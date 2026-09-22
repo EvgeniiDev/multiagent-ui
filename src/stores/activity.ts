@@ -220,9 +220,19 @@ export const useActivityStore = defineStore('activity', () => {
     await persist();
   }
 
-  const liveSessions = computed(() =>
-    new Set(entries.value.filter((e) => e.kind === 'turn-start').map((e) => e.sessionId))
-  );
+  /**
+   * Sessions with a turn that started and has not ended — "working now" as far
+   * as this client can see (other machines' turns are invisible here).
+   */
+  const liveSessions = computed(() => {
+    const busy = new Map<string, boolean>();
+    for (const entry of entries.value) {
+      if (!entry.sessionId) continue;
+      if (entry.kind === 'turn-start') busy.set(entry.sessionId, true);
+      else if (entry.kind === 'turn-end' || entry.kind === 'error') busy.set(entry.sessionId, false);
+    }
+    return new Set([...busy.entries()].filter(([, inFlight]) => inFlight).map(([id]) => id));
+  });
 
   return {
     entries,

@@ -944,6 +944,10 @@ html, body, #app {
 /* ---------- View rail: top-level navigation ---------- */
 
 .view-rail {
+  position: relative;
+  /* Above the mobile drawer backdrop (z-index 90), or the rail is unclickable
+     on a narrow viewport with the session drawer open. */
+  z-index: 95;
   flex: 0 0 auto;
   width: 46px;
   display: flex;
@@ -985,11 +989,17 @@ html, body, #app {
 }
 
 @media (max-width: 800px) {
-  /* On phones the rail becomes a horizontal bar above the content so it never
-     steals width from the reading column. */
+  /* On phones the app stacks: the rail becomes a top bar above the content, so
+     it never steals width from the reading column. */
+  .app-container.narrow-layout {
+    flex-direction: column;
+  }
+
   .view-rail {
+    flex: 0 0 auto;
     flex-direction: row;
-    width: auto;
+    width: 100%;
+    height: auto;
     justify-content: flex-start;
     gap: 0.375rem;
     padding: 0.375rem 0.5rem;
@@ -1037,6 +1047,12 @@ html, body, #app {
     inset: 0;
     background: rgba(0, 0, 0, 0.4);
     z-index: 90;
+  }
+
+  /* The rail sits above the scrim and keeps working while the drawer is open. */
+  .view-rail {
+    position: relative;
+    z-index: 95;
   }
 
   /* Hide the desktop chevron when the mobile hamburger is in play. */
