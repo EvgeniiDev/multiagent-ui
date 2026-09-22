@@ -3,7 +3,7 @@ import { ref, computed, nextTick, watch } from 'vue';
 import { marked } from 'marked';
 import { useSessionStore } from '../stores/session';
 import { isMobile } from '../lib/platform';
-import { readAttachments, formatBytes, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from '../lib/attachments';
+import { readAttachments, formatBytes, extractReplayedAttachments, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from '../lib/attachments';
 import ModePicker from './ModePicker.vue';
 import ModelPicker from './ModelPicker.vue';
 import CommandPalette from './CommandPalette.vue';
@@ -32,6 +32,45 @@ const submitOnEnter = !isMobile();
 const expandedThoughts = ref<Set<string>>(new Set());
 
 const messages = computed(() => sessionStore.messageList);
+
+/**
+ * Messages with their attachments in a renderable shape.
+ *
+ * A turn sent here carries `attachments` metadata directly. A turn the agent
+ * REPLAYED (`session/load`) does not: agents echo the file into the message
+ * text as markup, so those markers are pulled back out and turned into the same
+ * attachment blocks instead of leaking into the prose.
+ */
+const renderedMessages = computed(() =>
+  messages.value.map((message) => {
+    if (message.role !== 'user' || !message.content) {
+      return { ...message, attachments: message.attachments ?? [] };
+    }
+    const { text, attachments: replayed } = extractReplayedAttachments(message.content);
+    return {
+      ...message,
+      content: text,
+      attachments: [...(message.attachments ?? []), ...replayed],
+    };
+  })
+);
+
+// Per-attachment disclosure for the replayed file body (keyed message:index).
+const expandedAttachments = ref<Set<string>>(new Set());
+
+function attachmentKey(messageId: string, index: number): string {
+  return `${messageId}:${index}`;
+}
+
+function isAttachmentExpanded(messageId: string, index: number): boolean {
+  return expandedAttachments.value.has(attachmentKey(messageId, index));
+}
+
+function toggleAttachment(messageId: string, index: number): void {
+  const key = attachmentKey(messageId, index);
+  if (expandedAttachments.value.has(key)) expandedAttachments.value.delete(key);
+  else expandedAttachments.value.add(key);
+}
 const isLoading = computed(() => sessionStore.isLoading);
 const isReconnecting = computed(() => sessionStore.isReconnecting);
 const currentSession = computed(() => sessionStore.currentSession);
@@ -227,12 +266,12 @@ function getToolKind(kind: string): string {
     <div ref="messagesContainer" class="messages-container">
       <div class="messages">
       <div
-        v-for="(message, idx) in messages"
+        v-for="(message, idx) in renderedMessages"
         :key="message.id"
         :class="[
           'message',
           `message-${message.role}`,
-          { streaming: isLoading && idx === messages.length - 1 && message.role === 'assistant' },
+          { streaming: isLoading && idx === renderedMessages.length - 1 && message.role === 'assistant' },
         ]"
       >
         <div class="message-head">
@@ -241,18 +280,37 @@ function getToolKind(kind: string): string {
           }}</span>
         </div>
 
-        <!-- Files that travelled with this turn (metadata + image preview). -->
-        <div v-if="message.attachments?.length" class="message-attachments">
-          <div v-for="(att, i) in message.attachments" :key="att.id || i" class="message-attachment">
+        <!-- Attachments: one bordered block per file, attached to the message
+             rather than buried in its text. -->
+        <div v-if="message.attachments?.length" class="attachment-blocks">
+          <div
+            v-for="(att, i) in message.attachments"
+            :key="att.id || i"
+            class="attachment-block"
+          >
             <img
               v-if="att.kind === 'image' && att.previewUrl"
               :src="att.previewUrl"
               :alt="att.name"
-              class="message-attach-thumb"
+              class="attachment-image"
             />
-            <span v-else class="message-attach-glyph" aria-hidden="true">▤</span>
-            <span class="message-attach-name" :title="att.name">{{ att.name }}</span>
-            <span class="message-attach-size">{{ formatBytes(att.size) }}</span>
+            <div class="attachment-line">
+              <span class="attachment-kind">{{ att.kind }}</span>
+              <span class="attachment-name" :title="att.name">{{ att.name }}</span>
+              <span v-if="att.size" class="attachment-size">{{ formatBytes(att.size) }}</span>
+              <button
+                v-if="att.body"
+                class="attachment-toggle"
+                @click="toggleAttachment(message.id, i)"
+              >
+                {{ isAttachmentExpanded(message.id, i) ? 'Hide file' : 'Show file' }}
+              </button>
+              <span v-else-if="att.kind === 'image'" class="attachment-note">no preview in history</span>
+            </div>
+            <pre
+              v-if="att.body && isAttachmentExpanded(message.id, i)"
+              class="attachment-body"
+            >{{ att.body }}</pre>
           </div>
         </div>
 
@@ -802,41 +860,98 @@ function getToolKind(kind: string): string {
   color: var(--bg-danger, #b3402e);
 }
 
-/* Sent attachments in the transcript: same chip language as the composer. */
-.message-attachments {
+/* Sent attachments in the transcript: one bordered block per file, stacked,
+ * sitting on the message like an artefact rather than running as prose. */
+.attachment-blocks {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 0.375rem;
-  margin: 0.25rem 0 0.375rem;
+  margin: 0.25rem 0 0.5rem;
 }
 
-.message-attachment {
-  display: flex;
-  align-items: center;
-  gap: 0.375rem;
-  height: 26px;
-  padding: 0 0.5rem 0 0.375rem;
+.attachment-block {
+  padding: 0.5rem 0.625rem;
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
   border-radius: var(--radius-md, 6px);
-  background: rgba(43, 39, 35, 0.05);
-  font-size: 0.75rem;
+  background: var(--bg-main, #fbf8f3);
 }
 
-.message-attach-thumb {
-  width: 22px;
-  height: 22px;
-  object-fit: cover;
-  border-radius: 3px;
+.attachment-line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
 }
 
-.message-attach-glyph {
+.attachment-kind {
+  flex: 0 0 auto;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.5625rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--text-muted, #a39a8e);
 }
 
-.message-attach-name {
-  max-width: 260px;
-  overflow: hidden;
+.attachment-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--text-primary, #2b2723);
   white-space: nowrap;
+  overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.attachment-size {
+  flex: 0 0 auto;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6875rem;
+  color: var(--text-muted, #a39a8e);
+}
+
+.attachment-toggle {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 0.6875rem;
+  color: var(--text-accent, #c2532f);
+  cursor: pointer;
+}
+
+.attachment-toggle:hover {
+  text-decoration: underline;
+}
+
+.attachment-note {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 0.6875rem;
+  color: var(--text-muted, #a39a8e);
+}
+
+.attachment-image {
+  display: block;
+  max-width: 100%;
+  max-height: 220px;
+  margin-bottom: 0.4375rem;
+  border-radius: var(--radius-sm, 4px);
+}
+
+/* Replayed file content: monospace, bounded height, behind a disclosure. */
+.attachment-body {
+  margin: 0.5rem 0 0;
+  max-height: 260px;
+  overflow: auto;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--text-secondary, #6b6259);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 textarea {

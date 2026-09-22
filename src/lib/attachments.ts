@@ -6,7 +6,7 @@
 // dead URI, which is why nothing here builds one.
 
 import { uuid } from './uuid';
-import type { Attachment, AttachmentKind } from './types';
+import type { Attachment, AttachmentKind, AttachmentMeta } from './types';
 
 /** Hermes truncates inlined ACP resources at 512 KiB, so the cap is ours to enforce. */
 export const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
@@ -103,3 +103,101 @@ export async function readAttachments(
   }
   return { attachments, errors };
 }
+
+// ---------------------------------------------------------------------------
+// Replayed attachments
+// ---------------------------------------------------------------------------
+
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'avif']);
+
+/** `attachment://x.txt` -> `x.txt`; a plain name passes through. */
+function nameFromMarker(uri: string): string {
+  const tail = uri.split(/[\\/]/).filter(Boolean).pop() || uri;
+  const withoutScheme = tail.includes('://') ? tail.slice(tail.indexOf('://') + 3) : tail;
+  return withoutScheme.replace(/^\/+/, '') || uri;
+}
+
+function looksLikeImage(name: string, mime?: string | null): boolean {
+  if (mime && mime.startsWith('image/')) return true;
+  const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : '';
+  return IMAGE_EXTENSIONS.has(ext);
+}
+
+/**
+ * One attachment marker, in either shape seen in the wild:
+ *   `[attachment://notes.txt] <body>`                      (OpenCode)
+ *   `[Attached file: notes.txt] URI: file:///notes.txt <body>`  (Hermes)
+ * Hermes flattens its newlines into spaces, so the marker, the URI and the body
+ * can all sit on one line; parsing is marker-driven rather than line-based.
+ * The body runs from the end of a marker to the start of the next one.
+ */
+const ATTACHMENT_MARKER =
+  /\[(?:Attached (file|image): ([^\]]+)|([a-z][a-z0-9+.-]*:\/\/[^\]\s]+))\](?:\s*URI:\s*(\S+))?/g;
+
+/**
+ * Recover attachments from a user message the agent replayed.
+ *
+ * Agents do not return content blocks on `session/load`; they echo the file into
+ * the message TEXT, so a resumed conversation otherwise shows markers and file
+ * bodies as prose. This pulls them back out so the transcript can render real
+ * attachment blocks, and returns the message text with markers and bodies
+ * removed.
+ *
+ * Note: only text attachments survive a replay — agents do not echo image bytes
+ * or an image marker, so an image sent earlier cannot be recovered from history.
+ */
+export function extractReplayedAttachments(text: string): {
+  text: string;
+  attachments: AttachmentMeta[];
+} {
+  if (!text || (!text.includes('://') && !text.includes('[Attached '))) {
+    return { text, attachments: [] };
+  }
+
+  const matches = [...text.matchAll(ATTACHMENT_MARKER)];
+  if (matches.length === 0) return { text, attachments: [] };
+
+  const prose = text.slice(0, matches[0].index ?? 0);
+  /**
+   * A candidate body that repeats the message's own prose is a merged turn
+   * boundary, not file content. Either direction counts: Hermes can store the
+   * shorter prompt after the marker and the longer one before it.
+   */
+  const isEchoOfProse = (candidate: string) => {
+    const p = prose.trim();
+    const c = candidate.trim();
+    return c.length > 0 && p.length > 20 && (p.includes(c) || c.includes(p));
+  };
+
+  const attachments: AttachmentMeta[] = [];
+  for (let i = 0; i < matches.length; i++) {
+    const match = matches[i];
+    const [marker, explicitKind, explicitName, bareUri, explicitUri] = match;
+    const uri = (explicitUri || bareUri || '').trim();
+    const name = (explicitName || '').trim() || nameFromMarker(uri);
+    if (!name) continue;
+
+    const bodyStart = (match.index ?? 0) + marker.length;
+    const bodyEnd = i + 1 < matches.length ? (matches[i + 1].index ?? text.length) : text.length;
+    const candidate = text.slice(bodyStart, bodyEnd).replace(/\s+/g, ' ').trim();
+    const body = isEchoOfProse(candidate) ? '' : candidate;
+
+    const image = explicitKind === 'image' || looksLikeImage(name);
+    attachments.push({
+      name,
+      kind: image ? 'image' : 'text',
+      mimeType: image ? 'image/*' : 'text/plain',
+      // Bytes are gone on replay; the echoed text is all that is left to measure.
+      size: body.length,
+      body: body || undefined,
+    });
+  }
+
+  if (attachments.length === 0) return { text, attachments: [] };
+
+  return {
+    text: prose.replace(/[ \t]+$/, '').trim(),
+    attachments,
+  };
+}
+
