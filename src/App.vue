@@ -564,7 +564,7 @@ function clearError() {
   --bg-warning: #f5e9cf;
   --text-primary: #2b2723;
   --text-secondary: #6b6259;
-  --text-muted: #a39a8e;
+  --text-muted: #786d62;
   --text-on-accent: #fbf8f3;
   --text-accent: #c2532f;
   --text-code: #e8e0d5;
