@@ -13,10 +13,17 @@ import AuthMethodDialog from './components/AuthMethodDialog.vue';
 import TrafficMonitor from './components/TrafficMonitor.vue';
 import StartupProgress from './components/StartupProgress.vue';
 import DirectoryPicker from './components/DirectoryPicker.vue';
+import ProjectsView from './components/ProjectsView.vue';
+import BoardView from './components/BoardView.vue';
+import DashboardView from './components/DashboardView.vue';
+import { useUiStore, VIEWS } from './stores/ui';
+import { useActivityStore } from './stores/activity';
 import type { SavedSession } from './lib/types';
 
 const configStore = useConfigStore();
 const sessionStore = useSessionStore();
+const uiStore = useUiStore();
+const activityStore = useActivityStore();
 
 const selectedAgent = ref('');
 const selectedCwd = ref('');
@@ -137,7 +144,9 @@ onMounted(async () => {
   await configStore.loadConfig();
   await configStore.setupHotReload();
   await sessionStore.initStore();
-  
+  await activityStore.initActivityStore();
+  await uiStore.initUiStore();
+
   const savedCwd = await prefsStore.get<string>('lastCwd');
   if (savedCwd) {
     selectedCwd.value = savedCwd;
@@ -286,9 +295,44 @@ function clearError() {
 
 <template>
   <div class="app-container" :class="{ 'narrow-layout': isNarrowLayout }">
+    <!-- View rail: the shell's top-level navigation (Chat · Projects · Board · Dashboard) -->
+    <nav class="view-rail" aria-label="Main views">
+      <button
+        v-for="view in VIEWS"
+        :key="view.id"
+        class="rail-btn"
+        :class="{ active: uiStore.activeView === view.id }"
+        :title="`${view.label} (${view.key})`"
+        :aria-label="view.label"
+        :aria-current="uiStore.activeView === view.id ? 'page' : undefined"
+        @click="uiStore.setView(view.id)"
+      >
+        <svg
+          v-if="view.id === 'chat'"
+          viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+        ><path d="M21 11.5a8.4 8.4 0 01-9 8.4 8.9 8.9 0 01-3.8-.9L3 20l1.1-3.3A8.4 8.4 0 013 11.5 8.4 8.4 0 0112 3a8.4 8.4 0 019 8.5z" /></svg>
+        <svg
+          v-else-if="view.id === 'projects'"
+          viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+        ><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg>
+        <svg
+          v-else-if="view.id === 'board'"
+          viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+        ><path d="M4 4h4v16H4zM10 4h4v10h-4zM16 4h4v6h-4z" /></svg>
+        <svg
+          v-else
+          viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+        ><path d="M12 20a8 8 0 110-16 8 8 0 010 16zM12 15.5l3-4.5M12 8.5v4" /></svg>
+      </button>
+    </nav>
+
     <!-- Sidebar (slides in as a drawer on narrow viewports) -->
     <aside
-      v-show="showSidebar"
+      v-show="showSidebar && uiStore.activeView === 'chat'"
       class="sidebar"
       :class="{ 'is-drawer': isNarrowLayout }"
     >
@@ -437,16 +481,20 @@ function clearError() {
         </div>
         
         <!-- Chat View when connected -->
-        <ChatView v-if="isConnected" />
-        
-        <!-- Welcome screen when not connected -->
-        <div v-else class="welcome-screen">
+        <ChatView v-if="uiStore.activeView === 'chat' && isConnected" />
+
+        <!-- Welcome screen when the chat view has no session yet -->
+        <div v-else-if="uiStore.activeView === 'chat'" class="welcome-screen">
           <h2>Welcome to ACP UI</h2>
           <p>Select an agent and create a new session to get started.</p>
           <p v-if="!hasAgents" class="hint">
             Configure agents in your config file to begin.
           </p>
         </div>
+
+        <ProjectsView v-else-if="uiStore.activeView === 'projects'" />
+        <BoardView v-else-if="uiStore.activeView === 'board'" />
+        <DashboardView v-else />
       </main>
       
       <!-- Traffic Monitor Panel -->
@@ -891,6 +939,68 @@ html, body, #app {
 
 .mobile-hamburger {
   display: none;
+}
+
+/* ---------- View rail: top-level navigation ---------- */
+
+.view-rail {
+  flex: 0 0 auto;
+  width: 46px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.5rem 0;
+  background: var(--bg-sidebar, #f6f2ec);
+  border-right: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+}
+
+.rail-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-md, 6px);
+  background: transparent;
+  color: var(--text-muted, #a39a8e);
+  cursor: pointer;
+}
+
+.rail-btn:hover {
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  color: var(--text-primary, #2b2723);
+}
+
+.rail-btn.active {
+  color: var(--text-accent, #c2532f);
+  background: var(--tint-active, rgba(194, 83, 47, 0.10));
+}
+
+.rail-btn:focus-visible {
+  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
+  outline-offset: 2px;
+}
+
+@media (max-width: 800px) {
+  /* On phones the rail becomes a horizontal bar above the content so it never
+     steals width from the reading column. */
+  .view-rail {
+    flex-direction: row;
+    width: auto;
+    justify-content: flex-start;
+    gap: 0.375rem;
+    padding: 0.375rem 0.5rem;
+    border-right: none;
+    border-bottom: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  }
+
+  .rail-btn {
+    width: 44px;
+    height: 44px;
+  }
 }
 
 @media (max-width: 800px) {

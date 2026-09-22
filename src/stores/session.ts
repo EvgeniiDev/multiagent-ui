@@ -11,6 +11,7 @@ import { AcpClientBridge, createAcpClient } from '../lib/acp-bridge';
 import { onAgentStderr, spawnAgent, killAgent } from '../lib/host';
 import { isDesktop } from '../lib/platform';
 import { useConfigStore } from './config';
+import { useActivityStore } from './activity';
 import type { SessionNotification, AuthMethod, SessionInfo, ContentBlock } from '@agentclientprotocol/sdk';
 
 const STORE_PATH = 'sessions.json';
@@ -430,7 +431,29 @@ export const useSessionStore = defineStore('session', () => {
   // Session update handler
   function handleSessionUpdate(notification: SessionNotification) {
     const update = notification.update;
-    
+
+    // `usage_update` is sent on the wire (tokens used against a window, with an
+    // optional cost) but is not in the SDK's typed union yet, so it is handled
+    // before the switch that relies on that union for narrowing.
+    const untyped = update as {
+      sessionUpdate: string;
+      used?: number;
+      size?: number;
+      cost?: { amount?: number; currency?: string };
+    };
+    if (untyped.sessionUpdate === 'usage_update') {
+      useActivityStore().recordUsage({
+        agentName: currentSession.value?.agentName ?? 'unknown',
+        sessionId: currentSession.value?.sessionId ?? 'unknown',
+        cwd: currentSession.value?.cwd,
+        used: Number(untyped.used ?? 0),
+        size: Number(untyped.size ?? 0),
+        cost: typeof untyped.cost?.amount === 'number' ? untyped.cost.amount : undefined,
+        currency: untyped.cost?.currency,
+      });
+      return;
+    }
+
     switch (update.sessionUpdate) {
       case 'user_message_chunk':
         // Append to last user message or create new (for replay)
@@ -509,6 +532,14 @@ export const useSessionStore = defineStore('session', () => {
           status: update.status || 'pending',
           locations: update.locations,
         });
+        useActivityStore().recordEntry({
+          kind: 'tool-call',
+          agentName: currentSession.value?.agentName ?? 'unknown',
+          sessionId: currentSession.value?.sessionId,
+          cwd: currentSession.value?.cwd,
+          title: update.title,
+          detail: update.kind || 'other',
+        });
         break;
 
       case 'tool_call_update':
@@ -546,6 +577,20 @@ export const useSessionStore = defineStore('session', () => {
           }));
         }
         break;
+
+      // ---- ledger: everything below feeds Timeline / Events / Dashboard ----
+      case 'session_info_update': {
+        const info = update as { title?: string | null; updatedAt?: string | null };
+        useActivityStore().recordEntry({
+          kind: 'sync',
+          agentName: currentSession.value?.agentName ?? 'unknown',
+          sessionId: currentSession.value?.sessionId,
+          cwd: currentSession.value?.cwd,
+          title: info.title ?? currentSession.value?.title,
+          detail: 'session info updated',
+        });
+        break;
+      }
 
       default:
         console.log('Unhandled session update:', update);
@@ -779,7 +824,24 @@ export const useSessionStore = defineStore('session', () => {
       isConnected.value = true;
       messages.value = [];
       toolCalls.value.clear();
-      
+
+      const activity = useActivityStore();
+      activity.recordEntry({
+        kind: 'connected',
+        agentName,
+        sessionId: sessionResponse.sessionId,
+        cwd,
+        title: folder,
+      });
+      activity.recordEntry({
+        kind: 'session-open',
+        agentName,
+        sessionId: sessionResponse.sessionId,
+        cwd,
+        title: folder,
+        detail: 'new session',
+      });
+
       // Track successful session creation
       trackEvent('SessionCreated', { agentName, success: 'true' });
 
@@ -942,6 +1004,15 @@ export const useSessionStore = defineStore('session', () => {
       isConnected.value = true;
       // Messages already populated by session/update notifications during loadSession
 
+      useActivityStore().recordEntry({
+        kind: 'session-open',
+        agentName: savedSession.agentName,
+        sessionId: savedSession.sessionId,
+        cwd: savedSession.cwd,
+        title: savedSession.title,
+        detail: 'resumed',
+      });
+
       // Track successful session resume
       trackEvent('SessionResumed', { agentName: savedSession.agentName, success: 'true' });
 
@@ -955,6 +1026,29 @@ export const useSessionStore = defineStore('session', () => {
 
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e);
+      const message = error.value;
+      const activity = useActivityStore();
+      if (/already open in another process|session_locked/i.test(message)) {
+        // The agent refused because another process holds the session (Devin
+        // reports the holder PID). Surface it as a lock, not as a generic error.
+        activity.recordEntry({
+          kind: 'lock',
+          agentName: savedSession.agentName,
+          sessionId: savedSession.sessionId,
+          cwd: savedSession.cwd,
+          title: savedSession.title,
+          detail: message,
+        });
+      } else {
+        activity.recordEntry({
+          kind: 'error',
+          agentName: savedSession.agentName,
+          sessionId: savedSession.sessionId,
+          cwd: savedSession.cwd,
+          title: savedSession.title,
+          detail: message,
+        });
+      }
       // Disconnect the bridge if it was created — otherwise we leak the
       // spawned stdio process or open WebSocket on initialize/loadSession
       // failure.
@@ -997,6 +1091,15 @@ export const useSessionStore = defineStore('session', () => {
     });
 
     isLoading.value = true;
+    const activity = useActivityStore();
+    activity.recordEntry({
+      kind: 'turn-start',
+      agentName: currentSession.value.agentName,
+      sessionId: currentSession.value.sessionId,
+      cwd: currentSession.value.cwd,
+      title: currentSession.value.title,
+      detail: text.slice(0, 120),
+    });
     try {
       const response = await acpClient.prompt({
         sessionId: currentSession.value.sessionId,
@@ -1004,6 +1107,14 @@ export const useSessionStore = defineStore('session', () => {
       });
 
       console.log('Prompt completed:', response.stopReason);
+      activity.recordEntry({
+        kind: 'turn-end',
+        agentName: currentSession.value.agentName,
+        sessionId: currentSession.value.sessionId,
+        cwd: currentSession.value.cwd,
+        title: currentSession.value.title,
+        detail: response.stopReason || 'unknown',
+      });
 
       // Track prompt sent
       trackEvent('PromptSent', { 
@@ -1017,6 +1128,16 @@ export const useSessionStore = defineStore('session', () => {
         currentSession.value.lastUpdated = Date.now();
         await saveSessionsToStore();
       }
+    } catch (e) {
+      activity.recordEntry({
+        kind: 'error',
+        agentName: currentSession.value.agentName,
+        sessionId: currentSession.value.sessionId,
+        cwd: currentSession.value.cwd,
+        title: currentSession.value.title,
+        detail: e instanceof Error ? e.message : String(e),
+      });
+      throw e;
     } finally {
       isLoading.value = false;
     }
