@@ -270,7 +270,7 @@ function onReorder(cardId: string, delta: -1 | 1) {
 .empty-btn.primary {
   background: var(--bg-primary, #c2532f);
   border-color: var(--bg-primary, #c2532f);
-  color: #fff;
+  color: var(--text-on-accent, #fbf8f3);
 }
 
 .empty-btn.primary:hover {

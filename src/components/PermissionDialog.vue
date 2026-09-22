@@ -209,7 +209,7 @@ onBeforeUnmount(() => {
 /* Allow is the one filled control on screen. */
 .option-allow {
   background: var(--bg-primary, #c2532f);
-  color: #fff;
+  color: var(--text-on-accent, #fbf8f3);
   border: 1px solid var(--bg-primary, #c2532f);
 }
 

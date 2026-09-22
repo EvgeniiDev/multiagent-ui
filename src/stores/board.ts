@@ -180,7 +180,9 @@ export const useBoardStore = defineStore('board', () => {
 
   function logCardEvent(card: BoardCard, detail: string): void {
     useActivityStore().recordEntry({
-      kind: 'sync',
+      // A dedicated kind, so the Events tab and its filters can tell card
+      // lifecycle apart from agent syncs.
+      kind: 'card',
       agentName: card.agent || 'board',
       title: card.title,
       detail,

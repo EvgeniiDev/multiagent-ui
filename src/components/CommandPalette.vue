@@ -135,14 +135,14 @@ function selectCommand(cmd: SlashCommand) {
 }
 .command-item.selected {
   background: var(--bg-primary, #c2532f);
-  color: #fff;
+  color: var(--text-on-accent, #fbf8f3);
   border-radius: var(--radius-md, 6px);
 }
 .command-item.selected .command-name,
 .command-item.selected .command-hint,
 .command-item.selected .command-description,
 .command-item.selected .command-source {
-  color: #fff;
+  color: var(--text-on-accent, #fbf8f3);
 }
 
 .command-tooltip {
@@ -194,6 +194,6 @@ function selectCommand(cmd: SlashCommand) {
 }
 .command-item.selected .command-name,
 .command-item.selected .command-description {
-  color: #fff;
+  color: var(--text-on-accent, #fbf8f3);
 }
 </style>

@@ -29,6 +29,7 @@ export type ActivityKind =
   | 'usage'
   | 'error'
   | 'lock'
+  | 'card'
   | 'sync';
 
 export interface ActivityEntry {
@@ -185,7 +186,12 @@ export const useActivityStore = defineStore('activity', () => {
     // avoids summing the same running total over and over.
     const at = sample.at ?? Date.now();
     const last = [...usage.value].reverse().find((u) => u.sessionId === sample.sessionId);
-    if (last && sample.used === last.used && sample.size === last.size && !(sample.cost ?? 0) !== !(last.cost ?? 0)) {
+    // Skip a sample that repeats the previous one for this session: the agents
+    // report a running total, so an unchanged used/size/cost adds nothing.
+    const sameCost =
+      (sample.cost ?? null) === (last?.cost ?? null) &&
+      (sample.currency ?? null) === (last?.currency ?? null);
+    if (last && sample.used === last.used && sample.size === last.size && sameCost) {
       return;
     }
     usage.value.push({ at, ...sample });

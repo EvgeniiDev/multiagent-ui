@@ -553,7 +553,7 @@ textarea.f-input {
 .btn.primary {
   background: var(--bg-primary, #c2532f);
   border-color: var(--bg-primary, #c2532f);
-  color: #fff;
+  color: var(--text-on-accent, #fbf8f3);
 }
 
 .btn.primary:hover {

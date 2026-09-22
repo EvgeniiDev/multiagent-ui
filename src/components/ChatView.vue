@@ -851,7 +851,7 @@ function getToolKind(kind: string): string {
 
 .attach-remove:hover {
   background: var(--bg-danger, #b3402e);
-  color: #fff;
+  color: var(--text-on-accent, #fbf8f3);
 }
 
 .attach-error {

@@ -446,7 +446,7 @@ function clearError() {
     <!-- Backdrop behind the drawer on narrow viewports. Only intercepts
          taps when the layout is narrow; on desktop it's display:none. -->
     <div
-      v-show="isNarrowLayout && showSidebar"
+      v-show="isNarrowLayout && showSidebar && uiStore.activeView === 'chat'"
       class="drawer-backdrop"
       @click="handleBackdropClick"
     />
