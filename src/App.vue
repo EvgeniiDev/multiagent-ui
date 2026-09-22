@@ -565,8 +565,8 @@ function clearError() {
   --text-primary: #2b2723;
   --text-secondary: #6b6259;
   --text-muted: #786d62;
-  --text-on-accent: #fbf8f3;
-  --text-accent: #c2532f;
+  --text-on-accent: #ffffff;
+  --text-accent: #b04a28;
   --text-code: #e8e0d5;
   --border-color: #e3dbcf;
   /* Design tokens: density + faint chrome. Flat colors, thin hairline
