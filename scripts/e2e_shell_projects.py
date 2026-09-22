@@ -41,6 +41,24 @@ with sync_playwright() as p:
     assert detail["sessions"] > 0, detail
     page.screenshot(path="/tmp/cc_projects.png")
 
+    # Keyboard: bare digits switch views, but never while typing in a field
+    page.click('.rail-btn[aria-label="Projects"]')
+    page.wait_for_timeout(300)
+    page.click(".search")
+    page.type(".search", "3")
+    page.wait_for_timeout(300)
+    print("view while typing '3' in search:", page.evaluate("() => document.querySelector('.rail-btn.active').getAttribute('aria-label')"))
+    assert page.evaluate("() => document.querySelector('.rail-btn.active').getAttribute('aria-label')") == "Projects"
+    page.fill(".search", "")
+    page.click(".pane-head")
+    page.keyboard.press("3")
+    page.wait_for_timeout(400)
+    print("view after pressing '3':", page.evaluate("() => document.querySelector('.rail-btn.active').getAttribute('aria-label')"))
+    assert page.evaluate("() => document.querySelector('.rail-btn.active').getAttribute('aria-label')") == "Board"
+    page.keyboard.press("1")
+    page.wait_for_timeout(300)
+    print("view after pressing '1':", page.evaluate("() => document.querySelector('.rail-btn.active').getAttribute('aria-label')"))
+
     # Board / Dashboard placeholders still render (their workstreams own them)
     page.click('.rail-btn[aria-label="Board"]')
     page.wait_for_timeout(400)

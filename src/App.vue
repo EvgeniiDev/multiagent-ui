@@ -161,6 +161,7 @@ onMounted(async () => {
   if (typeof window !== 'undefined') {
     window.addEventListener('pageshow', scheduleReconnect);
     window.addEventListener('online', handleOnline);
+    window.addEventListener('keydown', handleViewShortcut);
   }
 });
 
@@ -269,6 +270,20 @@ function handleBackdropClick() {
   if (isNarrowLayout.value) showSidebar.value = false;
 }
 
+/**
+ * Bare digits 1..4 switch views; the rail advertises its key in the tooltip.
+ * Ignored while typing, so the composer and search fields keep their digits.
+ */
+function handleViewShortcut(event: KeyboardEvent) {
+  if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
+  const target = event.target as HTMLElement | null;
+  const tag = target?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return;
+  const view = VIEWS.find((candidate) => candidate.key === event.key);
+  if (!view) return;
+  event.preventDefault();
+  uiStore.setView(view.id);
+}
 onBeforeUnmount(() => {
   if (narrowMql) {
     narrowMql.removeEventListener('change', syncNarrowLayout);
@@ -280,6 +295,7 @@ onBeforeUnmount(() => {
   if (typeof window !== 'undefined') {
     window.removeEventListener('pageshow', scheduleReconnect);
     window.removeEventListener('online', handleOnline);
+    window.removeEventListener('keydown', handleViewShortcut);
   }
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -546,6 +562,7 @@ function clearError() {
   --text-primary: #2b2723;
   --text-secondary: #6b6259;
   --text-muted: #a39a8e;
+  --text-on-accent: #fbf8f3;
   --text-accent: #c2532f;
   --text-code: #e8e0d5;
   --border-color: #e3dbcf;
