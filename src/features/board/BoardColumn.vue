@@ -232,4 +232,12 @@ function onDragEnd() {
   font-size: 0.6875rem;
   color: var(--text-muted, #a39a8e);
 }
+
+@media (max-width: 800px) {
+  /* Hit area grows, the 13px icon stays the same. */
+  .col-add {
+    width: 44px;
+    height: 44px;
+  }
+}
 </style>

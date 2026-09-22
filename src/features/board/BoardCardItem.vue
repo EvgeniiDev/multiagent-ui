@@ -356,15 +356,15 @@ onBeforeUnmount(() => {
   background: var(--border-faint, rgba(43, 39, 35, 0.09));
 }
 
-@media (max-width: 767px) {
+@media (max-width: 800px) {
   .card-menu-btn {
     opacity: 1;
-    width: 32px;
-    height: 32px;
+    width: 44px;
+    height: 44px;
   }
 
   .menu-item {
-    min-height: 40px;
+    min-height: 44px;
     display: flex;
     align-items: center;
   }

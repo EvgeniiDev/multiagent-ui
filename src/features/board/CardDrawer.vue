@@ -573,7 +573,7 @@ textarea.f-input {
   outline-offset: 1px;
 }
 
-@media (max-width: 767px) {
+@media (max-width: 800px) {
   .card-drawer {
     width: 100%;
     border-left: none;
@@ -581,8 +581,15 @@ textarea.f-input {
 
   .btn,
   .seg-btn,
-  .f-input {
+  .f-input,
+  .link-add,
+  .link-del {
     min-height: 44px;
+  }
+
+  .drawer-close {
+    width: 44px;
+    height: 44px;
   }
 }
 </style>

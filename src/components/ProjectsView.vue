@@ -542,6 +542,15 @@ async function newSessionIn(row: ProjectRow) {
 
   .search {
     width: 100%;
+    height: 44px;
+  }
+
+  .picker {
+    height: 44px;
+  }
+
+  .range button {
+    height: 44px;
   }
 
   .project-path,

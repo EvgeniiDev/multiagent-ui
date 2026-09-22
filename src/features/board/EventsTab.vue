@@ -181,7 +181,11 @@ const BAD_KINDS = new Set<ActivityKind>(['error', 'lock']);
   color: var(--text-muted, #a39a8e);
 }
 
-@media (max-width: 767px) {
+@media (max-width: 800px) {
+  .ev-select {
+    height: 44px;
+  }
+
   .event-row {
     flex-wrap: wrap;
     padding: 0.375rem 0.75rem;
