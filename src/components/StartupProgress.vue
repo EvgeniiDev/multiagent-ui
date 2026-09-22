@@ -14,17 +14,24 @@ const emit = defineEmits<{
   toggleDetails: [];
 }>();
 
-const phaseIcon = computed(() => {
-  switch (props.phase) {
-    case 'starting': return '🚀';
-    case 'downloading': return '📥';
-    case 'installing': return '📦';
-    case 'building': return '🔨';
-    case 'initializing': return '⚙️';
-    case 'connecting': return '🔗';
-    default: return '⏳';
-  }
-});
+interface StepIcon {
+  path: string;
+  circle?: boolean;
+  line?: boolean;
+}
+
+const stepIcons: Record<string, StepIcon> = {
+  starting: { path: 'M12 2.5c2.4 2.5 6 6.6 6 10.5a6 6 0 0 1-12 0C6 9.1 9.6 5 12 2.5zM9.5 13.5a2.5 2.5 0 0 0 5 0c0-1.7-2.1-4-2.5-4.5-.4.5-2.5 2.8-2.5 4.5z' },
+  downloading: { path: 'M12 3v11M7.5 10.5L12 15l4.5-4.5M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2' },
+  installing: { path: 'M3.5 8L12 3.5 20.5 8v8L12 20.5 3.5 16zM3.5 8L12 12.5 20.5 8M12 12.5v8', line: true },
+  building: { path: 'M14.5 4.5l5 5L8 21H3v-5zM13 6l5 5' },
+  initializing: { path: 'M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1.5 14h5M9.5 8h5M17.5 16h5' },
+  connecting: { path: 'M10 14a4.5 4.5 0 0 0 6.4.4l3-3a4.5 4.5 0 0 0-6.4-6.4l-1.7 1.7M14 10a4.5 4.5 0 0 0-6.4-.4l-3 3a4.5 4.5 0 0 0 6.4 6.4l1.7-1.7' },
+};
+
+const defaultStep: StepIcon = { path: 'M12 3a9 9 0 1 0 9 9', circle: true };
+
+const stepIcon = computed<StepIcon>(() => stepIcons[props.phase] ?? defaultStep);
 
 const phaseText = computed(() => {
   switch (props.phase) {
@@ -58,7 +65,7 @@ const isLongWait = computed(() => props.elapsedSeconds > 10);
     </div>
     
     <div class="progress-status">
-      <span class="phase-icon">{{ phaseIcon }}</span>
+      <span class="phase-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path :d="stepIcon.path"/><circle v-if="stepIcon.circle" cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/><path v-if="stepIcon.line" d="M12 3v1.5"/></svg></span>
       <span class="phase-text">{{ phaseText }}</span>
     </div>
     

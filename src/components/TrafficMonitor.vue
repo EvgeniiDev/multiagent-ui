@@ -124,7 +124,7 @@ function handleCopy(entry: TrafficEntry) {
     ></div>
     
     <div class="monitor-header">
-      <span class="title">📡 ACP Traffic</span>
+      <span class="title"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-2px"><path d="M4.9 19.1a10 10 0 0 1 0-14.2M7.8 16.2a5.5 5.5 0 0 1 0-8.4M12 12h.01M16.7 10.3a3 3 0 0 1 0 4.4M19.6 7.4a7 7 0 0 1 0 10.2"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg> ACP Traffic</span>
       
       <div class="controls">
         <button 
@@ -132,20 +132,23 @@ function handleCopy(entry: TrafficEntry) {
           :class="{ active: trafficStore.isPaused }"
           @click="trafficStore.togglePause()"
           :title="trafficStore.isPaused ? 'Resume' : 'Pause'"
+          :aria-label="trafficStore.isPaused ? 'Resume' : 'Pause'"
         >
-          {{ trafficStore.isPaused ? '▶' : '⏸' }}
+          <svg v-if="trafficStore.isPaused" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M7 5l12 7-12 7z"/></svg>
+          <svg v-else viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M9 5v14M15 5v14"/></svg>
         </button>
         
         <button 
           class="control-btn"
           @click="trafficStore.clear()"
           title="Clear"
+          aria-label="Clear"
         >
-          🗑
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6.5 7l1 13h9l1-13M10 11v6M14 11v6"/></svg>
         </button>
         
         <div class="search-container">
-          <span class="search-icon">🔍</span>
+          <span class="search-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></span>
           <input 
             type="text"
             class="search-input"
@@ -179,7 +182,7 @@ function handleCopy(entry: TrafficEntry) {
         </select>
       </div>
       
-      <button class="close-btn" @click="emit('close')" title="Close">×</button>
+      <button class="close-btn" @click="emit('close')" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
     </div>
     
     <div 
@@ -207,8 +210,9 @@ function handleCopy(entry: TrafficEntry) {
             class="copy-btn" 
             @click.stop="handleCopy(entry)"
             title="Copy JSON"
+            aria-label="Copy JSON"
           >
-            📋
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>
           </button>
         </div>
         
@@ -219,7 +223,7 @@ function handleCopy(entry: TrafficEntry) {
     </div>
     
     <div v-if="trafficStore.isPaused" class="paused-indicator">
-      ⏸ Paused
+      <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" style="vertical-align:-1px"><path d="M9 5v14M15 5v14"/></svg> Paused
     </div>
   </div>
 </template>

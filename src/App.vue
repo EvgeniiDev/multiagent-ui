@@ -360,9 +360,10 @@ function clearError() {
             :class="{ active: showTrafficMonitor }"
             @click="showTrafficMonitor = !showTrafficMonitor" 
             title="ACP Traffic Monitor"
-          >📡</button>
-          <button class="settings-btn" @click="showSettings = true" title="Settings">⚙</button>
-          <button class="toggle-btn" @click="toggleSidebar">◀</button>
+            aria-label="ACP Traffic Monitor"
+          ><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.9 19.1a10 10 0 0 1 0-14.2M7.8 16.2a5.5 5.5 0 0 1 0-8.4M12 12h.01M16.7 10.3a3 3 0 0 1 0 4.4M19.6 7.4a7 7 0 0 1 0 10.2"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg></button>
+          <button class="settings-btn" @click="showSettings = true" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1a1.7 1.7 0 0 0 1.9.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1a1.7 1.7 0 0 0-.3 1.9v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.4 1z"/></svg></button>
+          <button class="toggle-btn" aria-label="Collapse sidebar" @click="toggleSidebar"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 6l-6 6 6 6"/></svg></button>
         </div>
       </div>
       
@@ -386,9 +387,10 @@ function clearError() {
                 class="cwd-btn" 
                 @click="handleSelectFolder"
                 title="Select folder"
+                aria-label="Select folder"
                 :disabled="isConnecting || isConnected"
               >
-                📁
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
               </button>
             </div>
             <!-- Mobile / web: directory tree browser (bridge fs API) + editable
@@ -459,15 +461,16 @@ function clearError() {
       class="mobile-hamburger"
       @click="showSidebar = true"
       aria-label="Open menu"
-    >☰</button>
+    ><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
 
     <!-- Collapsed sidebar toggle -->
     <button 
       v-if="!showSidebar" 
       class="sidebar-toggle-collapsed"
+      aria-label="Expand sidebar"
       @click="toggleSidebar"
     >
-      ▶
+      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 6l6 6-6 6"/></svg>
     </button>
     
     <!-- Main Content Area -->
@@ -485,7 +488,7 @@ function clearError() {
 
         <!-- Error display (suppressed while reconnecting). -->
         <div v-else-if="error" class="error-banner">
-          <span class="error-icon">⚠</span>
+          <span class="error-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2.5 20h19zM12 10v4.5M12 17.5h.01"/></svg></span>
           <span class="error-text">{{ error }}</span>
           <button
             v-if="canManuallyReconnect"

@@ -209,7 +209,7 @@ async function handleDelete(name: string) {
     <div class="settings-panel">
       <div class="settings-header">
         <h2>Settings</h2>
-        <button class="close-btn" @click="emit('close')">✕</button>
+        <button class="close-btn" aria-label="Close" @click="emit('close')"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       </div>
 
       <div class="settings-content">
