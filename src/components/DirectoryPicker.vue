@@ -183,10 +183,11 @@ onMounted(() => {
         class="browse-btn"
         type="button"
         title="Browse directories"
+        aria-label="Browse directories"
         :disabled="disabled"
         @click="openPicker"
       >
-        📂
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
       </button>
     </div>
 
@@ -194,7 +195,7 @@ onMounted(() => {
       <div class="tree-panel">
         <div class="tree-header">
           <span class="tree-title">Browse (agent host)</span>
-          <button class="tree-close" type="button" @click="close">×</button>
+          <button class="tree-close" type="button" aria-label="Close" @click="close"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
         </div>
 
         <div class="crumb-row">
@@ -204,7 +205,7 @@ onMounted(() => {
             <button class="crumb" type="button" @click="goTo(c.path)">{{ c.name }}</button>
           </template>
           <span class="spacer"></span>
-          <button class="small-btn" type="button" @click="goUp" :disabled="!parent">↑</button>
+          <button class="small-btn" type="button" aria-label="Go up" @click="goUp" :disabled="!parent"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
           <label class="hidden-toggle">
             <input type="checkbox" :checked="showHidden" @change="toggleHidden" />
             hidden
@@ -218,9 +219,9 @@ onMounted(() => {
           <ul v-else class="dir-list">
             <li v-for="d in dirs" :key="d.path">
               <button class="dir-row" type="button" @click="onDirClick(d)">
-                <span class="dir-icon">📁</span>
+                <span class="dir-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
                 <span class="dir-name">{{ d.name }}</span>
-                <span class="dir-pick" title="Use this directory" @click.stop="useDir(d)">✓</span>
+                <span class="dir-pick" title="Use this directory" @click.stop="useDir(d)" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg></span>
               </button>
             </li>
           </ul>

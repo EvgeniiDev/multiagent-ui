@@ -21,7 +21,7 @@ function handleSelect(methodId: string) {
     <div class="auth-dialog">
       <div class="dialog-header">
         <h3>Authentication Required</h3>
-        <button class="close-btn" @click="emit('cancel')">✕</button>
+        <button class="close-btn" aria-label="Close" @click="emit('cancel')"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       </div>
       
       <div class="dialog-content">

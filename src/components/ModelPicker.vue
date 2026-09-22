@@ -70,7 +70,7 @@ if (typeof window !== 'undefined') {
               {{ model.description }}
             </span>
           </div>
-          <span v-if="model.modelId === currentModelId" class="check-mark">✓</span>
+          <span v-if="model.modelId === currentModelId" class="check-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg></span>
         </div>
       </div>
     </Transition>
