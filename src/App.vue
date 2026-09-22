@@ -12,6 +12,7 @@ import SettingsView from './components/SettingsView.vue';
 import AuthMethodDialog from './components/AuthMethodDialog.vue';
 import TrafficMonitor from './components/TrafficMonitor.vue';
 import StartupProgress from './components/StartupProgress.vue';
+import DirectoryPicker from './components/DirectoryPicker.vue';
 import type { SavedSession } from './lib/types';
 
 const configStore = useConfigStore();
@@ -21,8 +22,22 @@ const selectedAgent = ref('');
 const selectedCwd = ref('');
 // On mobile / web there is no native folder picker (and the cwd refers to
 // a path on the *agent's* machine, not the local device), so we expose a
-// free-text field instead of the picker button.
+// directory tree browser backed by the bridge's fs-list API instead of a
+// free-text field.
 const folderPickerAvailable = canPickFolder();
+
+/** HTTP base URL of the selected agent's bridge (same origin as its ws URL).
+ * The tree picker lists directories through `/api/fs/*` on this bridge. */
+const fsBaseUrl = computed(() => {
+  if (folderPickerAvailable) return '';
+  const cfg = configStore.getAgent(selectedAgent.value);
+  if (!cfg || !cfg.url) return '';
+  const u = cfg.url.trim();
+  if (u.startsWith('ws://') || u.startsWith('wss://')) {
+    return (u.startsWith('wss://') ? 'https://' : 'http://') + u.slice(u.indexOf('://') + 3).replace(/\/+$/, '');
+  }
+  return '';
+});
 const showSidebar = ref(true);
 const showSettings = ref(false);
 const showTrafficMonitor = ref(false);
@@ -156,9 +171,8 @@ async function handleSelectFolder() {
   }
 }
 
-/** Persist a typed cwd as the user edits it (mobile / web field). */
-async function handleCwdInput(event: Event) {
-  const value = (event.target as HTMLInputElement).value;
+/** Persist a cwd picked from the directory tree. */
+async function handleTreeSelect(value: string) {
   selectedCwd.value = value;
   if (prefsStore) {
     await prefsStore.set('lastCwd', value);
@@ -169,18 +183,13 @@ async function handleCwdInput(event: Event) {
 async function handleNewSession() {
   if (!selectedAgent.value) return;
 
-  // ACP requires an absolute working directory; passing '.' is rejected by
-  // most agents. On desktop the folder picker always returns an absolute
-  // path, but on mobile the user types it, so validate up-front and surface
-  // a helpful error rather than letting the agent reject `session/new`.
+  // ACP requires a working directory. Absolute paths pass through; relative
+  // paths (e.g. `./projects/foo` or `projects/foo`) are resolved by the
+  // bridge against the agent's home directory. Empty is the only error we
+  // can catch client-side.
   const cwd = selectedCwd.value.trim();
   if (!cwd) {
-    sessionStore.error = 'Please enter a working directory (absolute path on the agent\u2019s machine).';
-    return;
-  }
-  const isAbsolute = cwd.startsWith('/') || /^[A-Za-z]:[\\/]/.test(cwd);
-  if (!isAbsolute) {
-    sessionStore.error = `Working directory must be an absolute path (got: ${cwd}).`;
+    sessionStore.error = 'Please enter a working directory (absolute path on the agent\u2019s machine, or a path relative to its home directory).';
     return;
   }
 
@@ -308,20 +317,14 @@ function clearError() {
                 📁
               </button>
             </div>
-            <!-- Mobile / web: free-text input. The cwd is interpreted by
-                 the remote agent, so the path must exist on the agent's
-                 machine. -->
-            <input
+            <!-- Mobile / web: directory tree browser (bridge fs API) + editable
+                 path. The path is interpreted on the agent's host. -->
+            <DirectoryPicker
               v-else
-              class="cwd-input"
-              type="text"
-              :value="selectedCwd"
-              @input="handleCwdInput"
+              :base-url="fsBaseUrl"
+              v-model="selectedCwd"
               :disabled="isConnecting || isConnected"
-              placeholder="/absolute/path/on/agent"
-              autocapitalize="none"
-              autocorrect="off"
-              spellcheck="false"
+              @select="handleTreeSelect"
             />
           </div>
           
@@ -464,46 +467,64 @@ function clearError() {
 
 <style>
 :root {
-  --bg-primary: #0066cc;
-  --bg-primary-hover: #0052a3;
-  --bg-sidebar: #f8f9fa;
-  --bg-main: #ffffff;
-  --bg-hover: #f0f0f0;
-  --bg-user: #e3f2fd;
-  --bg-assistant: #f5f5f5;
-  --bg-code: #282c34;
-  --bg-success: #28a745;
-  --bg-danger: #dc3545;
-  --bg-warning: #fff3cd;
-  --text-primary: #333;
-  --text-secondary: #666;
-  --text-muted: #999;
-  --text-accent: #0066cc;
-  --text-code: #abb2bf;
-  --border-color: #e0e0e0;
-  
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  /* Calm paper palette: warm neutral background, terracotta accent,
+   * dark ink text. Flat colors only — no gradients, no glows. */
+  --bg-primary: #c2532f;
+  --bg-primary-hover: #a8431f;
+  --bg-sidebar: #f6f2ec;
+  --bg-main: #fbf8f3;
+  --bg-hover: #efe9e0;
+  --bg-user: #f3e3d3;
+  --bg-assistant: #f1ece4;
+  --bg-code: #2b2723;
+  --bg-success: #5a7d4f;
+  --bg-danger: #b3402e;
+  --bg-warning: #f5e9cf;
+  --text-primary: #2b2723;
+  --text-secondary: #6b6259;
+  --text-muted: #a39a8e;
+  --text-accent: #c2532f;
+  --text-code: #e8e0d5;
+  --border-color: #e3dbcf;
+  /* Design tokens: density + faint chrome. Flat colors, thin hairline
+   * borders, no shadows-as-decoration. */
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --sidebar-w: 288px;
+  --border-faint: rgba(43, 39, 35, 0.09);
+  --tint-hover: rgba(43, 39, 35, 0.045);
+  --tint-active: rgba(194, 83, 47, 0.10);
+  --accent-soft: rgba(194, 83, 47, 0.14);
+
+  font-family: var(--font-ui);
   font-size: 16px;
   line-height: 1.5;
   color: var(--text-primary);
-  background-color: #ffffff;
+  background-color: var(--bg-main);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg-primary: #4da6ff;
-    --bg-primary-hover: #3399ff;
-    --bg-sidebar: #1e1e1e;
-    --bg-main: #252525;
-    --bg-hover: #333;
-    --bg-user: #1a3a5c;
-    --bg-assistant: #2d2d2d;
-    --text-primary: #e0e0e0;
-    --text-secondary: #a0a0a0;
-    --text-muted: #707070;
-    --text-accent: #4da6ff;
-    --border-color: #404040;
-    background-color: #252525;
+    --bg-primary: #e07450;
+    --bg-primary-hover: #ea8a69;
+    --bg-sidebar: #211d1a;
+    --bg-main: #2a2521;
+    --bg-hover: #363029;
+    --bg-user: #3d3128;
+    --bg-assistant: #332d28;
+    --text-primary: #ece5da;
+    --text-secondary: #b0a496;
+    --text-muted: #7d7266;
+    --text-accent: #e07450;
+    --border-color: #3d362f;
+    --border-faint: rgba(236, 229, 218, 0.13);
+    --tint-hover: rgba(236, 229, 218, 0.06);
+    --tint-active: rgba(224, 116, 80, 0.16);
+    --accent-soft: rgba(224, 116, 80, 0.20);
+    background-color: var(--bg-main);
   }
 }
 
@@ -526,10 +547,10 @@ html, body, #app {
 }
 
 .sidebar {
-  width: 320px;
-  min-width: 320px;
+  width: var(--sidebar-w);
+  min-width: var(--sidebar-w);
   background: var(--bg-sidebar);
-  border-right: 1px solid var(--border-color);
+  border-right: 1px solid var(--border-faint);
   display: flex;
   flex-direction: column;
 }
@@ -538,12 +559,14 @@ html, body, #app {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 1rem;
-  border-bottom: 1px solid var(--border-color);
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border-faint);
 }
 
 .sidebar-header h1 {
-  font-size: 1.25rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   margin: 0;
 }
 
@@ -579,19 +602,22 @@ html, body, #app {
 }
 
 .section {
-  padding: 1rem;
-  border-bottom: 1px solid var(--border-color);
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--border-faint);
 }
 
 .new-session-btn,
 .disconnect-btn {
   width: 100%;
-  margin-top: 0.75rem;
-  padding: 0.625rem 1rem;
+  margin-top: 0.625rem;
+  height: 30px;
+  padding: 0 0.75rem;
   border: none;
-  border-radius: 6px;
-  font-size: 0.9rem;
-  font-weight: 500;
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
   cursor: pointer;
 }
 
@@ -615,8 +641,11 @@ html, body, #app {
 
 .cwd-picker label {
   display: block;
-  font-size: 0.8rem;
-  color: var(--text-secondary);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
   margin-bottom: 0.25rem;
 }
 
@@ -628,11 +657,15 @@ html, body, #app {
 
 .cwd-path {
   flex: 1;
-  padding: 0.375rem 0.5rem;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  padding: 0 0.5rem;
   background: var(--bg-main);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  font-size: 0.8rem;
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;

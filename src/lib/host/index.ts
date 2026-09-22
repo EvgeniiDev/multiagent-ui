@@ -41,10 +41,34 @@ export interface RemoteAgentOptions {
 const WEB_CONFIG_KEY = 'acp-ui:agents';
 const WEB_CONFIG_PATH_LABEL = '(browser local storage)';
 
+// ---------------------------------------------------------------------------
+// Local deployment defaults (added for the .222 LAN deployment). The four ACP
+// bridges run as systemd user units on the same machine that serves this
+// bundle; the WebSocket host is derived from whatever hostname the page was
+// opened with, so the bundle stays host-agnostic. Seeded only when nothing is
+// stored yet — once the user edits Settings, the stored config wins.
+// ---------------------------------------------------------------------------
+const BRIDGE_PORTS: Record<string, number> = {
+  'Hermes Agent': 25901,
+  'OpenCode': 25902,
+  'Devin': 25903,
+  'Pi': 25904,
+};
+
+function defaultWebConfig(): AgentsConfig {
+  const hostname =
+    (typeof location !== 'undefined' && location.hostname) || '127.0.0.1';
+  const agents: Record<string, AgentConfig> = {};
+  for (const [name, port] of Object.entries(BRIDGE_PORTS)) {
+    agents[name] = { transport: 'websocket', url: `ws://${hostname}:${port}/` };
+  }
+  return { agents };
+}
+
 function loadWebConfig(): AgentsConfig {
-  if (typeof localStorage === 'undefined') return { agents: {} };
+  if (typeof localStorage === 'undefined') return defaultWebConfig();
   const raw = localStorage.getItem(WEB_CONFIG_KEY);
-  if (!raw) return { agents: {} };
+  if (!raw) return defaultWebConfig();
   try {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object' && parsed.agents) {
@@ -53,7 +77,7 @@ function loadWebConfig(): AgentsConfig {
   } catch (e) {
     console.warn('Failed to parse stored agents config:', e);
   }
-  return { agents: {} };
+  return defaultWebConfig();
 }
 
 function saveWebConfig(config: AgentsConfig): void {
