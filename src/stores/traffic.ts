@@ -1,4 +1,5 @@
 // Traffic store for ACP message monitoring
+import { uuid } from '../lib/uuid';
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 
@@ -57,7 +58,7 @@ export const useTrafficStore = defineStore('traffic', () => {
     
     const newEntry: TrafficEntry = {
       ...entry,
-      id: crypto.randomUUID(),
+      id: uuid(),
       timestamp: Date.now(),
     };
     
