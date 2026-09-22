@@ -454,7 +454,7 @@ async function handleDelete(name: string) {
 
 .add-btn:hover:not(:disabled) {
   background: var(--bg-primary);
-  color: white;
+  color: var(--text-on-accent, #fbf8f3);
 }
 
 .add-btn:disabled {
@@ -521,7 +521,7 @@ async function handleDelete(name: string) {
 .save-btn {
   padding: 0.5rem 1rem;
   background: var(--bg-primary);
-  color: white;
+  color: var(--text-on-accent, #fbf8f3);
   border: none;
   border-radius: 4px;
   cursor: pointer;
@@ -618,7 +618,7 @@ async function handleDelete(name: string) {
 
 .delete-btn:hover {
   background: var(--bg-danger);
-  color: white;
+  color: var(--text-on-accent, #fbf8f3);
 }
 
 .no-agents {

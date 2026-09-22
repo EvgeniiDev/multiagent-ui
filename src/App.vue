@@ -706,7 +706,7 @@ html, body, #app {
 
 .new-session-btn {
   background: var(--bg-primary);
-  color: white;
+  color: var(--text-on-accent, #fbf8f3);
 }
 
 .new-session-btn:hover:not(:disabled) {
@@ -791,7 +791,7 @@ html, body, #app {
 
 .disconnect-btn {
   background: var(--bg-danger);
-  color: white;
+  color: var(--text-on-accent, #fbf8f3);
 }
 
 .disconnect-btn:hover {

@@ -977,7 +977,7 @@ textarea:focus {
   height: 32px;
   padding: 0 1rem;
   background: var(--bg-primary, #c2532f);
-  color: white;
+  color: var(--text-on-accent, #fbf8f3);
   border: none;
   border-radius: var(--radius-md, 6px);
   font-family: inherit;
