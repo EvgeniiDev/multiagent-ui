@@ -4,6 +4,7 @@ import { ref, computed, watch } from 'vue';
 import { loadKvStore, type KVStore } from '../lib/host/storage';
 import { getAppVersion } from '../lib/host';
 import { trackEvent, trackError } from '../lib/telemetry';
+import { uuid } from '../lib/uuid';
 import type { SavedSession, ChatMessage, ToolCallInfo, PermissionRequest, SessionMode, SlashCommand, ModelInfo, AgentConfig } from '../lib/types';
 import { getTransportKind } from '../lib/types';
 import { AcpClientBridge, createAcpClient } from '../lib/acp-bridge';
@@ -144,7 +145,7 @@ export const useSessionStore = defineStore('session', () => {
           }
         } else {
           messages.value.push({
-            id: crypto.randomUUID(),
+            id: uuid(),
             role: 'user',
             content: update.content.type === 'text' ? update.content.text : '',
             timestamp: Date.now(),
@@ -161,7 +162,7 @@ export const useSessionStore = defineStore('session', () => {
           }
         } else {
           messages.value.push({
-            id: crypto.randomUUID(),
+            id: uuid(),
             role: 'assistant',
             content: update.content.type === 'text' ? update.content.text : '',
             timestamp: Date.now(),
@@ -179,7 +180,7 @@ export const useSessionStore = defineStore('session', () => {
           }
         } else {
           messages.value.push({
-            id: crypto.randomUUID(),
+            id: uuid(),
             role: 'assistant',
             content: '',
             thought: update.content.type === 'text' ? update.content.text : '',
@@ -479,11 +480,14 @@ export const useSessionStore = defineStore('session', () => {
       }
 
       // Save session
+      // Name the session after its workspace folder — an auto-generated
+      // "Session <date>" title is noise next to the sidebar timestamp.
+      const folder = cwd.split(/[\\/]/).filter(Boolean).pop() || cwd;
       const session: SavedSession = {
-        id: crypto.randomUUID(),
+        id: uuid(),
         agentName,
         sessionId: sessionResponse.sessionId,
-        title: `Session ${new Date().toLocaleString()}`,
+        title: folder,
         lastUpdated: Date.now(),
         cwd,
         supportsLoadSession,
@@ -708,7 +712,7 @@ export const useSessionStore = defineStore('session', () => {
 
     // Add user message
     messages.value.push({
-      id: crypto.randomUUID(),
+      id: uuid(),
       role: 'user',
       content: text,
       timestamp: Date.now(),
