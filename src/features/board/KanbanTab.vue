@@ -339,4 +339,14 @@ function onReorder(cardId: string, delta: -1 | 1) {
   flex: 1;
   min-height: 0;
 }
+
+@media (max-width: 800px) {
+  .empty-btn {
+    min-height: 44px;
+  }
+
+  .filter-clear {
+    min-height: 44px;
+  }
+}
 </style>

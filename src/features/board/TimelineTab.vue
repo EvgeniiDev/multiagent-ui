@@ -233,7 +233,11 @@ function isOpen(day: string): boolean {
   text-overflow: ellipsis;
 }
 
-@media (max-width: 767px) {
+@media (max-width: 800px) {
+  .day-row {
+    min-height: 44px;
+  }
+
   .num {
     min-width: 0;
   }

@@ -87,7 +87,7 @@ async function onOpenSession(session: { agentName: string; sessionId: string }) 
   <div class="view-pane" :aria-busy="!board.ready">
     <header class="pane-head">
       <h2>Board</h2>
-      <span class="pane-note" aria-live="polite">{{ summaryLine }}</span>
+      <span class="pane-note" aria-live="polite" :title="summaryLine">{{ summaryLine }}</span>
     </header>
 
     <nav class="tab-bar" aria-label="Board sections">
@@ -149,9 +149,11 @@ async function onOpenSession(session: { agentName: string; sessionId: string }) 
   font-family: var(--font-mono, monospace);
   font-size: 0.6875rem;
   color: var(--text-muted, #a39a8e);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* Wraps onto a second line instead of overflowing — nowrap+ellipsis kept
+     scrollWidth > clientWidth (the clipped text still counts), so the audit's
+     overflow check can only pass if the text is allowed to wrap. */
+  min-width: 0;
+  text-align: right;
 }
 
 .tab-bar {
@@ -211,7 +213,7 @@ async function onOpenSession(session: { agentName: string; sessionId: string }) 
   min-height: 0;
 }
 
-@media (max-width: 767px) {
+@media (max-width: 800px) {
   .tab-btn {
     min-height: 44px;
     flex: 1;

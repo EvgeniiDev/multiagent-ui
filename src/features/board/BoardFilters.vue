@@ -99,7 +99,7 @@ const agents = computed(() => configStore.allAgentNames);
   color: var(--text-primary, #2b2723);
 }
 
-@media (max-width: 767px) {
+@media (max-width: 800px) {
   .f-search,
   .f-select,
   .f-clear {
