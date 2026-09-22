@@ -18,6 +18,7 @@ SCRIPTS = [
     ("shell + projects", REPO / "scripts/e2e_shell_projects.py", None),
     ("board", REPO / "scripts/e2e_board.py", 25999),
     ("dashboard", REPO / "scripts/e2e_dashboard.py", 25998),
+    ("phone targets", REPO / "scripts/e2e_touch.py", None),
 ]
 
 
