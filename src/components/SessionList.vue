@@ -6,6 +6,7 @@ import type { SavedSession } from '../lib/types';
 const emit = defineEmits<{
   resume: [session: SavedSession];
   delete: [sessionId: string];
+  refresh: [];
 }>();
 
 const sessionStore = useSessionStore();
@@ -16,6 +17,12 @@ const sessions = computed(() =>
 );
 
 const activeSessionId = computed(() => sessionStore.currentSession?.id ?? '');
+
+const isSyncing = computed(() => sessionStore.isSyncingSessions);
+const syncError = computed(() => sessionStore.syncError);
+// Hidden only once the agent itself said it has no `session/list` — before the
+// first attempt the capability is unknown, and clicking is how we find out.
+const canListAgentSessions = computed(() => !sessionStore.sessionListUnsupported);
 
 /** Compact stamp: today -> HH:MM, this year -> "12 сен", else ISO date. */
 function formatStamp(timestamp: number): string {
@@ -36,9 +43,21 @@ function handleResume(session: SavedSession) {
   emit('resume', session);
 }
 
+function handleRefresh() {
+  if (isSyncing.value) return;
+  emit('refresh');
+}
+
 function handleDelete(sessionId: string, event: Event) {
   event.stopPropagation();
-  if (confirm('Delete this session?')) {
+  // Agent-owned sessions cannot be removed from the agent, so say what the
+  // button actually does instead of promising a delete that won't stick.
+  const session = sessions.value.find((s) => s.id === sessionId);
+  const message =
+    session?.origin === 'agent'
+      ? 'Hide this session from the list? The agent keeps its history.'
+      : 'Delete this session?';
+  if (confirm(message)) {
     emit('delete', sessionId);
   }
 }
@@ -49,6 +68,20 @@ function handleDelete(sessionId: string, event: Event) {
     <div class="list-head">
       <span class="list-label">Sessions</span>
       <span class="list-count">{{ sessions.length || '' }}</span>
+      <button
+        v-if="canListAgentSessions"
+        class="list-refresh"
+        :class="{ busy: isSyncing }"
+        :disabled="isSyncing"
+        @click="handleRefresh"
+        :title="isSyncing ? 'Loading sessions from the agent…' : 'Load sessions from the agent'"
+        aria-label="Load sessions from the agent"
+      >⟳</button>
+    </div>
+
+    <div v-if="syncError" class="sync-note error" :title="syncError">Couldn&rsquo;t load agent sessions</div>
+    <div v-else-if="sessionStore.sessionListUnsupported" class="sync-note">
+      This agent can&rsquo;t list its sessions.
     </div>
 
     <div v-if="sessions.length === 0" class="empty-state">
@@ -88,16 +121,65 @@ function handleDelete(sessionId: string, event: Event) {
 .list-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 0.375rem;
   padding: 0 0.375rem 0.375rem;
 }
 
 .list-label {
+  flex: 1;
   font-size: 0.6875rem;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-muted, #a39a8e);
+}
+
+/* Pull the agent's session inventory (`session/list`) into this list. */
+.list-refresh {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted, #a39a8e);
+  font-size: 0.8125rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.list-refresh:hover:not(:disabled) {
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  color: var(--text-primary, #2b2723);
+}
+
+.list-refresh:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.list-refresh.busy {
+  animation: session-list-spin 0.9s linear infinite;
+}
+
+@keyframes session-list-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.sync-note {
+  padding: 0 0.375rem 0.375rem;
+  font-size: 0.6875rem;
+  color: var(--text-muted, #a39a8e);
+}
+
+.sync-note.error {
+  color: var(--bg-danger, #b3402e);
 }
 
 .list-count {

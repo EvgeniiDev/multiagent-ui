@@ -17,6 +17,8 @@ import type {
   NewSessionResponse,
   LoadSessionRequest,
   LoadSessionResponse,
+  ListSessionsRequest,
+  ListSessionsResponse,
   PromptRequest,
   PromptResponse,
   CancelNotification,
@@ -331,6 +333,16 @@ export class AcpClientBridge implements Client {
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     return this.sendRequest<LoadSessionResponse>('session/load', params);
+  }
+
+  /**
+   * List the sessions the agent itself knows about (its own history store, not
+   * this client's): `session/list`. Only callable when the agent advertised the
+   * `session/list` capability during initialize. Pages are cursor-based — the
+   * agent caps the page size, so callers loop on `nextCursor`.
+   */
+  async listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {
+    return this.sendRequest<ListSessionsResponse>('session/list', params);
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {

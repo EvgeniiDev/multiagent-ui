@@ -77,7 +77,15 @@ export interface SavedSession {
   lastUpdated: number;
   cwd: string;
   supportsLoadSession?: boolean; // Whether the agent supports session/load
+  /**
+   * Where the entry came from. `local` — created in this client;
+   * `agent` — reported by the agent's own `session/list` (the agent owns the
+   * history, this client only mirrors the metadata).
+   */
+  origin?: SessionOrigin;
 }
+
+export type SessionOrigin = 'local' | 'agent';
 
 export interface ChatMessage {
   id: string;

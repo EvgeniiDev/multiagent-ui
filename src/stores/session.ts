@@ -11,10 +11,18 @@ import { AcpClientBridge, createAcpClient } from '../lib/acp-bridge';
 import { onAgentStderr, spawnAgent, killAgent } from '../lib/host';
 import { isDesktop } from '../lib/platform';
 import { useConfigStore } from './config';
-import type { SessionNotification, AuthMethod } from '@agentclientprotocol/sdk';
+import type { SessionNotification, AuthMethod, SessionInfo } from '@agentclientprotocol/sdk';
 
 const STORE_PATH = 'sessions.json';
 const PROTOCOL_VERSION = 1;
+
+/**
+ * `session/list` is cursor-paginated and the agent picks the page size
+ * (Hermes caps at 50). Cap the loop so a misbehaving agent that returns the
+ * same cursor forever can't spin the client: at 20 pages we surface what we
+ * have and stop.
+ */
+const MAX_SESSION_LIST_PAGES = 20;
 
 // App version (loaded once at startup)
 let appVersion = '0.1.0';
@@ -84,6 +92,186 @@ export const useSessionStore = defineStore('session', () => {
   let acpClient: AcpClientBridge | null = null;
   let store: KVStore | null = null;
 
+  // ---- Agent-side session inventory (`session/list`) -----------------------
+  // The agent owns its history; this client mirrors the metadata into the
+  // sidebar so sessions created elsewhere (CLI, Telegram, another device)
+  // show up here and can be resumed.
+  const supportsListSessions = ref(false);
+  const isSyncingSessions = ref(false);
+  const syncError = ref<string | null>(null);
+  /**
+   * The agent answered initialize without the `session/list` capability. Known
+   * only after a sync attempt, so the UI hides the refresh affordance rather
+   * than offering a button that can never work.
+   */
+  const sessionListUnsupported = ref(false);
+  /** Agent of the most recent connection — the default target for a refresh. */
+  const lastAgentName = ref('');
+  /**
+   * `${agentName}::${sessionId}` keys the user removed from the sidebar while
+   * the agent still holds them. Persisted, because otherwise the next sync
+   * would resurrect every deleted row and make Delete look broken.
+   */
+  let dismissedSessions: string[] = [];
+
+  function sessionKey(agentName: string, sessionId: string): string {
+    return `${agentName}::${sessionId}`;
+  }
+
+  /** Last path segment — used as a title when the agent reports none. */
+  function folderName(path: string): string {
+    return path.split(/[\\/]/).filter(Boolean).pop() || '';
+  }
+
+  /**
+   * Initialize a client and record which optional session features the agent
+   * has. Only Tauri desktop has real filesystem access; mobile and web cannot
+   * fulfil readTextFile / writeTextFile RPCs.
+   */
+  async function initializeClient(client: AcpClientBridge) {
+    const canAccessFs = isDesktop();
+    const initResponse = await client.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: {
+          readTextFile: canAccessFs,
+          writeTextFile: canAccessFs,
+        },
+      },
+      clientInfo: {
+        name: 'acp-ui',
+        title: 'ACP UI',
+        version: appVersion,
+      },
+    });
+    supportsListSessions.value = !!initResponse.agentCapabilities?.sessionCapabilities?.list;
+    sessionListUnsupported.value = !supportsListSessions.value;
+    lastAgentName.value = currentSession.value?.agentName || lastAgentName.value;
+    return initResponse;
+  }
+
+  /** Follow `nextCursor` until exhausted (bounded by MAX_SESSION_LIST_PAGES). */
+  async function listAllAgentSessions(client: AcpClientBridge, cwd?: string): Promise<SessionInfo[]> {
+    const all: SessionInfo[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < MAX_SESSION_LIST_PAGES; page++) {
+      const response = await client.listSessions({ cursor, cwd });
+      all.push(...(response.sessions ?? []));
+      const next = response.nextCursor ?? undefined;
+      // A repeated cursor would loop forever; treat it as the end of the list.
+      if (!next || next === cursor) break;
+      cursor = next;
+    }
+    return all;
+  }
+
+  /**
+   * Fold the agent's session metadata into `savedSessions`.
+   *
+   * Rows already known locally (same agent + sessionId) are updated in place —
+   * the agent's title and last-activity stamp win, since it is the source of
+   * truth. Unknown rows are appended and can be resumed via `session/load`.
+   */
+  function mergeAgentSessions(agentName: string, infos: SessionInfo[]): number {
+    const known = new Map(
+      savedSessions.value.map((s) => [sessionKey(s.agentName, s.sessionId), s])
+    );
+    let added = 0;
+    for (const info of infos) {
+      const key = sessionKey(agentName, info.sessionId);
+      if (dismissedSessions.includes(key)) continue;
+      const stamp = info.updatedAt ? Date.parse(info.updatedAt) : NaN;
+      const title = (info.title || '').trim() || folderName(info.cwd || '') || 'Session';
+      const existing = known.get(key);
+      if (existing) {
+        existing.title = title;
+        if (info.cwd) existing.cwd = info.cwd;
+        if (Number.isFinite(stamp)) existing.lastUpdated = stamp;
+        existing.supportsLoadSession = true;
+        continue;
+      }
+      savedSessions.value.push({
+        id: uuid(),
+        agentName,
+        sessionId: info.sessionId,
+        title,
+        lastUpdated: Number.isFinite(stamp) ? stamp : Date.now(),
+        cwd: info.cwd || '',
+        supportsLoadSession: true,
+        origin: 'agent',
+      });
+      added++;
+    }
+    return added;
+  }
+
+  /**
+   * Pull the agent's own session list into the sidebar.
+   *
+   * Reuses the live connection when it already belongs to `agentName`;
+   * otherwise opens a short-lived one. That second case is cheap: the bridge
+   * keeps the agent process alive across WebSocket clients, so this is an
+   * initialize round-trip, not a respawn. Session updates are deliberately
+   * left unwired on a transient connection — it only issues requests.
+   */
+  async function syncAgentSessions(agentName: string, cwd?: string): Promise<number> {
+    if (!agentName || isSyncingSessions.value) return 0;
+    isSyncingSessions.value = true;
+    syncError.value = null;
+    let transient: AcpClientBridge | null = null;
+    try {
+      let client: AcpClientBridge | null =
+        acpClient && currentSession.value?.agentName === agentName ? acpClient : null;
+
+      if (!client) {
+        const configStore = useConfigStore();
+        const agentConfig: AgentConfig | undefined = configStore.getAgent(agentName);
+        if (!agentConfig) throw new Error(`Agent '${agentName}' not found in config`);
+        transient = await createAcpClient({ name: agentName, config: agentConfig });
+        client = transient;
+        const initResponse = await initializeClient(client);
+        lastAgentName.value = agentName;
+        if (!initResponse.agentCapabilities?.sessionCapabilities?.list) {
+          return 0;
+        }
+      } else if (!supportsListSessions.value) {
+        return 0;
+      }
+
+      const infos = await listAllAgentSessions(client, cwd);
+      const added = mergeAgentSessions(agentName, infos);
+      await saveSessionsToStore();
+      trackEvent('SessionsListed', { agentName, total: String(infos.length) });
+      return added;
+    } catch (e) {
+      syncError.value = e instanceof Error ? e.message : String(e);
+      console.warn('Failed to list agent sessions:', e);
+      return 0;
+    } finally {
+      if (transient) {
+        try {
+          await transient.disconnect();
+        } catch (e) {
+          console.warn('disconnect after session list failed:', e);
+        }
+      }
+      isSyncingSessions.value = false;
+    }
+  }
+
+  /**
+   * Refresh entry point for the UI: default to the connected agent, else the
+   * selected one (nothing is connected yet), else the last agent we talked to.
+   */
+  async function refreshAgentSessions(agentName?: string): Promise<void> {
+    const target = agentName || currentSession.value?.agentName || lastAgentName.value;
+    if (!target) {
+      syncError.value = 'Select an agent first';
+      return;
+    }
+    await syncAgentSessions(target);
+  }
+
   // Computed
   const hasActiveSession = computed(() => currentSession.value !== null);
   const messageList = computed(() => messages.value);
@@ -100,7 +288,10 @@ export const useSessionStore = defineStore('session', () => {
     if (saved) {
       savedSessions.value = saved;
     }
-    
+    // Sidebar rows the user removed while the agent still holds them.
+    dismissedSessions = (await store.get<string[]>('dismissedSessions')) ?? [];
+    lastAgentName.value = (await store.get<string>('lastAgent')) ?? '';
+
     // Load app version (Tauri API on desktop/mobile, build-time inject on web)
     try {
       appVersion = await getAppVersion();
@@ -115,6 +306,14 @@ export const useSessionStore = defineStore('session', () => {
       await store.save();
     }
   }
+
+  // Remember the last agent we initialized against (persisted) so the sidebar
+  // refresh works before any session is connected.
+  watch(lastAgentName, async (name) => {
+    if (!store || !name) return;
+    await store.set('lastAgent', name);
+    await store.save();
+  });
 
   // Handle an unexpected transport close (e.g. WebSocket dropped while idle,
   // local agent process exited). The bridge has already rejected any
@@ -397,24 +596,7 @@ export const useSessionStore = defineStore('session', () => {
       startupPhase.value = 'connecting';
 
       // Initialize connection
-      // Only Tauri desktop has real filesystem access; mobile and web
-      // cannot fulfil readTextFile / writeTextFile RPCs.
-      const canAccessFs = isDesktop();
-
-      const initResponse = await acpClient.initialize({
-        protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: {
-          fs: {
-            readTextFile: canAccessFs,
-            writeTextFile: canAccessFs,
-          },
-        },
-        clientInfo: {
-          name: 'acp-ui',
-          title: 'ACP UI',
-          version: appVersion,
-        },
-      });
+      const initResponse = await initializeClient(acpClient);
 
       console.log('Agent initialized:', initResponse);
 
@@ -503,7 +685,12 @@ export const useSessionStore = defineStore('session', () => {
       
       // Track successful session creation
       trackEvent('SessionCreated', { agentName, success: 'true' });
-      
+
+      // Auto-load the agent's session inventory once connected, so sessions
+      // created outside this client (CLI, Telegram, another device) show up
+      // in the sidebar without a manual refresh.
+      void syncAgentSessions(agentName);
+
       // Set up session modes if available
       if (sessionResponse.modes) {
         availableModes.value = (sessionResponse.modes.availableModes || []).map(m => ({
@@ -603,25 +790,8 @@ export const useSessionStore = defineStore('session', () => {
         { immediate: true }
       );
 
-      // Only Tauri desktop has real filesystem access; mobile and web
-      // cannot fulfil readTextFile / writeTextFile RPCs.
-      const canAccessFs = isDesktop();
-
       // Initialize connection
-      const initResponse = await acpClient.initialize({
-        protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: {
-          fs: {
-            readTextFile: canAccessFs,
-            writeTextFile: canAccessFs,
-          },
-        },
-        clientInfo: {
-          name: 'acp-ui',
-          title: 'ACP UI',
-          version: appVersion,
-        },
-      });
+      const initResponse = await initializeClient(acpClient);
 
       // Store available auth methods for potential retry
       const availableAuthMethods = initResponse.authMethods || [];
@@ -677,6 +847,10 @@ export const useSessionStore = defineStore('session', () => {
 
       // Track successful session resume
       trackEvent('SessionResumed', { agentName: savedSession.agentName, success: 'true' });
+
+      // Same auto-load as a fresh connect: the sidebar should mirror the
+      // agent's whole inventory, not just what this client created.
+      void syncAgentSessions(savedSession.agentName);
 
       // Update last accessed time
       savedSession.lastUpdated = Date.now();
@@ -829,6 +1003,20 @@ export const useSessionStore = defineStore('session', () => {
 
   // Delete saved session
   async function deleteSession(sessionId: string): Promise<void> {
+    const doomed = savedSessions.value.find(s => s.id === sessionId);
+    // A session the agent owns cannot be deleted from here — the agent would
+    // hand it straight back on the next sync. Remember the dismissal instead
+    // so the row stays gone; the history itself is untouched agent-side.
+    if (doomed?.origin === 'agent') {
+      const key = sessionKey(doomed.agentName, doomed.sessionId);
+      if (!dismissedSessions.includes(key)) {
+        dismissedSessions.push(key);
+        if (store) {
+          await store.set('dismissedSessions', dismissedSessions);
+          await store.save();
+        }
+      }
+    }
     savedSessions.value = savedSessions.value.filter(s => s.id !== sessionId);
     await saveSessionsToStore();
   }
@@ -941,7 +1129,12 @@ export const useSessionStore = defineStore('session', () => {
     startupPhase,
     startupLogs,
     startupElapsed,
-    
+    supportsListSessions,
+    isSyncingSessions,
+    syncError,
+    sessionListUnsupported,
+    lastAgentName,
+
     // Computed
     hasActiveSession,
     messageList,
@@ -965,7 +1158,9 @@ export const useSessionStore = defineStore('session', () => {
     setModel,
     clearError,
     tryReconnect,
-    
+    syncAgentSessions,
+    refreshAgentSessions,
+
     // Expose client for permission handling
     get acpClient() { return acpClient; },
   };

@@ -213,6 +213,17 @@ async function handleDeleteSession(sessionId: string) {
   await sessionStore.deleteSession(sessionId);
 }
 
+/**
+ * Pull the agent's own session inventory (`session/list`) into the sidebar.
+ * When no session is connected there is no live target, so pass the selected
+ * agent; the store falls back to the last agent it talked to.
+ */
+async function handleRefreshSessions() {
+  await sessionStore.refreshAgentSessions(
+    isConnected.value ? undefined : selectedAgent.value || undefined
+  );
+}
+
 async function handleDisconnect() {
   await sessionStore.disconnect();
 }
@@ -363,6 +374,7 @@ function clearError() {
           <SessionList 
             @resume="handleResumeSession"
             @delete="handleDeleteSession"
+            @refresh="handleRefreshSessions"
           />
         </div>
       </div>
