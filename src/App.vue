@@ -157,6 +157,9 @@ onMounted(async () => {
 
 async function handleAgentSelect(agentName: string) {
   selectedAgent.value = agentName;
+  // Scope the sidebar to this agent: blank the list, show a loader, re-fetch
+  // its inventory. Without this a switch looks like nothing happened.
+  await sessionStore.setActiveAgent(agentName);
 }
 
 async function handleSelectFolder() {

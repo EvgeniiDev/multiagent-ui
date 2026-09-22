@@ -108,6 +108,20 @@ export const useSessionStore = defineStore('session', () => {
   /** Agent of the most recent connection — the default target for a refresh. */
   const lastAgentName = ref('');
   /**
+   * Agent whose sessions the sidebar is scoped to. Switching it blanks the list
+   * and shows a loader while the agent's inventory is re-fetched, so a switch is
+   * visibly different from "nothing happened".
+   */
+  const activeAgentName = ref('');
+  /** True from an agent switch until that agent's session list settles. */
+  const sidebarLoading = ref(false);
+  /**
+   * Outcome of the last inventory fetch, rendered next to the sidebar scope.
+   * Without it a failed or empty sync is indistinguishable from a click that
+   * did nothing.
+   */
+  const lastSync = ref<{ agent: string; count: number; ms: number; unsupported: boolean } | null>(null);
+  /**
    * `${agentName}::${sessionId}` keys the user removed from the sidebar while
    * the agent still holds them. Persisted, because otherwise the next sync
    * would resurrect every deleted row and make Delete look broken.
@@ -218,6 +232,7 @@ export const useSessionStore = defineStore('session', () => {
     if (!agentName || isSyncingSessions.value) return 0;
     isSyncingSessions.value = true;
     syncError.value = null;
+    const startedAt = Date.now();
     let transient: AcpClientBridge | null = null;
     try {
       let client: AcpClientBridge | null =
@@ -232,19 +247,23 @@ export const useSessionStore = defineStore('session', () => {
         const initResponse = await initializeClient(client);
         lastAgentName.value = agentName;
         if (!initResponse.agentCapabilities?.sessionCapabilities?.list) {
+          lastSync.value = { agent: agentName, count: 0, ms: Date.now() - startedAt, unsupported: true };
           return 0;
         }
       } else if (!supportsListSessions.value) {
+        lastSync.value = { agent: agentName, count: 0, ms: Date.now() - startedAt, unsupported: true };
         return 0;
       }
 
       const infos = await listAllAgentSessions(client, cwd);
       const added = mergeAgentSessions(agentName, infos);
       await saveSessionsToStore();
+      lastSync.value = { agent: agentName, count: infos.length, ms: Date.now() - startedAt, unsupported: false };
       trackEvent('SessionsListed', { agentName, total: String(infos.length) });
       return added;
     } catch (e) {
       syncError.value = e instanceof Error ? e.message : String(e);
+      lastSync.value = { agent: agentName, count: 0, ms: Date.now() - startedAt, unsupported: false };
       console.warn('Failed to list agent sessions:', e);
       return 0;
     } finally {
@@ -272,6 +291,28 @@ export const useSessionStore = defineStore('session', () => {
     await syncAgentSessions(target);
   }
 
+  /**
+   * Point the sidebar at `agentName` and load its inventory.
+   *
+   * The visible list is intentionally blank while the first page is in flight
+   * (switching agents must look like a load, not like a no-op). Re-selecting
+   * the agent already shown keeps the rows and just re-fetches.
+   */
+  async function setActiveAgent(agentName: string): Promise<void> {
+    if (!agentName) return;
+    const switched = activeAgentName.value !== agentName;
+    activeAgentName.value = agentName;
+    if (switched) {
+      sidebarLoading.value = true;
+      syncError.value = null;
+    }
+    try {
+      await syncAgentSessions(agentName);
+    } finally {
+      sidebarLoading.value = false;
+    }
+  }
+
   // Computed
   const hasActiveSession = computed(() => currentSession.value !== null);
   const messageList = computed(() => messages.value);
@@ -279,6 +320,19 @@ export const useSessionStore = defineStore('session', () => {
   // Only sessions that support resuming (loadSession capability)
   const resumableSessions = computed(() => 
     savedSessions.value.filter(s => s.supportsLoadSession === true)
+  );
+
+  /**
+   * Sessions the sidebar shows: the agent-scoped view of the inventory the
+   * agent itself reported. Scoping per agent keeps a 170-row mixed list
+   * legible — switching agents is the filter.
+   */
+  const visibleSessions = computed(() =>
+    activeAgentName.value
+      ? savedSessions.value
+          .filter(s => s.agentName === activeAgentName.value && s.supportsLoadSession === true)
+          .sort((a, b) => b.lastUpdated - a.lastUpdated)
+      : []
   );
 
   // Initialize store
@@ -689,7 +743,7 @@ export const useSessionStore = defineStore('session', () => {
       // Auto-load the agent's session inventory once connected, so sessions
       // created outside this client (CLI, Telegram, another device) show up
       // in the sidebar without a manual refresh.
-      void syncAgentSessions(agentName);
+      void setActiveAgent(agentName);
 
       // Set up session modes if available
       if (sessionResponse.modes) {
@@ -850,7 +904,7 @@ export const useSessionStore = defineStore('session', () => {
 
       // Same auto-load as a fresh connect: the sidebar should mirror the
       // agent's whole inventory, not just what this client created.
-      void syncAgentSessions(savedSession.agentName);
+      void setActiveAgent(savedSession.agentName);
 
       // Update last accessed time
       savedSession.lastUpdated = Date.now();
@@ -1134,13 +1188,17 @@ export const useSessionStore = defineStore('session', () => {
     syncError,
     sessionListUnsupported,
     lastAgentName,
+    activeAgentName,
+    sidebarLoading,
+    lastSync,
 
     // Computed
     hasActiveSession,
     messageList,
     toolCallList,
     resumableSessions,
-    
+    visibleSessions,
+
     // Actions
     initStore,
     createSession,
@@ -1160,6 +1218,7 @@ export const useSessionStore = defineStore('session', () => {
     tryReconnect,
     syncAgentSessions,
     refreshAgentSessions,
+    setActiveAgent,
 
     // Expose client for permission handling
     get acpClient() { return acpClient; },
