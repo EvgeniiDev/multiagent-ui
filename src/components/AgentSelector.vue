@@ -84,17 +84,22 @@ function handleSelect(event: Event) {
 }
 
 label {
+  font-size: 0.6875rem;
   font-weight: 600;
-  color: var(--text-secondary, #666);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted, #a39a8e);
 }
 
 select {
-  padding: 0.5rem;
-  border: 1px solid var(--border-color, #ccc);
-  border-radius: 4px;
-  font-size: 1rem;
-  background: var(--bg-input, #fff);
-  color: var(--text-primary, #333);
+  height: 30px;
+  padding: 0 0.5rem;
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border-radius: var(--radius-md, 6px);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  background: var(--bg-main, #fbf8f3);
+  color: var(--text-primary, #2b2723);
 }
 
 select:disabled {

@@ -404,7 +404,7 @@ function handleCopy(entry: TrafficEntry) {
 }
 
 .entry.out .direction-icon {
-  color: #0066cc;
+  color: var(--text-accent);
 }
 
 .entry.in .direction-icon {
@@ -418,7 +418,7 @@ function handleCopy(entry: TrafficEntry) {
 
 @media (prefers-color-scheme: dark) {
   .entry.out .direction-icon {
-    color: #4da6ff;
+    color: var(--text-accent);
   }
   
   .entry.in .direction-icon {

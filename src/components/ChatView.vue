@@ -134,27 +134,18 @@ function renderMarkdown(content: string): string {
   return marked.parse(content, { async: false }) as string;
 }
 
-function getToolIcon(kind: string): string {
+/** Short kind label for a tool chip (uppercased by CSS, set in mono). */
+function getToolKind(kind: string): string {
   switch (kind) {
-    case 'read': return '📖';
-    case 'edit': return '✏️';
-    case 'delete': return '🗑️';
-    case 'move': return '📦';
-    case 'search': return '🔍';
-    case 'execute': return '▶️';
-    case 'think': return '💭';
-    case 'fetch': return '🌐';
-    default: return '🔧';
-  }
-}
-
-function getStatusIcon(status: string): string {
-  switch (status) {
-    case 'pending': return '⏳';
-    case 'in_progress': return '⚙️';
-    case 'completed': return '✓';
-    case 'failed': return '✗';
-    default: return '';
+    case 'read': return 'read';
+    case 'edit': return 'edit';
+    case 'delete': return 'del';
+    case 'move': return 'move';
+    case 'search': return 'find';
+    case 'execute': return 'run';
+    case 'think': return 'think';
+    case 'fetch': return 'fetch';
+    default: return 'tool';
   }
 }
 </script>
@@ -183,57 +174,62 @@ function getStatusIcon(status: string): string {
     </div>
     
     <div ref="messagesContainer" class="messages-container">
-      <div 
-        v-for="message in messages" 
+      <div class="messages">
+      <div
+        v-for="(message, idx) in messages"
         :key="message.id"
-        :class="['message', `message-${message.role}`]"
+        :class="[
+          'message',
+          `message-${message.role}`,
+          { streaming: isLoading && idx === messages.length - 1 && message.role === 'assistant' },
+        ]"
       >
-        <div class="message-header">
-          <span class="role">{{ message.role === 'user' ? 'You' : 'Assistant' }}</span>
+        <div class="message-head">
+          <span class="role">{{
+            message.role === 'user' ? 'You' : (currentSession?.agentName || 'Assistant')
+          }}</span>
         </div>
-        
-        <!-- Agent thinking section (collapsible) - shown first to explain reasoning -->
+
+        <!-- Collapsed reasoning: a quiet inline disclosure, closed by default. -->
         <div v-if="message.thought && message.role === 'assistant'" class="thought-section">
           <button class="thought-toggle" @click="toggleThought(message.id)">
-            <span class="thought-icon">💭</span>
-            <span class="thought-label">{{ isThoughtExpanded(message.id) ? 'Hide Thinking' : 'Show Thinking' }}</span>
-            <span class="thought-chevron">{{ isThoughtExpanded(message.id) ? '▲' : '▼' }}</span>
+            <span class="thought-chevron">{{ isThoughtExpanded(message.id) ? '▾' : '▸' }}</span>
+            <span class="thought-label">{{ isThoughtExpanded(message.id) ? 'Hide thinking' : 'Thinking' }}</span>
           </button>
           <div v-if="isThoughtExpanded(message.id)" class="thought-content">
             <div v-html="renderMarkdown(message.thought)" />
           </div>
         </div>
-        
-        <!-- Tool calls for this message (shown after thinking) -->
+
+        <!-- Tool calls: one dense chip per call, status carried by a dot. -->
         <div v-if="message.toolCalls?.length" class="tool-calls-section">
-          <div 
-            v-for="tc in message.toolCalls" 
+          <div
+            v-for="tc in message.toolCalls"
             :key="tc.toolCallId"
             :class="['tool-call-inline', `tool-${tc.status}`]"
           >
-            <span class="tool-icon">{{ getToolIcon(tc.kind) }}</span>
+            <span class="tool-dot" aria-hidden="true"></span>
+            <span class="tool-kind">{{ getToolKind(tc.kind) }}</span>
             <span class="tool-name">{{ tc.title }}</span>
             <span v-if="tc.locations?.length" class="tool-location">
               {{ tc.locations[0].path }}
             </span>
-            <span :class="['tool-status', `status-${tc.status}`]">
-              {{ getStatusIcon(tc.status) }}
-            </span>
           </div>
         </div>
-        
-        <div 
+
+        <div
           v-if="message.content"
           class="message-content"
           v-html="renderMarkdown(message.content)"
         />
       </div>
-      
+
       <!-- Loading indicator -->
       <div v-if="isLoading" class="loading-indicator">
         <span class="spinner"></span>
-        <span>Thinking...</span>
-        <button class="cancel-btn" @click="handleCancel">Cancel</button>
+        <span>Working…</span>
+        <button class="cancel-btn" @click="handleCancel">Stop</button>
+      </div>
       </div>
     </div>
     
@@ -278,8 +274,8 @@ function getStatusIcon(status: string): string {
 }
 
 .chat-header {
-  padding: 1rem;
-  border-bottom: 1px solid var(--border-color, #e0e0e0);
+  padding: 0.625rem 1rem;
+  border-bottom: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -288,7 +284,9 @@ function getStatusIcon(status: string): string {
 
 .chat-header h2 {
   margin: 0;
-  font-size: 1.1rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -301,154 +299,240 @@ function getStatusIcon(status: string): string {
 }
 
 .agent-name {
-  font-size: 0.875rem;
-  color: var(--text-accent, #0066cc);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6875rem;
+  letter-spacing: 0.02em;
+  color: var(--text-muted, #a39a8e);
 }
 
 .messages-container {
   flex: 1;
   overflow-y: auto;
-  padding: 1rem;
+  padding: 1.25rem 1.5rem 0.75rem;
+}
+
+/* Reading column: capped measure so long agent answers stay scannable. */
+.messages {
+  max-width: 780px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
 }
 
 .message {
-  margin-bottom: 1rem;
-  padding: 0.75rem;
-  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3125rem;
 }
 
+/* User turns are input, not output: a compact sand card, pushed right. */
 .message-user {
-  background: var(--bg-user, #e3f2fd);
-  margin-left: 2rem;
+  align-self: flex-end;
+  max-width: 88%;
+  margin-left: 12%;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-user, #f3e3d3);
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border-radius: var(--radius-lg, 10px);
 }
 
+/* Assistant turns carry no chrome at all — the text is the interface. */
 .message-assistant {
-  background: var(--bg-assistant, #f5f5f5);
-  margin-right: 2rem;
+  padding: 0;
 }
 
-.message-header {
-  margin-bottom: 0.5rem;
+.message-head {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
 }
 
 .role {
+  font-size: 0.6875rem;
   font-weight: 600;
-  font-size: 0.875rem;
-  color: var(--text-secondary, #666);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted, #a39a8e);
+}
+
+.message-user .role {
+  color: var(--text-secondary, #6b6259);
+}
+
+/* Streaming caret: shows the turn is still running, no spinner needed. */
+@keyframes caret-blink {
+  50% { opacity: 0; }
+}
+
+.message.streaming .message-content::after {
+  content: '▍';
+  margin-left: 2px;
+  color: var(--text-accent, #c2532f);
+  animation: caret-blink 1.1s steps(1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message.streaming .message-content::after {
+    animation: none;
+  }
 }
 
 /* Tool calls inline styles */
 .tool-calls-section {
-  margin-bottom: 0.75rem;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 2px;
 }
 
 .tool-call-inline {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.375rem 0.625rem;
-  border-radius: 4px;
-  font-size: 0.8rem;
-  background: rgba(0, 0, 0, 0.04);
-  border-left: 2px solid var(--border-color);
-}
-
-.tool-pending {
-  border-left-color: #f59e0b;
+  gap: 0.4375rem;
+  min-height: 24px;
+  padding: 0 0.5rem;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6875rem;
 }
 
 .tool-in_progress {
-  border-left-color: #3b82f6;
-  background: rgba(59, 130, 246, 0.08);
-}
-
-.tool-completed {
-  border-left-color: #10b981;
-  background: rgba(16, 185, 129, 0.08);
+  background: rgba(59, 130, 246, 0.07);
 }
 
 .tool-failed {
-  border-left-color: #ef4444;
-  background: rgba(239, 68, 68, 0.08);
+  background: rgba(179, 64, 46, 0.09);
 }
 
-.tool-icon {
-  font-size: 0.875rem;
+.tool-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted, #a39a8e);
+}
+
+.tool-pending .tool-dot { background: #d99a1f; }
+.tool-in_progress .tool-dot { background: #3b82f6; }
+.tool-completed .tool-dot { background: #4f8a52; }
+.tool-failed .tool-dot { background: #b3402e; }
+
+.tool-kind {
+  flex: 0 0 auto;
+  font-size: 0.625rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted, #a39a8e);
 }
 
 .tool-name {
-  font-weight: 500;
-  color: var(--text-primary);
-}
-
-.tool-location {
-  flex: 1;
-  color: var(--text-muted);
-  font-size: 0.75rem;
+  flex: 0 1 auto;
+  max-width: 45%;
+  color: var(--text-primary, #2b2723);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.tool-status {
-  font-size: 0.75rem;
-  font-weight: 600;
+.tool-location {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-muted, #a39a8e);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
 }
 
-.status-pending { color: #f59e0b; }
-.status-in_progress { color: #3b82f6; }
-.status-completed { color: #10b981; }
-.status-failed { color: #ef4444; }
-
 .message-content {
-  line-height: 1.5;
-  overflow-wrap: break-word;
-  word-wrap: break-word;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--text-primary, #2b2723);
+  overflow-wrap: anywhere;
 }
 
 .message-content :deep(p) {
-  margin: 0.5rem 0;
+  margin: 0 0 0.5rem;
+}
+
+.message-content :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.message-content :deep(h1),
+.message-content :deep(h2),
+.message-content :deep(h3) {
+  margin: 0.75rem 0 0.375rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .message-content :deep(ol),
 .message-content :deep(ul) {
-  margin: 0.5rem 0;
-  padding-left: 1.5rem;
+  margin: 0.375rem 0;
+  padding-left: 1.125rem;
 }
 
 .message-content :deep(li) {
-  margin: 0.25rem 0;
+  margin: 0.125rem 0;
+}
+
+.message-content :deep(a) {
+  color: var(--text-accent, #c2532f);
+  text-decoration: none;
+  border-bottom: 1px solid var(--accent-soft, rgba(194, 83, 47, 0.25));
+}
+
+.message-content :deep(blockquote) {
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--border-color, #e3dbcf);
+  color: var(--text-secondary, #6b6259);
 }
 
 .message-content :deep(pre) {
-  background: var(--bg-code, #282c34);
-  color: var(--text-code, #abb2bf);
-  padding: 0.75rem;
-  border-radius: 4px;
+  margin: 0.5rem 0;
+  background: var(--bg-code, #2b2723);
+  color: var(--text-code, #e8e0d5);
+  padding: 0.625rem 0.75rem;
+  border-radius: var(--radius-md, 6px);
+  font-size: 0.75rem;
+  line-height: 1.5;
   overflow-x: auto;
 }
 
 .message-content :deep(code) {
-  font-family: 'Consolas', 'Monaco', monospace;
-  font-size: 0.9rem;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85em;
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  padding: 0.0625rem 0.25rem;
+  border-radius: 3px;
+}
+
+.message-content :deep(pre code) {
+  background: none;
+  padding: 0;
+  font-size: inherit;
 }
 
 .loading-indicator {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.75rem;
-  color: var(--text-muted, #666);
+  padding: 0.25rem 0.125rem 0.5rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+  color: var(--text-muted, #a39a8e);
 }
 
 .spinner {
-  width: 16px;
-  height: 16px;
+  width: 13px;
+  height: 13px;
   border: 2px solid var(--border-color, #ccc);
-  border-top-color: var(--text-accent, #0066cc);
+  border-top-color: var(--text-accent, #c2532f);
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }
@@ -459,11 +543,14 @@ function getStatusIcon(status: string): string {
 
 .cancel-btn {
   margin-left: auto;
-  padding: 0.25rem 0.5rem;
-  border: 1px solid var(--border-color, #ccc);
-  border-radius: 4px;
+  height: 24px;
+  padding: 0 0.5rem;
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border-radius: var(--radius-md, 6px);
   background: transparent;
-  font-size: 0.8rem;
+  font-family: inherit;
+  font-size: 0.75rem;
+  color: var(--text-secondary, #6b6259);
   cursor: pointer;
 }
 
@@ -471,39 +558,45 @@ function getStatusIcon(status: string): string {
   position: relative;
   display: flex;
   gap: 0.5rem;
-  padding: 1rem;
-  border-top: 1px solid var(--border-color, #e0e0e0);
+  padding: 0.625rem 0.75rem;
+  border-top: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
 }
 
 textarea {
   flex: 1;
-  padding: 0.75rem;
-  border: 1px solid var(--border-color, #ccc);
-  border-radius: 6px;
-  font-size: 1rem;
+  padding: 0.5rem 0.625rem;
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border-radius: var(--radius-lg, 10px);
+  font-size: 0.875rem;
   font-family: inherit;
+  line-height: 1.45;
+  background: var(--bg-main, #fbf8f3);
+  color: inherit;
   resize: none;
 }
 
 textarea:focus {
   outline: none;
-  border-color: var(--text-accent, #0066cc);
+  border-color: var(--text-accent, #c2532f);
 }
 
 .send-btn {
-  padding: 0.75rem 1.5rem;
-  background: var(--bg-primary, #0066cc);
+  align-self: flex-end;
+  height: 32px;
+  padding: 0 1rem;
+  background: var(--bg-primary, #c2532f);
   color: white;
   border: none;
-  border-radius: 6px;
-  font-size: 1rem;
-  font-weight: 500;
+  border-radius: var(--radius-md, 6px);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
   cursor: pointer;
   transition: background 0.15s;
 }
 
 .send-btn:hover:not(:disabled) {
-  background: var(--bg-primary-hover, #0052a3);
+  background: var(--bg-primary-hover, #a8431f);
 }
 
 .send-btn:disabled {
@@ -554,58 +647,64 @@ textarea:focus {
     min-height: 44px;
     padding: 0.5rem 1rem;
   }
+
+  /* Narrow screens: give the reading column the full width back. */
+  .messages-container {
+    padding: 0.875rem 0.75rem 0.5rem;
+  }
+
+  .message-user {
+    max-width: 94%;
+    margin-left: 6%;
+  }
+
+  .tool-name {
+    max-width: 38%;
+  }
 }
 
-/* Agent Thinking Section */
+/* Agent thinking: a quiet inline disclosure, not a boxed panel. */
 .thought-section {
-  margin-bottom: 0.75rem;
-  border: 1px solid var(--border-color, #e0e0e0);
-  border-radius: 8px;
-  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
 }
 
 .thought-toggle {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
-  width: 100%;
-  padding: 0.5rem 0.75rem;
-  background: var(--bg-hover, #f5f5f5);
+  gap: 0.3125rem;
+  align-self: flex-start;
+  padding: 0;
   border: none;
+  background: none;
   cursor: pointer;
-  font-size: 0.85rem;
-  color: var(--text-muted, #666);
-  text-align: left;
-  transition: background 0.15s ease;
+  font-family: inherit;
+  font-size: 0.75rem;
+  color: var(--text-muted, #a39a8e);
 }
 
 .thought-toggle:hover {
-  background: var(--bg-user, #e3f2fd);
-}
-
-.thought-icon {
-  font-size: 1rem;
-  flex-shrink: 0;
+  color: var(--text-secondary, #6b6259);
 }
 
 .thought-label {
-  flex: 1;
   font-weight: 500;
 }
 
 .thought-chevron {
-  font-size: 0.7rem;
-  color: var(--text-muted, #999);
+  font-size: 0.625rem;
 }
 
 .thought-content {
-  padding: 0.75rem 1rem 0.75rem 1.25rem;
-  background: var(--bg-main, #fafafa);
-  border-top: 1px solid var(--border-color, #e0e0e0);
-  font-size: 0.9rem;
-  color: var(--text-muted, #666);
-  font-style: italic;
-  line-height: 1.5;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 0.5rem 0.625rem;
+  border-radius: var(--radius-md, 6px);
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  color: var(--text-secondary, #6b6259);
 }
 
 .thought-content :deep(p) {
