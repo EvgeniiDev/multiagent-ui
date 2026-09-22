@@ -3,15 +3,25 @@ import { ref, computed, nextTick, watch } from 'vue';
 import { marked } from 'marked';
 import { useSessionStore } from '../stores/session';
 import { isMobile } from '../lib/platform';
+import { readAttachments, formatBytes, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from '../lib/attachments';
 import ModePicker from './ModePicker.vue';
 import ModelPicker from './ModelPicker.vue';
 import CommandPalette from './CommandPalette.vue';
-import type { SlashCommand } from '../lib/types';
+import type { Attachment, SlashCommand } from '../lib/types';
 
 const sessionStore = useSessionStore();
 const inputText = ref('');
 const messagesContainer = ref<HTMLElement | null>(null);
 const commandPaletteRef = ref<InstanceType<typeof CommandPalette> | null>(null);
+
+// Files staged for the next turn, and the last attach error (limits, wrong type).
+const attachments = ref<Attachment[]>([]);
+const attachError = ref<string | null>(null);
+const fileInput = ref<HTMLInputElement | null>(null);
+const supportsImages = computed(() => sessionStore.supportsImages);
+const imageHint = computed(
+  () => `Images and text files (max ${formatBytes(MAX_IMAGE_ATTACHMENT_BYTES)} / ${formatBytes(MAX_TEXT_ATTACHMENT_BYTES)})`
+);
 
 // On mobile (iOS/Android) the soft-keyboard's Return key should insert a
 // newline like every other native chat app; submitting is the dedicated
@@ -57,14 +67,55 @@ watch(messages, async () => {
 
 async function handleSend() {
   const text = inputText.value.trim();
-  if (!text || isLoading.value) return;
-  
+  if ((!text && attachments.value.length === 0) || isLoading.value) return;
+
+  const files = attachments.value;
   inputText.value = '';
+  attachments.value = [];
+  attachError.value = null;
   try {
-    await sessionStore.sendPrompt(text);
+    await sessionStore.sendPrompt(text, files);
   } catch (e) {
+    // A rejected prompt used to die in the console: the composer cleared, the
+    // turn produced nothing, and the user saw no reason. Surface it.
     console.error('Failed to send prompt:', e);
+    sessionStore.error = `Send failed: ${e instanceof Error ? e.message : String(e)}`;
+    // Hand the files back so the turn can be retried without re-picking them.
+    attachments.value = files;
+    inputText.value = text;
   }
+}
+
+function openFilePicker() {
+  attachError.value = null;
+  fileInput.value?.click();
+}
+
+async function handleFilesPicked(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const picked = Array.from(input.files ?? []);
+  // Reset so picking the same file twice still fires a change event.
+  input.value = '';
+  if (picked.length === 0) return;
+
+  const { attachments: staged, errors } = await readAttachments(picked);
+  // The agent advertises image support; attaching one it can't read would just
+  // be ignored on its side, so refuse it here with an explanation.
+  const unsupportedImages = staged.filter(a => a.kind === 'image' && !supportsImages.value);
+  const accepted = staged.filter(a => !unsupportedImages.includes(a));
+  attachments.value = [...attachments.value, ...accepted];
+  const notes = [
+    ...errors,
+    ...(unsupportedImages.length
+      ? [`${sessionStore.lastAgentName || 'This agent'} does not accept images`]
+      : []),
+  ];
+  attachError.value = notes.length ? notes.join(' · ') : null;
+}
+
+function removeAttachment(id?: string) {
+  attachments.value = attachments.value.filter(a => a.id !== id);
+  attachError.value = null;
 }
 
 function handleKeyDown(event: KeyboardEvent) {
@@ -190,6 +241,21 @@ function getToolKind(kind: string): string {
           }}</span>
         </div>
 
+        <!-- Files that travelled with this turn (metadata + image preview). -->
+        <div v-if="message.attachments?.length" class="message-attachments">
+          <div v-for="(att, i) in message.attachments" :key="att.id || i" class="message-attachment">
+            <img
+              v-if="att.kind === 'image' && att.previewUrl"
+              :src="att.previewUrl"
+              :alt="att.name"
+              class="message-attach-thumb"
+            />
+            <span v-else class="message-attach-glyph" aria-hidden="true">▤</span>
+            <span class="message-attach-name" :title="att.name">{{ att.name }}</span>
+            <span class="message-attach-size">{{ formatBytes(att.size) }}</span>
+          </div>
+        </div>
+
         <!-- Collapsed reasoning: a quiet inline disclosure, closed by default. -->
         <div v-if="message.thought && message.role === 'assistant'" class="thought-section">
           <button class="thought-toggle" @click="toggleThought(message.id)">
@@ -242,27 +308,67 @@ function getToolKind(kind: string): string {
         @select="handleCommandSelect"
         @close="handleCommandClose"
       />
-      <textarea
-        v-model="inputText"
-        :placeholder="
-          isReconnecting
-            ? 'Reconnecting…'
-            : (availableCommands.length > 0
-                ? 'Type your message... (/ for commands)'
-                : 'Type your message...')
-        "
-        :disabled="isLoading || isReconnecting"
-        @keydown="handleKeyDown"
-        rows="3"
-      />
-      <button 
-        class="send-btn"
-        :disabled="!inputText.trim() || isLoading || isReconnecting"
-        @click="handleSend"
-      >
-        Send
-      </button>
-    </div>
+
+      <!-- Staged files: one dense chip each, with a thumbnail for images. -->
+      <div v-if="attachments.length" class="attach-tray">
+        <div v-for="att in attachments" :key="att.id" class="attach-chip">
+          <img
+            v-if="att.kind === 'image' && att.previewUrl"
+            :src="att.previewUrl"
+            :alt="att.name"
+            class="attach-thumb"
+          />
+          <span v-else class="attach-glyph" aria-hidden="true">▤</span>
+          <span class="attach-name" :title="att.name">{{ att.name }}</span>
+          <span class="attach-size">{{ formatBytes(att.size) }}</span>
+          <button
+            class="attach-remove"
+            @click="removeAttachment(att.id)"
+            title="Remove attachment"
+            aria-label="Remove attachment"
+          >×</button>
+        </div>
+      </div>
+
+      <div v-if="attachError" class="attach-error">{{ attachError }}</div>
+
+      <div class="input-row">
+        <button
+          class="attach-btn"
+          :disabled="isLoading || isReconnecting"
+          @click="openFilePicker"
+          :title="imageHint"
+          aria-label="Attach files"
+        >📎</button>
+        <input
+          ref="fileInput"
+          class="file-input"
+          type="file"
+          multiple
+          accept="image/*,.txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.xml,.html,.css,.js,.mjs,.ts,.tsx,.vue,.py,.sh,.sql,.toml,.ini,.cfg,.conf,.diff,.patch"
+          @change="handleFilesPicked"
+        />
+        <textarea
+          v-model="inputText"
+          :placeholder="
+            isReconnecting
+              ? 'Reconnecting…'
+              : (availableCommands.length > 0
+                  ? 'Type your message... (/ for commands)'
+                  : 'Type your message...')
+          "
+          :disabled="isLoading || isReconnecting"
+          @keydown="handleKeyDown"
+          rows="3"
+        />
+        <button 
+          class="send-btn"
+          :disabled="(!inputText.trim() && attachments.length === 0) || isLoading || isReconnecting"
+          @click="handleSend"
+        >
+          Send
+        </button>
+      </div>    </div>
   </div>
 </template>
 
@@ -557,9 +663,159 @@ function getToolKind(kind: string): string {
 .input-container {
   position: relative;
   display: flex;
-  gap: 0.5rem;
+  flex-direction: column;
+  gap: 0.375rem;
   padding: 0.625rem 0.75rem;
   border-top: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+}
+
+.input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+
+/* ---------------- Attachments ---------------- */
+
+/* Quiet square button: no fill until hover, so it doesn't compete with Send. */
+.attach-btn {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border-radius: var(--radius-md, 6px);
+  background: transparent;
+  font-size: 0.9375rem;
+  line-height: 1;
+  cursor: pointer;
+  filter: grayscale(1) opacity(0.75);
+}
+
+.attach-btn:hover:not(:disabled) {
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  filter: none;
+}
+
+.attach-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.file-input {
+  display: none;
+}
+
+.attach-tray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+.attach-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  max-width: 100%;
+  height: 26px;
+  padding: 0 0.25rem 0 0.375rem;
+  border-radius: var(--radius-md, 6px);
+  background: var(--bg-hover, #efe9e0);
+  font-size: 0.75rem;
+}
+
+.attach-thumb {
+  width: 18px;
+  height: 18px;
+  object-fit: cover;
+  border-radius: 3px;
+}
+
+.attach-glyph {
+  font-size: 0.75rem;
+  color: var(--text-muted, #a39a8e);
+}
+
+.attach-name {
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-primary, #2b2723);
+}
+
+.attach-size,
+.message-attach-size {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6875rem;
+  color: var(--text-muted, #a39a8e);
+}
+
+.attach-remove {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted, #a39a8e);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.attach-remove:hover {
+  background: var(--bg-danger, #b3402e);
+  color: #fff;
+}
+
+.attach-error {
+  padding: 0 0.125rem;
+  font-size: 0.6875rem;
+  color: var(--bg-danger, #b3402e);
+}
+
+/* Sent attachments in the transcript: same chip language as the composer. */
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin: 0.25rem 0 0.375rem;
+}
+
+.message-attachment {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  height: 26px;
+  padding: 0 0.5rem 0 0.375rem;
+  border-radius: var(--radius-md, 6px);
+  background: rgba(43, 39, 35, 0.05);
+  font-size: 0.75rem;
+}
+
+.message-attach-thumb {
+  width: 22px;
+  height: 22px;
+  object-fit: cover;
+  border-radius: 3px;
+}
+
+.message-attach-glyph {
+  color: var(--text-muted, #a39a8e);
+}
+
+.message-attach-name {
+  max-width: 260px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 textarea {
@@ -646,6 +902,12 @@ textarea:focus {
     min-width: 64px;
     min-height: 44px;
     padding: 0.5rem 1rem;
+  }
+
+  .attach-btn {
+    width: 44px;
+    height: 44px;
+    font-size: 1.0625rem;
   }
 
   /* Narrow screens: give the reading column the full width back. */

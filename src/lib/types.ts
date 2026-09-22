@@ -94,6 +94,34 @@ export interface ChatMessage {
   thought?: string;
   timestamp: number;
   toolCalls?: ToolCallInfo[];
+  /** Files that travelled with this user turn (metadata only, for display). */
+  attachments?: AttachmentMeta[];
+}
+
+export type AttachmentKind = 'image' | 'text';
+
+/** What the transcript needs to render a sent file. */
+export interface AttachmentMeta {
+  id?: string;
+  name: string;
+  kind: AttachmentKind;
+  mimeType: string;
+  size: number;
+  /** Data URL for images — lets the transcript show what was sent. */
+  previewUrl?: string;
+}
+
+/**
+ * A file staged for the next prompt.
+ *
+ * Images travel as ACP `image` content blocks (base64) and text files as
+ * inline `resource` blocks (`TextResourceContents`), so neither requires the
+ * agent to be able to read the client's filesystem — the client and the agent
+ * are different machines.
+ */
+export interface Attachment extends AttachmentMeta {
+  /** base64 for images, raw text for text files. */
+  data: string;
 }
 
 export interface ToolCallInfo {

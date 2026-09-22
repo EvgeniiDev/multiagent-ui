@@ -5,13 +5,13 @@ import { loadKvStore, type KVStore } from '../lib/host/storage';
 import { getAppVersion } from '../lib/host';
 import { trackEvent, trackError } from '../lib/telemetry';
 import { uuid } from '../lib/uuid';
-import type { SavedSession, ChatMessage, ToolCallInfo, PermissionRequest, SessionMode, SlashCommand, ModelInfo, AgentConfig } from '../lib/types';
+import type { SavedSession, ChatMessage, ToolCallInfo, PermissionRequest, SessionMode, SlashCommand, ModelInfo, AgentConfig, Attachment } from '../lib/types';
 import { getTransportKind } from '../lib/types';
 import { AcpClientBridge, createAcpClient } from '../lib/acp-bridge';
 import { onAgentStderr, spawnAgent, killAgent } from '../lib/host';
 import { isDesktop } from '../lib/platform';
 import { useConfigStore } from './config';
-import type { SessionNotification, AuthMethod, SessionInfo } from '@agentclientprotocol/sdk';
+import type { SessionNotification, AuthMethod, SessionInfo, ContentBlock } from '@agentclientprotocol/sdk';
 
 const STORE_PATH = 'sessions.json';
 const PROTOCOL_VERSION = 1;
@@ -97,6 +97,8 @@ export const useSessionStore = defineStore('session', () => {
   // sidebar so sessions created elsewhere (CLI, Telegram, another device)
   // show up here and can be resumed.
   const supportsListSessions = ref(false);
+  /** Agent accepts ACP `image` content blocks (promptCapabilities.image). */
+  const supportsImages = ref(false);
   const isSyncingSessions = ref(false);
   const syncError = ref<string | null>(null);
   /**
@@ -160,8 +162,44 @@ export const useSessionStore = defineStore('session', () => {
     });
     supportsListSessions.value = !!initResponse.agentCapabilities?.sessionCapabilities?.list;
     sessionListUnsupported.value = !supportsListSessions.value;
+    // Agents announce whether they accept image content blocks; attaching an
+    // image to an agent that doesn't is a silent no-op on its side.
+    supportsImages.value = !!initResponse.agentCapabilities?.promptCapabilities?.image;
     lastAgentName.value = currentSession.value?.agentName || lastAgentName.value;
     return initResponse;
+  }
+
+  /**
+   * Build the ACP content blocks for one turn.
+   *
+   * Attachments go out inline — images as base64 `image` blocks, text files as
+   * inline `resource` blocks. Both are self-contained on purpose: the agent
+   * usually runs on another machine, so a `resource_link` pointing at a client
+   * path would reach it as an unreadable URI.
+   */
+  function promptContentBlocks(text: string, attachments: Attachment[]): ContentBlock[] {
+    const blocks: ContentBlock[] = [];
+    if (text) {
+      blocks.push({ type: 'text', text });
+    }
+    for (const attachment of attachments) {
+      // The URI is only a display name for the agent ('[Attached file: x]').
+      const uri = `file:///attached/${attachment.name}`;
+      if (attachment.kind === 'image') {
+        blocks.push({
+          type: 'image',
+          mimeType: attachment.mimeType || 'image/png',
+          data: attachment.data,
+          uri,
+        });
+      } else {
+        blocks.push({
+          type: 'resource',
+          resource: { uri, mimeType: attachment.mimeType || 'text/plain', text: attachment.data },
+        });
+      }
+    }
+    return blocks;
   }
 
   /** Follow `nextCursor` until exhausted (bounded by MAX_SESSION_LIST_PAGES). */
@@ -933,29 +971,31 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   // Send prompt
-  async function sendPrompt(text: string): Promise<void> {
+  async function sendPrompt(text: string, attachments: Attachment[] = []): Promise<void> {
     if (!acpClient || !currentSession.value) {
       throw new Error('No active session');
     }
+    if (!text && attachments.length === 0) {
+      return;
+    }
 
-    // Add user message
+    // Add user message (attachments kept as metadata so the transcript shows
+    // what went out, including a thumbnail for images).
     messages.value.push({
       id: uuid(),
       role: 'user',
       content: text,
       timestamp: Date.now(),
+      attachments: attachments.map(({ name, kind, mimeType, size, previewUrl }) => ({
+        name, kind, mimeType, size, previewUrl,
+      })),
     });
 
     isLoading.value = true;
     try {
       const response = await acpClient.prompt({
         sessionId: currentSession.value.sessionId,
-        prompt: [
-          {
-            type: 'text',
-            text,
-          },
-        ],
+        prompt: promptContentBlocks(text, attachments),
       });
 
       console.log('Prompt completed:', response.stopReason);
@@ -1184,6 +1224,7 @@ export const useSessionStore = defineStore('session', () => {
     startupLogs,
     startupElapsed,
     supportsListSessions,
+    supportsImages,
     isSyncingSessions,
     syncError,
     sessionListUnsupported,
