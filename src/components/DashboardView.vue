@@ -842,6 +842,7 @@ watch(
   flex: 1;
   min-height: 0;
   overflow: auto;
+  overflow-x: hidden;
   padding: 0.75rem 1rem 2rem;
   display: flex;
   flex-direction: column;
@@ -858,7 +859,8 @@ watch(
 .panel-title {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.5rem;
   font-size: 0.6875rem;
   font-weight: 600;
   letter-spacing: 0.06em;
@@ -913,6 +915,10 @@ watch(
 
 .sum-row dd {
   margin: 0;
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  overflow-wrap: break-word;
   font-family: var(--font-mono, monospace);
   font-variant-numeric: tabular-nums;
   font-size: 0.75rem;
@@ -1253,6 +1259,7 @@ table.dense th.num {
     min-height: 44px;
     padding: 0 0.25rem;
     font-size: 0.8125rem;
+    white-space: nowrap;
   }
 
   .mini-btn {
@@ -1262,6 +1269,21 @@ table.dense th.num {
 
   .sum-row dt {
     flex-basis: 110px;
+  }
+
+  .sum-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding: 0.25rem 0;
+  }
+
+  .sum-row dt {
+    flex: none;
+  }
+
+  .sum-row dd {
+    text-align: left;
   }
 
   /* Tables become stacked labelled rows: no horizontal scrolling. */
