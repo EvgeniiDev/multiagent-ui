@@ -600,8 +600,9 @@ function clearError() {
     --bg-assistant: #332d28;
     --text-primary: #ece5da;
     --text-secondary: #b0a496;
-    --text-muted: #7d7266;
-    --text-accent: #e07450;
+    --text-muted: #b3a79b;
+    --text-on-accent: #211d1a;
+    --text-accent: #f0a184;
     --border-color: #3d362f;
     --border-faint: rgba(236, 229, 218, 0.13);
     --tint-hover: rgba(236, 229, 218, 0.06);
