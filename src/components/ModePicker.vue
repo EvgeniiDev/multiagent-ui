@@ -18,19 +18,6 @@ const currentMode = computed(() =>
   props.modes.find(m => m.id === props.currentModeId)
 );
 
-function getModeIcon(modeId: string): string {
-  switch (modeId.toLowerCase()) {
-    case 'ask': return '🎯';
-    case 'architect': 
-    case 'plan': return '📐';
-    case 'code': 
-    case 'auto': return '💻';
-    case 'debug': return '🐛';
-    case 'review': return '👀';
-    default: return '⚙️';
-  }
-}
-
 function toggleDropdown() {
   if (!props.disabled) {
     isOpen.value = !isOpen.value;
@@ -64,7 +51,6 @@ if (typeof window !== 'undefined') {
       :disabled="disabled"
       @click.stop="toggleDropdown"
     >
-      <span class="mode-icon">{{ getModeIcon(currentModeId) }}</span>
       <span class="mode-name">{{ currentMode?.name || currentModeId }}</span>
       <span class="dropdown-arrow">{{ isOpen ? '▲' : '▼' }}</span>
     </button>
@@ -77,7 +63,6 @@ if (typeof window !== 'undefined') {
           :class="['dropdown-item', { selected: mode.id === currentModeId }]"
           @click="selectMode(mode.id)"
         >
-          <span class="item-icon">{{ getModeIcon(mode.id) }}</span>
           <div class="item-content">
             <span class="item-name">{{ mode.name }}</span>
             <span v-if="mode.description" class="item-description">
@@ -147,14 +132,12 @@ if (typeof window !== 'undefined') {
   background: var(--bg-main);
   border: 1px solid var(--border-color);
   border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   z-index: 100;
   overflow: hidden;
 }
 
 @media (prefers-color-scheme: dark) {
   .dropdown-menu {
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   }
 }
 

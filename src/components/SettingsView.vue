@@ -359,7 +359,7 @@ async function handleDelete(name: string) {
 .settings-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(43, 39, 35, 0.28);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -378,15 +378,15 @@ async function handleDelete(name: string) {
   vertical-align: middle;
   border: 1px solid transparent;
   /* Default (stdio) — emerald to convey "local process". */
-  background: #ecfdf5;
-  color: #047857;
-  border-color: #a7f3d0;
+  background: var(--bg-warning, #f5e9cf);
+  color: var(--bg-success, #5a7d4f);
+  border-color: var(--border-faint, rgba(43, 39, 35, 0.09));
 }
 .agent-transport-badge[data-kind='websocket'],
 .agent-transport-badge[data-kind='http'] {
-  background: #e0f2fe;
-  color: #0369a1;
-  border-color: #bae6fd;
+  background: var(--accent-soft, rgba(194, 83, 47, 0.14));
+  color: var(--text-accent, #c2532f);
+  border-color: var(--border-faint, rgba(43, 39, 35, 0.09));
 }
 
 .settings-panel {
@@ -397,7 +397,7 @@ async function handleDelete(name: string) {
   max-height: 80vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  box-shadow: none;
 }
 
 .settings-header {

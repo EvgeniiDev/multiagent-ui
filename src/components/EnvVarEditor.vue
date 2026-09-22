@@ -154,7 +154,7 @@ const hasEnvVars = computed(() => envVars.value.length > 0);
   padding: 0.375rem 0.5rem;
   border: 1px solid var(--border-color);
   border-radius: 4px;
-  background: var(--bg-input);
+  background: var(--bg-main);
   color: var(--text-primary);
   font-family: monospace;
   font-size: 0.875rem;
@@ -170,7 +170,7 @@ const hasEnvVars = computed(() => envVars.value.length > 0);
   padding: 0.375rem 0.5rem;
   border: 1px solid var(--border-color);
   border-radius: 4px;
-  background: var(--bg-input);
+  background: var(--bg-main);
   color: var(--text-primary);
   font-family: monospace;
   font-size: 0.875rem;
@@ -198,6 +198,6 @@ const hasEnvVars = computed(() => envVars.value.length > 0);
 .env-key:focus,
 .env-value:focus {
   outline: none;
-  border-color: var(--accent-color);
+  border-color: var(--text-accent);
 }
 </style>

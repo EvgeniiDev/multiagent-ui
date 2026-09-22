@@ -18,17 +18,6 @@ const currentModel = computed(() =>
   props.models.find(m => m.modelId === props.currentModelId)
 );
 
-function getModelIcon(modelId: string): string {
-  const lower = modelId.toLowerCase();
-  if (lower.includes('claude')) return '🟣';
-  if (lower.includes('gpt') || lower.includes('openai')) return '🟢';
-  if (lower.includes('gemini') || lower.includes('google')) return '🔵';
-  if (lower.includes('llama') || lower.includes('meta')) return '🟠';
-  if (lower.includes('mistral')) return '🔴';
-  if (lower.includes('deepseek')) return '🟤';
-  return '🤖';
-}
-
 function toggleDropdown() {
   if (!props.disabled) {
     isOpen.value = !isOpen.value;
@@ -63,7 +52,6 @@ if (typeof window !== 'undefined') {
       @click.stop="toggleDropdown"
       :title="currentModel?.name || currentModelId"
     >
-      <span class="model-icon">{{ getModelIcon(currentModelId) }}</span>
       <span class="model-name">{{ currentModel?.name || currentModelId }}</span>
       <span class="dropdown-arrow">{{ isOpen ? '▲' : '▼' }}</span>
     </button>
@@ -76,7 +64,6 @@ if (typeof window !== 'undefined') {
           :class="['dropdown-item', { selected: model.modelId === currentModelId }]"
           @click="selectModel(model.modelId)"
         >
-          <span class="item-icon">{{ getModelIcon(model.modelId) }}</span>
           <div class="item-content">
             <span class="item-name">{{ model.name }}</span>
             <span v-if="model.description" class="item-description">
@@ -155,13 +142,11 @@ if (typeof window !== 'undefined') {
   background: var(--bg-main);
   border: 1px solid var(--border-color);
   border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   z-index: 100;
 }
 
 @media (prefers-color-scheme: dark) {
   .dropdown-menu {
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   }
 }
 

@@ -335,11 +335,26 @@ function getToolKind(kind: string): string {
       <div class="input-row">
         <button
           class="attach-btn"
+          :class="{ active: attachments.length > 0 }"
           :disabled="isLoading || isReconnecting"
           @click="openFilePicker"
           :title="imageHint"
           aria-label="Attach files"
-        >📎</button>
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="15"
+            height="15"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M21.44 11.05l-8.49 8.49a5.5 5.5 0 01-7.78-7.78l8.49-8.49a3.5 3.5 0 014.95 4.95l-8.49 8.49a1.5 1.5 0 01-2.12-2.12l7.78-7.78" />
+          </svg>
+        </button>
         <input
           ref="fileInput"
           class="file-input"
@@ -677,7 +692,9 @@ function getToolKind(kind: string): string {
 
 /* ---------------- Attachments ---------------- */
 
-/* Quiet square button: no fill until hover, so it doesn't compete with Send. */
+/* Quiet square button: hairline, no fill until hover, so it doesn't compete
+ * with Send. The glyph is a stroke icon in currentColor, not an emoji — a
+ * grayscale-filtered emoji never matched the palette. */
 .attach-btn {
   flex: 0 0 auto;
   width: 32px;
@@ -689,15 +706,19 @@ function getToolKind(kind: string): string {
   border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
   border-radius: var(--radius-md, 6px);
   background: transparent;
-  font-size: 0.9375rem;
-  line-height: 1;
+  color: var(--text-secondary, #6b6259);
   cursor: pointer;
-  filter: grayscale(1) opacity(0.75);
 }
 
 .attach-btn:hover:not(:disabled) {
   background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  filter: none;
+  color: var(--text-primary, #2b2723);
+}
+
+/* Files staged: the one accent, same as an active row elsewhere. */
+.attach-btn.active {
+  border-color: var(--bg-primary, #c2532f);
+  color: var(--text-accent, #c2532f);
 }
 
 .attach-btn:disabled {

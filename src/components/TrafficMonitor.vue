@@ -408,12 +408,12 @@ function handleCopy(entry: TrafficEntry) {
 }
 
 .entry.in .direction-icon {
-  color: #28a745;
+  color: var(--bg-success, #5a7d4f);
 }
 
 .entry.error .direction-icon,
 .entry.error .method {
-  color: #dc3545;
+  color: var(--bg-danger, #b3402e);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -422,12 +422,12 @@ function handleCopy(entry: TrafficEntry) {
   }
   
   .entry.in .direction-icon {
-    color: #5cb85c;
+    color: var(--bg-success, #5a7d4f);
   }
   
   .entry.error .direction-icon,
   .entry.error .method {
-    color: #ff6b6b;
+    color: var(--bg-danger, #b3402e);
   }
 }
 
@@ -483,6 +483,6 @@ function handleCopy(entry: TrafficEntry) {
   background: var(--bg-warning);
   border-radius: 4px;
   font-size: 0.7rem;
-  color: #856404;
+  color: var(--text-secondary, #6b6259);
 }
 </style>

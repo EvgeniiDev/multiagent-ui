@@ -107,10 +107,9 @@ function selectCommand(cmd: SlashCommand) {
   left: 0;
   width: 400px;
   margin-bottom: 6px;
-  background: #fff;
-  border: 1px solid #e0e0e0;
-  border-radius: 8px;
-  box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+  background: var(--bg-main, #fbf8f3);
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border-radius: var(--radius-lg, 10px);
   max-height: 320px;
   overflow: visible;
   z-index: 100;
@@ -124,8 +123,8 @@ function selectCommand(cmd: SlashCommand) {
 .command-item {
   padding: 8px 16px;
   cursor: pointer;
-  border-bottom: 1px solid #f0f0f0;
-  background: #fff;
+  border-bottom: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  background: var(--bg-main, #fbf8f3);
   display: flex;
   align-items: center;
   transition: background 0.12s;
@@ -135,9 +134,9 @@ function selectCommand(cmd: SlashCommand) {
   border-bottom: none;
 }
 .command-item.selected {
-  background: #2563eb;
+  background: var(--bg-primary, #c2532f);
   color: #fff;
-  border-radius: 6px;
+  border-radius: var(--radius-md, 6px);
 }
 .command-item.selected .command-name,
 .command-item.selected .command-hint,
@@ -151,11 +150,10 @@ function selectCommand(cmd: SlashCommand) {
   left: calc(100% + 8px);
   top: 0;
   width: 220px;
-  background: #fff;
-  color: #333;
-  border: 1px solid #e0e0e0;
-  border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  background: var(--bg-main, #fbf8f3);
+  color: var(--text-primary, #2b2723);
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border-radius: var(--radius-md, 6px);
   padding: 8px 12px;
   font-size: 0.95em;
   white-space: normal;
@@ -163,7 +161,7 @@ function selectCommand(cmd: SlashCommand) {
   word-break: break-word;
 }
 .command-item:hover:not(.selected) {
-  background: #f3f8fd;
+  background: var(--tint-active, rgba(194, 83, 47, 0.10));
 }
 
 /* Command row: command and description on same line */
@@ -175,7 +173,7 @@ function selectCommand(cmd: SlashCommand) {
 }
 .command-name {
   font-weight: 600;
-  color: #2563eb;
+  color: var(--text-accent, #c2532f);
   font-family: monospace;
   font-size: 1em;
   min-width: 110px;
@@ -186,7 +184,7 @@ function selectCommand(cmd: SlashCommand) {
   text-overflow: ellipsis;
 }
 .command-description {
-  color: #666;
+  color: var(--text-muted, #a39a8e);
   font-size: 0.97em;
   margin-left: 18px;
   flex: 1 1 auto;
