@@ -1,0 +1,16 @@
+[Unit]
+Description=ACP bridge: Hermes Agent (WebSocket on :25901)
+Documentation=https://github.com/EvgeniiDev/acp-ui/blob/main/docs/lan-deployment.md
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# NODE_PATH points at the global npm root that provides the `ws` package.
+Environment=NODE_PATH=%h/.local/lib/node_modules
+ExecStart=%h/.local/bin/node %h/.hermes/acp-ws-bridge.mjs --port 25901 --cmd "hermes acp"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

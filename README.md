@@ -1,5 +1,21 @@
 # ACP UI
 
+> **This is a fork of [formulahendry/acp-ui](https://github.com/formulahendry/acp-ui).**
+> Upstream is the source of truth for the app; this fork adds a self-hosted LAN
+> deployment with a filesystem-aware bridge and a visual/density pass.
+> See [docs/lan-deployment.md](docs/lan-deployment.md) for the deployment recipe.
+>
+> **What differs from upstream**
+>
+> | Area | Change |
+> |---|---|
+> | LAN deployment | `deploy/acp-ws-bridge.mjs` — stdio↔WebSocket bridge that buffers stdout into one complete NDJSON line per frame (works around `@rebornix/stdio-to-ws` splitting >64 KiB JSON-RPC lines mid-frame) and exposes a small `/api/fs/*` directory-listing API. systemd user units + `deploy/install.sh`. |
+> | Working directory | Directory **tree picker** for the web/mobile build (breadcrumbs, hidden-directory toggle, scoped to the bridge root) plus **relative path** support — the bridge resolves `projects/notes` against its root before `session/new`. |
+> | Web on plain HTTP | `src/lib/uuid.ts` polyfills `crypto.randomUUID` (absent in non-secure contexts, so session creation used to fail on `http://<lan-ip>`). |
+> | Default agents | The web build seeds the four LAN bridges (Hermes / OpenCode / Devin / Pi) when no agent config is stored. |
+> | Sessions | Named after their workspace folder instead of `Session <date>`. |
+> | UI | Warm paper palette, density tokens (288px sidebar, 26px session rows), assistant messages without chrome, tool calls as compact status-dot chips, streaming caret. |
+
 <a href="https://apps.microsoft.com/detail/9P76NGS1VF2L?referrer=appbadge&mode=full" target="_blank"  rel="noopener noreferrer">
 	<img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200"/>
 </a>

@@ -1,0 +1,15 @@
+[Unit]
+Description=ACP UI web bundle (LAN static server)
+Documentation=https://github.com/EvgeniiDev/acp-ui/blob/main/docs/lan-deployment.md
+After=network-online.target
+
+[Service]
+Type=simple
+# Serve the web build produced by `npm run build:web` (dist-web/).
+WorkingDirectory=%h/projects/acp-ui/dist-web
+ExecStart=/usr/bin/python3 -m http.server 25808 --bind 0.0.0.0
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
