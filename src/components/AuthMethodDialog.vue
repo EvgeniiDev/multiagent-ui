@@ -61,32 +61,34 @@ function handleSelect(methodId: string) {
 .auth-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(43, 39, 35, 0.28);
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 1rem;
   z-index: 1000;
 }
 
 .auth-dialog {
-  background: var(--bg-main);
-  border-radius: 8px;
-  width: 90%;
+  background: var(--bg-main, #fbf8f3);
+  border: 1px solid rgba(43, 39, 35, 0.16);
+  border-radius: var(--radius-lg, 10px);
+  width: 100%;
   max-width: 420px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
 }
 
 .dialog-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 1rem 1.25rem;
-  border-bottom: 1px solid var(--border-color);
+  padding: 0.75rem 0.875rem;
+  border-bottom: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
 }
 
 .dialog-header h3 {
   margin: 0;
-  font-size: 1.125rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
 }
 
 .close-btn {

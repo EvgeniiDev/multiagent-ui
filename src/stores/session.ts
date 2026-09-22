@@ -183,8 +183,13 @@ export const useSessionStore = defineStore('session', () => {
       blocks.push({ type: 'text', text });
     }
     for (const attachment of attachments) {
-      // The URI is only a display name for the agent ('[Attached file: x]').
-      const uri = `file:///attached/${attachment.name}`;
+      // The URI is only a display name for the agent. Deliberately NOT a
+      // `file://` path: agents parse such a URI as a path to read, ask the
+      // client for `fs/read_text_file` (which the web build cannot serve) and
+      // the turn dies in a permission prompt. Measured on OpenCode:
+      // `file:///attached/x.txt` → permission request, turn cancelled;
+      // `attachment://x.txt` → no request, content delivered.
+      const uri = `attachment://${attachment.name}`;
       if (attachment.kind === 'image') {
         blocks.push({
           type: 'image',
