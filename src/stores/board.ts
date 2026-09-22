@@ -162,6 +162,18 @@ export const useBoardStore = defineStore('board', () => {
         .filter((c): c is BoardCard => c !== null);
     }
     ready.value = true;
+
+    // Flush a pending debounced write on unload — otherwise a card edited
+    // <600ms before a reload would be lost.
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pagehide', () => {
+        if (saveTimer) {
+          clearTimeout(saveTimer);
+          saveTimer = null;
+          void persist();
+        }
+      });
+    }
   }
 
   // ---- ledger mirror ------------------------------------------------------

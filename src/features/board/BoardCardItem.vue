@@ -42,8 +42,13 @@ function onCardClick() {
 
 function onKeydown(event: KeyboardEvent) {
   // Card-level keyboard support (N7): Enter opens, Alt+←/→ moves between
-  // columns, Alt+↑/↓ reorders inside the column. Plain arrows stay free for
-  // tab traversal / scrolling.
+  // columns, Alt+↑/↓ reorders inside the column, Esc closes an open menu.
+  // Plain arrows stay free for tab traversal / scrolling.
+  if (event.key === 'Escape' && menuOpen.value) {
+    event.preventDefault();
+    menuOpen.value = false;
+    return;
+  }
   if (event.key === 'Enter' && !event.altKey) {
     event.preventDefault();
     emit('open', props.card);

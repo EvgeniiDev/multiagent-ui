@@ -575,14 +575,14 @@ textarea.f-input {
 
 @media (max-width: 767px) {
   .card-drawer {
-    width: 100vw;
+    width: 100%;
     border-left: none;
   }
 
   .btn,
   .seg-btn,
   .f-input {
-    min-height: 40px;
+    min-height: 44px;
   }
 }
 </style>

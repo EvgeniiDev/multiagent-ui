@@ -65,6 +65,14 @@ function onMove(cardId: string, to: BoardColumnId, beforeId?: string | null) {
   board.moveCard(cardId, to, beforeId ?? null);
 }
 
+function onRemove(cardId: string) {
+  const card = board.cards.find((c) => c.id === cardId);
+  if (!card) return;
+  if (confirm(`Delete "${card.title || 'Untitled card'}"?`)) {
+    board.removeCard(cardId);
+  }
+}
+
 function onReorder(cardId: string, delta: -1 | 1) {
   const card = board.cards.find((c) => c.id === cardId);
   if (!card) return;
@@ -84,25 +92,12 @@ function onReorder(cardId: string, delta: -1 | 1) {
   <div class="kanban-tab">
     <BoardFilters />
 
-    <div v-if="!hasCards" class="board-empty" aria-live="polite">
-      <p class="empty-title">No cards yet</p>
-      <p class="empty-text">
-        Cards are tasks for people and agents. Use the + button in a column
-        header — a new card lands in <span class="mono">Inbox</span> — then click it to
-        fill in the brief, acceptance criteria and verification steps.
-      </p>
-      <div class="empty-actions">
-        <button class="empty-btn primary" @click="onAdd">New card</button>
-        <button class="empty-btn" @click="onExample">Add example card</button>
-      </div>
-    </div>
+    <p v-if="board.isFiltering && !hasVisible" class="filter-empty">
+      No cards match the filter.
+      <button class="filter-clear" @click="board.clearFilters()">Clear filter</button>
+    </p>
 
-    <template v-else>
-      <p v-if="board.isFiltering && !hasVisible" class="filter-empty">
-        No cards match the filter.
-        <button class="filter-clear" @click="board.clearFilters()">Clear filter</button>
-      </p>
-
+    <div class="kanban-area">
       <!-- Phone: column switcher + one stacked column. -->
       <template v-if="isPhone">
         <div class="col-switcher" role="tablist" aria-label="Board columns">
@@ -124,7 +119,7 @@ function onReorder(cardId: string, delta: -1 | 1) {
             @open="onOpen"
             @move="onMove"
             @duplicate="(id) => board.duplicateCard(id)"
-            @remove="(id) => board.removeCard(id)"
+            @remove="onRemove"
             @reorder="onReorder"
           />
         </div>
@@ -142,11 +137,28 @@ function onReorder(cardId: string, delta: -1 | 1) {
           @open="onOpen"
           @move="onMove"
           @duplicate="(id) => board.duplicateCard(id)"
-          @remove="(id) => board.removeCard(id)"
+          @remove="onRemove"
           @reorder="onReorder"
         />
       </div>
-    </template>
+
+      <!-- Empty state: the columns still render underneath (the board's
+           shape stays visible); this overlay explains the first move. -->
+      <div v-if="!hasCards" class="board-empty" aria-live="polite">
+        <div class="empty-card">
+          <p class="empty-title">No cards yet</p>
+          <p class="empty-text">
+            Cards are tasks for people and agents. Use the + button in a column
+            header — a new card lands in <span class="mono">Inbox</span> — then click it to
+            fill in the brief, acceptance criteria and verification steps.
+          </p>
+          <div class="empty-actions">
+            <button class="empty-btn primary" @click="onAdd">New card</button>
+            <button class="empty-btn" @click="onExample">Add example card</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -156,6 +168,14 @@ function onReorder(cardId: string, delta: -1 | 1) {
   flex-direction: column;
   height: 100%;
   min-height: 0;
+}
+
+.kanban-area {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .cols-scroll {
@@ -183,13 +203,25 @@ function onReorder(cardId: string, delta: -1 | 1) {
 }
 
 .board-empty {
-  flex: 1;
+  position: absolute;
+  inset: 0;
+  z-index: 5;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0.375rem;
   padding: 2rem;
+  /* Clicks pass through around the panel so the column + buttons and the
+     board itself stay usable under the empty state. */
+  pointer-events: none;
+}
+
+.empty-card {
+  pointer-events: auto;
+  max-width: 26rem;
+  padding: 1.25rem 1.5rem;
+  background: var(--bg-main, #fbf8f3);
+  border: 1px solid var(--border-color, #e3dbcf);
+  border-radius: var(--radius-lg, 10px);
   text-align: center;
 }
 
@@ -214,6 +246,7 @@ function onReorder(cardId: string, delta: -1 | 1) {
 
 .empty-actions {
   display: flex;
+  justify-content: center;
   gap: 0.5rem;
   margin-top: 0.625rem;
 }

@@ -15,10 +15,10 @@ export function fmtTime(ts: number): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-/** `YYYY-MM-DD` local day key (matches the ledger's `usageByDay` keys). */
+/** `YYYY-MM-DD` UTC day key — deliberately identical to the ledger's
+ * `usageByDay` bucketing so a day never splits into two rows. */
 export function dayKey(ts: number): string {
-  const d = new Date(ts);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return new Date(ts).toISOString().slice(0, 10);
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
