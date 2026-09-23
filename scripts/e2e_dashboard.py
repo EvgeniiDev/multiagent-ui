@@ -13,9 +13,19 @@ BASE = "http://127.0.0.1:25998/"
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
-def ts(days_ago: int, hour: int = 12) -> int:
-    d = (NOW - timedelta(days=days_ago)).replace(hour=hour, minute=0, second=0)
+def ts_ago(**kwargs: int) -> int:
+    # Relative fixture clock: N minutes/hours/days before "now", so the seed
+    # never lands in the future no matter what time of day the suite runs.
+    # (The old "today at 12:00 UTC" clock broke every assertion before noon.)
+    d = NOW - timedelta(**kwargs)
     return int(d.timestamp() * 1000)
+
+
+def ts(days_ago: int, hour: int = 12) -> int:  # noqa: ARG001
+    # "Same wall-clock day, N days back" without ever landing in the future:
+    # clamp to now - 5 minutes.
+    d = (NOW - timedelta(days=days_ago)).replace(hour=hour, minute=0, second=0)
+    return min(int(d.timestamp() * 1000), int((NOW - timedelta(minutes=5)).timestamp() * 1000))
 
 
 # Two agents, two projects, two days. Tokens: alpha=1200+800=2000, beta=500.
