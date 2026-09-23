@@ -1,0 +1,16 @@
+[Unit]
+Description=ACP UI card runner (board -> CLI dispatcher)
+After=network.target acp-state.service
+Requires=acp-state.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node %h/projects/acp-ui/server/acp-runner.mjs --serve
+Environment=STATE_URL=http://127.0.0.1:25900
+Environment=ROOT_DIR=%h/projects
+Environment=RUNNER_ID=host-runner
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
