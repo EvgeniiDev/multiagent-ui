@@ -49,3 +49,6 @@ Desktop.ini
 *.AppImage
 *.deb
 *.rpm
+
+# per-card run artefacts (role prompts stay tracked)
+.acp/cards/

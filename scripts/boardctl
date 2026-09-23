@@ -1,0 +1,828 @@
+#!/usr/bin/env python3
+"""boardctl — work with the ACP panel board from a terminal or an agent.
+
+Talks straight to the host state server (default http://127.0.0.1:25900), the
+same document the web panel reads, so a card added here shows up on every
+device, and a card claimed here is not taken twice.
+
+    boardctl stages                      # stages + the statuses each one allows
+    boardctl list --project acp-ui
+    boardctl next --project acp-ui       # the card an agent should pick up
+    boardctl show 3f2a                  # any unique id prefix works
+    boardctl add --title "Fix X" --project acp-ui --stage spec --priority high
+    boardctl move 3f2a dev review
+    boardctl claim 3f2a --agent hermes --session sess-1 --lease 900
+    boardctl release 3f2a --reason "handing over"
+    boardctl note 3f2a "measured: panel writes 41 rows"
+    boardctl events --limit 20 --card 3f2a
+
+Every command takes --json for machine-readable output. The acting agent name
+comes from --agent, else $BOARD_AGENT, else "boardctl".
+
+Exit codes: 0 ok, 1 usage/validation error, 2 not found, 3 conflict/transport.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+DEFAULT_URL = os.environ.get("BOARD_URL", "http://127.0.0.1:25900")
+DEFAULT_PROJECT = os.environ.get("BOARD_PROJECT", "")
+ACTOR = os.environ.get("BOARD_AGENT", "boardctl")
+
+# Mirrors BOARD_STAGE_IDS / STAGE_STATUSES in src/stores/board.ts. Kept here so
+# the CLI can refuse an invalid combination instead of writing a card the panel
+# would silently rewrite.
+STAGES: "list[str]" = ["backlog", "spec", "plan", "dev", "reviewtest", "done"]
+STAGE_LABELS = {
+    "backlog": "Backlog",
+    "spec": "Spec",
+    "plan": "Plan",
+    "dev": "Dev",
+    "reviewtest": "Review/Test",
+    "done": "Done",
+}
+STAGE_STATUSES: "dict[str, list[str]]" = {
+    "backlog": [],
+    "spec": ["in_progress", "review", "done"],
+    "plan": ["in_progress", "review", "done"],
+    "dev": ["in_progress", "review", "done"],
+    "reviewtest": ["in_progress", "agent_tested", "accepted"],
+    "done": [],
+}
+PRIORITIES = ["high", "medium", "low"]
+MAX_ENTRIES = 5000
+
+
+class CliError(Exception):
+    def __init__(self, msg: str, code: int = 1) -> None:
+        super().__init__(msg)
+        self.code = code
+
+
+# --- state server -----------------------------------------------------------
+
+
+def _request(path: str, method: str = "GET", body: dict | None = None) -> dict:
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        f"{DEFAULT_URL}{path}",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")
+        raise CliError(f"{method} {path} -> {exc.code} {detail}", 3) from None
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise CliError(
+            f"state server unreachable at {DEFAULT_URL} ({exc}); "
+            "is acp-state.service running?",
+            3,
+        ) from None
+
+
+def read_doc(name: str, default: dict) -> "tuple[dict, int]":
+    """Return (data, rev); rev is 0 when the document does not exist yet."""
+    try:
+        payload = _request(f"/api/state/{name}")
+    except CliError as exc:
+        if exc.code != 3 or "404" not in str(exc):
+            raise
+        return default, 0
+    return payload.get("data") or default, int(payload.get("rev") or 0)
+
+
+def write_doc(name: str, data: dict, rev: int) -> int:
+    payload = _request(f"/api/state/{name}", "PUT", {"data": data, "rev": rev})
+    return int(payload.get("rev") or 0)
+
+
+def mutate(name: str, default: dict, fn, tries: int = 6):
+    """Read-modify-write with a bounded retry on rev conflicts.
+
+    The panel polls and writes the same documents, so a bare PUT can lose the
+    race; retrying on 409 re-reads the fresh revision and reapplies `fn`.
+    """
+    last: Exception | None = None
+    for _ in range(tries):
+        data, rev = read_doc(name, json.loads(json.dumps(default)))
+        data, result = fn(data)
+        try:
+            write_doc(name, data, rev)
+            return result
+        except CliError as exc:
+            if exc.code == 3 and "409" in str(exc):
+                last = exc
+                time.sleep(0.3)
+                continue
+            raise
+    raise CliError(f"{name}: lost {tries} revision races ({last})", 3)
+
+
+# --- model helpers ----------------------------------------------------------
+
+
+def empty_board() -> dict:
+    return {"version": 2, "cards": []}
+
+
+def empty_claims() -> dict:
+    return {"version": 1, "claims": {}}
+
+
+def empty_activity() -> dict:
+    return {"entries": [], "usage": []}
+
+
+def load_cards() -> "list[dict]":
+    return read_doc("board.json", empty_board())[0].get("cards") or []
+
+
+def resolve(cards: "list[dict]", ref: str) -> dict:
+    """Find a card by full id or any unique prefix; '#' was never a separator."""
+    needle = ref.strip().lower()
+    exact = [c for c in cards if str(c.get("id", "")).lower() == needle]
+    if exact:
+        return exact[0]
+    partial = [c for c in cards if str(c.get("id", "")).lower().startswith(needle)]
+    if not partial:
+        raise CliError(f"no card matches {ref!r}", 2)
+    if len(partial) > 1:
+        ids = ", ".join(c["id"][:8] for c in partial[:5])
+        raise CliError(f"{ref!r} is ambiguous ({len(partial)} cards: {ids}…)", 1)
+    return partial[0]
+
+
+def check_stage_status(stage: str, status: "str | None") -> "tuple[str, str | None]":
+    if stage not in STAGES:
+        raise CliError(f"unknown stage {stage!r}; one of {', '.join(STAGES)}")
+    if status in ("", None):
+        return stage, None
+    allowed = STAGE_STATUSES[stage]
+    if not allowed:
+        raise CliError(f"stage {stage!r} has no statuses (use: boardctl move <id> {stage})")
+    if status not in allowed:
+        raise CliError(
+            f"{status!r} is not valid in {stage!r}; allowed: {', '.join(allowed)}"
+        )
+    return stage, status
+
+
+def put_card(cards: "list[dict]", card: dict) -> "list[dict]":
+    out = [c for c in cards if c.get("id") != card["id"]]
+    out.append(card)
+    return out
+
+
+def new_card(**kw) -> dict:
+    now = int(time.time() * 1000)
+    card = {
+        "id": str(uuid.uuid4()),
+        "title": "",
+        "description": "",
+        "project": "",
+        "agent": "",
+        "priority": "medium",
+        "acceptance": "",
+        "verification": "",
+        "links": [],
+        "session": None,
+        "blocked": False,
+        "blockedReason": "",
+        "cancelled": False,
+        "touches": [],
+        "dependsOn": [],
+        "blocks": [],
+        "conflictsWith": [],
+        "stage": "backlog",
+        "status": None,
+        "statusByStage": {},
+        "order": 10,
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    card.update(kw)
+    return card
+
+
+def live_claims(claims: dict) -> "dict[str, dict]":
+    """Claims whose lease has not expired."""
+    now = int(time.time() * 1000)
+    out = {}
+    for cid, claim in (claims.get("claims") or {}).items():
+        if int(claim.get("leaseUntil") or 0) > now:
+            out[cid] = claim
+    return out
+
+
+def add_entry(entries: "list[dict]", *, agent: str, title: str, detail: str,
+              cwd: str | None = None) -> "list[dict]":
+    entries.append({
+        "id": str(uuid.uuid4()),
+        "at": int(time.time() * 1000),
+        "kind": "card",
+        "agentName": agent,
+        "cwd": cwd or os.getcwd(),
+        "title": title,
+        "detail": detail,
+    })
+    return entries[-MAX_ENTRIES:]
+
+
+def log(*, title: str, detail: str, agent: str | None = None) -> None:
+    """Append a card event to the shared activity ledger (best effort)."""
+    def fn(data):
+        data.setdefault("entries", [])
+        data.setdefault("usage", [])
+        data["entries"] = add_entry(data["entries"], agent=agent or ACTOR,
+                                    title=title, detail=detail)
+        return data, True
+
+    try:
+        mutate("activity.json", empty_activity(), fn)
+    except CliError:
+        pass  # the card change itself already landed; audit must not fail it
+
+
+# --- output -----------------------------------------------------------------
+
+
+def short(card: dict, claims: "dict[str, dict]") -> str:
+    mark = "!"
+    if card.get("cancelled"):
+        mark = "x"
+    elif card.get("blocked"):
+        mark = "!"
+    else:
+        mark = " "
+    status = card.get("status") or "-"
+    claim = claims.get(card["id"])
+    who = f" @{claim['agentName']}" if claim else ""
+    return (f"{mark} {card['id'][:8]}  {STAGE_LABELS.get(card.get('stage','?'),card.get('stage')):<11}"
+            f"{status:<12}{card.get('priority','medium'):<7}"
+            f"{(card.get('project') or '-'):<12}{card.get('title','')[:52]}{who}")
+
+
+def emit(payload, args, text: "callable | None" = None) -> None:
+    if getattr(args, "json", False) or text is None:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(text())
+
+
+# --- commands ---------------------------------------------------------------
+
+
+def cmd_stages(args) -> int:
+    rows = [{"stage": s, "label": STAGE_LABELS[s], "statuses": STAGE_STATUSES[s]} for s in STAGES]
+    emit(rows, args, lambda: "\n".join(
+        f"{r['label']:<12} {r['stage']:<11} "
+        f"{', '.join(r['statuses']) if r['statuses'] else '(no in-stage status)'}"
+        for r in rows))
+    return 0
+
+
+def cmd_list(args) -> int:
+    cards = load_cards()
+    claims = live_claims(read_doc("claims.json", empty_claims())[0])
+    if args.stage:
+        cards = [c for c in cards if c.get("stage") == args.stage]
+    if args.status:
+        cards = [c for c in cards if (c.get("status") or "") == args.status]
+    if args.project:
+        cards = [c for c in cards if (c.get("project") or "") == args.project]
+    if args.priority:
+        cards = [c for c in cards if (c.get("priority") or "medium") == args.priority]
+    if args.blocked:
+        cards = [c for c in cards if c.get("blocked")]
+    if args.cancelled:
+        cards = [c for c in cards if c.get("cancelled")]
+    if args.claimed:
+        cards = [c for c in cards if c["id"] in claims]
+    if args.unclaimed:
+        cards = [c for c in cards if c["id"] not in claims]
+    cards.sort(key=lambda c: (STAGES.index(c.get("stage", "backlog")) if c.get("stage") in STAGES else 0,
+                              c.get("order", 10)))
+    payload = [dict(c, claim=claims.get(c["id"])) for c in cards]
+    if not cards:
+        emit([], args, lambda: "no cards match")
+        return 0
+    emit(payload, args, lambda: "\n".join(short(c, claims) for c in cards))
+    return 0
+
+
+def cmd_show(args) -> int:
+    cards = load_cards()
+    card = resolve(cards, args.card)
+    claims = live_claims(read_doc("claims.json", empty_claims())[0])
+    claim = claims.get(card["id"])
+    payload = dict(card, claim=claim)
+    if args.json:
+        emit(payload, args)
+        return 0
+    lines = [
+        f"{card['title']}",
+        f"  id       {card['id']}",
+        f"  stage    {STAGE_LABELS.get(card.get('stage'), card.get('stage'))}"
+        f" / {card.get('status') or '-'}",
+        f"  project  {card.get('project') or '-'}   priority {card.get('priority')}",
+        f"  agent    {card.get('agent') or '-'}",
+    ]
+    flags = [f for f in ("blocked", "cancelled") if card.get(f)]
+    if flags:
+        reason = f" ({card.get('blockedReason')})" if card.get("blockedReason") else ""
+        lines.append(f"  flags    {', '.join(flags)}{reason}")
+    if claim:
+        left = (int(claim.get("leaseUntil", 0)) - int(time.time() * 1000)) // 1000
+        lines.append(f"  claim    {claim.get('agentName')} lease {left}s"
+                     f"{' session ' + claim['sessionId'] if claim.get('sessionId') else ''}")
+    for field in ("description", "acceptance", "verification"):
+        if card.get(field):
+            lines.append(f"  {field}: {card[field]}")
+    if card.get("dependsOn") or card.get("blocks") or card.get("conflictsWith"):
+        lines.append(f"  graph    dependsOn={card.get('dependsOn')} blocks={card.get('blocks')} "
+                     f"conflictsWith={card.get('conflictsWith')}")
+    if card.get("touches"):
+        lines.append(f"  touches  {', '.join(card['touches'])}")
+    print("\n".join(lines))
+    return 0
+
+
+def cmd_add(args) -> int:
+    stage, status = check_stage_status(args.stage, args.status)
+    if not args.title.strip():
+        raise CliError("--title is required")
+    project = args.project or DEFAULT_PROJECT
+    card = new_card(
+        title=args.title.strip(),
+        description=args.description or "",
+        acceptance=args.acceptance or "",
+        verification=args.verification or "",
+        project=project,
+        agent=args.agent or "",
+        priority=args.priority,
+        stage=stage,
+        status=status,
+        touches=args.touch or [],
+        dependsOn=[], blocks=[], conflictsWith=[],
+    )
+
+    def fn(data):
+        cards = data.get("cards") or []
+        card["order"] = max([c.get("order", 10) for c in cards] or [10]) + 10
+        cards.append(card)
+        data["version"] = 2
+        data["cards"] = cards
+        return data, card
+
+    card = mutate("board.json", empty_board(), fn)
+    log(title=card["title"], detail=f"card created in {stage}"
+        + (f" / {status}" if status else "") + f" by {ACTOR} ({card['id'][:8]})")
+    emit(card, args, lambda: f"created {card['id'][:8]}  {stage}"
+         f"{' / ' + status if status else ''}  {card['title']}")
+    return 0
+
+
+def _apply(card: dict, args, to_activity: "list[str]") -> None:
+    stage = getattr(args, "stage", None)
+    status = getattr(args, "status", None)
+    if stage or status:
+        target_stage = stage or card.get("stage")
+        # A stage change without an explicit status picks that stage's opener,
+        # unless the card already remembers one for the stage.
+        target_status = status
+        if stage and target_status is None:
+            remembered = (card.get("statusByStage") or {}).get(stage)
+            allowed = STAGE_STATUSES.get(stage, [])
+            target_status = remembered if remembered in allowed else (allowed[0] if allowed else None)
+        target_stage, target_status = check_stage_status(target_stage, target_status)
+        if card.get("stage") != target_stage:
+            if card.get("status"):
+                card.setdefault("statusByStage", {})
+                card["statusByStage"][card["stage"]] = card["status"]
+            to_activity.append(f"moved {card.get('stage')} → {target_stage}")
+            card["stage"] = target_stage
+        if target_status != card.get("status"):
+            to_activity.append(f"status {card.get('status') or '-'} → {target_status or '-'}")
+            card["status"] = target_status
+    for field in ("title", "description", "acceptance", "verification", "project", "priority"):
+        value = getattr(args, field, None)
+        if value is not None:
+            if field == "priority" and value not in PRIORITIES:
+                raise CliError(f"priority must be one of {', '.join(PRIORITIES)}")
+            if card.get(field) != value:
+                to_activity.append(f"{field} updated")
+                card[field] = value
+    if getattr(args, "agent", None) is not None:
+        card["agent"] = args.agent
+    if getattr(args, "touch", None):
+        card["touches"] = sorted(set(card.get("touches") or []) | set(args.touch))
+
+
+def _save_card(card: dict, actor_note: str) -> dict:
+    card["updatedAt"] = int(time.time() * 1000)
+
+    def fn(data):
+        cards = data.get("cards") or []
+        data["cards"] = put_card(cards, card)
+        data["version"] = 2
+        return data, card
+
+    return mutate("board.json", empty_board(), fn)
+
+
+def cmd_set(args) -> int:
+    cards = load_cards()
+    card = resolve(cards, args.card)
+    changes: "list[str]" = []
+    _apply(card, args, changes)
+    if not changes:
+        emit(card, args, lambda: "nothing to change")
+        return 0
+    card = _save_card(card, ACTOR)
+    log(title=card["title"], detail="; ".join(changes) + f" by {ACTOR}")
+    emit(card, args, lambda: f"{card['id'][:8]}: " + "; ".join(changes))
+    return 0
+
+
+def cmd_move(args) -> int:
+    cards = load_cards()
+    card = resolve(cards, args.card)
+    stage, status = check_stage_status(args.stage, args.status)
+    changes: "list[str]" = []
+    ns = argparse.Namespace(stage=stage, status=status)
+    _apply(card, ns, changes)
+    if not changes:
+        emit(card, args, lambda: f"{card['id'][:8]} is already in {stage}")
+        return 0
+    card = _save_card(card, ACTOR)
+    log(title=card["title"], detail="; ".join(changes) + f" by {ACTOR}")
+    emit(card, args, lambda: f"{card['id'][:8]}: " + "; ".join(changes))
+    return 0
+
+
+def cmd_flag(args) -> int:
+    cards = load_cards()
+    card = resolve(cards, args.card)
+    on = args.flag == "set"
+    detail = ""
+    if args.name == "blocked":
+        card["blocked"] = on
+        if args.reason:
+            card["blockedReason"] = args.reason
+        elif not on:
+            card["blockedReason"] = ""
+        detail = ("flagged blocked" + (f": {args.reason}" if args.reason and on else "")) if on else "unblocked"
+    else:
+        card["cancelled"] = on
+        detail = "flagged cancelled" if on else "un-cancelled"
+    card = _save_card(card, ACTOR)
+    log(title=card["title"], detail=f"{detail} by {ACTOR}")
+    emit(card, args, lambda: f"{card['id'][:8]}: {detail}")
+    return 0
+
+
+def cmd_claim(args) -> int:
+    cards = load_cards()
+    card = resolve(cards, args.card)
+    if card.get("cancelled"):
+        raise CliError("card is cancelled", 1)
+    if card.get("blocked"):
+        raise CliError(f"card is blocked ({card.get('blockedReason') or 'no reason'})", 1)
+    if card.get("stage") == "done":
+        raise CliError("card is already done", 1)
+    agent = args.agent or ACTOR
+    lease_ms = int(args.lease * 1000)
+    card_title = card["title"]
+    card_id = card["id"]
+
+    def fn(data):
+        claims = data.setdefault("claims", {})
+        now = int(time.time() * 1000)
+        cur = claims.get(card_id)
+        if cur and int(cur.get("leaseUntil") or 0) > now and cur.get("agentName") != agent:
+            raise CliError(
+                f"card is claimed by {cur['agentName']} for another "
+                f"{(int(cur['leaseUntil']) - now) // 1000}s", 3)
+        claims[card_id] = {
+            "agentName": agent,
+            "sessionId": args.session or "",
+            "leaseUntil": now + lease_ms,
+            "startedAt": (cur or {}).get("startedAt", now),
+            "claimedAt": now,
+        }
+        data["version"] = 1
+        return data, claims[card_id]
+
+    claim = mutate("claims.json", empty_claims(), fn)
+
+    # Mirror the running agent onto the card so the panel shows who holds it.
+    if args.mirror:
+        cards = load_cards()
+        card = resolve(cards, card_id)
+        if card.get("agent") != agent:
+            card["agent"] = agent
+        card["session"] = {"agentName": agent, "sessionId": args.session or ""}
+        _save_card(card, agent)
+    log(title=card_title, agent=agent,
+        detail=f"claimed by {agent} for {args.lease}s"
+               + (f" (session {args.session})" if args.session else ""))
+    emit(claim, args, lambda: f"claimed {card_id[:8]} by {agent} for {args.lease}s")
+    return 0
+
+
+def cmd_release(args) -> int:
+    cards = load_cards()
+    card = resolve(cards, args.card)
+    agent = args.agent or ACTOR
+
+    def fn(data):
+        claims = data.setdefault("claims", {})
+        cur = claims.get(card["id"])
+        if not cur:
+            return data, None
+        if cur.get("agentName") != agent and not args.force:
+            raise CliError(f"card is claimed by {cur['agentName']}, not {agent} (use --force)", 3)
+        claims.pop(card["id"], None)
+        data["version"] = 1
+        return data, cur
+
+    released = mutate("claims.json", empty_claims(), fn)
+    log(title=card["title"], agent=agent,
+        detail=f"claim released by {agent}" + (f": {args.reason}" if args.reason else ""))
+    emit({"released": released}, args,
+         lambda: f"released {card['id'][:8]}" if released else f"{card['id'][:8]} was not claimed")
+    return 0
+
+
+def cmd_note(args) -> int:
+    cards = load_cards()
+    card = resolve(cards, args.card)
+    text = " ".join(args.text).strip()
+    if not text:
+        raise CliError("note text is required")
+    log(title=card["title"], detail=text)
+    emit({"card": card["id"], "title": card["title"], "detail": text}, args,
+         lambda: f"noted on {card['id'][:8]}: {text}")
+    return 0
+
+
+def cmd_events(args) -> int:
+    data = read_doc("activity.json", empty_activity())[0]
+    entries = data.get("entries") or []
+    if args.kind:
+        entries = [e for e in entries if e.get("kind") == args.kind]
+    if args.card:
+        cards = load_cards()
+        card = resolve(cards, args.card)
+        entries = [e for e in entries if e.get("title") == card["title"]]
+    entries = entries[-args.limit:]
+
+    def render() -> str:
+        if not entries:
+            return "no events"
+        width = len(str(entries[-1].get("at", 0)))
+        return "\n".join(
+            f"{time.strftime('%H:%M:%S', time.localtime(e.get('at', 0) / 1000))}  "
+            f"{e.get('kind', '?'):<12}{(e.get('agentName') or ''):<14}"
+            f"{(e.get('title') or '')[:34]:<35}{e.get('detail') or ''}"
+            for e in entries)
+
+    emit(entries, args, render)
+    return 0
+
+
+def cmd_projects(args) -> int:
+    data = read_doc("projects.json", {"version": 1, "projects": []})[0]
+    rows = data.get("projects") or []
+    active = data.get("activeProjectId", "all")
+    emit(rows, args, lambda: "\n".join(
+        f"{('*' if p.get('id') == active else ' ')} {p.get('name',''):<16}{p.get('path','')}"
+        for p in rows) or "no projects")
+    return 0
+
+
+def cmd_next(args) -> int:
+    """The card an agent should pick up: earliest actionable stage, priority first."""
+    cards = load_cards()
+    claims = live_claims(read_doc("claims.json", empty_claims())[0])
+    workable = ["backlog", "spec", "plan", "dev", "reviewtest"]
+    rank = {"high": 0, "medium": 1, "low": 2}
+    candidates = [
+        c for c in cards
+        if c.get("stage") in workable
+        and not c.get("blocked") and not c.get("cancelled")
+        and c["id"] not in claims
+        and (not args.project or (c.get("project") or "") == args.project)
+        and (not args.stage or c.get("stage") == args.stage)
+    ]
+    if not candidates:
+        emit(None, args, lambda: "nothing to pick up")
+        return 0
+    candidates.sort(key=lambda c: (STAGES.index(c["stage"]), rank.get(c.get("priority"), 1),
+                                   c.get("order", 10)))
+    card = candidates[0]
+    if args.json:
+        emit(card, args)
+        return 0
+    print(f"{card['id']}  [{STAGE_LABELS.get(card.get('stage'), card.get('stage'))}"
+          f"/{card.get('status') or '-'}]  {card.get('priority')}  {card['title']}")
+    if card.get("acceptance"):
+        print(f"  acceptance: {card['acceptance']}")
+    if card.get("verification"):
+        print(f"  verification: {card['verification']}")
+    print(f"  claim it: boardctl claim {card['id'][:8]} --agent {ACTOR}")
+    return 0
+
+
+def cmd_rm(args) -> int:
+    cards = load_cards()
+    card = resolve(cards, args.card)
+    claims = live_claims(read_doc("claims.json", empty_claims())[0])
+    if card["id"] in claims and not args.force:
+        raise CliError(f"card is claimed by {claims[card['id']]['agentName']} (use --force)", 3)
+
+    def fn(data):
+        data["cards"] = [c for c in data.get("cards", []) if c.get("id") != card["id"]]
+        data["version"] = 2
+        return data, card
+
+    mutate("board.json", empty_board(), fn)
+
+    def clean(data):
+        (data.get("claims") or {}).pop(card["id"], None)
+        return data, True
+
+    try:
+        mutate("claims.json", empty_claims(), clean)
+    except CliError:
+        pass
+    log(title=card["title"], detail=f"card deleted by {ACTOR}")
+    emit(card, args, lambda: f"deleted {card['id'][:8]}  {card['title']}")
+    return 0
+
+
+# --- argv -------------------------------------------------------------------
+
+
+def _common_flags() -> argparse.ArgumentParser:
+    """--json/--url accepted BOTH before and after the subcommand.
+
+    Subparser defaults are SUPPRESS so an omitted flag never overwrites the
+    value the top-level parser already parsed (the classic argparse gotcha).
+    """
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                        help="machine-readable output")
+    common.add_argument("--url", default=argparse.SUPPRESS,
+                        help=f"state server (default {DEFAULT_URL})")
+    return common
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="boardctl",
+        description="Work with the ACP panel board from the terminal (state server on :25900).",
+        epilog="Stages: " + " → ".join(STAGES),
+    )
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--url", default=DEFAULT_URL, help=f"state server (default {DEFAULT_URL})")
+    common = _common_flags()
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("stages", parents=[common], help="stages and their in-stage statuses")
+    s.set_defaults(func=cmd_stages)
+
+    s = sub.add_parser("list", parents=[common], help="list cards")
+    s.add_argument("--stage", choices=STAGES)
+    s.add_argument("--status")
+    s.add_argument("--project")
+    s.add_argument("--priority", choices=PRIORITIES)
+    s.add_argument("--blocked", action="store_true", help="only the blocked flag")
+    s.add_argument("--cancelled", action="store_true")
+    s.add_argument("--claimed", action="store_true")
+    s.add_argument("--unclaimed", action="store_true")
+    s.set_defaults(func=cmd_list)
+
+    s = sub.add_parser("show", parents=[common], help="one card, with its claim")
+    s.add_argument("card")
+    s.set_defaults(func=cmd_show)
+
+    s = sub.add_parser("add", parents=[common], help="create a card")
+    s.add_argument("--title", required=True)
+    s.add_argument("--project", default="")
+    s.add_argument("--stage", default="backlog", choices=STAGES)
+    s.add_argument("--status")
+    s.add_argument("--priority", default="medium", choices=PRIORITIES)
+    s.add_argument("--description")
+    s.add_argument("--acceptance")
+    s.add_argument("--verification")
+    s.add_argument("--agent")
+    s.add_argument("--touch", action="append", metavar="PATH")
+    s.set_defaults(func=cmd_add)
+
+    s = sub.add_parser("set", parents=[common], help="change fields of a card")
+    s.add_argument("card")
+    s.add_argument("--stage", choices=STAGES)
+    s.add_argument("--status")
+    s.add_argument("--priority", choices=PRIORITIES)
+    s.add_argument("--title")
+    s.add_argument("--description")
+    s.add_argument("--acceptance")
+    s.add_argument("--verification")
+    s.add_argument("--project")
+    s.add_argument("--agent")
+    s.add_argument("--touch", action="append", metavar="PATH")
+    s.set_defaults(func=cmd_set)
+
+    s = sub.add_parser("move", parents=[common], help="move a card to a stage (optionally a status)")
+    s.add_argument("card")
+    s.add_argument("stage", choices=STAGES)
+    s.add_argument("status", nargs="?")
+    s.set_defaults(func=cmd_move)
+
+    s = sub.add_parser("block", parents=[common], help="set the blocked flag")
+    s.add_argument("card")
+    s.add_argument("--reason", default="")
+    s.set_defaults(func=cmd_flag, flag="set", name="blocked")
+    s = sub.add_parser("unblock", parents=[common], help="clear the blocked flag")
+    s.add_argument("card")
+    s.add_argument("--reason", default="")
+    s.set_defaults(func=cmd_flag, flag="clear", name="blocked")
+    s = sub.add_parser("cancel", parents=[common], help="set the cancelled flag")
+    s.add_argument("card")
+    s.add_argument("--reason", default="")
+    s.set_defaults(func=cmd_flag, flag="set", name="cancelled")
+    s = sub.add_parser("uncancel", parents=[common], help="clear the cancelled flag")
+    s.add_argument("card")
+    s.add_argument("--reason", default="")
+    s.set_defaults(func=cmd_flag, flag="clear", name="cancelled")
+
+    s = sub.add_parser("claim", parents=[common], help="take a card (lease is renewable by re-claiming)")
+    s.add_argument("card")
+    s.add_argument("--agent", default="")
+    s.add_argument("--session", default="")
+    s.add_argument("--lease", type=int, default=900, help="seconds (default 900)")
+    s.add_argument("--no-mirror", dest="mirror", action="store_false",
+                   help="do not write the agent/session onto the card")
+    s.set_defaults(func=cmd_claim, mirror=True)
+
+    s = sub.add_parser("release", parents=[common], help="drop the claim (card stays where it is)")
+    s.add_argument("card")
+    s.add_argument("--agent", default="")
+    s.add_argument("--reason", default="")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(func=cmd_release)
+
+    s = sub.add_parser("note", parents=[common], help="append a note to the card's activity history")
+    s.add_argument("card")
+    s.add_argument("text", nargs="+")
+    s.set_defaults(func=cmd_note)
+
+    s = sub.add_parser("events", parents=[common], help="recent activity entries (card lifecycle = --kind card)")
+    s.add_argument("--limit", type=int, default=20)
+    s.add_argument("--kind")
+    s.add_argument("--card")
+    s.set_defaults(func=cmd_events)
+
+    s = sub.add_parser("projects", parents=[common], help="registered projects")
+    s.set_defaults(func=cmd_projects)
+
+    s = sub.add_parser("next", parents=[common], help="the next card an agent should pick up")
+    s.add_argument("--project", default="")
+    s.add_argument("--stage", choices=STAGES)
+    s.set_defaults(func=cmd_next)
+
+    s = sub.add_parser("rm", parents=[common], help="delete a card")
+    s.add_argument("card")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(func=cmd_rm)
+    return p
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    global DEFAULT_URL
+    DEFAULT_URL = args.url.rstrip("/")
+    try:
+        return args.func(args)
+    except CliError as exc:
+        print(f"boardctl: {exc}", file=sys.stderr)
+        return exc.code
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())
