@@ -509,21 +509,33 @@ export const useSessionStore = defineStore('session', () => {
         }
         break;
 
-      case 'tool_call':
-        // Add tool call to the current assistant message
-        const currentAssistantMsg = messages.value[messages.value.length - 1];
-        if (currentAssistantMsg && currentAssistantMsg.role === 'assistant') {
-          if (!currentAssistantMsg.toolCalls) {
-            currentAssistantMsg.toolCalls = [];
-          }
-          currentAssistantMsg.toolCalls.push({
-            toolCallId: update.toolCallId,
-            title: update.title,
-            kind: update.kind || 'other',
-            status: update.status || 'pending',
-            locations: update.locations,
-          });
+      case 'tool_call': {
+        // Chips render per assistant message, so a call that arrives before
+        // the agent has written anything (the common case — the model calls a
+        // tool first) has to open that message itself. Otherwise every
+        // intermediate step is dropped and a running turn looks silent until
+        // the final text lands.
+        let targetMsg = messages.value[messages.value.length - 1];
+        if (!targetMsg || targetMsg.role !== 'assistant') {
+          targetMsg = {
+            id: uuid(),
+            role: 'assistant',
+            content: '',
+            timestamp: Date.now(),
+            toolCalls: [],
+          };
+          messages.value.push(targetMsg);
         }
+        if (!targetMsg.toolCalls) {
+          targetMsg.toolCalls = [];
+        }
+        targetMsg.toolCalls.push({
+          toolCallId: update.toolCallId,
+          title: update.title,
+          kind: update.kind || 'other',
+          status: update.status || 'pending',
+          locations: update.locations,
+        });
         // Also keep in global map for updates
         toolCalls.value.set(update.toolCallId, {
           toolCallId: update.toolCallId,
@@ -541,6 +553,7 @@ export const useSessionStore = defineStore('session', () => {
           detail: update.kind || 'other',
         });
         break;
+      }
 
       case 'tool_call_update':
         const existing = toolCalls.value.get(update.toolCallId);
