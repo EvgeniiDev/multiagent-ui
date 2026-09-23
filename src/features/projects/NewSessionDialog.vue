@@ -11,6 +11,12 @@ import { useConfigStore } from '../../stores/config';
 import { useUiStore } from '../../stores/ui';
 import DirectoryPicker from '../../components/DirectoryPicker.vue';
 
+const props = defineProps<{
+  /** Working directory the field opens with — the scoped project's path when
+   *  the dialog is launched under a project scope, empty otherwise. */
+  initialCwd?: string;
+}>();
+
 const emit = defineEmits<{
   close: [];
 }>();
@@ -20,7 +26,7 @@ const configStore = useConfigStore();
 const uiStore = useUiStore();
 
 const agent = ref('');
-const cwd = ref('');
+const cwd = ref(props.initialCwd ?? '');
 const busy = ref(false);
 const error = ref('');
 

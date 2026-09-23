@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useSessionStore } from '../stores/session';
+import { useUiStore } from '../stores/ui';
+import { useProjectsStore } from '../features/scope/registry';
 import type { SavedSession } from '../lib/types';
 
 const emit = defineEmits<{
@@ -10,10 +12,23 @@ const emit = defineEmits<{
 }>();
 
 const sessionStore = useSessionStore();
+const uiStore = useUiStore();
+const projectsStore = useProjectsStore();
 
 // The sidebar mirrors ONE agent's inventory at a time (switching agents is the
-// filter) — a merged list of every agent runs to hundreds of rows.
-const sessions = computed(() => sessionStore.visibleSessions);
+// filter) — a merged list of every agent runs to hundreds of rows. On top of
+// that the global project scope applies: with a project selected only
+// sessions whose cwd lies inside its path show; 'all' is unfiltered.
+const sessions = computed(() =>
+  projectsStore.sessionsOfProject(sessionStore.visibleSessions)
+);
+
+// 'all' is the only mode where a session outside every project is visible —
+// those rows get an "unassigned" tag so the distinction stays readable.
+const showUnassigned = computed(() => uiStore.activeProjectId === 'all');
+function isUnassigned(session: SavedSession): boolean {
+  return !projectsStore.projectIdForCwd(session.cwd);
+}
 
 const scope = computed(() => sessionStore.activeAgentName);
 const activeSessionId = computed(() => sessionStore.currentSession?.id ?? '');
@@ -122,6 +137,11 @@ function handleDelete(sessionId: string, event: Event) {
         @click="handleResume(session)"
       >
         <span class="row-title">{{ session.title }}</span>
+        <span
+          v-if="showUnassigned && isUnassigned(session)"
+          class="row-tag"
+          title="Not inside any registered project"
+        >unassigned</span>
         <span class="row-stamp">{{ formatStamp(session.lastUpdated) }}</span>
         <button
           class="row-delete"
@@ -310,6 +330,19 @@ ul {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Small muted tag marking sessions outside every project (All mode only). */
+.row-tag {
+  flex: 0 0 auto;
+  font-size: 0.625rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted, #a39a8e);
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border-radius: var(--radius-sm, 4px);
+  padding: 0 0.25rem;
+  line-height: 1.5;
 }
 
 .row-stamp {

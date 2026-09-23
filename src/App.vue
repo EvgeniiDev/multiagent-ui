@@ -16,14 +16,18 @@ import DirectoryPicker from './components/DirectoryPicker.vue';
 import ProjectsView from './components/ProjectsView.vue';
 import BoardView from './components/BoardView.vue';
 import DashboardView from './components/DashboardView.vue';
+import ProjectScopeSelector from './components/ProjectScopeSelector.vue';
+import NewSessionDialog from './features/projects/NewSessionDialog.vue';
 import { useUiStore, VIEWS } from './stores/ui';
 import { useActivityStore } from './stores/activity';
+import { useProjectsStore } from './features/scope/registry';
 import type { SavedSession } from './lib/types';
 
 const configStore = useConfigStore();
 const sessionStore = useSessionStore();
 const uiStore = useUiStore();
 const activityStore = useActivityStore();
+const projectsStore = useProjectsStore();
 
 const selectedAgent = ref('');
 const selectedCwd = ref('');
@@ -49,6 +53,13 @@ const showSidebar = ref(true);
 const showSettings = ref(false);
 const showTrafficMonitor = ref(false);
 const showStartupDetails = ref(false);
+// "New session" on the welcome screen — the same dialog the Projects header
+// uses, so starting a session works before any connection exists.
+const showWelcomeNewSession = ref(false);
+
+/** Working directory a scoped "New session" starts in: the active project's
+ * path, or empty (agent's default) at All. */
+const scopeCwd = computed(() => projectsStore.activeProject?.path ?? '');
 
 // Reactive flag tracking whether the viewport is narrow enough to show the
 // sidebar as a slide-in drawer (mobile / very narrow desktop windows). Used
@@ -145,6 +156,8 @@ onMounted(async () => {
   await configStore.setupHotReload();
   await sessionStore.initStore();
   await activityStore.initActivityStore();
+  // Registry first: ui's project-scope reads delegate to it.
+  await projectsStore.initProjectsStore();
   await uiStore.initUiStore();
 
   const savedCwd = await prefsStore.get<string>('lastCwd');
@@ -453,16 +466,6 @@ function clearError() {
       @click="handleBackdropClick"
     />
 
-    <!-- Mobile hamburger to open the drawer when collapsed. The desktop
-         chevron toggle (`.sidebar-toggle-collapsed`) is hidden on narrow
-         viewports via CSS so we don't show two affordances. -->
-    <button
-      v-show="isNarrowLayout && !showSidebar"
-      class="mobile-hamburger"
-      @click="showSidebar = true"
-      aria-label="Open menu"
-    ><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
-
     <!-- Collapsed sidebar toggle -->
     <button 
       v-if="!showSidebar" 
@@ -475,6 +478,19 @@ function clearError() {
     
     <!-- Main Content Area -->
     <div class="main-area">
+      <!-- Global project scope — one selector for every view (§B). The
+           mobile hamburger lives here as the bar's trailing control: fixed
+           positioning used to leave it under the top rail (z 95 > 50) so the
+           drawer was unreachable on narrow viewports. -->
+      <header class="scope-bar">
+        <ProjectScopeSelector />
+        <button
+          v-show="isNarrowLayout && !showSidebar"
+          class="mobile-hamburger"
+          @click="showSidebar = true"
+          aria-label="Open menu"
+        ><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      </header>
       <main class="main-content">
         <!-- Reconnect banner takes priority over the error banner: while a
              reconnect is in progress we don't want a contradictory red
@@ -502,10 +518,19 @@ function clearError() {
         <!-- Chat View when connected -->
         <ChatView v-if="uiStore.activeView === 'chat' && isConnected" />
 
-        <!-- Welcome screen when the chat view has no session yet -->
+        <!-- Welcome screen when the chat view has no session yet. The New
+             session dialog is reachable here too — a session start must not
+             depend on an existing connection. -->
         <div v-else-if="uiStore.activeView === 'chat'" class="welcome-screen">
           <h2>Welcome to ACP UI</h2>
           <p>Select an agent and create a new session to get started.</p>
+          <button
+            class="welcome-new-session"
+            type="button"
+            @click="showWelcomeNewSession = true"
+          >
+            New session
+          </button>
           <p v-if="!hasAgents" class="hint">
             Configure agents in your config file to begin.
           </p>
@@ -543,6 +568,13 @@ function clearError() {
     <SettingsView 
       v-if="showSettings"
       @close="showSettings = false"
+    />
+
+    <!-- New session from the welcome screen (no connection required). -->
+    <NewSessionDialog
+      v-if="showWelcomeNewSession"
+      :initial-cwd="scopeCwd"
+      @close="showWelcomeNewSession = false"
     />
   </div>
 </template>
@@ -819,6 +851,37 @@ html, body, #app {
   overflow: hidden;
 }
 
+/* Global scope strip: the project selector from §B. Slim chrome row pinned
+ * above every view (chat, projects, board, dashboard). */
+.scope-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.75rem;
+  border-bottom: 1px solid var(--border-faint);
+  background: var(--bg-main);
+}
+
+/* The drawer hamburger is a scope-bar item — static flow, right edge. It is
+ * display:none on desktop via the base rule below and only re-enabled inside
+ * the narrow-viewport media query (same pattern as before the move). */
+.mobile-hamburger {
+  display: none;
+  flex: 0 0 auto;
+  margin-left: auto;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text-primary);
+}
+
 .main-content {
   flex: 1;
   display: flex;
@@ -952,13 +1015,34 @@ html, body, #app {
   color: var(--text-muted);
 }
 
+/* Same accent CTA language as the Projects header's .new-session-cta. */
+.welcome-new-session {
+  margin-top: 1.25rem;
+  height: 34px;
+  padding: 0 1.25rem;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+  color: var(--text-on-accent, #fbf8f3);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.welcome-new-session:hover {
+  background: var(--bg-primary-hover);
+}
+
+@media (max-width: 800px) {
+  .welcome-new-session {
+    min-height: 44px;
+  }
+}
+
 /* ---------- Mobile / narrow-viewport layout ---------- */
 
 .drawer-backdrop {
-  display: none;
-}
-
-.mobile-hamburger {
   display: none;
 }
 
@@ -1083,21 +1167,6 @@ html, body, #app {
 
   .mobile-hamburger {
     display: flex;
-    align-items: center;
-    justify-content: center;
-    position: fixed;
-    top: calc(env(safe-area-inset-top, 0px) + 0.5rem);
-    left: 0.5rem;
-    z-index: 50;
-    width: 44px;
-    height: 44px;
-    padding: 0;
-    background: var(--bg-sidebar);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    font-size: 1.25rem;
-    cursor: pointer;
-    color: var(--text-primary);
   }
 
   /* Tap-target sizing for the icon buttons inside the sidebar header. */

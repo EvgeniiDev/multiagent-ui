@@ -1,133 +1,141 @@
-STATUS: DONE
+STATUS: DONE — all five items implemented, e2e 23/23 green. Registry was
+exercised through the contract-faithful stub (W1's `src/stores/projects.ts`
+lands separately); the seam flip is one line, see Integration requests.
 
-## Defect A — click on a project row now always produces a visible change
+## Что сделано
 
-Root cause: `.project-detail` was rendered as the last child of the scrolling
-`.pane-body`, so on any list longer than the viewport the click only flipped a
-ref — the mounted detail sat below the fold.
+1. **Селектор проекта в шапке** — `src/components/ProjectScopeSelector.vue`
+   (новый): `All` + список проектов из реестра, смонтирован в новой
+   `.scope-bar` наверху `.main-area` в `src/App.vue` — виден на всех видах
+   (chat/projects/board/dashboard). `src/stores/ui.ts` — единственный вход
+   скоупа для видов: `activeProjectId` и `activeProject` — делегирующие
+   computed в реестр (`features/scope/registry.ts` → стор `projects`),
+   `setActiveProject(id)` — делегирующая запись. Своя копия состояния не
+   хранится нигде: значение и персистенция (`projects.json`,
+   `activeProjectId`) живут в реестре по контракту W1. Просроченный id
+   селектор мягко сбрасывает в `all` (computed-get + watch).
+2. **Сессии по проекту** — `src/components/SessionList.vue`: вид и поведение
+   прежние (плотные строки, scope-строка агента, ⟳, скрытие строки); список
+   пропускается через `projectsStore.sessionsOfProject(visibleSessions)` —
+   показываются сессии, чей `cwd` внутри пути проекта; при `All` фильтра нет.
+   Сессии вне всех проектов видны только в `All` и помечены тегом
+   `unassigned` (`.row-tag`); сессия внутри `Common`, но не внутри более
+   узкого проекта, считается привязанной к `Common` (не unassigned).
+3. **Projects-вид подчинён селектору** — `src/components/ProjectsView.vue`:
+   источник строк — реестр (`projectsStore.projects`), а не вывод из сессий.
+   Сессии/usage/turns раскладываются по владельцу через `projectIdForCwd`
+   (longest-prefix — вложенные проекты не дублируют сессию). При выбранном
+   проекте список показывает только его и detail открыт на нём без клика;
+   при `All` — все. Сессиям вне проектов строки не соответствует (их место —
+   All-скоуп сайдбара, как в брифе).
+4. **Старт сессии в контексте проекта** — `NewSessionDialog.vue` получил
+   опциональный `initialCwd`; кнопка «New session» в шапке Projects
+   подставляет `activeProject.path`, при `All` поле пустое (как раньше —
+   см. Left as is про §A «старт в Common»).
+5. **Welcome screen** — `.welcome-screen` получила кнопку «New session»
+   (`.welcome-new-session`) и тот же `NewSessionDialog` с `initial-cwd` —
+   старт доступен без соединения; подтверждение ведёт в Chat.
 
-Fix in `src/components/ProjectsView.vue` (detail extracted to
-`src/features/projects/ProjectDetail.vue`):
+Попутно исправлен pre-existing баг (файл мой): на ≤800px `.mobile-hamburger`
+был `position:fixed; top:0.5rem; z-index:50` — под верхним rail (z 95), т.е.
+drawer с сессиями на телефоне не открывался вообще. Кнопка перенесена в
+`.scope-bar` (статичный поток, правый край, 44px).
 
-- `.pane-body` no longer scrolls. It is a horizontal flex frame holding two
-  independently scrolling panes: `.list-col` (`flex: 0 0 auto`,
-  `width: clamp(340px, 30vw, 420px)`, `overflow-y: auto`) and `.detail-col`
-  (`flex: 1`, `overflow-y: auto`). Agents/tokens collapse out of list rows in
-  the narrow column; they remain in the detail pane.
-- Selected row: `.open` now paints `--tint-active` background + a 3px accent
-  bar (`inset 3px 0 0 var(--bg-primary)`), heavier name weight,
-  `aria-current="true"`, `tabindex="0"` + Enter/Space activation.
-- `<800px` (same matchMedia breakpoint as the sidebar drawer): single column.
-  The detail mounts as `li.project-inline-detail` — the clicked row's
-  `nextElementSibling` — and `openProject` calls
-  `scrollIntoView({ block: 'nearest' })` on it after `nextTick`. Exactly one
-  `.project-detail` exists in the DOM at a time (the detail column is `v-if`'d
-  off while narrow and `display:none` besides).
-- Close affordance: `.detail-close` (SVG ✕, `aria-label="Close project
-  detail"`) in the detail header; kept "New session here", metrics and the
-  per-project session list.
-- Placeholder ("Select a project to see its sessions and usage.") when nothing
-  is selected.
+## Что проверено
 
-Measured `.project-detail` bounding-box `y` after clicking row 20 of a seeded
-26-row list (probe numbers from the brief, "before"):
+Всё ниже — **против стаба** `src/features/scope/__local-projects-stub.ts`
+(тот же Pinia id `projects`, тот же документ `acp-ui:projects.json`
+`{version, projects, activeProjectId}` — сиды теста совпадают с форматом W1).
+Против реального стора W1 пока ничего — файла в ветке нет; интеграцию
+проверяет Hermes после слияния (флип = раскомментировать две строки в
+`registry.ts`, удалить стаб).
 
-| viewport   | before (probe, deployed build)              | after (this build, e2e)      |
-|------------|---------------------------------------------|------------------------------|
-| 1440×900   | y = 1297 (invisible; scrollTop stayed 0)    | y = 63 (inside viewport)     |
-| 1024×768   | — (same defect shape: last child of list)   | y = 63                       |
-| 390×844    | end of list, no scroll                      | y = 583, inline under row    |
+- e2e_project_scope.py, 23/23 (1440x900 + 390x844): чистый профиль →
+  All+Common; сид реестра → All+Common+Alpha+Beta; фильтрация сайдбара по
+  Alpha/Beta (2 и 1 строка); `unassigned` только на внешней сессии;
+  персистенция выбора в `projects.json` + после reload; Projects-вид
+  подчинён селектору (3→1 строка, detail без клика); `initialCwd` в диалоге
+  (путь Alpha при скоупе, пусто при All); New session с welcome-screen без
+  соединения → `chat-view`; ноль `pageerror`; селект 44px на 390.
 
-At 390 the detail's `<li>` is `clickedRow.nextElementSibling`
-(`compareDocumentPosition` FOLLOWING, sibling distance 1) and is pulled into
-view by `scrollIntoView`.
+## Доказательства
 
-## Defect B — session creation no longer requires a project
-
-One shared implementation: `src/features/projects/NewSessionDialog.vue`
-(agent `<select>` fed by `configStore.agentNames` — stdio already filtered out
-on web/mobile — plus a working-directory field that reuses the existing
-`DirectoryPicker`, so ws agents also get the bridge-backed directory tree for
-free; the field may stay empty, `''` is passed through to
-`sessionStore.createSession` and the agent uses its own default). Confirm →
-`createSession(agent, cwd)` → `uiStore.setView('chat')` — the same path as
-"New session here". Esc / overlay click / Cancel dismiss; failure keeps the
-dialog open with the error inline (the store's error banner also fires).
-
-Two entry points:
-
-- `ProjectsView` header: primary `.new-session-cta` button — works with no
-  project selected and no session connected.
-- `ChatView` header: `.chat-new-session` — always rendered while the chat view
-  is mounted (the sidebar's own New Session button is untouched per the
-  brief), disabled only while a turn is streaming / a reconnect is in flight.
-
-## Evidence
-
-`npm run build:web` (vue-tsc + vite, green):
+Сборка (`npm run build:web`, vue-tsc + vite):
 
 ```
-dist-web/assets/index-DYJcA_3A.js   452.02 kB │ gzip: 160.29 kB
-✓ built in 2.52s
+dist-web/assets/index-cqwkSiKP.js   457.26 kB │ gzip: 161.92 kB
+✓ built in 2.64s
 ```
 
-`~/.hermes/tools-venv/bin/python scripts/e2e_projects_ux.py` (self-serves
-dist-web on 127.0.0.1:25989, seeds 26 sessions with distinct `cwd` into
-`acp-ui:sessions.json`, reloads, mocks the ACP handshake via
-`page.route_web_socket`):
+`~/.hermes/tools-venv/bin/python scripts/e2e_project_scope.py` (сам поднимает
+dist-web на 25987):
 
 ```
-PASS  seeded long project list  (26 rows)
-PASS  Projects header New session opens dialog (no project selected)
-PASS  dialog offers the configured agents  (,E2E Mock,E2E Mock B)
-PASS  dialog confirm creates session and lands on Chat
+PASS  clean profile: selector shows All + auto-provisioned Common  (All,Common)
+PASS  selector lists All + every registered project  (All,Common,Alpha,Beta)
+PASS  All scope: sidebar shows every session  (alpha one,alpha two,beta one,loose work,orphan job)
+PASS  Alpha scope: only Alpha sessions in sidebar  (alpha one,alpha two)
+PASS  All scope: outside session carries 'unassigned' tag
+PASS  All scope: exactly one unassigned row (Common loose is assigned)
+PASS  scope persisted into projects.json  (p-beta)
+PASS  scope survives reload  (p-beta)
+PASS  reloaded Beta scope still filters sessions  (beta one)
+PASS  Projects at All lists the registry (Common, Alpha, Beta)
+PASS  Projects scoped: list shows only Alpha
+PASS  Projects scoped: detail shows Alpha without a click
+PASS  Projects scoped: detail lists Alpha's two sessions  (2 rows)
+PASS  New session dialog prefills scoped project path  ('/home/hermes/projects/alpha')
+PASS  New session dialog at All keeps cwd empty (as before)  ('')
+PASS  welcome screen offers New session with no connection
+PASS  welcome New session starts a session and lands on Chat
 PASS  dialog closes after confirm
-PASS  chat header has a New session control
-PASS  chat header control opens the same dialog
-PASS  1440: detail pane inside viewport after click  (y=63 vh=900)
-PASS  1440: detail shows the clicked project's path  ('/home/hermes/projects/proj-19')
-PASS  selected row carries .open
-PASS  selected row has aria-current='true'
-PASS  selected row is unmistakable (tint bg + accent bar)  (bg=rgba(194, 83, 47, 0.1) shadow=rgb(194, 83, 47) 3px 0px 0px 0px inset)
-PASS  1024: detail pane still inside viewport  (y=63 vh=768)
-PASS  390: detail rendered immediately after the clicked row  (nextIsDetail=True, follows=True)
-PASS  390: inline detail inside viewport after scrollIntoView  (y=583 vh=844)
-PASS  390: inline detail shows the clicked project  ('proj-19')
-PASS  390: exactly one .project-detail in DOM
-PASS  390: selected row still marked
+PASS  390: scope select is a full-height touch target  (44px)
+PASS  390: drawer session list filtered to Alpha
+PASS  390: Projects scoped to Alpha shows one row
+PASS  390: inline detail mounts under the scoped row
 PASS  zero pageerror events
-
-19/19 assertions passed
+23/23 assertions passed
 ```
 
-Re-run, unchanged, against this worktree's build:
+Перепрогнанные наборы (из этого worktree, на собранном `dist-web`):
 
-- `scripts/e2e_board.py`     — **16/16** (dist-web served on 25999)
-- `scripts/e2e_touch.py`     — **17/17** (self-served on 25996)
-- `scripts/e2e_dashboard.py` — **11/16 — pre-existing time-bomb, not caused by
-  this change.** Its fixture dates the `beta` rows "today at 12:00 UTC";
-  between 00:00 and 12:00 UTC those rows are in the future and
-  `usageInRange(from, to=Date.now())` drops them (summary reads 2,000 instead
-  of 2,500, by-agent has 1 row, quota-warning rows 0). Verified by stashing
-  this change, rebuilding HEAD and re-running: identical 11/16 failure. The
-  script is in the forbidden set so it was not edited; it should go green if
-  re-run after 12:00 UTC, or its `ts(0, 12)` fixture should be anchored to a
-  guaranteed-past hour.
+- `scripts/e2e_board.py` — **16/16** (dist-web на 25999).
+- `scripts/e2e_touch.py` — **17/17** (25996). Проекты-часть проходит на одной
+  строке `Common` — реестр без сида содержит только её.
+- `scripts/e2e_projects_ux.py` — **падает, ожидаемо**: `FAIL seeded long
+  project list (1 rows)`, затем таймаут на `.project-row` nth(19). Скрипт
+  проверяет старую семантику «проекты выводятся из сессий» (26 cwd → 26
+  строк); по v2 §B источник списка — реестр, и все 26 сидовых cwd лежат внутри
+  `Common` → 1 строка. Это не «до слияния W1» — поведение сохранится и с
+  настоящим стором: фикстуре нужен сид `acp-ui:projects.json`. Скрипт чужой —
+  не правил, см. Integration requests. Пройденные до падения ассерты
+  (New session из шапки/чата, диалог, агенты) — PASS.
+- Скриншоты: `docs/scope-{1440x900,1024x768,390x844}.png`.
 
-Screenshots: `docs/ux-projects-1440x900.png`, `docs/ux-projects-1024x768.png`,
-`docs/ux-projects-390x844.png`, `docs/ux-newsession-1440x900.png`.
+## Integration requests
 
-## Integration requests / Left as is
+- **После слияния W1**: в `src/features/scope/registry.ts` раскомментировать
+  импорт из `../../stores/projects` (две строки, помечены `TODO(w1-merge)`) и
+  удалить `__local-projects-stub.ts`. Проверить, что реальный стор пишет
+  `activeProjectId` в тот же документ `projects.json` — тогда e2e-сиды и
+  персистенция переносятся без правок.
+- **`scripts/e2e_projects_ux.py`** (чужой): его фикстуре нужен сид
+  `acp-ui:projects.json` с проектами под cwd `proj-XX`, либо переосмысление
+  ассерта про длинный список — сейчас он проверяет отменённую семантику
+  «проект = cwd из сессий». До правки он будет падать и после слияния W1.
+- **`stores/session.ts`** (не просил правок, наблюдение): `visibleSessions`
+  требует `activeAgentName` — после перезагрузки сайдбар пуст до выбора
+  агента. Не блокирует скоуп, но с реестром фильтр «молчит» на пустом списке.
 
-- **`App.vue` gates `<ChatView>` on `isConnected`** (the welcome screen
-  renders instead while disconnected). The chat-header "New session" is
-  therefore present whenever the chat view exists — including while the
-  sidebar button is hidden — but a literal "available while disconnected"
-  header control cannot exist without touching `App.vue`. Request: either
-  mount `ChatView` unconditionally, or add the same one-line trigger +
-  `<NewSessionDialog v-if … @close>` to `.welcome-screen`. The dialog is a
-  drop-in component (`src/features/projects/NewSessionDialog.vue`, emits
-  `close`, owns the whole create → switch-to-chat flow).
-- `e2e_dashboard.py` fixture time-bomb described above (file is out of
-  scope).
-- Sidebar `.new-session-btn` left exactly as is, per the brief.
+## Left as is
+
+- **Борд и дашборд** читают селектор, но не фильтруются — это W3/W4 по плану
+  (`stores/board.ts`, `DashboardView.vue` вне моего владения).
+- **§A «New session без проекта стартует в Common»**: по буквальному тексту
+  брифа при `All` поле cwd диалога пусто («работать как раньше»). Если
+  владелец хочет префилл пути `Common` при `All` — одна строка в `scopeCwd`
+  (App.vue + ProjectsView.vue), оставлено на интеграцию.
+- `sessionsOfProject` в стабе — path-containment по активному проекту (как в
+  брифе «cwd лежит внутри пути проекта»): при вложенных проектах сессии
+  дочернего видны и в родительском скоупе. Если W1 выбрал ownership
+  (longest-prefix), сайдбар автоматически возьмёт его семантику.
