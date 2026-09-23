@@ -39,6 +39,8 @@ export interface ActivityEntry {
   kind: ActivityKind;
   agentName: string;
   sessionId?: string;
+  /** Role the dispatcher ran under, on `card` events it wrote. */
+  role?: string;
   cwd?: string;
   title?: string;
   detail?: string;

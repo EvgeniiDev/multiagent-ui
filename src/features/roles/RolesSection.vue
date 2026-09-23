@@ -45,6 +45,7 @@ const formPromptFile = ref('');
 const formMaxConcurrent = ref(1);
 const formPollIntervalSec = ref(15);
 const formTimeoutMin = ref(45);
+const formMaxRetries = ref(1);
 const error = ref('');
 const busy = ref(false);
 /** Role whose last delete was rejected because it is still assigned — its
@@ -60,6 +61,7 @@ function resetForm(): void {
   formMaxConcurrent.value = 1;
   formPollIntervalSec.value = 15;
   formTimeoutMin.value = 45;
+  formMaxRetries.value = 1;
   showForm.value = false;
   editingId.value = null;
 }
@@ -80,6 +82,7 @@ function startEdit(r: Role): void {
   formMaxConcurrent.value = r.maxConcurrent;
   formPollIntervalSec.value = r.pollIntervalSec;
   formTimeoutMin.value = r.timeoutMin;
+  formMaxRetries.value = r.maxRetries;
   error.value = '';
 }
 
@@ -117,6 +120,7 @@ function formToRole(id: string): Role {
     maxConcurrent: Number(formMaxConcurrent.value),
     pollIntervalSec: Number(formPollIntervalSec.value),
     timeoutMin: Number(formTimeoutMin.value),
+    maxRetries: Number(formMaxRetries.value),
   };
 }
 
@@ -305,6 +309,11 @@ onMounted(async () => {
           <label>Timeout (min)</label>
           <input v-model.number="formTimeoutMin" type="number" min="1" step="1" data-testid="role-timeout" />
         </div>
+        <div class="form-group">
+          <label>Max retries</label>
+          <input v-model.number="formMaxRetries" type="number" min="1" step="1" data-testid="role-retries" />
+          <small>Attempts per card; 1 = no retry, then the card is flagged blocked.</small>
+        </div>
       </div>
       <div class="form-actions">
         <button class="save-btn" type="button" :disabled="busy" data-testid="role-save" @click="handleSubmit">
@@ -340,7 +349,7 @@ onMounted(async () => {
           </div>
           <div class="role-limits">
             id <code>{{ r.id }}</code> · args <code>{{ r.args.join(' ') || '—' }}</code>
-            · max {{ r.maxConcurrent }} · poll {{ r.pollIntervalSec }}s · timeout {{ r.timeoutMin }}m
+            · max {{ r.maxConcurrent }} · poll {{ r.pollIntervalSec }}s · timeout {{ r.timeoutMin }}m · retries {{ r.maxRetries }}
             <template v-if="isAssigned(r)"> · stage: {{ rolesStore.stagesForRole(r.id).join(', ') }}</template>
           </div>
         </div>
