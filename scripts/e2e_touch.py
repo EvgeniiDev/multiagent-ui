@@ -111,13 +111,18 @@ def seed(context, with_board=True):
              "agent": "Hermes Agent", "priority": "medium", "acceptance": "",
              "verification": "", "links": [{"label": "brief", "url": "https://example.com/brief"}],
              "session": {"agentName": "Hermes Agent", "sessionId": "sess-e2e-1"},
-             "blockedBy": "", "status": "inbox", "order": 10,
+             "blocked": False, "blockedReason": "", "cancelled": False,
+             "touches": [], "dependsOn": [], "blocks": [], "conflictsWith": [],
+             "stage": "backlog", "status": None, "statusByStage": {}, "order": 10,
              "createdAt": now - H, "updatedAt": now - H},
             {"id": "seed-card-2", "title": "Triage incoming agent work",
              "description": "Seeded card.", "project": "infra", "agent": "OpenCode",
              "priority": "high", "acceptance": "", "verification": "", "links": [],
-             "session": None, "blockedBy": "waiting on api spec", "status": "blocked",
-             "order": 10, "createdAt": now - 2 * H, "updatedAt": now - 2 * H},
+             "session": None, "blocked": True, "blockedReason": "waiting on api spec",
+             "cancelled": False, "touches": [], "dependsOn": [], "blocks": [],
+             "conflictsWith": [], "stage": "backlog", "status": None,
+             "statusByStage": {}, "order": 10,
+             "createdAt": now - 2 * H, "updatedAt": now - 2 * H},
         ]
         scripts.append(
             f"if (!localStorage.getItem('acp-ui:board.json'))"
@@ -242,7 +247,7 @@ def run_checks():
         page.wait_for_selector(".view-rail", timeout=10000)
         page.click('.rail-btn[aria-label="Board"]')
         page.wait_for_selector(".col-switcher", timeout=5000)
-        page.wait_for_selector('[data-col="inbox"] .board-card', timeout=5000)
+        page.wait_for_selector('[data-col="backlog"] .board-card', timeout=5000)
 
         check_touch(page, ".view-pane", "board@390")
 
@@ -262,7 +267,7 @@ def run_checks():
         check("board@390: no page-level horizontal scroll", hscroll <= 1, f"{hscroll}px")
 
         # Card "Move to" menu: trigger + items.
-        page.locator('[data-col="inbox"] .board-card .card-menu-btn').first.click()
+        page.locator('[data-col="backlog"] .board-card .card-menu-btn').first.click()
         page.wait_for_selector(".card-menu .menu-item", timeout=5000)
         check_touch(page, ".card-menu", "board@390 move-to menu")
         page.keyboard.press("Escape")
@@ -270,7 +275,7 @@ def run_checks():
         page.wait_for_timeout(150)
 
         # Card drawer.
-        page.locator('[data-col="inbox"] .board-card').first.click()
+        page.locator('[data-col="backlog"] .board-card').first.click()
         page.wait_for_selector(".card-drawer", timeout=5000)
         check_touch(page, ".card-drawer", "board@390 drawer")
         page.keyboard.press("Escape")
@@ -343,7 +348,7 @@ def run_checks():
         dp.wait_for_selector(".view-rail", timeout=10000)
 
         dp.click('.rail-btn[aria-label="Board"]')
-        dp.wait_for_selector('[data-col="inbox"]', timeout=5000)
+        dp.wait_for_selector('[data-col="backlog"]', timeout=5000)
         check_desktop_density(
             dp, [".tab-btn", ".board-filters .f-search"], "board@1024"
         )
