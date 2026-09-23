@@ -1,8 +1,16 @@
 // Which top-level view the shell shows. Persisted so a reload lands where the
 // user was working.
+//
+// This store is also the scope entry point for views: `activeProjectId`
+// (`'all' | projectId`) is the single source the header selector writes and
+// every view reads. The value itself lives in the projects registry (W1's
+// `stores/projects.ts`, reached through the features/scope seam) — the
+// registry owns persistence in `projects.json`; what is kept here is only the
+// delegating computed so no view ever holds a private copy.
 import { defineStore } from 'pinia';
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { loadKvStore, type KVStore } from '../lib/host/storage';
+import { useProjectsStore } from '../features/scope/registry';
 
 export type ViewId = 'chat' | 'projects' | 'board' | 'dashboard';
 
@@ -17,10 +25,20 @@ const STORE_PATH = 'preferences.json';
 const KEY = 'activeView';
 
 export const useUiStore = defineStore('ui', () => {
+  const projectsStore = useProjectsStore();
   const activeView = ref<ViewId>('chat');
   const showSettings = ref(false);
   const showTraffic = ref(false);
   let store: KVStore | null = null;
+
+  // Global project scope ('all' | project id). Reads/writes delegate to the
+  // registry — persistence, validation and the Common default live there.
+  const activeProjectId = computed<string>(() => projectsStore.activeProjectId);
+  const activeProject = computed(() => projectsStore.activeProject);
+
+  async function setActiveProject(id: string): Promise<void> {
+    await projectsStore.setActiveProject(id);
+  }
 
   async function initUiStore(): Promise<void> {
     store = await loadKvStore(STORE_PATH);
@@ -60,5 +78,15 @@ export const useUiStore = defineStore('ui', () => {
     });
   }
 
-  return { activeView, showSettings, showTraffic, initUiStore, setView, VIEWS };
+  return {
+    activeView,
+    showSettings,
+    showTraffic,
+    activeProjectId,
+    activeProject,
+    initUiStore,
+    setView,
+    setActiveProject,
+    VIEWS,
+  };
 });

@@ -1,10 +1,12 @@
 <script setup lang="ts">
-// Projects view (F2 in docs/control-center-requirements.md).
+// Projects view (F2 in docs/control-center-requirements.md, rescoped by v2 §B).
 //
-// A project is a working directory the agents have worked in. Nothing is
-// declared by hand: projects are derived from the sessions the agents report,
-// so the list is always the truth of what has actually been touched. Numbers
-// come from the activity ledger (usage_update / turn events), never invented.
+// The list source is the projects REGISTRY (stores/projects.ts via the
+// features/scope seam) — one row per registered project — not sessions'
+// derived cwds. Sessions, usage and turns aggregate into a project by
+// longest-prefix cwd ownership (a session counts once even when projects
+// nest). The global scope selector applies: with a project selected the list
+// and the detail show only it; 'all' lists every registered project.
 //
 // Layout is a real two-pane view: the project list lives in its own
 // scrollable column on the left, the detail pane sits beside it with its own
@@ -15,9 +17,10 @@
 // is inlined directly under the clicked row, scrolled into view on select.
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useSessionStore } from '../stores/session';
-import { useActivityStore, projectName } from '../stores/activity';
+import { useActivityStore } from '../stores/activity';
 import { useConfigStore } from '../stores/config';
 import { useUiStore } from '../stores/ui';
+import { useProjectsStore } from '../features/scope/registry';
 import type { SavedSession } from '../lib/types';
 import ProjectDetail from '../features/projects/ProjectDetail.vue';
 import NewSessionDialog from '../features/projects/NewSessionDialog.vue';
@@ -28,6 +31,7 @@ const sessionStore = useSessionStore();
 const activity = useActivityStore();
 const configStore = useConfigStore();
 const uiStore = useUiStore();
+const projectsStore = useProjectsStore();
 
 const search = ref('');
 const agentFilter = ref('');
@@ -58,38 +62,72 @@ onBeforeUnmount(() => {
   }
 });
 
-/** One row per working directory, aggregated over the sessions we know about. */
+/** Working directory the header's "New session" dialog opens with — the
+ *  scoped project's path, or empty at All (agent's default directory). */
+const scopeCwd = computed(() => uiStore.activeProject?.path ?? '');
+
+/** One row per REGISTERED project; sessions/usage attach by ownership — the
+ *  owning project is the longest-prefix cwd match, so nested projects never
+ *  double-count a session. */
 const projects = computed<ProjectRow[]>(() => {
   const { from, to } = range.value ? activity.dayRange(range.value) : { from: 0, to: Date.now() };
-  const usage = new Map(activity.usageByProject(from, to).map((u) => [u.project, u]));
+  const scoped = uiStore.activeProjectId;
   const liveSessions = activity.liveSessions;
-  const byCwd = new Map<string, SavedSession[]>();
-  for (const session of sessionStore.savedSessions) {
-    if (!session.cwd) continue;
-    const list = byCwd.get(session.cwd) ?? [];
-    list.push(session);
-    byCwd.set(session.cwd, list);
+
+  // Tokens/cost/turns per project id over the selected range.
+  const stats = new Map<string, { tokens: number; cost: number; turns: number }>();
+  const bump = (id: string) => {
+    let v = stats.get(id);
+    if (!v) stats.set(id, (v = { tokens: 0, cost: 0, turns: 0 }));
+    return v;
+  };
+  for (const u of activity.usageInRange(from, to)) {
+    const pid = u.cwd ? projectsStore.projectIdForCwd(u.cwd) : null;
+    if (!pid) continue;
+    const s = bump(pid);
+    s.tokens += Math.max(0, u.used);
+    s.cost += u.cost ?? 0;
+  }
+  for (const e of activity.entriesInRange(from, to)) {
+    if (e.kind !== 'turn-end' || !e.cwd) continue;
+    const pid = projectsStore.projectIdForCwd(e.cwd);
+    if (pid) bump(pid).turns += 1;
+  }
+
+  const sessionsByProject = new Map<string, SavedSession[]>();
+  for (const s of sessionStore.savedSessions) {
+    const pid = s.cwd ? projectsStore.projectIdForCwd(s.cwd) : null;
+    if (!pid) continue;
+    const list = sessionsByProject.get(pid) ?? [];
+    list.push(s);
+    sessionsByProject.set(pid, list);
   }
 
   const rows: ProjectRow[] = [];
-  for (const [cwd, sessions] of byCwd) {
-    const name = projectName(cwd);
+  for (const project of projectsStore.projects) {
+    if (scoped !== 'all' && project.id !== scoped) continue;
+    const sessions = sessionsByProject.get(project.id) ?? [];
     const agents = [...new Set(sessions.map((s) => s.agentName))].sort();
     if (agentFilter.value && !agents.includes(agentFilter.value)) continue;
     if (search.value) {
       const needle = search.value.toLowerCase();
-      if (!name.toLowerCase().includes(needle) && !cwd.toLowerCase().includes(needle)) continue;
+      if (!project.name.toLowerCase().includes(needle) && !project.path.toLowerCase().includes(needle)) continue;
     }
-    const stat = usage.get(name);
-    const currentBusy =
-      sessionStore.isLoading && sessionStore.currentSession?.cwd === cwd;
+    const stat = stats.get(project.id);
+    const currentCwd = sessionStore.currentSession?.cwd;
     rows.push({
-      cwd,
-      name,
+      cwd: project.path,
+      name: project.name,
       sessions: sessions.length,
-      lastActivity: Math.max(...sessions.map((s) => s.lastUpdated)),
+      lastActivity: sessions.length
+        ? Math.max(...sessions.map((s) => s.lastUpdated))
+        : project.createdAt,
       agents,
-      live: currentBusy || sessions.some((s) => liveSessions.has(s.sessionId)),
+      live:
+        (sessionStore.isLoading &&
+          !!currentCwd &&
+          projectsStore.projectIdForCwd(currentCwd) === project.id) ||
+        sessions.some((s) => liveSessions.has(s.sessionId)),
       tokens: stat?.tokens ?? 0,
       cost: stat?.cost ?? 0,
       turns: stat?.turns ?? 0,
@@ -98,13 +136,22 @@ const projects = computed<ProjectRow[]>(() => {
   return rows.sort((a, b) => b.lastActivity - a.lastActivity);
 });
 
-const selected = computed(() => projects.value.find((p) => p.cwd === selectedCwd.value) ?? null);
-
-const selectedSessions = computed(() =>
-  sessionStore.savedSessions
-    .filter((s) => s.cwd === selectedCwd.value)
-    .sort((a, b) => b.lastUpdated - a.lastUpdated)
+// With a project scoped, list AND detail show only it — the detail falls
+// back to the single scoped row so no click is needed.
+const selected = computed(
+  () =>
+    projects.value.find((p) => p.cwd === selectedCwd.value) ??
+    (uiStore.activeProjectId !== 'all' ? projects.value[0] ?? null : null)
 );
+
+const selectedSessions = computed(() => {
+  const current = selected.value;
+  if (!current) return [];
+  const pid = projectsStore.projectIdForCwd(current.cwd);
+  return sessionStore.savedSessions
+    .filter((s) => s.cwd && projectsStore.projectIdForCwd(s.cwd) === pid)
+    .sort((a, b) => b.lastUpdated - a.lastUpdated);
+});
 
 const agentsInUse = computed(() => [...new Set(sessionStore.savedSessions.map((s) => s.agentName))].sort());
 
@@ -167,8 +214,8 @@ async function newSessionIn(row: ProjectRow) {
 
     <div class="pane-body">
       <p v-if="projects.length === 0" class="pane-empty">
-        No projects yet. A project appears here once an agent reports a session with a working
-        directory.
+        No projects match. Projects are registered in Settings &rarr; Projects;
+        the global scope selector and the filters above narrow this list.
       </p>
 
       <template v-else>
@@ -193,7 +240,7 @@ async function newSessionIn(row: ProjectRow) {
                 <span class="project-stamp">{{ formatStamp(row.lastActivity) }}</span>
               </li>
               <li
-                v-if="isNarrow && row.cwd === selectedCwd"
+                v-if="isNarrow && selected && row.cwd === selected.cwd"
                 class="project-inline-detail"
               >
                 <ProjectDetail
@@ -226,7 +273,11 @@ async function newSessionIn(row: ProjectRow) {
       </template>
     </div>
 
-    <NewSessionDialog v-if="showNewSession" @close="showNewSession = false" />
+    <NewSessionDialog
+      v-if="showNewSession"
+      :initial-cwd="scopeCwd"
+      @close="showNewSession = false"
+    />
   </div>
 </template>
 
