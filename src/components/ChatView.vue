@@ -2,6 +2,7 @@
 import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue';
 import { marked } from 'marked';
 import { useSessionStore } from '../stores/session';
+import { useActivityStore } from '../stores/activity';
 import { isMobile } from '../lib/platform';
 import { readAttachments, formatBytes, extractReplayedAttachments, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from '../lib/attachments';
 import ModePicker from './ModePicker.vue';
@@ -90,6 +91,7 @@ const currentModeId = computed(() => sessionStore.currentModeId);
 const availableModels = computed(() => sessionStore.availableModels);
 const currentModelId = computed(() => sessionStore.currentModelId);
 const availableCommands = computed(() => sessionStore.availableCommands);
+const isAutonomous = computed(() => sessionStore.autonomous);
 
 // Slash command state
 const showCommandPalette = computed(() => {
@@ -249,6 +251,12 @@ let composerRo: ResizeObserver | null = null;
 let composerBoxWidth = 0;
 onMounted(() => {
   autosizeComposer();
+  // Test seam for the autonomous e2e (same shape as window.__projects):
+  // exposes the session + activity stores so the test can flip autonomous
+  // mode, shorten the permission timeout through the same code path the
+  // production UI uses, and read back the audit entries.
+  (window as unknown as { __session: unknown }).__session = sessionStore;
+  (window as unknown as { __activity: unknown }).__activity = useActivityStore();
   if (typeof ResizeObserver !== 'undefined' && composerBox.value) {
     composerRo = new ResizeObserver((entries) => {
       const w = entries[0].contentRect.width;
@@ -439,7 +447,7 @@ function getToolKind(kind: string): string {
           :disabled="isLoading"
           @change="handleModeChange"
         />
-        <span class="agent-name">{{ currentSession?.agentName }}</span>
+        <span class="agent-name">{{ currentSession?.agentName }}<span v-if="isAutonomous" class="auto-badge">auto</span></span>
       </div>
     </div>
     
@@ -736,6 +744,19 @@ function getToolKind(kind: string): string {
   font-size: 0.6875rem;
   letter-spacing: 0.02em;
   color: var(--text-muted, #a39a8e);
+}
+
+/* Autonomous run marker: one mono token, same palette as the header. */
+.auto-badge {
+  display: inline-block;
+  margin-left: 0.375rem;
+  padding: 0.0625rem 0.3rem;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  font-size: 0.625rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary, #6b6259);
 }
 
 .messages-container {

@@ -5,9 +5,12 @@
 // nothing to do with this UI.
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
 import type { PermissionRequest } from '../lib/types';
+import { useSessionStore } from '../stores/session';
 
 const props = defineProps<{
   request: PermissionRequest;
+  /** Seconds until the client closes the request on its own. Defaults to the session store's ceiling. */
+  timeoutSec?: number;
 }>();
 
 const emit = defineEmits<{
@@ -36,6 +39,16 @@ const isReject = (kind: string) => kind.startsWith('reject');
 
 /** Short kind label, matching the app's mono chips ("read", "run", …). */
 const kindLabel = computed(() => props.request.toolCall.kind || 'tool');
+
+/** Seconds until the client closes the request on its own (store ceiling by default). */
+const timeoutSeconds = computed(() => {
+  if (typeof props.timeoutSec === 'number' && Number.isFinite(props.timeoutSec)) {
+    return Math.max(1, Math.ceil(props.timeoutSec));
+  }
+  const storeMs = Number(useSessionStore().permissionTimeoutMs ?? NaN);
+  if (!Number.isFinite(storeMs) || storeMs <= 0) return 120;
+  return Math.max(1, Math.ceil(storeMs / 1000));
+});
 
 const locations = computed(() =>
   // The agent's title usually already names the path ("Read /x/y.txt"); printing
@@ -85,6 +98,8 @@ onBeforeUnmount(() => {
         <div v-if="locations.length" class="locations">
           <p v-for="(loc, index) in locations" :key="index" class="location">{{ loc.path }}</p>
         </div>
+
+        <p class="timeout-line">Ответ нужен в течение {{ timeoutSeconds }} с — иначе запрос закроется сам.</p>
       </div>
 
       <div class="dialog-actions">
@@ -180,6 +195,14 @@ onBeforeUnmount(() => {
   line-height: 1.4;
   color: var(--text-secondary, #6b6259);
   word-break: break-all;
+}
+
+/* The request carries its own deadline — said once, in muted text. */
+.timeout-line {
+  margin: 0.5rem 0 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--text-muted, #a39a8e);
 }
 
 .dialog-actions {

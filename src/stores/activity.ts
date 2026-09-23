@@ -26,6 +26,7 @@ export type ActivityKind =
   | 'turn-start'
   | 'turn-end'
   | 'tool-call'
+  | 'permission'
   | 'usage'
   | 'error'
   | 'lock'

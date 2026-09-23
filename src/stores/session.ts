@@ -25,6 +25,19 @@ const PROTOCOL_VERSION = 1;
  */
 const MAX_SESSION_LIST_PAGES = 20;
 
+/**
+ * Default ceiling for one pending `session/request_permission`: if neither
+ * a human nor the autonomous path answers within this window, the client
+ * closes the request honestly (`cancelPermission()`) and writes a
+ * `permission` ledger entry — the turn must not hang forever.
+ * Mutable export so the e2e can shorten it through the same code path
+ * the production UI uses (no sleeps in the WS mock handler).
+ */
+export let PERMISSION_TIMEOUT_MS = 120000;
+export function setPermissionTimeoutMs(ms: number): void {
+  PERMISSION_TIMEOUT_MS = ms;
+}
+
 // App version (loaded once at startup)
 let appVersion = '0.1.0';
 
@@ -62,6 +75,17 @@ export const useSessionStore = defineStore('session', () => {
   const isReconnecting = ref(false);
   const error = ref<string | null>(null);
   const pendingPermission = ref<PermissionRequest | null>(null);
+  /**
+   * Autonomous run: when true the client answers `session/request_permission`
+   * itself with the allow-once option the agent offered (no dialog) and
+   * writes a `permission` audit entry per auto-approval. Per-run state —
+   * set on `createSession`/`resumeSession` via `options.autonomous`, never a
+   * global toggle. Exposed on `window.__session` for the e2e only; the
+   * production path sets it when a role/card starts the run.
+   */
+  const autonomous = ref(false);
+  /** Real timeout handle for the currently pending permission request. */
+  let permissionTimer: ReturnType<typeof setTimeout> | null = null;
   
   // Authentication state
   const pendingAuthMethods = ref<AuthMethod[]>([]);
@@ -424,8 +448,108 @@ export const useSessionStore = defineStore('session', () => {
     acpClient = null;
     isConnected.value = false;
     isLoading.value = false;
+    clearPermissionTimer();
     pendingPermission.value = null;
     error.value = `Connection lost: ${reason ?? 'transport closed'}`;
+  }
+
+  // ---- Autonomous permission handling (W6-B) -------------------------------
+  // A pending `session/request_permission` is answered exactly once, by the
+  // first of: the autonomous path, the human, or the timeout. The timer is
+  // the backstop — it closes the request honestly via `cancelPermission()`
+  // so a turn never hangs forever.
+
+  function clearPermissionTimer(): void {
+    if (permissionTimer !== null) {
+      clearTimeout(permissionTimer);
+      permissionTimer = null;
+    }
+  }
+
+  function recordPermissionEntry(request: PermissionRequest, detail: string): void {
+    useActivityStore().recordEntry({
+      kind: 'permission',
+      agentName: currentSession.value?.agentName ?? 'unknown',
+      sessionId: request.sessionId || currentSession.value?.sessionId,
+      cwd: currentSession.value?.cwd,
+      title: request.toolCall.title || request.toolCall.toolCallId,
+      detail,
+    });
+  }
+
+  /** The allow-once option the agent offered, if any. */
+  function pickAllowOption(request: PermissionRequest): PermissionRequest['options'][number] | null {
+    return (
+      request.options.find((o) => o.kind === 'allow_once') ??
+      request.options.find((o) => o.kind.startsWith('allow')) ??
+      null
+    );
+  }
+
+  function onPermissionTimeout(): void {
+    permissionTimer = null;
+    const request = pendingPermission.value;
+    if (!request) return;
+    recordPermissionEntry(
+      request,
+      `permission request timed out after ${Math.ceil(PERMISSION_TIMEOUT_MS / 1000)}s (no answer)`
+    );
+    cancelPermission();
+  }
+
+  function armPermissionTimer(): void {
+    clearPermissionTimer();
+    permissionTimer = setTimeout(onPermissionTimeout, PERMISSION_TIMEOUT_MS);
+  }
+
+  /**
+   * Single entry point for every permission request the bridge reports.
+   * Autonomous sessions never populate `pendingPermission` (so App.vue
+   * mounts no `.permission-dialog`) — they answer immediately and audit.
+   * Manual sessions publish the request for the dialog and arm the timeout.
+   * A `null` report means the request settled elsewhere: drop the dialog
+   * and the timer.
+   */
+  function handlePermissionRequest(request: PermissionRequest | null): void {
+    if (!request) {
+      clearPermissionTimer();
+      pendingPermission.value = null;
+      return;
+    }
+    if (autonomous.value) {
+      const allow = pickAllowOption(request);
+      if (allow) {
+        recordPermissionEntry(
+          request,
+          `auto-approve: autonomous run (option "${allow.name}" / ${allow.optionId})`
+        );
+        resolvePermission(allow.optionId);
+      } else {
+        recordPermissionEntry(
+          request,
+          'auto-deny: autonomous run (no allow option offered by agent)'
+        );
+        cancelPermission();
+      }
+      return;
+    }
+    pendingPermission.value = request;
+    armPermissionTimer();
+  }
+
+  /** Enable/disable the autonomous run for the current session. */
+  function setAutonomous(value: boolean): void {
+    autonomous.value = value;
+  }
+
+  /**
+   * Shorten/lengthen the permission ceiling (ms) through the same code path
+   * the production UI uses. Exists for the e2e; production leaves the
+   * 120 s default alone. Re-arms the timer when a request is pending.
+   */
+  function setPermissionTimeout(ms: number): void {
+    setPermissionTimeoutMs(ms);
+    if (pendingPermission.value && !autonomous.value) armPermissionTimer();
   }
 
   // Session update handler
@@ -640,11 +764,18 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   // Create new session
-  async function createSession(agentName: string, cwd: string): Promise<void> {
+  async function createSession(
+    agentName: string,
+    cwd: string,
+    options?: { autonomous?: boolean }
+  ): Promise<void> {
     isLoading.value = true;
     isConnecting.value = true;
     connectionAborted = false;
     error.value = null;
+    // Autonomous is per-run, not a global toggle: reset on every connect so
+    // a manual session never inherits it from a previous run.
+    autonomous.value = options?.autonomous ?? false;
 
     // Look up the agent's transport kind so we know whether to do the
     // stdio-only startup choreography (spawn → stderr progress) or the
@@ -734,11 +865,11 @@ export const useSessionStore = defineStore('session', () => {
         handleUnexpectedClose(reason);
       };
       
-      // Sync bridge's pendingPermissionRequest to store's pendingPermission
+      // Route bridge permission requests through the autonomous/timeout path.
       watch(
         () => acpClient?.pendingPermissionRequest.value,
         (newValue) => {
-          pendingPermission.value = newValue ?? null;
+          handlePermissionRequest(newValue ?? null);
         },
         { immediate: true }
       );
@@ -929,9 +1060,13 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   // Resume existing session
-  async function resumeSession(savedSession: SavedSession): Promise<void> {
+  async function resumeSession(
+    savedSession: SavedSession,
+    options?: { autonomous?: boolean }
+  ): Promise<void> {
     isLoading.value = true;
     error.value = null;
+    autonomous.value = options?.autonomous ?? false;
 
     try {
       const configStore = useConfigStore();
@@ -953,11 +1088,11 @@ export const useSessionStore = defineStore('session', () => {
         handleUnexpectedClose(reason);
       };
 
-      // Sync bridge's pendingPermissionRequest to store's pendingPermission
+      // Route bridge permission requests through the autonomous/timeout path.
       watch(
         () => acpClient?.pendingPermissionRequest.value,
         (newValue) => {
-          pendingPermission.value = newValue ?? null;
+          handlePermissionRequest(newValue ?? null);
         },
         { immediate: true }
       );
@@ -1194,12 +1329,16 @@ export const useSessionStore = defineStore('session', () => {
 
   // Handle permission response
   function resolvePermission(optionId: string): void {
+    clearPermissionTimer();
+    pendingPermission.value = null;
     if (acpClient) {
       acpClient.resolvePermission(optionId);
     }
   }
 
   function cancelPermission(): void {
+    clearPermissionTimer();
+    pendingPermission.value = null;
     if (acpClient) {
       acpClient.cancelPermission();
     }
@@ -1227,6 +1366,9 @@ export const useSessionStore = defineStore('session', () => {
     isConnected.value = false;
     messages.value = [];
     toolCalls.value.clear();
+    clearPermissionTimer();
+    pendingPermission.value = null;
+    autonomous.value = false;
     availableModes.value = [];
     currentModeId.value = '';
     availableCommands.value = [];
@@ -1352,6 +1494,8 @@ export const useSessionStore = defineStore('session', () => {
     isReconnecting,
     error,
     pendingPermission,
+    autonomous,
+    permissionTimeoutMs: computed(() => PERMISSION_TIMEOUT_MS),
     pendingAuthMethods,
     pendingAuthAgentName,
     availableModes,
@@ -1388,6 +1532,8 @@ export const useSessionStore = defineStore('session', () => {
     cancelConnection,
     resolvePermission,
     cancelPermission,
+    setAutonomous,
+    setPermissionTimeout,
     selectAuthMethod,
     cancelAuthSelection,
     disconnect,
