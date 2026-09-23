@@ -1,62 +1,61 @@
-# W5-A — Roles (CLI + args + prompt file, bound to stages)
+# W6-A — Card as pipeline: artifacts, STATUS tokens, transitions
 
-**STATUS: DONE** — build green, e2e 35/35, zero pageerrors.
+**STATUS: DONE** — `npm run build:web` green (`vue-tsc` strict), e2e 41/41,
+zero `pageerror`.
 
 ## What was built
 
-- **`src/stores/roles.ts`** (new) — `roles.json` KV document, `version: 1`,
-  keys `version` + `roles` + `stageRoles`. Role = data only:
-  `{id, label, cli, args[], promptFile, maxConcurrent, pollIntervalSec,
-  timeoutMin}`. CRUD: `addRole`, `updateRole`, `removeRole(id, {force})`,
-  `setStageRole(stage, roleId | null)`. Validation (thrown Errors, surfaced
-  verbatim in the UI): unique non-empty `id` without whitespace; `cli` from
-  `KNOWN_CLIS` (`hermes | opencode | devin | pi | codex`);
-  `maxConcurrent >= 1`; `pollIntervalSec >= 5`; `timeoutMin >= 1`.
-  `removeRole` on a stage-assigned role throws
-  `Role '<id>' is assigned to stage(s): <list>` unless `force: true` —
-  no silent orphaning. Persistence via `loadKvStore` + debounced
-  `scheduleSave` + pagehide flush, same shape as `board.ts`; permissive
-  `sanitizeRole` on load (an unknown hand-edited `cli` survives — it just
-  has no runner). `cliHasRunner` maps a cli to a configured agent by
-  word-matching agent names (`Hermes Agent` → `hermes`, `Pi` → `pi`).
+- **`src/stores/artifacts.ts`** (new) — per-card session cache
+  (`byCard[cardId]`) of the artifact dir `<projectPath>/.acp/cards/<cardId>/`
+  read through the host bridge. Today's bridge `GET /api/fs/list` returns
+  directories only, so discovery probes the fixed pipeline names
+  (`00_brief.md` … `06_handoff.md`) plus the numbered families
+  `05_review_rN.md` / `run-N.log` (first 404 ends the sequence) via
+  `GET /api/fs/read` → `{path, bytes, content}`. If a newer `list` carries
+  `files[]`, it is taken as the listing instead and its size/mtime enrich
+  the records — otherwise `mtime` stays `null` (the bridge exposes none).
+  Bridge errors surface verbatim: `state.error` keeps the `{error}` text
+  next to any stale data, a missing dir is an honest empty state, and a
+  per-file failure (403/413/415/malformed) lands on the artifact row as
+  `error`. `refresh()` dedupes in-flight calls; `ensureLoaded()` loads once
+  and retries after an `error` phase.
+  Pure helpers exported (and e2e-tested in-browser via `window.__pipeline`):
+  `parseStatusToken` (last non-empty line `STATUS: <token>` + trailing
+  detail), `reviewRoundOf`, `pickStatusArtifact` (stage's own output first —
+  max `05_review_rN` in reviewtest — else furthest-along token doc;
+  `run-*.log` never speaks), and `proposeTransition(stage, reviewRound,
+  token, detail)` implementing the table: `spec+APPROVE→plan`,
+  `plan+APPROVE→dev`, `dev+DONE→reviewtest`, `reviewtest+DONE→agent_tested`
+  (an in-stage status, not a stage), `CHANGES_REQUIRED→` one step back
+  (`plan→spec`, `dev→plan`, `reviewtest→dev`), `BLOCKED→` the `blocked`
+  flag with the token line's reason; anything else → `none`.
 
-- **`src/lib/fsApi.ts`** (new) — `readTextFile(baseUrl, path)` →
-  `GET <bridge>/api/fs/read?path=` → `{path, bytes, content}`;
-  `writeTextFile(baseUrl, path, content)` → `POST <bridge>/api/fs/write`
-  `{path, content}`. Bridge errors surface verbatim (403 outside root,
-  415 binary, 413 >512KB, 404 missing).
+- **`src/features/board/CardDrawer.vue`** — "Artifacts" block: STATUS badge
+  (`STATUS: <token>` or `STATUS: —`, title names the source file), Refresh
+  button (re-reads the bridge dir; the open viewer re-points at the fresh
+  record), file list (name · size · mtime when provided · token chip),
+  click opens read-only `pre` mono content — no markdown render. Proposal
+  row shows the suggested transition and **Apply** runs it through the
+  board's own mutations (`moveCard` / `setCardStatus` / `setCardFlag` +
+  `blockedReason` patch) — the boardctl-equivalent path, no direct
+  document writes. Empty dir → readable line; unresolvable project →
+  no-project note; bridge error → verbatim banner.
 
-- **`src/features/roles/RolesSection.vue`** (new), registered in
-  `SettingsView.vue` next to Projects — role list, add/edit form
-  (id, label, cli select, args, prompt-file path, the three limits),
-  per-row "Prompt file" editor (bridge read/write, honest error display,
-  resolved path shown from the bridge response), and a "Stage → role"
-  block (six selects, empty = any runner). Force delete is only offered
-  after the guarded delete rejects. Tokens only, stroke icons, no shadows.
-  Exposes `window.__roles` like `__projects`.
+- **`src/features/board/BoardCardItem.vue`** — `card-status-token` meta chip
+  showing the artifact STATUS on the kanban card (lazy `ensureLoaded` on
+  mount when the card's project resolves; session-cached).
 
-- **`src/features/board/BoardColumn.vue`** — role selector in the column
-  header (`data-testid="col-role-select"`, empty = "any runner"), danger
-  styling when the assigned role has no runner.
+- **`scripts/e2e_card_pipeline.py`** (new) — serves `dist-web` itself on
+  `127.0.0.1:25988`; `page.route` stubs `:25900` → 500 (localStorage KV —
+  nothing lands in `~/.hermes`) and `/api/fs/` → a bridge stub mirroring
+  the real one (dirs-only `list`, 404 `read`, scoped `write` that persists
+  under the fixture root). Fixtures are written to `./tmp-pipeline-test/`
+  inside the worktree and the seeded registry project points there.
 
-- **`src/features/board/BoardCardItem.vue`** — `card-role-badge` chip with
-  the stage role's label, plus `card-no-runner` chip reading exactly
-  `no runner for role` when no configured agent matches the role's CLI.
-  `src/stores/board.ts` is untouched — the badge derives from
-  `rolesStore.roleForStage(card.stage)` at render time.
-
-- **`src/components/BoardView.vue`** — `rolesStore.initRolesStore()` on
-  mount (idempotent; `RolesSection` also self-inits).
-
-- **`scripts/e2e_roles.py`** (new) — serves `dist-web` itself on
-  `127.0.0.1:25983`, routes `:25900` state calls to 500 (localStorage
-  fallback — nothing lands in `~/.hermes`), seeds a v2 board via
-  `add_init_script`. Prompt files are written through the real bridge
-  (127.0.0.1:25901) into `./tmp-roles-test/` inside the worktree.
-
-Loose-coupling check: `grep -ri "prompt" src/stores/roles.ts
-src/features/roles/ src/lib/fsApi.ts` matches only the word "prompt" in
-field names/UI labels — no prompt text anywhere in panel code.
+Untouched per the boundaries: `src/stores/session.ts`,
+`src/components/PermissionDialog.vue`, `src/stores/board.ts`,
+`src/App.vue`, `src/lib/fsApi.ts`, `src/features/settings/fsApi.ts`
+(imported only).
 
 ## Verification output (real)
 
@@ -65,71 +64,90 @@ field names/UI labels — no prompt text anywhere in panel code.
 ```
 vite v6.4.1 building for web...
 transforming...
-✓ 271 modules transformed.
+✓ 272 modules transformed.
 rendering chunks...
 computing gzip size...
 dist-web/index.html                   0.96 kB │ gzip:   0.50 kB
-dist-web/assets/index-Ce3iqR39.css  118.77 kB │ gzip:  16.11 kB
+dist-web/assets/index-COhF8bJO.css  123.29 kB │ gzip:  16.72 kB
 dist-web/assets/index-mMtcOqJ_.js     0.17 kB │ gzip:   0.16 kB
 dist-web/assets/app-C--UO2wg.js       0.25 kB │ gzip:   0.21 kB
 dist-web/assets/core-DsojzR6k.js      0.77 kB │ gzip:   0.41 kB
 dist-web/assets/event-DRK-L59a.js     1.07 kB │ gzip:   0.58 kB
 dist-web/assets/index-D8BamZOI.js     1.39 kB │ gzip:   0.69 kB
 dist-web/assets/index-5FpjeHmg.js     1.53 kB │ gzip:   0.52 kB
-dist-web/assets/stdio-Cv8SwEzt.js     1.63 kB │ gzip:   0.63 kB
-dist-web/assets/index-CX3CIWF6.js   496.52 kB │ gzip: 173.40 kB
-✓ built in 2.79s
+dist-web/assets/stdio-B2pFB07W.js     1.63 kB │ gzip:   0.62 kB
+dist-web/assets/index-BmsqoWMF.js   506.54 kB │ gzip: 176.86 kB
+✓ built in 2.69s
 ```
 
-### `~/.hermes/tools-venv/bin/python scripts/e2e_roles.py`
+### `~/.hermes/tools-venv/bin/python scripts/e2e_card_pipeline.py`
 
 ```
-PASS  settings roles section renders
-PASS  role row appears
-PASS  role persisted in roles.json
-PASS  roles.json version is 1
-PASS  role fields round-trip
-PASS  role survives reload
-PASS  duplicate id rejected with visible error  (Role id 'dev' already exists)
-PASS  duplicate id not added
-PASS  maxConcurrent < 1 rejected
-PASS  pollIntervalSec < 5 rejected
-PASS  timeoutMin < 1 rejected
-PASS  invalid role not added
-PASS  second role created
-PASS  codex role flagged no-runner in the list
-PASS  stage assignments in the selects
-PASS  delete of assigned role rejected  (Role 'dev' is assigned to stage(s): dev — unassign it first or use force)
-PASS  assigned role still listed
-PASS  force delete offered after rejection
-PASS  missing prompt file shows the bridge error  (not found: /home/hermes/projects/acp-ui-w5-roles/tmp-roles-test/dev.md)
-PASS  prompt path shown is the role's promptFile
-PASS  prompt write lands on disk via the bridge
-PASS  save status shown
-PASS  reopened editor loads the saved content
-PASS  dev column selector shows the assigned role  (dev)
-PASS  spec column selector shows ghost
-PASS  unassigned column selector is empty
-PASS  dev card carries the role badge  (Developer)
-PASS  dev role has a runner (no warning badge)
-PASS  spec card carries the ghost role badge
-PASS  codex role shows 'no runner for role' on the card
-PASS  unassigned stage shows no role badge
-PASS  column header can assign a role
-PASS  force delete removes the role
-PASS  force delete clears the stage assignment  ({"spec": "ghost"})
+PASS  kanban card carries the STATUS chip
+PASS  kanban chip shows the 05_review_r1 token  (DONE)
+PASS  artifact list shows the pipeline files  (00_brief.md,01_spec.md,02_plan.md,03_plan_review.md,04_impl_log.md,05_review_r1.md,run-1.log)
+PASS  drawer badge shows STATUS: DONE  (STATUS: DONE)
+PASS  drawer badge names 05_review_r1.md as the source  (STATUS token from 05_review_r1.md)
+PASS  per-file token chips render  (APPROVE,APPROVE,APPROVE,DONE)
+PASS  artifact opens read-only content
+PASS  viewer is a pre (no markdown render)
+PASS  unit: spec+APPROVE -> move plan  ({"kind": "move", "to": "plan", "label": "approve spec → Plan"})
+PASS  unit: plan+APPROVE -> move dev  ({"kind": "move", "to": "dev", "label": "approve plan → Dev"})
+PASS  unit: dev+DONE -> move reviewtest  ({"kind": "move", "to": "reviewtest", "label": "dev done → Review/Test"})
+PASS  unit: reviewtest+DONE -> status agent_tested  ({"kind": "status", "status": "agent_tested", "label": "review done (round 1) → agent_tested"})
+PASS  unit: plan+CHANGES_REQUIRED -> back to spec  ({"kind": "move", "to": "spec", "label": "changes required → back to Spec"})
+PASS  unit: dev+CHANGES_REQUIRED -> back to plan  ({"kind": "move", "to": "plan", "label": "changes required → back to Plan"})
+PASS  unit: reviewtest+CHANGES_REQUIRED -> back to dev  ({"kind": "move", "to": "dev", "label": "changes required (round 2) → back to Dev"})
+PASS  unit: BLOCKED -> flag with reason from the token line  ({"kind": "flag", "flag": "blocked", "reason": "reviewer cli missing on host", "label": "flag blocked — reviewer cli missing on host"})
+PASS  unit: spec+DONE -> none  ({"kind": "none", "label": "DONE has no step from spec"})
+PASS  unit: backlog+APPROVE -> none  ({"kind": "none", "label": "APPROVE has no step from backlog"})
+PASS  unit: no token -> none  ({"kind": "none", "label": "no STATUS token yet"})
+PASS  unit: parseStatusToken splits token + reason  ({"token": "BLOCKED", "detail": "waiting on creds"})
+PASS  unit: non-token last line -> null  (None)
+PASS  reviewtest card proposes the token transition  (review done (round 1) → agent_tested / Apply)
+PASS  Apply sets the card status to agent_tested  (agent_tested)
+PASS  Refresh picks up the rewritten token
+PASS  CHANGES_REQUIRED proposes a step back to Dev  (changes required (round 1) → back to Dev / Apply)
+PASS  Apply moves the card back to dev
+PASS  Apply moves spec card to plan
+PASS  blocked card badge shows BLOCKED
+PASS  BLOCKED proposes the flag with its reason  (flag blocked — reviewer cli missing on host / Apply)
+PASS  Apply sets the blocked flag on the card
+PASS  blocked reason lands in the card field  (reviewer cli missing on host)
+PASS  dev card proposes the back-step to Plan  (changes required → back to Plan / Apply)
+PASS  Apply moves dev card back to plan
+PASS  empty dir gives a readable empty state
+PASS  empty state: no bogus badge token
+PASS  missing dir also gives the empty state
+PASS  missing dir raises no error banner
+PASS  unassigned project shows the no-project note
+PASS  bridge stub answers write  ({"status": 200, "body": {"path": ".../tmp-pipeline-test/.acp/cards/c-spec/run-9.log", "created": true, "bytes": 16}})
+PASS  written file lands inside the worktree
 PASS  zero pageerror events
 
-35/35 assertions passed
+41/41 assertions passed
 ```
+
+## Integration requests
+
+- **Bridge `list`/`read` shape** (host side, `~/.hermes/acp-ws-bridge.mjs`):
+  to stop probing and to fill `mtime`, `/api/fs/list` needs a `files[]`
+  array (`{name, path, bytes, mtime}`) and/or `/api/fs/read` an `mtime`
+  field. `artifacts.ts` already consumes `files[]` when present, so the
+  panel needs no code change once the bridge grows it.
+- **`board.ts` reload**: Refresh re-reads artifacts and re-syncs the
+  drawer; the board document itself has no re-read path. Under the shared
+  state backend (`:25900`) the 5 s `RemoteKVStore` poll adopts remote
+  changes anyway; under pure localStorage a `reload()` on the board store
+  would let Refresh pick up `boardctl` edits without a page reload.
 
 ## Not verified / known limits
 
-- Tauri build (`npm run build`) not exercised — changes are host-agnostic;
-  `loadKvStore` picks plugin-store on Tauri the same way board.ts does.
-- The bridge error codes 415/413 were not exercised in e2e (404 and the
-  write path are; the helpers surface any `{error}` body verbatim).
-- `cliHasRunner` is a name-word match against configured agents — a custom
-  agent named e.g. `my-devin-box` counts as a `devin` runner.
-- Roles are stored but nothing launches them yet (dispatcher is a later
-  workstream); `maxConcurrent`/`pollIntervalSec`/`timeoutMin` are data.
+- Tauri build (`npm run build`) not exercised — the store is host-agnostic
+  (same bridge seam as the role prompt editor).
+- Bridge error codes 413/415 surfaced per-row but only stub-verified; the
+  real `~/.hermes` bridge was read for semantics, not driven live.
+- `spec + CHANGES_REQUIRED` and tokens on `backlog`/`done` cards propose
+  `none` (the brief's table has no back-step from spec).
+- `tmp-pipeline-test/` is recreated by the e2e script on each run and left
+  untracked — it is test data inside the worktree, per the brief.
