@@ -4,6 +4,7 @@
 // src/stores/board.ts (cards) and src/stores/activity.ts (ledger).
 import { ref, computed, onMounted } from 'vue';
 import { useBoardStore, type BoardStageId } from '../stores/board';
+import { useRolesStore } from '../stores/roles';
 import { useActivityStore } from '../stores/activity';
 import { useSessionStore } from '../stores/session';
 import { useUiStore } from '../stores/ui';
@@ -25,6 +26,7 @@ const TABS: { id: BoardTab; label: string }[] = [
 ];
 
 const board = useBoardStore();
+const rolesStore = useRolesStore();
 const activity = useActivityStore();
 const sessionStore = useSessionStore();
 const uiStore = useUiStore();
@@ -34,6 +36,7 @@ const openCardId = ref<string | null>(null);
 
 onMounted(() => {
   void board.initBoardStore();
+  void rolesStore.initRolesStore();
 });
 
 /** Compact per-stage counters for the header, plus the card-flag totals

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 import type { BoardCard, BoardStageId, CardStatus } from '../../stores/board';
+import { useRolesStore } from '../../stores/roles';
 import { statusBreakdown, type BoardStageDef } from './columns';
 import BoardCardItem from './BoardCardItem.vue';
 
@@ -32,6 +33,25 @@ const breakdown = computed(() => statusBreakdown(props.col.id, props.cards));
 /** Cards in this stage carrying the `blocked` flag — counted separately
  * from the status split (the flag can sit on a card in any status). */
 const blockedCount = computed(() => props.cards.filter((c) => c.blocked).length);
+
+// Stage-role selector: the role bound to this stage in roles.json. Empty
+// means "as now — any runner picks up the stage's cards".
+const rolesStore = useRolesStore();
+const stageRole = computed(() => rolesStore.roleForStage(props.col.id));
+const stageRoleNoRunner = computed(
+  () => !!stageRole.value && !rolesStore.roleHasRunner(stageRole.value)
+);
+
+function onStageRole(event: Event) {
+  const value = (event.target as HTMLSelectElement).value;
+  try {
+    rolesStore.setStageRole(props.col.id, value || null);
+  } catch (e) {
+    // The select lists real roles only, so a throw here means a stale
+    // option raced a delete — log it; the next render resyncs the value.
+    console.error('setStageRole failed:', e);
+  }
+}
 
 function cardIdFromDrag(event: DragEvent): string | null {
   return event.dataTransfer?.getData('application/x-board-card') || null;
@@ -93,6 +113,21 @@ function onDragEnd() {
         class="col-blocked"
         :title="`${blockedCount} card(s) flagged blocked`"
       >{{ blockedCount }} blocked</span>
+      <select
+        class="col-role"
+        :class="{ 'no-runner': stageRoleNoRunner }"
+        :value="stageRole?.id ?? ''"
+        data-testid="col-role-select"
+        :aria-label="`Role for ${col.label} stage`"
+        :title="stageRole
+          ? `Stage role: ${stageRole.label} (${stageRole.cli})${stageRoleNoRunner ? ' — no runner' : ''}`
+          : 'No stage role — any runner picks up'"
+        @change="onStageRole"
+        @click.stop
+      >
+        <option value="">any runner</option>
+        <option v-for="r in rolesStore.roles" :key="r.id" :value="r.id">{{ r.label }}</option>
+      </select>
       <button
         class="col-add"
         :aria-label="`Add card (lands in Backlog)`"
@@ -190,6 +225,30 @@ function onDragEnd() {
   font-family: var(--font-mono, monospace);
   font-size: 0.625rem;
   color: var(--bg-danger, #b3402e);
+}
+
+.col-role {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 7.5rem;
+  padding: 0.0625rem 0.125rem;
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-secondary, #6b6259);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.625rem;
+  cursor: pointer;
+}
+
+.col-role.no-runner {
+  color: var(--bg-danger, #b3402e);
+  border-color: var(--bg-danger, #b3402e);
+}
+
+.col-role:focus-visible {
+  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
+  outline-offset: 1px;
 }
 
 .col-add {

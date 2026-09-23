@@ -2,6 +2,7 @@
 import { ref, computed, onBeforeUnmount } from 'vue';
 import type { BoardCard, BoardStageId, CardStatus } from '../../stores/board';
 import { useBoardStore } from '../../stores/board';
+import { useRolesStore } from '../../stores/roles';
 import { useUiStore } from '../../stores/ui';
 import { BOARD_STAGES, stageLabel, statusesForStage } from './columns';
 import { fmtStamp } from './format';
@@ -24,6 +25,7 @@ const emit = defineEmits<{
 
 const board = useBoardStore();
 const uiStore = useUiStore();
+const rolesStore = useRolesStore();
 
 const menuOpen = ref(false);
 const statusOpen = ref(false);
@@ -35,6 +37,13 @@ const stageStatuses = computed(() => statusesForStage(props.card.stage));
  * project (or has none) is marked `unassigned`. Scoped views never see it. */
 const unassigned = computed(
   () => uiStore.activeProjectId === 'all' && board.projectIdForCard(props.card) === null
+);
+
+/** The role bound to the card's stage (roles.json stageRoles). The card
+ * model itself stays untouched — the badge is derived at render time. */
+const stageRole = computed(() => rolesStore.roleForStage(props.card.stage));
+const stageRoleHasRunner = computed(
+  () => !!stageRole.value && rolesStore.roleHasRunner(stageRole.value)
 );
 
 const PRIORITY_LABEL: Record<string, string> = { high: 'high', medium: 'med', low: 'low' };
@@ -193,6 +202,11 @@ onBeforeUnmount(() => {
         @click="toggleStatusMenu"
         @keydown.stop
       >{{ card.status }}</button>
+      <span v-if="stageRole" class="meta-chip role" data-testid="card-role-badge"
+        :title="`Stage role: ${stageRole.label} (${stageRole.cli})`">{{ stageRole.label }}</span>
+      <span v-if="stageRole && !stageRoleHasRunner" class="meta-chip no-runner"
+        data-testid="card-no-runner"
+        :title="`No configured agent runs CLI '${stageRole.cli}'`">no runner for role</span>
       <span v-if="card.blocked" class="meta-chip flag blocked"
         :title="card.blockedReason ? `Blocked: ${card.blockedReason}` : 'Flagged blocked'"
       >blocked</span>
@@ -396,6 +410,17 @@ onBeforeUnmount(() => {
 .meta-chip.p-high {
   color: var(--bg-danger, #b3402e);
   background: var(--tint-active, rgba(194, 83, 47, 0.10));
+}
+
+.meta-chip.role {
+  color: var(--text-accent, #c2532f);
+  background: var(--accent-soft, rgba(194, 83, 47, 0.14));
+}
+
+.meta-chip.no-runner {
+  color: var(--bg-danger, #b3402e);
+  border: 1px solid var(--bg-danger, #b3402e);
+  background: transparent;
 }
 
 .meta-chip.flag.blocked {
