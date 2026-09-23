@@ -1,10 +1,15 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
-import { useBoardStore, type BoardCard, type BoardColumnId } from '../../stores/board';
+import {
+  useBoardStore,
+  type BoardCard,
+  type BoardStageId,
+  type CardStatus,
+} from '../../stores/board';
 import { useSessionStore } from '../../stores/session';
 import { useConfigStore } from '../../stores/config';
 import { projectName } from '../../stores/activity';
-import { BOARD_COLUMNS, PRIORITIES } from './columns';
+import { BOARD_STAGES, PRIORITIES, statusesForStage, stageLabel } from './columns';
 import { fmtStamp } from './format';
 
 const props = defineProps<{
@@ -32,8 +37,11 @@ interface Draft {
   priority: 'high' | 'medium' | 'low';
   acceptance: string;
   verification: string;
-  blockedBy: string;
-  status: BoardColumnId;
+  blocked: boolean;
+  blockedReason: string;
+  cancelled: boolean;
+  stage: BoardStageId;
+  status: CardStatus | null;
   links: { label: string; url: string }[];
   sessionKey: string;
 }
@@ -46,8 +54,11 @@ const draft = ref<Draft>({
   priority: 'medium',
   acceptance: '',
   verification: '',
-  blockedBy: '',
-  status: 'inbox',
+  blocked: false,
+  blockedReason: '',
+  cancelled: false,
+  stage: 'backlog',
+  status: null,
   links: [],
   sessionKey: '',
 });
@@ -64,7 +75,10 @@ function draftFromCard(c: BoardCard): Draft {
     priority: c.priority,
     acceptance: c.acceptance,
     verification: c.verification,
-    blockedBy: c.blockedBy,
+    blocked: c.blocked,
+    blockedReason: c.blockedReason,
+    cancelled: c.cancelled,
+    stage: c.stage,
     status: c.status,
     links: c.links.map((l) => ({ ...l })),
     sessionKey: c.session ? `${c.session.agentName}::${c.session.sessionId}` : '',
@@ -89,9 +103,17 @@ function flush() {
   const c = card.value;
   if (!c) return;
   const d = draft.value;
-  if (d.status !== c.status) {
-    board.moveCard(c.id, d.status);
+  // Stage first (a stage change may reset the status), then the in-stage
+  // status, then the flags — each through its own mutation so the stage's
+  // status rules and the ledger entries stay intact.
+  if (d.stage !== c.stage) {
+    board.moveCard(c.id, d.stage);
   }
+  if (d.status && d.status !== c.status) {
+    board.setCardStatus(c.id, d.status);
+  }
+  if (d.blocked !== c.blocked) board.setCardFlag(c.id, 'blocked', d.blocked);
+  if (d.cancelled !== c.cancelled) board.setCardFlag(c.id, 'cancelled', d.cancelled);
   const sessionKey = d.sessionKey;
   const session = sessionKey
     ? { agentName: sessionKey.split('::')[0], sessionId: sessionKey.split('::').slice(1).join('::') }
@@ -104,7 +126,7 @@ function flush() {
     priority: d.priority,
     acceptance: d.acceptance,
     verification: d.verification,
-    blockedBy: d.blockedBy.trim(),
+    blockedReason: d.blockedReason.trim(),
     links: d.links
       .filter((l) => l.label.trim() || l.url.trim())
       .map((l) => ({ label: l.label.trim(), url: l.url.trim() })),
@@ -128,6 +150,16 @@ const attachedSession = computed(() => {
     ) ?? null
   );
 });
+
+function onStagePicked() {
+  // Keep the draft's status if it exists in the new stage, else reset to
+  // the stage's initial (null for backlog/done).
+  const allowed = statusesForStage(draft.value.stage);
+  if (!draft.value.status || !allowed.includes(draft.value.status)) {
+    draft.value.status = allowed[0] ?? null;
+  }
+  markDirty();
+}
 
 function onSessionPicked() {
   // When a session is attached and the project is still empty, default the
@@ -193,6 +225,7 @@ onBeforeUnmount(() => {
     <header class="drawer-head">
       <span class="drawer-title">Card</span>
       <span class="drawer-id mono">{{ card.id.slice(0, 8) }}</span>
+      <span class="drawer-stage mono">{{ stageLabel(card.stage) }}<template v-if="card.status"> · {{ card.status }}</template></span>
       <button class="drawer-close" aria-label="Close card editor" title="Close (Esc)" @click="emit('close')">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
           stroke-width="2" stroke-linecap="round" aria-hidden="true">
@@ -250,18 +283,47 @@ onBeforeUnmount(() => {
 
       <div class="field-row">
         <label class="field">
-          <span class="field-label">Column</span>
-          <select v-model="draft.status" data-field="status" class="f-input" @change="markDirty">
-            <option v-for="c in BOARD_COLUMNS" :key="c.id" :value="c.id">{{ c.label }}</option>
+          <span class="field-label">Stage</span>
+          <select v-model="draft.stage" data-field="stage" class="f-input" @change="onStagePicked">
+            <option v-for="c in BOARD_STAGES" :key="c.id" :value="c.id">{{ c.label }}</option>
           </select>
         </label>
 
         <label class="field">
-          <span class="field-label">Blocked by</span>
-          <input v-model="draft.blockedBy" data-field="blockedBy" class="f-input" type="text"
-            placeholder="what blocks it" @input="markDirty" />
+          <span class="field-label">Status</span>
+          <select v-model="draft.status" data-field="status" class="f-input"
+            :disabled="!statusesForStage(draft.stage).length" @change="markDirty">
+            <option v-if="!statusesForStage(draft.stage).length" :value="null">—</option>
+            <option v-for="s in statusesForStage(draft.stage)" :key="s" :value="s">{{ s }}</option>
+          </select>
         </label>
       </div>
+
+      <div class="field">
+        <span class="field-label">Flags</span>
+        <div class="prio-seg" role="group" aria-label="Card flags">
+          <button
+            class="seg-btn flag-btn"
+            :class="{ active: draft.blocked }"
+            :aria-pressed="draft.blocked"
+            data-field="blocked"
+            @click="draft.blocked = !draft.blocked; markDirty()"
+          >blocked</button>
+          <button
+            class="seg-btn flag-btn"
+            :class="{ active: draft.cancelled }"
+            :aria-pressed="draft.cancelled"
+            data-field="cancelled"
+            @click="draft.cancelled = !draft.cancelled; markDirty()"
+          >cancelled</button>
+        </div>
+      </div>
+
+      <label v-if="draft.blocked" class="field">
+        <span class="field-label">Blocked reason</span>
+        <input v-model="draft.blockedReason" data-field="blockedReason" class="f-input" type="text"
+          placeholder="what blocks it (optional card ref)" @input="markDirty" />
+      </label>
 
       <label class="field">
         <span class="field-label">Acceptance criteria</span>
@@ -354,6 +416,11 @@ onBeforeUnmount(() => {
 
 .drawer-id {
   font-size: 0.6875rem;
+  color: var(--text-muted, #a39a8e);
+}
+
+.drawer-stage {
+  font-size: 0.625rem;
   color: var(--text-muted, #a39a8e);
 }
 
@@ -463,6 +530,10 @@ textarea.f-input {
 .seg-btn.active {
   background: var(--tint-active, rgba(194, 83, 47, 0.10));
   color: var(--text-accent, #c2532f);
+}
+
+.seg-btn.flag-btn.active {
+  color: var(--bg-danger, #b3402e);
 }
 
 .link-row {

@@ -1,9 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
-import { useBoardStore, type BoardCard, type BoardColumnId } from '../../stores/board';
+import {
+  useBoardStore,
+  type BoardCard,
+  type BoardStageId,
+  type CardStatus,
+} from '../../stores/board';
 import { useSessionStore } from '../../stores/session';
 import { projectName } from '../../stores/activity';
-import { BOARD_COLUMNS } from './columns';
+import { BOARD_STAGES } from './columns';
 import BoardColumn from './BoardColumn.vue';
 import BoardFilters from './BoardFilters.vue';
 
@@ -32,9 +37,9 @@ onBeforeUnmount(() => {
   if (mql) mql.removeEventListener('change', syncMql);
 });
 
-const activeCol = ref<BoardColumnId>('inbox');
+const activeCol = ref<BoardStageId>('backlog');
 const activeColDef = computed(
-  () => BOARD_COLUMNS.find((c) => c.id === activeCol.value) ?? BOARD_COLUMNS[0]
+  () => BOARD_STAGES.find((c) => c.id === activeCol.value) ?? BOARD_STAGES[0]
 );
 
 const hasCards = computed(() => board.cards.length > 0);
@@ -45,13 +50,13 @@ function onOpen(card: BoardCard) {
 }
 
 function onAdd() {
-  // New cards land in `inbox` whichever column the button sits in — the
-  // board treats inbox as the single triage entry point. If a session is
+  // New cards land in `backlog` whichever column the button sits in — the
+  // board treats backlog as the single triage entry point. If a session is
   // live, its cwd's last segment seeds the project field.
   const cwd = sessionStore.currentSession?.cwd;
   const card = board.addCard({
     title: '',
-    project: cwd ? projectName(cwd) : '',
+    project: cwd ? projectName(cwd) : undefined,
   });
   emit('open-card', card.id);
 }
@@ -61,8 +66,16 @@ function onExample() {
   emit('open-card', card.id);
 }
 
-function onMove(cardId: string, to: BoardColumnId, beforeId?: string | null) {
+function onMove(cardId: string, to: BoardStageId, beforeId?: string | null) {
   board.moveCard(cardId, to, beforeId ?? null);
+}
+
+function onSetStatus(cardId: string, status: CardStatus) {
+  board.setCardStatus(cardId, status);
+}
+
+function onSetFlag(cardId: string, flag: 'blocked' | 'cancelled', on: boolean) {
+  board.setCardFlag(cardId, flag, on);
 }
 
 function onRemove(cardId: string) {
@@ -76,14 +89,14 @@ function onRemove(cardId: string) {
 function onReorder(cardId: string, delta: -1 | 1) {
   const card = board.cards.find((c) => c.id === cardId);
   if (!card) return;
-  const list = board.cardsInColumn(card.status);
+  const list = board.cardsInStage(card.stage);
   const i = list.findIndex((c) => c.id === cardId);
   if (i === -1) return;
   if (delta < 0 && i > 0) {
-    board.moveCard(cardId, card.status, list[i - 1].id);
+    board.moveCard(cardId, card.stage, list[i - 1].id);
   } else if (delta > 0 && i < list.length - 1) {
     const next = list[i + 2];
-    board.moveCard(cardId, card.status, next ? next.id : null);
+    board.moveCard(cardId, card.stage, next ? next.id : null);
   }
 }
 </script>
@@ -100,24 +113,26 @@ function onReorder(cardId: string, delta: -1 | 1) {
     <div class="kanban-area">
       <!-- Phone: column switcher + one stacked column. -->
       <template v-if="isPhone">
-        <div class="col-switcher" role="tablist" aria-label="Board columns">
+        <div class="col-switcher" role="tablist" aria-label="Board stages">
           <button
-            v-for="col in BOARD_COLUMNS"
+            v-for="col in BOARD_STAGES"
             :key="col.id"
             class="switch-btn"
             :class="{ active: activeCol === col.id }"
             role="tab"
             :aria-selected="activeCol === col.id"
             @click="activeCol = col.id"
-          >{{ col.label }} <span class="switch-count">{{ board.cardsInColumn(col.id).length }}</span></button>
+          >{{ col.label }} <span class="switch-count">{{ board.cardsInStage(col.id).length }}</span></button>
         </div>
         <div class="col-single">
           <BoardColumn
             :col="activeColDef"
-            :cards="board.cardsInColumn(activeColDef.id)"
+            :cards="board.cardsInStage(activeColDef.id)"
             @add="onAdd"
             @open="onOpen"
             @move="onMove"
+            @set-status="onSetStatus"
+            @set-flag="onSetFlag"
             @duplicate="(id) => board.duplicateCard(id)"
             @remove="onRemove"
             @reorder="onReorder"
@@ -129,13 +144,15 @@ function onReorder(cardId: string, delta: -1 | 1) {
            inside the pane (never a page-level scroll). -->
       <div v-else class="cols-scroll">
         <BoardColumn
-          v-for="col in BOARD_COLUMNS"
+          v-for="col in BOARD_STAGES"
           :key="col.id"
           :col="col"
-          :cards="board.cardsInColumn(col.id)"
+          :cards="board.cardsInStage(col.id)"
           @add="onAdd"
           @open="onOpen"
           @move="onMove"
+          @set-status="onSetStatus"
+          @set-flag="onSetFlag"
           @duplicate="(id) => board.duplicateCard(id)"
           @remove="onRemove"
           @reorder="onReorder"
@@ -148,8 +165,8 @@ function onReorder(cardId: string, delta: -1 | 1) {
         <div class="empty-card">
           <p class="empty-title">No cards yet</p>
           <p class="empty-text">
-            Cards are tasks for people and agents. Use the + button in a column
-            header — a new card lands in <span class="mono">Inbox</span> — then click it to
+            Cards are tasks for people and agents. Use the + button in a stage
+            header — a new card lands in <span class="mono">Backlog</span> — then click it to
             fill in the brief, acceptance criteria and verification steps.
           </p>
           <div class="empty-actions">

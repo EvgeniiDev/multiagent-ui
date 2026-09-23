@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onBeforeUnmount } from 'vue';
-import type { BoardCard, BoardColumnId } from '../../stores/board';
-import { BOARD_COLUMNS, columnLabel } from './columns';
+import type { BoardCard, BoardStageId, CardStatus } from '../../stores/board';
+import { useBoardStore } from '../../stores/board';
+import { useUiStore } from '../../stores/ui';
+import { BOARD_STAGES, stageLabel, statusesForStage } from './columns';
 import { fmtStamp } from './format';
 
 const props = defineProps<{
@@ -10,7 +12,9 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   open: [card: BoardCard];
-  move: [cardId: string, to: BoardColumnId, beforeId?: string | null];
+  move: [cardId: string, to: BoardStageId, beforeId?: string | null];
+  'set-status': [cardId: string, status: CardStatus];
+  'set-flag': [cardId: string, flag: 'blocked' | 'cancelled', on: boolean];
   duplicate: [cardId: string];
   remove: [cardId: string];
   reorder: [cardId: string, delta: -1 | 1];
@@ -18,22 +22,44 @@ const emit = defineEmits<{
   dragend: [];
 }>();
 
-const menuOpen = ref(false);
+const board = useBoardStore();
+const uiStore = useUiStore();
 
-const otherColumns = computed(() => BOARD_COLUMNS.filter((c) => c.id !== props.card.status));
+const menuOpen = ref(false);
+const statusOpen = ref(false);
+
+const otherStages = computed(() => BOARD_STAGES.filter((c) => c.id !== props.card.stage));
+const stageStatuses = computed(() => statusesForStage(props.card.stage));
+
+/** All-mode only: a card whose project label resolves to no registry
+ * project (or has none) is marked `unassigned`. Scoped views never see it. */
+const unassigned = computed(
+  () => uiStore.activeProjectId === 'all' && board.projectIdForCard(props.card) === null
+);
 
 const PRIORITY_LABEL: Record<string, string> = { high: 'high', medium: 'med', low: 'low' };
 
 function toggleMenu(event: Event) {
   event.stopPropagation();
+  statusOpen.value = false;
   menuOpen.value = !menuOpen.value;
   if (menuOpen.value) {
-    document.addEventListener('click', closeMenu, { once: true });
+    document.addEventListener('click', closeMenus, { once: true });
   }
 }
 
-function closeMenu() {
+function toggleStatusMenu(event: Event) {
+  event.stopPropagation();
   menuOpen.value = false;
+  statusOpen.value = !statusOpen.value;
+  if (statusOpen.value) {
+    document.addEventListener('click', closeMenus, { once: true });
+  }
+}
+
+function closeMenus() {
+  menuOpen.value = false;
+  statusOpen.value = false;
 }
 
 function onCardClick() {
@@ -42,11 +68,11 @@ function onCardClick() {
 
 function onKeydown(event: KeyboardEvent) {
   // Card-level keyboard support (N7): Enter opens, Alt+←/→ moves between
-  // columns, Alt+↑/↓ reorders inside the column, Esc closes an open menu.
+  // stages, Alt+↑/↓ reorders inside the stage, Esc closes an open menu.
   // Plain arrows stay free for tab traversal / scrolling.
-  if (event.key === 'Escape' && menuOpen.value) {
+  if (event.key === 'Escape' && (menuOpen.value || statusOpen.value)) {
     event.preventDefault();
-    menuOpen.value = false;
+    closeMenus();
     return;
   }
   if (event.key === 'Enter' && !event.altKey) {
@@ -57,10 +83,10 @@ function onKeydown(event: KeyboardEvent) {
   if (!event.altKey) return;
   if (event.key === 'ArrowLeft') {
     event.preventDefault();
-    emit('move', props.card.id, prevColumn());
+    emit('move', props.card.id, prevStage());
   } else if (event.key === 'ArrowRight') {
     event.preventDefault();
-    emit('move', props.card.id, nextColumn());
+    emit('move', props.card.id, nextStage());
   } else if (event.key === 'ArrowUp') {
     event.preventDefault();
     emit('reorder', props.card.id, -1);
@@ -70,18 +96,18 @@ function onKeydown(event: KeyboardEvent) {
   }
 }
 
-function prevColumn(): BoardColumnId {
-  const ids = BOARD_COLUMNS.map((c) => c.id);
-  return ids[Math.max(0, ids.indexOf(props.card.status) - 1)];
+function prevStage(): BoardStageId {
+  const ids = BOARD_STAGES.map((c) => c.id);
+  return ids[Math.max(0, ids.indexOf(props.card.stage) - 1)];
 }
 
-function nextColumn(): BoardColumnId {
-  const ids = BOARD_COLUMNS.map((c) => c.id);
-  return ids[Math.min(ids.length - 1, ids.indexOf(props.card.status) + 1)];
+function nextStage(): BoardStageId {
+  const ids = BOARD_STAGES.map((c) => c.id);
+  return ids[Math.min(ids.length - 1, ids.indexOf(props.card.stage) + 1)];
 }
 
 function onDragStart(event: DragEvent) {
-  menuOpen.value = false;
+  closeMenus();
   if (event.dataTransfer) {
     event.dataTransfer.setData('application/x-board-card', props.card.id);
     event.dataTransfer.setData('text/plain', props.card.title);
@@ -90,34 +116,48 @@ function onDragStart(event: DragEvent) {
   emit('dragstart', props.card.id, event);
 }
 
-function moveTo(col: BoardColumnId) {
-  menuOpen.value = false;
-  emit('move', props.card.id, col);
+function moveTo(stage: BoardStageId) {
+  closeMenus();
+  emit('move', props.card.id, stage);
+}
+
+function pickStatus(status: CardStatus) {
+  closeMenus();
+  emit('set-status', props.card.id, status);
+}
+
+function toggleFlag(flag: 'blocked' | 'cancelled') {
+  closeMenus();
+  emit('set-flag', props.card.id, flag, !props.card[flag]);
 }
 
 function onDuplicate() {
-  menuOpen.value = false;
+  closeMenus();
   emit('duplicate', props.card.id);
 }
 
 function onRemove() {
-  menuOpen.value = false;
+  closeMenus();
   emit('remove', props.card.id);
 }
 
 onBeforeUnmount(() => {
-  document.removeEventListener('click', closeMenu);
+  document.removeEventListener('click', closeMenus);
 });
 </script>
 
 <template>
   <article
     class="board-card"
-    :class="[`prio-${card.priority}`, { 'has-menu': menuOpen }]"
+    :class="[`prio-${card.priority}`, {
+      'has-menu': menuOpen || statusOpen,
+      'flag-blocked': card.blocked,
+      'flag-cancelled': card.cancelled,
+    }]"
     :data-card-id="card.id"
     draggable="true"
     tabindex="0"
-    :aria-label="`${card.title} — ${columnLabel(card.status)}`"
+    :aria-label="`${card.title} — ${stageLabel(card.stage)}`"
     @click="onCardClick"
     @keydown="onKeydown"
     @dragstart="onDragStart"
@@ -141,10 +181,29 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="card-meta">
+      <!-- In-stage status chip: click opens the stage's status picker.
+           backlog/done have no status, so no chip renders there. -->
+      <button
+        v-if="stageStatuses.length"
+        class="status-chip"
+        :class="`st-${card.status}`"
+        :aria-label="`Status: ${card.status} — change`"
+        :aria-expanded="statusOpen"
+        :title="`Status in ${stageLabel(card.stage)}: ${card.status} — click to change`"
+        @click="toggleStatusMenu"
+        @keydown.stop
+      >{{ card.status }}</button>
+      <span v-if="card.blocked" class="meta-chip flag blocked"
+        :title="card.blockedReason ? `Blocked: ${card.blockedReason}` : 'Flagged blocked'"
+      >blocked</span>
+      <span v-if="card.cancelled" class="meta-chip flag cancelled" title="Flagged cancelled">cancelled</span>
+      <span v-if="unassigned" class="meta-chip unassigned" title="No project">unassigned</span>
       <span v-if="card.project" class="meta-chip" :title="card.project">{{ card.project }}</span>
       <span v-if="card.agent" class="meta-chip agent" :title="card.agent">{{ card.agent }}</span>
       <span class="meta-chip prio" :class="`p-${card.priority}`">{{ PRIORITY_LABEL[card.priority] }}</span>
-      <span v-if="card.blockedBy" class="meta-chip blocked" :title="`Blocked by: ${card.blockedBy}`">blocked</span>
+      <span v-if="card.dependsOn.length" class="meta-chip rel" :title="`Depends on: ${card.dependsOn.join(', ')}`">dep {{ card.dependsOn.length }}</span>
+      <span v-if="card.blocks.length" class="meta-chip rel" :title="`Blocks: ${card.blocks.join(', ')}`">blocks {{ card.blocks.length }}</span>
+      <span v-if="card.conflictsWith.length" class="meta-chip rel conflict" :title="`Conflicts with: ${card.conflictsWith.join(', ')}`">conflict {{ card.conflictsWith.length }}</span>
       <span v-if="card.session" class="meta-chip sess" title="Attached session">
         <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor"
           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -158,15 +217,36 @@ onBeforeUnmount(() => {
 
     <p v-if="card.description" class="card-desc">{{ card.description }}</p>
 
+    <!-- Status picker — the compact per-card control from the brief: click
+         the chip, pick one of this stage's statuses, no modal. -->
+    <div v-if="statusOpen" class="card-menu status-menu" role="menu" @click.stop>
+      <div class="menu-label">Status in {{ stageLabel(card.stage) }}</div>
+      <button
+        v-for="s in stageStatuses"
+        :key="s"
+        class="menu-item"
+        :class="{ current: card.status === s }"
+        role="menuitem"
+        @click="pickStatus(s)"
+      >{{ s }}</button>
+    </div>
+
     <div v-if="menuOpen" class="card-menu" role="menu" @click.stop>
       <div class="menu-label">Move to</div>
       <button
-        v-for="col in otherColumns"
+        v-for="col in otherStages"
         :key="col.id"
         class="menu-item"
         role="menuitem"
         @click="moveTo(col.id)"
       >{{ col.label }}</button>
+      <div class="menu-sep" />
+      <button class="menu-item" role="menuitem" @click="toggleFlag('blocked')">
+        {{ card.blocked ? 'Clear blocked flag' : 'Flag blocked' }}
+      </button>
+      <button class="menu-item" role="menuitem" @click="toggleFlag('cancelled')">
+        {{ card.cancelled ? 'Clear cancelled flag' : 'Flag cancelled' }}
+      </button>
       <div class="menu-sep" />
       <button class="menu-item" role="menuitem" @click="onDuplicate">Duplicate</button>
       <button class="menu-item danger" role="menuitem" @click="onRemove">Delete…</button>
@@ -197,6 +277,18 @@ onBeforeUnmount(() => {
 
 .board-card[draggable='true'] {
   user-select: none;
+}
+
+/* Flag marks: a blocked card keeps its stage but carries a danger edge;
+   a cancelled card is dimmed with a struck title. Both stay out of any
+   future auto-pickup. */
+.board-card.flag-blocked {
+  border-left: 2px solid var(--bg-danger, #b3402e);
+}
+
+.board-card.flag-cancelled .card-title {
+  color: var(--text-muted, #a39a8e);
+  text-decoration: line-through;
 }
 
 .card-top {
@@ -251,6 +343,38 @@ onBeforeUnmount(() => {
   margin-top: 0.25rem;
 }
 
+/* The in-stage status chip doubles as the status picker's trigger, so it
+   is a real button — sized like a meta chip, touch-sized on phones. */
+.status-chip {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.625rem;
+  letter-spacing: 0.02em;
+  padding: 0.0625rem 0.3rem;
+  border: 1px solid var(--border-color, #e3dbcf);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  color: var(--text-accent, #c2532f);
+  cursor: pointer;
+  max-width: 9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-chip:hover {
+  border-color: var(--text-accent, #c2532f);
+}
+
+.status-chip:focus-visible {
+  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
+  outline-offset: 1px;
+}
+
+.status-chip.st-done,
+.status-chip.st-accepted {
+  color: var(--text-secondary, #6b6259);
+}
+
 .meta-chip {
   font-family: var(--font-mono, monospace);
   font-size: 0.625rem;
@@ -274,7 +398,16 @@ onBeforeUnmount(() => {
   background: var(--tint-active, rgba(194, 83, 47, 0.10));
 }
 
-.meta-chip.blocked {
+.meta-chip.flag.blocked {
+  color: var(--bg-danger, #b3402e);
+}
+
+.meta-chip.flag.cancelled,
+.meta-chip.unassigned {
+  color: var(--text-muted, #a39a8e);
+}
+
+.meta-chip.rel.conflict {
   color: var(--bg-danger, #b3402e);
 }
 
@@ -303,7 +436,8 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-/* "Move to" menu — also the touch / no-mouse path for moving cards. */
+/* Card menus — "Move to"/flags and the status picker share one look. The
+   status menu anchors under the chip (left), the actions menu under ⋮. */
 .card-menu {
   position: absolute;
   top: 1.625rem;
@@ -314,6 +448,11 @@ onBeforeUnmount(() => {
   background: var(--bg-main, #fbf8f3);
   border: 1px solid var(--border-color, #e3dbcf);
   border-radius: var(--radius-md, 6px);
+}
+
+.status-menu {
+  right: auto;
+  left: 0.375rem;
 }
 
 .menu-label {
@@ -346,6 +485,11 @@ onBeforeUnmount(() => {
   outline: none;
 }
 
+.menu-item.current {
+  color: var(--text-accent, #c2532f);
+  background: var(--tint-active, rgba(194, 83, 47, 0.10));
+}
+
 .menu-item.danger {
   color: var(--bg-danger, #b3402e);
 }
@@ -361,6 +505,11 @@ onBeforeUnmount(() => {
     opacity: 1;
     width: 44px;
     height: 44px;
+  }
+
+  .status-chip {
+    min-height: 44px;
+    padding: 0 0.5rem;
   }
 
   .menu-item {

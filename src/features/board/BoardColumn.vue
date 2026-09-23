@@ -1,18 +1,20 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
-import type { BoardCard, BoardColumnId } from '../../stores/board';
-import type { BoardColumnDef } from './columns';
+import type { BoardCard, BoardStageId, CardStatus } from '../../stores/board';
+import { statusBreakdown, type BoardStageDef } from './columns';
 import BoardCardItem from './BoardCardItem.vue';
 
 const props = defineProps<{
-  col: BoardColumnDef;
+  col: BoardStageDef;
   cards: BoardCard[];
 }>();
 
 const emit = defineEmits<{
   add: [];
   open: [card: BoardCard];
-  move: [cardId: string, to: BoardColumnId, beforeId?: string | null];
+  move: [cardId: string, to: BoardStageId, beforeId?: string | null];
+  'set-status': [cardId: string, status: CardStatus];
+  'set-flag': [cardId: string, flag: 'blocked' | 'cancelled', on: boolean];
   duplicate: [cardId: string];
   remove: [cardId: string];
   reorder: [cardId: string, delta: -1 | 1];
@@ -24,10 +26,12 @@ const depth = ref(0);
 const dropBeforeId = ref<string | null>(null);
 const dragActive = computed(() => depth.value > 0);
 
-/** Cards parked in `blocked` that name what blocks them. */
-const notedBlockers = computed(
-  () => props.cards.filter((c) => c.blockedBy.trim().length > 0).length
-);
+/** Per-status tally inside this stage, e.g. `in_progress 1 / review 1`. */
+const breakdown = computed(() => statusBreakdown(props.col.id, props.cards));
+
+/** Cards in this stage carrying the `blocked` flag — counted separately
+ * from the status split (the flag can sit on a card in any status). */
+const blockedCount = computed(() => props.cards.filter((c) => c.blocked).length);
 
 function cardIdFromDrag(event: DragEvent): string | null {
   return event.dataTransfer?.getData('application/x-board-card') || null;
@@ -74,20 +78,25 @@ function onDragEnd() {
   <section
     class="board-col"
     :data-col="col.id"
-    :aria-label="`${col.label} column, ${cards.length} cards`"
+    :aria-label="`${col.label} stage, ${cards.length} cards`"
   >
     <header class="col-head">
       <span class="col-label">{{ col.label }}</span>
       <span class="col-count">{{ cards.length }}</span>
       <span
-        v-if="col.id === 'blocked' && notedBlockers > 0"
+        v-if="breakdown"
+        class="col-statuses"
+        :title="`${col.label}: ${breakdown}`"
+      >{{ breakdown }}</span>
+      <span
+        v-if="blockedCount > 0"
         class="col-blocked"
-        :title="`${notedBlockers} card(s) name what blocks them`"
-      >{{ notedBlockers }} blocked</span>
+        :title="`${blockedCount} card(s) flagged blocked`"
+      >{{ blockedCount }} blocked</span>
       <button
         class="col-add"
-        :aria-label="`Add card (lands in Inbox)`"
-        :title="`Add card — lands in Inbox`"
+        :aria-label="`Add card (lands in Backlog)`"
+        :title="`Add card — lands in Backlog`"
         @click="emit('add')"
       >
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
@@ -115,6 +124,8 @@ function onDragEnd() {
           :card="card"
           @open="(c) => emit('open', c)"
           @move="(id, to, beforeId) => emit('move', id, to, beforeId)"
+          @set-status="(id, s) => emit('set-status', id, s)"
+          @set-flag="(id, f, on) => emit('set-flag', id, f, on)"
           @duplicate="(id) => emit('duplicate', id)"
           @remove="(id) => emit('remove', id)"
           @reorder="(id, delta) => emit('reorder', id, delta)"
@@ -162,6 +173,17 @@ function onDragEnd() {
   font-size: 0.6875rem;
   font-variant-numeric: tabular-nums;
   color: var(--text-muted, #a39a8e);
+}
+
+.col-statuses {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.625rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted, #a39a8e);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .col-blocked {
