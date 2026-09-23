@@ -268,7 +268,7 @@ def short(card: dict, claims: "dict[str, dict]") -> str:
     status = card.get("status") or "-"
     claim = claims.get(card["id"])
     who = f" @{claim['agentName']}" if claim else ""
-    return (f"{mark} {card['id'][:8]}  {STAGE_LABELS.get(card.get('stage','?'),card.get('stage')):<11}"
+    return (f"{mark} {card['id'][:8]}  {STAGE_LABELS.get(card.get('stage','?'),card.get('stage')):<12}"
             f"{status:<12}{card.get('priority','medium'):<7}"
             f"{(card.get('project') or '-'):<12}{card.get('title','')[:52]}{who}")
 
