@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue';
 import { useConfigStore } from '../stores/config';
 import ProjectsSection from '../features/settings/ProjectsSection.vue';
+import RolesSection from '../features/roles/RolesSection.vue';
 import { addAgent, removeAgent, updateAgent } from '../lib/host';
 import { getTransportKind, type AgentTransportKind } from '../lib/types';
 import { restrictedTransports } from '../lib/platform';
@@ -347,6 +348,8 @@ async function handleDelete(name: string) {
         </section>
 
         <ProjectsSection />
+
+        <RolesSection />
 
         <section class="config-section">
           <h3>Config File</h3>
