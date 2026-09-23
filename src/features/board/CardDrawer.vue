@@ -8,7 +8,16 @@ import {
 } from '../../stores/board';
 import { useSessionStore } from '../../stores/session';
 import { useConfigStore } from '../../stores/config';
+import { useProjectsStore } from '../../stores/projects';
 import { projectName } from '../../stores/activity';
+import {
+  useArtifactsStore,
+  pickStatusArtifact,
+  proposeTransition,
+  parseStatusToken,
+  reviewRoundOf,
+  type CardArtifact,
+} from '../../stores/artifacts';
 import { BOARD_STAGES, PRIORITIES, statusesForStage, stageLabel } from './columns';
 import { fmtStamp } from './format';
 
@@ -24,6 +33,8 @@ const emit = defineEmits<{
 const board = useBoardStore();
 const sessionStore = useSessionStore();
 const configStore = useConfigStore();
+const projectsStore = useProjectsStore();
+const artifactsStore = useArtifactsStore();
 
 const card = computed(() => board.cards.find((c) => c.id === props.cardId) ?? null);
 
@@ -207,8 +218,110 @@ function onEsc(event: KeyboardEvent) {
   }
 }
 
+// ---- artifacts (card-as-pipeline, W6-A) -------------------------------------
+//
+// Artifacts live on the host at <projectPath>/.acp/cards/<cardId>/ and are
+// read through the bridge by the artifacts store. The block below lists
+// them, shows the card's current STATUS token, and offers the transition
+// the token proposes — applied through the same store mutations the manual
+// stage/status controls use (moveCard / setCardStatus / setCardFlag), never
+// a direct document write.
+
+/** The card's registry project path; null when the free-text project label
+ * resolves to nothing (artifacts then can't be located). */
+const cardProjectPath = computed(() => {
+  const c = card.value;
+  if (!c) return null;
+  const pid = board.projectIdForCard(c);
+  const proj = pid ? projectsStore.projects.find((p) => p.id === pid) : null;
+  return proj?.path ?? null;
+});
+
+const artState = computed(() => artifactsStore.stateFor(props.cardId));
+const openArtifact = ref<CardArtifact | null>(null);
+
+/** The artifact whose token currently speaks for the card — stage-aware
+ * (in reviewtest it is the highest `05_review_rN` round). */
+const tokenArtifact = computed(() =>
+  pickStatusArtifact(card.value?.stage ?? 'backlog', artState.value.artifacts)
+);
+const reviewRound = computed(() => reviewRoundOf(artState.value.artifacts));
+
+const proposal = computed(() =>
+  card.value
+    ? proposeTransition(
+        card.value.stage,
+        reviewRound.value,
+        tokenArtifact.value?.token ?? null,
+        tokenArtifact.value?.tokenDetail ?? ''
+      )
+    : { kind: 'none' as const, label: '' }
+);
+
+watch(
+  [() => props.cardId, cardProjectPath],
+  () => {
+    openArtifact.value = null;
+    if (card.value && cardProjectPath.value) {
+      artifactsStore.ensureLoaded(props.cardId, cardProjectPath.value);
+    }
+  },
+  { immediate: true }
+);
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function onOpenArtifact(a: CardArtifact) {
+  openArtifact.value = openArtifact.value?.name === a.name ? null : a;
+}
+
+/** "Обновить": re-read the artifact dir over the bridge and re-sync the
+ * draft from the card (the board store itself is already live). */
+function onRefreshArtifacts() {
+  if (cardProjectPath.value) {
+    void artifactsStore.refresh(props.cardId, cardProjectPath.value).then(() => {
+      // Artifact objects are replaced wholesale — re-point the open viewer
+      // at the fresh record so it doesn't show pre-refresh content.
+      const name = openArtifact.value?.name;
+      if (name) {
+        openArtifact.value =
+          artState.value.artifacts.find((a) => a.name === name) ?? null;
+      }
+    });
+  }
+  if (card.value) draft.value = draftFromCard(card.value);
+}
+
+/** "Применить": the proposed transition via the board's own mutations —
+ * the same code path as a manual move/status pick in the UI. */
+function onApplyTransition() {
+  const c = card.value;
+  const p = proposal.value;
+  if (!c || p.kind === 'none') return;
+  flush();
+  if (p.kind === 'move') board.moveCard(c.id, p.to);
+  else if (p.kind === 'status') board.setCardStatus(c.id, p.status);
+  else {
+    board.setCardFlag(c.id, 'blocked', true);
+    if (p.reason) board.updateCard(c.id, { blockedReason: p.reason });
+  }
+  if (card.value) draft.value = draftFromCard(card.value);
+}
+
 onMounted(() => {
   window.addEventListener('keydown', onEsc, true);
+  // e2e seam — same pattern as window.__projects / window.__roles.
+  (window as unknown as { __pipeline: unknown }).__pipeline = {
+    proposeTransition,
+    parseStatusToken,
+    pickStatusArtifact,
+    reviewRoundOf,
+  };
+  (window as unknown as { __artifacts: unknown }).__artifacts = artifactsStore;
 });
 
 onBeforeUnmount(() => {
@@ -360,6 +473,71 @@ onBeforeUnmount(() => {
           >{{ s.agentName }} · {{ s.title }}</option>
         </select>
       </label>
+
+      <div class="field artifacts" data-testid="artifacts-block">
+        <div class="art-head">
+          <span class="field-label">Artifacts</span>
+          <span
+            class="status-token mono"
+            :class="tokenArtifact?.token ? `tok-${tokenArtifact.token.toLowerCase()}` : 'tok-none'"
+            data-testid="status-token"
+            :title="tokenArtifact ? `STATUS token from ${tokenArtifact.name}` : 'No STATUS token in the card artifacts'"
+          >STATUS: {{ tokenArtifact?.token ?? '—' }}</span>
+          <button
+            class="art-refresh"
+            data-testid="artifacts-refresh"
+            title="Re-read artifacts and board state"
+            :disabled="!cardProjectPath || artState.phase === 'loading'"
+            @click="onRefreshArtifacts"
+          >↻ Refresh</button>
+        </div>
+
+        <p v-if="!cardProjectPath" class="art-note" data-testid="artifacts-noproject">
+          No project on this card — artifacts live under &lt;projectPath&gt;/.acp/cards/.
+        </p>
+        <template v-else>
+          <p v-if="artState.error" class="art-error" data-testid="artifacts-error">{{ artState.error }}</p>
+          <p
+            v-else-if="artState.phase === 'loading' && !artState.artifacts.length"
+            class="art-note"
+          >Loading artifacts…</p>
+          <p
+            v-else-if="!artState.artifacts.length"
+            class="art-note"
+            data-testid="artifacts-empty"
+          >No artifacts yet — <span class="mono">.acp/cards/{{ card.id.slice(0, 8) }}…</span> is empty or missing on the host.</p>
+
+          <ul v-if="artState.artifacts.length" class="art-list" data-testid="artifacts-list">
+            <li v-for="a in artState.artifacts" :key="a.name">
+              <button
+                class="art-row mono"
+                :class="{ open: openArtifact?.name === a.name }"
+                :title="a.path"
+                @click="onOpenArtifact(a)"
+              >
+                <span class="art-name">{{ a.name }}</span>
+                <span class="art-size">{{ a.mtime ? fmtStamp(a.mtime) + ' · ' : '' }}{{ fmtBytes(a.bytes) }}</span>
+                <span v-if="a.token" class="art-tok" :class="`tok-${a.token.toLowerCase()}`">{{ a.token }}</span>
+                <span v-if="a.error" class="art-tok tok-err" :title="a.error">error</span>
+              </button>
+            </li>
+          </ul>
+
+          <pre
+            v-if="openArtifact"
+            class="art-view mono"
+            data-testid="artifact-view"
+          >{{ openArtifact.error ? `${openArtifact.error}\n\n` : '' }}{{ openArtifact.content }}</pre>
+
+          <div v-if="proposal.kind !== 'none'" class="art-proposal" data-testid="transition-proposal">
+            <span class="art-proposal-label">{{ proposal.label }}</span>
+            <button class="btn primary" data-testid="apply-transition" @click="onApplyTransition">Apply</button>
+          </div>
+          <p v-else-if="artState.phase === 'ready' && tokenArtifact" class="art-note" data-testid="transition-none">
+            {{ proposal.label }}
+          </p>
+        </template>
+      </div>
 
       <p class="drawer-stamps mono">
         created {{ fmtStamp(card.createdAt) }} · updated {{ fmtStamp(card.updatedAt) }}<template v-if="lastSavedAt"> · saved {{ fmtStamp(lastSavedAt) }}</template>
@@ -639,9 +817,186 @@ textarea.f-input {
 .seg-btn:focus-visible,
 .link-add:focus-visible,
 .link-del:focus-visible,
-.drawer-close:focus-visible {
+.drawer-close:focus-visible,
+.art-refresh:focus-visible,
+.art-row:focus-visible {
   outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
   outline-offset: 1px;
+}
+
+/* Artifacts — the card-as-pipeline block. */
+
+.artifacts {
+  border-top: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  padding-top: 0.625rem;
+}
+
+.art-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.art-refresh {
+  margin-left: auto;
+  min-height: 24px;
+  padding: 0 0.5rem;
+  border: 1px solid var(--border-color, #e3dbcf);
+  border-radius: var(--radius-md, 6px);
+  background: transparent;
+  color: var(--text-secondary, #6b6259);
+  font-family: inherit;
+  font-size: 0.6875rem;
+  cursor: pointer;
+}
+
+.art-refresh:hover {
+  color: var(--text-accent, #c2532f);
+  border-color: var(--text-accent, #c2532f);
+}
+
+.art-refresh:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.status-token {
+  font-size: 0.625rem;
+  letter-spacing: 0.02em;
+  padding: 0.0625rem 0.3rem;
+  border: 1px solid var(--border-color, #e3dbcf);
+  border-radius: var(--radius-sm, 4px);
+  color: var(--text-muted, #a39a8e);
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+}
+
+.status-token.tok-approve,
+.status-token.tok-done,
+.art-tok.tok-approve,
+.art-tok.tok-done {
+  color: var(--bg-success, #5a7d4f);
+  border-color: var(--bg-success, #5a7d4f);
+}
+
+.status-token.tok-changes_required,
+.art-tok.tok-changes_required {
+  color: var(--text-accent, #c2532f);
+  border-color: var(--text-accent, #c2532f);
+}
+
+.status-token.tok-blocked,
+.art-tok.tok-blocked,
+.art-tok.tok-err {
+  color: var(--bg-danger, #b3402e);
+  border-color: var(--bg-danger, #b3402e);
+}
+
+.art-note {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--text-muted, #a39a8e);
+}
+
+.art-error {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--bg-danger, #b3402e);
+  overflow-wrap: anywhere;
+}
+
+.art-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.art-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 26px;
+  padding: 0 0.375rem;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-primary, #2b2723);
+  font-size: 0.6875rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.art-row:hover {
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+}
+
+.art-row.open {
+  background: var(--tint-active, rgba(194, 83, 47, 0.10));
+}
+
+.art-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.art-size {
+  color: var(--text-muted, #a39a8e);
+  white-space: nowrap;
+}
+
+.art-tok {
+  padding: 0 0.25rem;
+  border: 1px solid var(--border-color, #e3dbcf);
+  border-radius: var(--radius-sm, 4px);
+  font-size: 0.625rem;
+  white-space: nowrap;
+}
+
+.art-view {
+  margin: 0;
+  max-height: 16rem;
+  overflow: auto;
+  padding: 0.5rem;
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border-radius: var(--radius-md, 6px);
+  background: var(--bg-sidebar, #f6f2ec);
+  font-size: 0.6875rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.art-proposal {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.5rem;
+  border: 1px dashed var(--border-color, #e3dbcf);
+  border-radius: var(--radius-md, 6px);
+}
+
+.art-proposal-label {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6875rem;
+  color: var(--text-secondary, #6b6259);
+}
+
+@media (max-width: 800px) {
+  .art-refresh,
+  .art-row,
+  .art-proposal .btn {
+    min-height: 44px;
+  }
 }
 
 @media (max-width: 800px) {

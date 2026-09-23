@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { ref, computed, onBeforeUnmount } from 'vue';
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
 import type { BoardCard, BoardStageId, CardStatus } from '../../stores/board';
 import { useBoardStore } from '../../stores/board';
 import { useRolesStore } from '../../stores/roles';
 import { useUiStore } from '../../stores/ui';
+import { useProjectsStore } from '../../stores/projects';
+import { useArtifactsStore, pickStatusArtifact } from '../../stores/artifacts';
 import { BOARD_STAGES, stageLabel, statusesForStage } from './columns';
 import { fmtStamp } from './format';
 
@@ -26,6 +28,8 @@ const emit = defineEmits<{
 const board = useBoardStore();
 const uiStore = useUiStore();
 const rolesStore = useRolesStore();
+const projectsStore = useProjectsStore();
+const artifactsStore = useArtifactsStore();
 
 const menuOpen = ref(false);
 const statusOpen = ref(false);
@@ -45,6 +49,21 @@ const stageRole = computed(() => rolesStore.roleForStage(props.card.stage));
 const stageRoleHasRunner = computed(
   () => !!stageRole.value && rolesStore.roleHasRunner(stageRole.value)
 );
+
+/** STATUS token badge (W6-A): the token of the stage's latest artifact,
+ * read through the bridge by the artifacts store (session-cached; the
+ * card asks once on mount when its project resolves to a registry path). */
+const statusToken = computed(() => {
+  const st = artifactsStore.byCard[props.card.id];
+  if (!st || !st.artifacts.length) return null;
+  return pickStatusArtifact(props.card.stage, st.artifacts)?.token ?? null;
+});
+
+onMounted(() => {
+  const pid = board.projectIdForCard(props.card);
+  const proj = pid ? projectsStore.projects.find((p) => p.id === pid) : null;
+  if (proj) artifactsStore.ensureLoaded(props.card.id, proj.path);
+});
 
 const PRIORITY_LABEL: Record<string, string> = { high: 'high', medium: 'med', low: 'low' };
 
@@ -202,6 +221,9 @@ onBeforeUnmount(() => {
         @click="toggleStatusMenu"
         @keydown.stop
       >{{ card.status }}</button>
+      <span v-if="statusToken" class="meta-chip st-token" :class="`tok-${statusToken.toLowerCase()}`"
+        data-testid="card-status-token"
+        :title="`STATUS: ${statusToken} — from .acp/cards artifacts`">{{ statusToken }}</span>
       <span v-if="stageRole" class="meta-chip role" data-testid="card-role-badge"
         :title="`Stage role: ${stageRole.label} (${stageRole.cli})`">{{ stageRole.label }}</span>
       <span v-if="stageRole && !stageRoleHasRunner" class="meta-chip no-runner"
@@ -433,6 +455,20 @@ onBeforeUnmount(() => {
 }
 
 .meta-chip.rel.conflict {
+  color: var(--bg-danger, #b3402e);
+}
+
+/* STATUS-token badge (W6-A): mirrors the drawer's token colors. */
+.meta-chip.st-token.tok-approve,
+.meta-chip.st-token.tok-done {
+  color: var(--bg-success, #5a7d4f);
+}
+
+.meta-chip.st-token.tok-changes_required {
+  color: var(--text-accent, #c2532f);
+}
+
+.meta-chip.st-token.tok-blocked {
   color: var(--bg-danger, #b3402e);
 }
 
