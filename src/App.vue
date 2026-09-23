@@ -626,6 +626,11 @@ function clearError() {
   --tint-hover: rgba(43, 39, 35, 0.045);
   --tint-active: rgba(194, 83, 47, 0.10);
   --accent-soft: rgba(194, 83, 47, 0.14);
+  /* Scrollbars are painted, not left to the engine: its default is a cool
+   * white that clashes with warm paper. */
+  --scrollbar-thumb: rgba(43, 39, 35, 0.22);
+  --scrollbar-thumb-hover: rgba(43, 39, 35, 0.40);
+  color-scheme: light;
 
   font-family: var(--font-ui);
   font-size: 16px;
@@ -653,8 +658,44 @@ function clearError() {
     --tint-hover: rgba(236, 229, 218, 0.06);
     --tint-active: rgba(224, 116, 80, 0.16);
     --accent-soft: rgba(224, 116, 80, 0.20);
+    --scrollbar-thumb: rgba(236, 229, 218, 0.24);
+    --scrollbar-thumb-hover: rgba(236, 229, 218, 0.42);
+    color-scheme: dark;
     background-color: var(--bg-main);
   }
+}
+
+/* One painted scrollbar for the whole app. `scrollbar-color` is the standard
+   property (Chromium 121+, Firefox); the ::-webkit-* rules below are the
+   fallback for engines that still ignore it. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 * {

@@ -120,6 +120,10 @@ def seed(context):
 def start_server():
     for _ in range(30):
         s = socket.socket()
+        # SO_REUSEADDR: a socket left in TIME_WAIT by the previous run would
+        # otherwise fail this availability probe for up to a minute while the
+        # real server would have bound fine.
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("127.0.0.1", PORT))
             break

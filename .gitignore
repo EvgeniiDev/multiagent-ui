@@ -52,3 +52,6 @@ Desktop.ini
 
 # per-card run artefacts (role prompts stay tracked)
 .acp/cards/
+
+# python bytecode from the e2e suites
+scripts/__pycache__/

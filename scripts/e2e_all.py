@@ -20,6 +20,9 @@ SCRIPTS = [
     ("board", REPO / "scripts/e2e_board.py", 25999),
     ("dashboard", REPO / "scripts/e2e_dashboard.py", 25998),
     ("phone targets", REPO / "scripts/e2e_touch.py", None),
+    ("live stream", REPO / "scripts/e2e_live_stream.py", None),
+    ("scrollbars", REPO / "scripts/e2e_scrollbars.py", None),
+    ("roles", REPO / "scripts/e2e_roles.py", None),
 ]
 
 
