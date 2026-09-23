@@ -5,12 +5,24 @@
 // declared by hand: projects are derived from the sessions the agents report,
 // so the list is always the truth of what has actually been touched. Numbers
 // come from the activity ledger (usage_update / turn events), never invented.
-import { computed, ref } from 'vue';
+//
+// Layout is a real two-pane view: the project list lives in its own
+// scrollable column on the left, the detail pane sits beside it with its own
+// scroll. Previously the detail rendered as the last child of the scrolling
+// list — on any list longer than the viewport a click selected a row but
+// produced no visible change (measured: detail y = 1297 in a 900px viewport
+// with 41 rows). Under 800px the panes collapse to one column and the detail
+// is inlined directly under the clicked row, scrolled into view on select.
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useSessionStore } from '../stores/session';
 import { useActivityStore, projectName } from '../stores/activity';
 import { useConfigStore } from '../stores/config';
 import { useUiStore } from '../stores/ui';
 import type { SavedSession } from '../lib/types';
+import ProjectDetail from '../features/projects/ProjectDetail.vue';
+import NewSessionDialog from '../features/projects/NewSessionDialog.vue';
+import type { ProjectRow } from '../features/projects/types';
+import { formatStamp, compactNumber } from '../features/projects/format';
 
 const sessionStore = useSessionStore();
 const activity = useActivityStore();
@@ -21,18 +33,30 @@ const search = ref('');
 const agentFilter = ref('');
 const selectedCwd = ref('');
 const range = ref<7 | 30 | 0>(7);
+const showNewSession = ref(false);
+const listEl = ref<HTMLElement | null>(null);
 
-interface ProjectRow {
-  cwd: string;
-  name: string;
-  sessions: number;
-  lastActivity: number;
-  agents: string[];
-  live: boolean;
-  tokens: number;
-  cost: number;
-  turns: number;
+// Same 800px breakpoint as the sidebar drawer in App.vue. When it matches,
+// the detail is rendered inline under the clicked row instead of in the
+// (hidden) second column.
+const isNarrow = ref(false);
+let narrowMql: MediaQueryList | null = null;
+function syncNarrow() {
+  if (narrowMql) isNarrow.value = narrowMql.matches;
 }
+onMounted(() => {
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    narrowMql = window.matchMedia('(max-width: 800px)');
+    syncNarrow();
+    narrowMql.addEventListener('change', syncNarrow);
+  }
+});
+onBeforeUnmount(() => {
+  if (narrowMql) {
+    narrowMql.removeEventListener('change', syncNarrow);
+    narrowMql = null;
+  }
+});
 
 /** One row per working directory, aggregated over the sessions we know about. */
 const projects = computed<ProjectRow[]>(() => {
@@ -84,33 +108,17 @@ const selectedSessions = computed(() =>
 
 const agentsInUse = computed(() => [...new Set(sessionStore.savedSessions.map((s) => s.agentName))].sort());
 
-function formatStamp(timestamp: number): string {
-  const d = new Date(timestamp);
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  if (d.toDateString() === now.toDateString()) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  if (d.getFullYear() === now.getFullYear()) return `${d.getDate()} ${months[d.getMonth()]}`;
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-function relative(timestamp: number): string {
-  const minutes = Math.round((Date.now() - timestamp) / 60000);
-  if (minutes < 1) return 'just now';
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
-}
-
-function compactNumber(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-  return String(value);
-}
-
 async function openProject(row: ProjectRow) {
   selectedCwd.value = selectedCwd.value === row.cwd ? '' : row.cwd;
+  if (selectedCwd.value && isNarrow.value) {
+    // The detail mounts inline as the clicked row's next sibling; pull it
+    // into view so the tap visibly produces something even near the bottom
+    // of a long list.
+    await nextTick();
+    listEl.value
+      ?.querySelector('.project-inline-detail')
+      ?.scrollIntoView({ block: 'nearest' });
+  }
 }
 
 async function resume(session: SavedSession) {
@@ -151,6 +159,9 @@ async function newSessionIn(row: ProjectRow) {
           <button :class="{ active: range === 0 }" @click="range = 0">all</button>
         </div>
         <span class="pane-note">{{ projects.length }} projects</span>
+        <button class="new-session-cta" type="button" @click="showNewSession = true">
+          New session
+        </button>
       </div>
     </header>
 
@@ -160,73 +171,62 @@ async function newSessionIn(row: ProjectRow) {
         directory.
       </p>
 
-      <ul v-else class="project-list">
-        <li
-          v-for="row in projects"
-          :key="row.cwd"
-          class="project-row"
-          :class="{ open: row.cwd === selectedCwd }"
-          @click="openProject(row)"
-        >
-          <span class="live-dot" :class="{ on: row.live }" :title="row.live ? 'Working now' : 'Idle'"></span>
-          <span class="project-name">{{ row.name }}</span>
-          <span class="project-path" :title="row.cwd">{{ row.cwd }}</span>
-          <span class="project-agents">{{ row.agents.join(' · ') }}</span>
-          <span class="project-stat" :title="`${row.turns} turns in range`">{{ row.sessions }} sess</span>
-          <span class="project-stat mono">{{ compactNumber(row.tokens) }}</span>
-          <span class="project-stamp">{{ formatStamp(row.lastActivity) }}</span>
-        </li>
-      </ul>
-
-      <section v-if="selected" class="project-detail">
-        <header class="detail-head">
-          <div>
-            <h3>{{ selected.name }}</h3>
-            <p class="detail-path mono">{{ selected.cwd }}</p>
-          </div>
-          <div class="detail-actions">
-            <button class="action" @click="newSessionIn(selected)">New session here</button>
-          </div>
-        </header>
-
-        <div class="detail-metrics">
-          <span class="metric">
-            <span class="metric-label">sessions</span>
-            <span class="metric-value mono">{{ selected.sessions }}</span>
-          </span>
-          <span class="metric">
-            <span class="metric-label">last activity</span>
-            <span class="metric-value mono">{{ relative(selected.lastActivity) }}</span>
-          </span>
-          <span class="metric">
-            <span class="metric-label">tokens ({{ range ? range + 'd' : 'all' }})</span>
-            <span class="metric-value mono">{{ compactNumber(selected.tokens) }}</span>
-          </span>
-          <span class="metric">
-            <span class="metric-label">turns</span>
-            <span class="metric-value mono">{{ selected.turns }}</span>
-          </span>
-          <span v-if="selected.cost" class="metric">
-            <span class="metric-label">cost</span>
-            <span class="metric-value mono">{{ selected.cost.toFixed(2) }}</span>
-          </span>
+      <template v-else>
+        <div ref="listEl" class="list-col">
+          <ul class="project-list">
+            <template v-for="row in projects" :key="row.cwd">
+              <li
+                class="project-row"
+                :class="{ open: row.cwd === selectedCwd }"
+                :aria-current="row.cwd === selectedCwd ? 'true' : undefined"
+                tabindex="0"
+                @click="openProject(row)"
+                @keydown.enter.prevent="openProject(row)"
+                @keydown.space.prevent="openProject(row)"
+              >
+                <span class="live-dot" :class="{ on: row.live }" :title="row.live ? 'Working now' : 'Idle'"></span>
+                <span class="project-name">{{ row.name }}</span>
+                <span class="project-path" :title="row.cwd">{{ row.cwd }}</span>
+                <span class="project-agents">{{ row.agents.join(' · ') }}</span>
+                <span class="project-stat" :title="`${row.turns} turns in range`">{{ row.sessions }} sess</span>
+                <span class="project-stat mono">{{ compactNumber(row.tokens) }}</span>
+                <span class="project-stamp">{{ formatStamp(row.lastActivity) }}</span>
+              </li>
+              <li
+                v-if="isNarrow && row.cwd === selectedCwd"
+                class="project-inline-detail"
+              >
+                <ProjectDetail
+                  :project="row"
+                  :sessions="selectedSessions"
+                  :range="range"
+                  @close="selectedCwd = ''"
+                  @resume="resume"
+                  @new-session="newSessionIn"
+                />
+              </li>
+            </template>
+          </ul>
         </div>
 
-        <h4 class="detail-sub">Sessions</h4>
-        <ul class="detail-sessions">
-          <li
-            v-for="session in selectedSessions"
-            :key="session.id"
-            class="detail-session"
-            @click="resume(session)"
-          >
-            <span class="session-title" :title="session.title">{{ session.title }}</span>
-            <span class="session-agent">{{ session.agentName }}</span>
-            <span class="session-stamp">{{ formatStamp(session.lastUpdated) }}</span>
-          </li>
-        </ul>
-      </section>
+        <div class="detail-col">
+          <ProjectDetail
+            v-if="selected && !isNarrow"
+            :project="selected"
+            :sessions="selectedSessions"
+            :range="range"
+            @close="selectedCwd = ''"
+            @resume="resume"
+            @new-session="newSessionIn"
+          />
+          <p v-else class="detail-placeholder">
+            Select a project to see its sessions and usage.
+          </p>
+        </div>
+      </template>
     </div>
+
+    <NewSessionDialog v-if="showNewSession" @close="showNewSession = false" />
   </div>
 </template>
 
@@ -307,15 +307,61 @@ async function newSessionIn(row: ProjectRow) {
   color: var(--text-muted, #a39a8e);
 }
 
+.new-session-cta {
+  height: 28px;
+  padding: 0 0.75rem;
+  border: none;
+  border-radius: var(--radius-md, 6px);
+  background: var(--bg-primary, #c2532f);
+  color: var(--text-on-accent, #fbf8f3);
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.new-session-cta:hover {
+  background: var(--bg-primary-hover, #a8431f);
+}
+
+/* Two independently scrolling panes: list column on the left (fixed band,
+ * never grows), detail column taking the rest. The body itself only frames
+ * them — it no longer scrolls, so a click can never render its result below
+ * the fold. */
 .pane-body {
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  padding: 0.5rem 1rem 1rem;
+  display: flex;
+  overflow: hidden;
+}
+
+.list-col {
+  flex: 0 0 auto;
+  width: clamp(340px, 30vw, 420px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0.5rem 0.75rem 1rem;
+  border-right: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+}
+
+.detail-col {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 1rem 1.25rem;
+}
+
+.detail-placeholder {
+  margin: 0.25rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--text-muted, #a39a8e);
 }
 
 .pane-empty {
-  margin: 0.5rem 0 0;
+  margin: 0;
+  padding: 1rem;
   font-size: 0.8125rem;
   color: var(--text-muted, #a39a8e);
 }
@@ -341,8 +387,20 @@ async function newSessionIn(row: ProjectRow) {
   background: var(--tint-hover, rgba(43, 39, 35, 0.045));
 }
 
+.project-row:focus-visible {
+  outline: 2px solid var(--bg-primary, #c2532f);
+  outline-offset: -2px;
+}
+
+/* Selected row: accent bar on the left edge + active tint — visible from
+ * across the list, not just on hover. */
 .project-row.open {
   background: var(--tint-active, rgba(194, 83, 47, 0.10));
+  box-shadow: inset 3px 0 0 var(--bg-primary, #c2532f);
+}
+
+.project-row.open .project-name {
+  font-weight: 600;
 }
 
 .live-dot {
@@ -359,10 +417,13 @@ async function newSessionIn(row: ProjectRow) {
 
 .project-name {
   flex: 0 0 auto;
-  min-width: 8rem;
+  min-width: 6rem;
   font-size: 0.8125rem;
   font-weight: 500;
   color: var(--text-primary, #2b2723);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .project-path {
@@ -408,125 +469,21 @@ async function newSessionIn(row: ProjectRow) {
   color: var(--text-muted, #a39a8e);
 }
 
-.project-detail {
-  margin-top: 0.75rem;
-  padding-top: 0.75rem;
-  border-top: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+/* The list column is narrow by design: agents and token counts are repeated
+ * in the detail pane, so they collapse out of the row first. */
+.list-col .project-agents,
+.list-col .project-stat.mono {
+  display: none;
 }
 
-.detail-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-}
-
-.detail-head h3 {
-  margin: 0;
-  font-size: 0.875rem;
-  font-weight: 600;
-}
-
-.detail-path {
-  margin: 0.125rem 0 0;
-  font-size: 0.6875rem;
-  color: var(--text-muted, #a39a8e);
-}
-
-.action {
-  height: 28px;
-  padding: 0 0.75rem;
-  border: 1px solid var(--bg-primary, #c2532f);
+/* Inline detail (narrow layout): framed card directly under the clicked row. */
+.project-inline-detail {
+  margin: 0.125rem 0 0.5rem;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border-left: 3px solid var(--bg-primary, #c2532f);
   border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-accent, #c2532f);
-  font-family: inherit;
-  font-size: 0.75rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.action:hover {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-}
-
-.detail-metrics {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1.25rem;
-  margin: 0.625rem 0 0;
-}
-
-.metric {
-  display: flex;
-  flex-direction: column;
-  gap: 0.125rem;
-}
-
-.metric-label {
-  font-size: 0.625rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-muted, #a39a8e);
-}
-
-.metric-value {
-  font-size: 0.8125rem;
-  color: var(--text-primary, #2b2723);
-}
-
-.detail-sub {
-  margin: 0.875rem 0 0.25rem;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-muted, #a39a8e);
-}
-
-.detail-sessions {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.detail-session {
-  display: flex;
-  align-items: center;
-  gap: 0.625rem;
-  min-height: 28px;
-  padding: 0 0.375rem;
-  border-radius: var(--radius-sm, 4px);
-  cursor: pointer;
-}
-
-.detail-session:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-}
-
-.session-title {
-  flex: 1;
-  min-width: 0;
-  font-size: 0.8125rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.session-agent {
-  flex: 0 0 auto;
-  font-family: var(--font-mono, monospace);
-  font-size: 0.6875rem;
-  color: var(--text-muted, #a39a8e);
-}
-
-.session-stamp {
-  flex: 0 0 auto;
-  min-width: 3.5rem;
-  text-align: right;
-  font-family: var(--font-mono, monospace);
-  font-size: 0.6875rem;
-  color: var(--text-muted, #a39a8e);
+  background: var(--bg-main, #fbf8f3);
 }
 
 @media (max-width: 800px) {
@@ -553,18 +510,31 @@ async function newSessionIn(row: ProjectRow) {
     height: 44px;
   }
 
+  .new-session-cta {
+    min-height: 44px;
+  }
+
   .project-path,
   .project-agents {
     display: none;
   }
 
-  .project-row,
-  .detail-session {
+  .project-row {
     min-height: 44px;
   }
 
-  .action {
-    min-height: 44px;
+  /* Single column: the list takes the full pane and scrolls; the second
+   * column (which only ever holds the placeholder or the desktop detail)
+   * drops out entirely — the detail renders inline under the row instead. */
+  .list-col {
+    flex: 1;
+    width: auto;
+    border-right: none;
+    padding: 0.5rem 0.75rem 1rem;
+  }
+
+  .detail-col {
+    display: none;
   }
 }
 </style>

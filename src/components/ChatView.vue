@@ -7,12 +7,17 @@ import { readAttachments, formatBytes, extractReplayedAttachments, MAX_IMAGE_ATT
 import ModePicker from './ModePicker.vue';
 import ModelPicker from './ModelPicker.vue';
 import CommandPalette from './CommandPalette.vue';
+import NewSessionDialog from '../features/projects/NewSessionDialog.vue';
 import type { Attachment, SlashCommand } from '../lib/types';
 
 const sessionStore = useSessionStore();
 const inputText = ref('');
 const messagesContainer = ref<HTMLElement | null>(null);
 const commandPaletteRef = ref<InstanceType<typeof CommandPalette> | null>(null);
+
+// Header "New session": unlike the sidebar button (hidden while
+// connected), this one stays put for as long as the chat view is mounted.
+const showNewSession = ref(false);
 
 // Files staged for the next turn, and the last attach error (limits, wrong type).
 const attachments = ref<Attachment[]>([]);
@@ -245,6 +250,14 @@ function getToolKind(kind: string): string {
     <div class="chat-header">
       <h2>{{ currentSession?.title || 'Chat' }}</h2>
       <div class="header-right">
+        <button
+          class="chat-new-session"
+          type="button"
+          :disabled="isLoading || isReconnecting"
+          @click="showNewSession = true"
+        >
+          New session
+        </button>
         <ModelPicker 
           v-if="availableModels.length > 0"
           :models="availableModels"
@@ -442,6 +455,8 @@ function getToolKind(kind: string): string {
           Send
         </button>
       </div>    </div>
+
+    <NewSessionDialog v-if="showNewSession" @close="showNewSession = false" />
   </div>
 </template>
 
@@ -475,6 +490,30 @@ function getToolKind(kind: string): string {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+}
+
+.chat-new-session {
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 0.75rem;
+  border: 1px solid var(--bg-primary, #c2532f);
+  border-radius: var(--radius-md, 6px);
+  background: transparent;
+  color: var(--text-accent, #c2532f);
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.chat-new-session:hover:not(:disabled) {
+  background: var(--tint-active, rgba(194, 83, 47, 0.10));
+}
+
+.chat-new-session:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .agent-name {
@@ -1031,6 +1070,10 @@ textarea:focus {
   textarea {
     /* Avoid iOS auto-zoom on focus when font-size < 16px. */
     font-size: 16px;
+    min-height: 44px;
+  }
+
+  .chat-new-session {
     min-height: 44px;
   }
 
