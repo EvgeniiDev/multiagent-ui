@@ -1,0 +1,14 @@
+[Unit]
+Description=ACP UI shared state server (panel KV store on the host)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /home/hermes/projects/acp-ui/server/acp-state-server.mjs
+Environment=STATE_DIR=/home/hermes/.hermes/acp-ui-state
+Environment=PORT=25900
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
