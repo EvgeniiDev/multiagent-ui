@@ -4,11 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/node /home/hermes/projects/acp-ui/server/acp-state-server.mjs
-Environment=STATE_DIR=/home/hermes/.hermes/acp-ui-state
+ExecStart=/usr/bin/node %h/projects/acp-ui/server/acp-state-server.mjs
+Environment=STATE_DIR=%h/.hermes/acp-ui-state
 Environment=PORT=25900
-Restart=on-failure
-RestartSec=3
+Restart=always
+RestartSec=2
 
 [Install]
 WantedBy=default.target
