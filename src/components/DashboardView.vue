@@ -135,6 +135,17 @@ interface DayPoint {
   costs: string;
 }
 
+/**
+ * Axis/table label for one bucket. A bucket is one day, or a week when the span is
+ * long (the step above 120 days) — and a week that prints as its first day reads
+ * like a day, which is exactly the confusion reported ("таблица на все дни года").
+ */
+function labelFor(key: string, startMs: number, step: number): string {
+  if (step === 1) return shortDate(key);
+  const end = new Date(startMs + 6 * 86400000).toISOString().slice(0, 10);
+  return `${shortDate(key)} – ${shortDate(end)}`;
+}
+
 const dayPoints = computed<DayPoint[]>(() => {
   const { from, to } = bounds.value;
   const rows = activity.usageByDay(from, to);
@@ -173,7 +184,7 @@ const dayPoints = computed<DayPoint[]>(() => {
         }
       }
     }
-    out.push({ day: key, label: shortDate(key), tokens, cost, turns, costs: fmtCostGroups(
+    out.push({ day: key, label: labelFor(key, t, step), tokens, cost, turns, costs: fmtCostGroups(
         groupCost(
           samples.filter((s) => {
             const sd = new Date(s.at).toISOString().slice(0, 10);
@@ -186,6 +197,15 @@ const dayPoints = computed<DayPoint[]>(() => {
   }
   return out;
 });
+
+/**
+ * Table and CSV list days WITH data. The chart keeps the gap-filled series so
+ * its axis stays continuous, but printing a few hundred empty rows (a year-long
+ * range fills every bucket) is noise, not information.
+ */
+const tableRows = computed(() =>
+  dayPoints.value.filter((d) => d.tokens > 0 || d.cost > 0 || d.turns > 0)
+);
 
 const maxDayTokens = computed(() =>
   dayPoints.value.reduce((m, d) => Math.max(m, d.tokens), 0)
@@ -391,7 +411,7 @@ function payload(): ExportPayload {
       cost: r.cost,
       turns: r.turns,
     })),
-    byDay: dayPoints.value.map((d) => ({ day: d.day, tokens: d.tokens, cost: d.cost, turns: d.turns })),
+    byDay: tableRows.value.map((d) => ({ day: d.day, tokens: d.tokens, cost: d.cost, turns: d.turns })),
   };
 }
 
@@ -591,7 +611,7 @@ watch(
       <!-- By day: chart + table -->
       <section class="panel" aria-label="Usage by day">
         <div class="panel-title">By day <span class="muted">· tokens per day, {{ windowLabel }}</span></div>
-        <div v-if="dayPoints.length === 0" class="empty" data-testid="day-empty">
+        <div v-if="tableRows.length === 0" class="empty" data-testid="day-empty">
           No days in this range.
         </div>
         <div v-else-if="maxDayTokens === 0" class="empty" data-testid="day-empty">
@@ -636,12 +656,12 @@ watch(
             </g>
           </svg>
         </div>
-        <table v-if="dayPoints.length > 0" class="dense" data-testid="by-day-table">
+        <table v-if="tableRows.length > 0" class="dense" data-testid="by-day-table">
           <thead>
-            <tr><th scope="col">Day</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th></tr>
+            <tr><th scope="col">Day / week</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th></tr>
           </thead>
           <tbody>
-            <tr v-for="d in dayPoints" :key="d.day" data-testid="by-day-row" :data-day="d.day">
+            <tr v-for="d in tableRows" :key="d.day" data-testid="by-day-row" :data-day="d.day">
               <td data-label="Day">{{ d.label }}</td>
               <td class="num mono" data-label="Tokens">{{ fmtInt(d.tokens) }}</td>
               <td class="num mono" data-label="Cost">{{ d.costs }}</td>

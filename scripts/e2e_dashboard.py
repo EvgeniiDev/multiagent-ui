@@ -29,12 +29,14 @@ def ts(days_ago: int, hour: int = 12) -> int:  # noqa: ARG001
     return min(int(d.timestamp() * 1000), int((NOW - timedelta(minutes=5)).timestamp() * 1000))
 
 
-# Two agents, two projects, two days. Tokens: alpha=1200+800=2000, beta=500.
+# Two agents, two projects, two days. `used` is a session's RUNNING total (that is
+# what `usage_update` carries), so sess-a1 reads 1200 and then 2000 — an increasing
+# series. Tokens actually consumed: alpha 2000, beta 500.
 USAGE = [
     {"at": ts(1), "agentName": "alpha", "sessionId": "sess-a1", "cwd": "/home/u/proj-one",
      "used": 1200, "size": 8000, "cost": 0.02, "currency": "USD"},
-    {"at": ts(1), "agentName": "alpha", "sessionId": "sess-a1", "cwd": "/home/u/proj-one",
-     "used": 800, "size": 8000, "cost": 0.01, "currency": "USD"},
+    {"at": ts(0), "agentName": "alpha", "sessionId": "sess-a1", "cwd": "/home/u/proj-one",
+     "used": 2000, "size": 8000, "cost": 0.03, "currency": "USD"},
     {"at": ts(0), "agentName": "beta", "sessionId": "sess-b1", "cwd": "/home/u/proj-two",
      "used": 500, "size": 4000},
 ]
