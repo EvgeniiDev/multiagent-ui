@@ -368,14 +368,6 @@ function clearError() {
       <div class="sidebar-header">
         <h1>ACP UI</h1>
         <div class="header-actions">
-          <button 
-            class="settings-btn" 
-            :class="{ active: showTrafficMonitor }"
-            @click="showTrafficMonitor = !showTrafficMonitor" 
-            title="ACP Traffic Monitor"
-            aria-label="ACP Traffic Monitor"
-          ><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.9 19.1a10 10 0 0 1 0-14.2M7.8 16.2a5.5 5.5 0 0 1 0-8.4M12 12h.01M16.7 10.3a3 3 0 0 1 0 4.4M19.6 7.4a7 7 0 0 1 0 10.2"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg></button>
-          <button class="settings-btn" @click="showSettings = true" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1a1.7 1.7 0 0 0 1.9.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1a1.7 1.7 0 0 0-.3 1.9v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.4 1z"/></svg></button>
           <button class="toggle-btn" aria-label="Collapse sidebar" @click="toggleSidebar"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 6l-6 6 6 6"/></svg></button>
         </div>
       </div>
@@ -484,6 +476,27 @@ function clearError() {
            drawer was unreachable on narrow viewports. -->
       <header class="scope-bar">
         <ProjectScopeSelector />
+        <!-- Global actions: Settings opens the Settings overlay, Traffic
+             toggles the traffic panel. They live here (not in any view's own
+             header) so every view — Chat, Projects, Board, Dashboard — can
+             reach them. -->
+        <div class="scope-actions">
+          <button
+            class="scope-icon-btn"
+            :class="{ active: showTrafficMonitor }"
+            type="button"
+            title="ACP Traffic Monitor"
+            aria-label="ACP Traffic Monitor"
+            @click="showTrafficMonitor = !showTrafficMonitor"
+          ><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.9 19.1a10 10 0 0 1 0-14.2M7.8 16.2a5.5 5.5 0 0 1 0-8.4M12 12h.01M16.7 10.3a3 3 0 0 1 0 4.4M19.6 7.4a7 7 0 0 1 0 10.2"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg></button>
+          <button
+            class="scope-icon-btn"
+            type="button"
+            title="Settings"
+            aria-label="Settings"
+            @click="showSettings = true"
+          ><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1a1.7 1.7 0 0 0 1.9.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1a1.7 1.7 0 0 0-.3 1.9v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.4 1z"/></svg></button>
+        </div>
         <button
           v-show="isNarrowLayout && !showSidebar"
           class="mobile-hamburger"
@@ -691,7 +704,6 @@ html, body, #app {
   gap: 0.25rem;
 }
 
-.settings-btn,
 .toggle-btn {
   padding: 0.25rem 0.5rem;
   border: none;
@@ -701,15 +713,8 @@ html, body, #app {
   color: var(--text-muted);
 }
 
-.settings-btn:hover,
 .toggle-btn:hover {
   color: var(--text-primary);
-}
-
-.settings-btn.active {
-  color: var(--text-accent);
-  background: var(--bg-hover);
-  border-radius: 4px;
 }
 
 .sidebar-content {
@@ -852,15 +857,61 @@ html, body, #app {
 }
 
 /* Global scope strip: the project selector from §B. Slim chrome row pinned
- * above every view (chat, projects, board, dashboard). */
+ * above every view (chat, projects, board, dashboard). Positioned + z-indexed
+ * above the mobile drawer backdrop (z 90) — like the view rail (z 95) — so
+ * the global Settings/Traffic buttons stay clickable while the drawer is
+ * open on narrow viewports. */
 .scope-bar {
+  position: relative;
+  z-index: 95;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  min-width: 0;
   padding: 0.375rem 0.75rem;
   border-bottom: 1px solid var(--border-faint);
   background: var(--bg-main);
+}
+
+/* Global actions in the scope bar: Settings + Traffic. Same icon-button
+ * geometry as the view rail (34×34, radius-md, hairline/ghost) so the bar
+ * reads as one chrome row. */
+.scope-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.scope-icon-btn {
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border-radius: var(--radius-md, 6px);
+  background: transparent;
+  color: var(--text-muted, #a39a8e);
+  cursor: pointer;
+}
+
+.scope-icon-btn:hover {
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  color: var(--text-primary, #2b2723);
+}
+
+.scope-icon-btn.active {
+  color: var(--text-accent, #c2532f);
+  background: var(--tint-active, rgba(194, 83, 47, 0.10));
+}
+
+.scope-icon-btn:focus-visible {
+  outline: 2px solid var(--text-accent, #c2532f);
+  outline-offset: 2px;
 }
 
 /* The drawer hamburger is a scope-bar item — static flow, right edge. It is
@@ -869,7 +920,6 @@ html, body, #app {
 .mobile-hamburger {
   display: none;
   flex: 0 0 auto;
-  margin-left: auto;
   align-items: center;
   justify-content: center;
   width: 44px;
@@ -1170,11 +1220,26 @@ html, body, #app {
   }
 
   /* Tap-target sizing for the icon buttons inside the sidebar header. */
-  .settings-btn,
   .toggle-btn {
     min-width: 40px;
     min-height: 40px;
     font-size: 1rem;
+  }
+
+  /* Scope bar on phones: no wrap, no horizontal scroll — the selector
+   * shrinks (min-width drops) while Settings/Traffic stay ≥44px. */
+  .scope-bar {
+    flex-wrap: nowrap;
+    overflow: hidden;
+  }
+
+  .scope-actions {
+    margin-left: auto;
+  }
+
+  .scope-icon-btn {
+    width: 44px;
+    height: 44px;
   }
 
   /* Honour the iOS home indicator at the bottom of the main area. */
