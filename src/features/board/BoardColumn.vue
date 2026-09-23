@@ -251,6 +251,18 @@ function onDragEnd() {
   outline-offset: 1px;
 }
 
+/* Phone: the select itself grows to a real touch target (min-height 44px).
+   A ::after hit-area extension was tried first, but a pseudo-element does
+   not enlarge a <select> reliably — the probe (and the popup anchoring)
+   still read the 17px element box. */
+@media (max-width: 799px) {
+  .col-role {
+    min-height: 44px;
+    padding: 0.5rem 0.5rem;
+    font-size: 0.6875rem;
+  }
+}
+
 .col-add {
   margin-left: auto;
   width: 22px;

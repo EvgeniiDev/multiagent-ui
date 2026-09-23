@@ -144,12 +144,25 @@ def controls(page, scope_sel):
             .map(el => {
               const r = el.getBoundingClientRect();
               const cs = getComputedStyle(el);
+              // Effective touch target: the control box unioned with any
+              // ::before/::after hit-area extension (transparent overlays are
+              // the sanctioned way to enlarge a dense control on phones).
+              let top = r.top, bottom = r.bottom, left = r.left, right = r.right;
+              for (const pseudo of ['::before', '::after']) {
+                const ps = getComputedStyle(el, pseudo);
+                if (ps.content === 'none' || ps.position !== 'absolute') continue;
+                const pr = el.getBoundingClientRect();
+                const t = parseFloat(ps.top) || 0, b = parseFloat(ps.bottom) || 0;
+                const l = parseFloat(ps.left) || 0, rr = parseFloat(ps.right) || 0;
+                top = Math.min(top, pr.top - t); bottom = Math.max(bottom, pr.bottom + b);
+                left = Math.min(left, pr.left - l); right = Math.max(right, pr.right + rr);
+              }
               return {
                 tag: el.tagName.toLowerCase(),
                 cls: String(el.className).split(' ')[0],
                 label: (el.getAttribute('aria-label') || el.textContent || '')
                   .replace(/\\s+/g, ' ').trim().slice(0, 24),
-                h: r.height, w: r.width,
+                h: bottom - top, w: right - left,
                 shown: r.width > 0 && r.height > 0 &&
                        cs.display !== 'none' && cs.visibility !== 'hidden',
               };
