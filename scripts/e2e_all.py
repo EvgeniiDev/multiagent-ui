@@ -1,7 +1,8 @@
-"""Run every control-center E2E against the deployed bundle and summarise.
+"""Run every control-center E2E against one build and summarise.
 
-Serves `dist-web/` on the port each script expects (25998/25999) and runs the
-scripts one after another, so the artefacts come from one and the same build.
+Starts one http.server per suite port (25998/25999) from the same fresh
+`dist-web/`, runs all suites, then stops the servers. Individual suites that
+self-serve (state/touch/etc.) are unaffected.
 
 Usage:  npm run build:web && ~/.hermes/tools-venv/bin/python scripts/e2e_all.py
 """
@@ -24,7 +25,7 @@ SCRIPTS = [
 
 def serve(port: int) -> subprocess.Popen:
     proc = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(port)],
+        [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
         cwd=str(REPO / "dist-web"),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -35,7 +36,7 @@ def serve(port: int) -> subprocess.Popen:
             return proc
         except Exception:
             time.sleep(0.25)
-    return proc
+    raise RuntimeError(f"http.server on {port} did not become ready")
 
 
 def main() -> int:

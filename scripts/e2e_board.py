@@ -14,6 +14,7 @@ Screenshots land in docs/board-*.png.
 """
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -119,6 +120,7 @@ def main():
                                       viewport={"width": 1440, "height": 900})
         seed_ledger(context)
         page = context.new_page()
+        page.route(re.compile(r":25900/"), lambda route: route.abort())
         page.on("pageerror", lambda exc: page_errors.append(str(exc)))
         page.on("dialog", lambda d: d.accept())
 
@@ -156,6 +158,8 @@ def main():
         backlog_card.locator(".card-menu-btn").click()
         page.locator(".card-menu .menu-item", has_text="Spec").first.click()
         page.wait_for_selector('[data-col="spec"] .board-card', timeout=5000)
+        page.wait_for_selector(
+            '[data-col="spec"] .board-card .status-chip', timeout=5000)
         moved = page.locator('[data-col="spec"] .board-card', has_text="E2E board card")
         spec_after = page.locator('[data-col="spec"] .col-count').inner_text()
         check("card moved to spec via menu", moved.count() == 1)
@@ -233,6 +237,7 @@ def main():
                                     viewport={"width": 390, "height": 844})
         seed_ledger(phone)
         p2 = phone.new_page()
+        p2.route(re.compile(r":25900/"), lambda route: route.abort())
         p2.on("pageerror", lambda exc: page_errors.append(str(exc)))
         p2.goto(BASE, wait_until="load")
         p2.wait_for_selector(".view-rail")

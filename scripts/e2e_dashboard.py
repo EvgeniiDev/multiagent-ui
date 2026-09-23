@@ -4,6 +4,7 @@ Run: npm run build:web, serve dist-web on 25998, then run this with the
 tools venv python (sync_playwright, chromium headless).
 """
 import json
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -68,6 +69,7 @@ def main() -> int:
         browser = p.chromium.launch()
         ctx = browser.new_context(ignore_https_errors=True, viewport={"width": 1440, "height": 900})
         page = ctx.new_page()
+        page.route(re.compile(r":25900/"), lambda route: route.abort())
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.add_init_script(
             f"localStorage.setItem('acp-ui:activity.json', {json.dumps(FIXTURE)});"

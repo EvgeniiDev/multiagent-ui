@@ -22,6 +22,7 @@ docs/polish-board-390x844.png / docs/polish-projects-390x844.png.
 """
 
 import json
+import re
 import socket
 import subprocess
 import sys
@@ -239,6 +240,7 @@ def run_checks():
         )
         seed(phone)
         page = phone.new_page()
+        page.route(re.compile(r":25900/"), lambda route: route.abort())
         page.on("pageerror", lambda exc: page_errors.append(str(exc)))
         page.on("dialog", lambda d: d.accept())
 
@@ -329,6 +331,7 @@ def run_checks():
         )
         seed(empty_ctx, with_board=False)
         ep = empty_ctx.new_page()
+        ep.route(re.compile(r":25900/"), lambda route: route.abort())
         ep.on("pageerror", lambda exc: page_errors.append(str(exc)))
         ep.goto(BASE, wait_until="load")
         ep.wait_for_selector(".view-rail", timeout=10000)
@@ -343,6 +346,7 @@ def run_checks():
         )
         seed(desk)
         dp = desk.new_page()
+        dp.route(re.compile(r":25900/"), lambda route: route.abort())
         dp.on("pageerror", lambda exc: page_errors.append(str(exc)))
         dp.goto(BASE, wait_until="load")
         dp.wait_for_selector(".view-rail", timeout=10000)
