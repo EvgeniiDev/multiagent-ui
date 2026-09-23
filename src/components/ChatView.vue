@@ -7,8 +7,10 @@ import { readAttachments, formatBytes, extractReplayedAttachments, MAX_IMAGE_ATT
 import ModePicker from './ModePicker.vue';
 import ModelPicker from './ModelPicker.vue';
 import CommandPalette from './CommandPalette.vue';
+import VoiceInput from './VoiceInput.vue';
 import NewSessionDialog from '../features/projects/NewSessionDialog.vue';
 import type { Attachment, SlashCommand } from '../lib/types';
+import type { SttPartial } from '../lib/stt';
 
 const sessionStore = useSessionStore();
 const inputText = ref('');
@@ -25,6 +27,8 @@ const attachError = ref<string | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
 const composerEl = ref<HTMLTextAreaElement | null>(null);
 const composerBox = ref<HTMLElement | null>(null);
+const voiceInputRef = ref<InstanceType<typeof VoiceInput> | null>(null);
+const voiceOverlayEl = ref<HTMLElement | null>(null);
 const supportsImages = computed(() => sessionStore.supportsImages);
 const imageHint = computed(
   () => `Images and text files (max ${formatBytes(MAX_IMAGE_ATTACHMENT_BYTES)} / ${formatBytes(MAX_TEXT_ATTACHMENT_BYTES)})`
@@ -132,10 +136,111 @@ function autosizeComposer() {
   if (pinned && feed) feed.scrollTop = feed.scrollHeight;
 }
 
-watch(inputText, async () => {
+watch(inputText, async (newVal, oldVal) => {
+  // Edits typed while dictating move the insertion mark when they land in
+  // front of it, so the voice text stays where the user last saw it.
+  if (voicePhase.value !== 'idle') {
+    const delta = newVal.length - (oldVal?.length ?? 0);
+    const caret = composerEl.value?.selectionStart ?? newVal.length;
+    if (delta !== 0 && caret <= voiceAt.value) {
+      voiceAt.value = Math.max(0, Math.min(voiceAt.value + delta, newVal.length));
+    }
+  }
   await nextTick();
   autosizeComposer();
 });
+
+// ---------------- Voice dictation ----------------
+//
+// VoiceInput owns the mic + the STT socket; this block owns where the
+// transcript lands in the field. While a take runs, the textarea's own
+// text is transparent and an overlay paints `typed | committed | volatile
+// | typed` so settled words read normally and the hypothesis is muted.
+type VoicePhase = 'idle' | 'connecting' | 'listening' | 'stopping';
+
+const voicePhase = ref<VoicePhase>('idle');
+const voiceElapsed = ref(0);
+const voiceAt = ref(0);
+const voiceCommitted = ref('');
+const voiceVolatile = ref('');
+const voiceError = ref<string | null>(null);
+
+const voiceActive = computed(() => voicePhase.value !== 'idle');
+const voicePre = computed(() => inputText.value.slice(0, voiceAt.value));
+const voicePost = computed(() => inputText.value.slice(voiceAt.value));
+// The overlay shows the same separator the final insert will add, so the
+// spacing doesn't jump when the take commits.
+const voiceSep = computed(() =>
+  (voiceCommitted.value || voiceVolatile.value) &&
+  voicePre.value.length > 0 &&
+  !/\s$/.test(voicePre.value)
+    ? ' '
+    : '',
+);
+
+const voiceStatusText = computed(() => {
+  switch (voicePhase.value) {
+    case 'connecting':
+      return 'Starting microphone…';
+    case 'listening': {
+      const s = voiceElapsed.value;
+      return `Listening… ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    }
+    case 'stopping':
+      return 'Finishing…';
+    default:
+      return voiceError.value;
+  }
+});
+
+function onVoiceState(s: { phase: VoicePhase; elapsedS: number }) {
+  const was = voicePhase.value;
+  voicePhase.value = s.phase;
+  voiceElapsed.value = s.elapsedS;
+  if (s.phase === 'listening' && was !== 'listening') {
+    voiceAt.value = composerEl.value?.selectionStart ?? inputText.value.length;
+    voiceCommitted.value = '';
+    voiceVolatile.value = '';
+    voiceError.value = null;
+  }
+  if (s.phase === 'idle') {
+    voiceCommitted.value = '';
+    voiceVolatile.value = '';
+  }
+}
+
+function onVoicePartial(p: SttPartial) {
+  voiceCommitted.value = p.committed;
+  voiceVolatile.value = p.volatile;
+  syncVoiceOverlayScroll();
+}
+
+function onVoiceFinal(text: string) {
+  if (text) {
+    const pre = inputText.value.slice(0, voiceAt.value);
+    const post = inputText.value.slice(voiceAt.value);
+    const insert = (pre.length > 0 && !/\s$/.test(pre) ? ' ' : '') + text;
+    inputText.value = pre + insert + post;
+    const caret = pre.length + insert.length;
+    void nextTick(() => {
+      composerEl.value?.focus();
+      composerEl.value?.setSelectionRange(caret, caret);
+    });
+  }
+}
+
+function onVoiceError(message: string) {
+  voiceError.value = message || null;
+}
+
+function syncVoiceOverlayScroll() {
+  const ta = composerEl.value;
+  const ov = voiceOverlayEl.value;
+  if (ta && ov) {
+    ov.scrollTop = ta.scrollTop;
+    ov.scrollLeft = ta.scrollLeft;
+  }
+}
 
 // Width changes (viewport resize, sidebar toggle) rewrap the text — the
 // height has to be recomputed. Height-only changes are ignored, which also
@@ -163,6 +268,10 @@ onBeforeUnmount(() => {
 async function handleSend() {
   const text = inputText.value.trim();
   if ((!text && attachments.value.length === 0) || isLoading.value) return;
+
+  // A take in flight would land its final text into the cleared field —
+  // stop it first so the send and the dictation don't interleave.
+  voiceInputRef.value?.stop();
 
   const files = attachments.value;
   inputText.value = '';
@@ -220,6 +329,13 @@ function handleKeyDown(event: KeyboardEvent) {
       commandPaletteRef.value.handleKeyDown(event);
       return;
     }
+  }
+
+  // Escape ends a take before the palette/send handling gets a say.
+  if (event.key === 'Escape' && voicePhase.value !== 'idle') {
+    event.preventDefault();
+    voiceInputRef.value?.stop();
+    return;
   }
 
   // Enter-to-send is desktop only. On mobile we let the textarea insert a
@@ -454,6 +570,13 @@ function getToolKind(kind: string): string {
 
       <div v-if="attachError" class="attach-error">{{ attachError }}</div>
 
+      <div
+        v-if="voiceStatusText"
+        class="voice-status"
+        :class="{ 'is-error': voicePhase === 'idle' && voiceError }"
+        role="status"
+      >{{ voiceStatusText }}</div>
+
       <div class="input-row">
         <!-- Field + attach read as one control: the hairline frame is the
              box, the ghost attach button sits inside it on the last line. -->
@@ -488,21 +611,42 @@ function getToolKind(kind: string): string {
             accept="image/*,.txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.xml,.html,.css,.js,.mjs,.ts,.tsx,.vue,.py,.sh,.sql,.toml,.ini,.cfg,.conf,.diff,.patch"
             @change="handleFilesPicked"
           />
-          <textarea
-            ref="composerEl"
-            v-model="inputText"
-            :placeholder="
-              isReconnecting
-                ? 'Reconnecting…'
-                : (availableCommands.length > 0
-                    ? 'Type your message... (/ for commands)'
-                    : 'Type your message...')
-            "
-            :disabled="isLoading || isReconnecting"
-            @keydown="handleKeyDown"
-            rows="1"
-          />
+          <div class="composer-field">
+            <textarea
+              ref="composerEl"
+              v-model="inputText"
+              :class="{ 'voice-ghost': voiceActive }"
+              :placeholder="
+                isReconnecting
+                  ? 'Reconnecting…'
+                  : (availableCommands.length > 0
+                      ? 'Type your message... (/ for commands)'
+                      : 'Type your message...')
+              "
+              :disabled="isLoading || isReconnecting"
+              @keydown="handleKeyDown"
+              @scroll="syncVoiceOverlayScroll"
+              rows="1"
+            />
+            <!-- While dictating, the field's own text is transparent and
+                 this overlay paints it instead: settled words read like
+                 typed text, the still-moving hypothesis is muted. -->
+            <div
+              v-if="voiceActive"
+              ref="voiceOverlayEl"
+              class="voice-overlay"
+              aria-hidden="true"
+            ><span>{{ voicePre }}</span><span>{{ voiceSep }}</span><span class="voice-commit">{{ voiceCommitted }}</span><span class="voice-volatile">{{ voiceVolatile }}</span><span>{{ voicePost }}</span></div>
+          </div>
         </div>
+        <VoiceInput
+          ref="voiceInputRef"
+          :disabled="isLoading || isReconnecting"
+          @state="onVoiceState"
+          @partial="onVoicePartial"
+          @final="onVoiceFinal"
+          @error="onVoiceError"
+        />
         <button
           class="icon-btn send-btn"
           :disabled="(!inputText.trim() && attachments.length === 0) || isLoading || isReconnecting"
@@ -1129,6 +1273,61 @@ function getToolKind(kind: string): string {
   color: var(--text-muted, #786d62);
 }
 
+/* Wrapper keeps the dictation overlay pinned exactly over the textarea. */
+.composer-field {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+}
+
+/* While a take runs the textarea's own glyphs go transparent (caret stays
+ * via caret-color) and the overlay paints the same box: typed text and
+ * committed words in the field's normal colour, the volatile hypothesis in
+ * muted. Metrics mirror the textarea's so the two layers sit pixel-aligned. */
+.composer-box textarea.voice-ghost {
+  color: transparent;
+  caret-color: var(--text-primary, #2b2723);
+}
+
+.voice-overlay {
+  position: absolute;
+  inset: 0;
+  padding: 7px 0.125rem;
+  font-family: inherit;
+  font-size: 0.875rem;
+  line-height: 20px;
+  color: var(--text-primary, #2b2723);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.voice-overlay .voice-volatile {
+  color: var(--text-muted, #786d62);
+}
+
+/* One quiet line above the row: timer while listening, the reason when a
+ * take fails — same size register as .attach-error. */
+.voice-status {
+  padding: 0 0.125rem;
+  font-size: 0.6875rem;
+  color: var(--text-muted, #786d62);
+}
+
+.voice-status.is-error {
+  color: var(--bg-danger, #b3402e);
+}
+
+/* --bg-danger reads ~5.4:1 on paper but only ~2.7:1 on the dark surface —
+ * the accent token keeps the failure legible there (>= 4.5:1). */
+@media (prefers-color-scheme: dark) {
+  .voice-status.is-error {
+    color: var(--text-accent, #f0a184);
+  }
+}
+
 /* The only filled element in the row: accent when armed, a quiet hairline
  * when there is nothing to send — not a faded fill. */
 .send-btn {
@@ -1187,6 +1386,13 @@ function getToolKind(kind: string): string {
     padding-top: 11px;
     padding-bottom: 11px;
     min-height: 44px;
+  }
+
+  .voice-overlay {
+    font-size: 16px;
+    line-height: 22px;
+    padding-top: 11px;
+    padding-bottom: 11px;
   }
 
   .chat-new-session {
