@@ -24,6 +24,7 @@ import { useProjectsStore } from '../features/scope/registry';
 import type { SavedSession } from '../lib/types';
 import ProjectDetail from '../features/projects/ProjectDetail.vue';
 import NewSessionDialog from '../features/projects/NewSessionDialog.vue';
+import NewProjectDialog from '../features/projects/NewProjectDialog.vue';
 import type { ProjectRow } from '../features/projects/types';
 import { formatStamp, compactNumber } from '../features/projects/format';
 
@@ -38,6 +39,7 @@ const agentFilter = ref('');
 const selectedCwd = ref('');
 const range = ref<7 | 30 | 0>(7);
 const showNewSession = ref(false);
+const showNewProject = ref(false);
 const listEl = ref<HTMLElement | null>(null);
 
 // Same 800px breakpoint as the sidebar drawer in App.vue. When it matches,
@@ -177,6 +179,13 @@ async function resume(session: SavedSession) {
   }
 }
 
+/** A project was just created in the New project dialog (it is already the
+ * active scope): select it so the detail pane opens on it right away. */
+function handleProjectCreated(projectId: string) {
+  const created = projectsStore.projects.find((p) => p.id === projectId);
+  if (created) selectedCwd.value = created.path;
+}
+
 /** Start a session in this project's directory with the agent it used most. */
 async function newSessionIn(row: ProjectRow) {
   const agent = row.agents[0] ?? configStore.agentNames[0];
@@ -206,6 +215,9 @@ async function newSessionIn(row: ProjectRow) {
           <button :class="{ active: range === 0 }" @click="range = 0">all</button>
         </div>
         <span class="pane-note">{{ projects.length }} projects</span>
+        <button class="new-project-cta" type="button" @click="showNewProject = true">
+          New project
+        </button>
         <button class="new-session-cta" type="button" @click="showNewSession = true">
           New session
         </button>
@@ -277,6 +289,12 @@ async function newSessionIn(row: ProjectRow) {
       v-if="showNewSession"
       :initial-cwd="scopeCwd"
       @close="showNewSession = false"
+    />
+
+    <NewProjectDialog
+      v-if="showNewProject"
+      @close="showNewProject = false"
+      @created="handleProjectCreated"
     />
   </div>
 </template>
@@ -561,6 +579,25 @@ async function newSessionIn(row: ProjectRow) {
     height: 44px;
   }
 
+.new-project-cta {
+  height: 28px;
+  padding: 0 0.75rem;
+  border: 1px solid var(--bg-primary, #c2532f);
+  border-radius: var(--radius-md, 6px);
+  background: transparent;
+  color: var(--text-accent, #c2532f);
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.new-project-cta:hover {
+  background: var(--tint-active, rgba(194, 83, 47, 0.10));
+}
+
+  .new-project-cta,
   .new-session-cta {
     min-height: 44px;
   }
