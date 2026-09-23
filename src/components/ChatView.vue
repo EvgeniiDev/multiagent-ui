@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch } from 'vue';
+import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue';
 import { marked } from 'marked';
 import { useSessionStore } from '../stores/session';
 import { isMobile } from '../lib/platform';
@@ -23,6 +23,8 @@ const showNewSession = ref(false);
 const attachments = ref<Attachment[]>([]);
 const attachError = ref<string | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
+const composerEl = ref<HTMLTextAreaElement | null>(null);
+const composerBox = ref<HTMLElement | null>(null);
 const supportsImages = computed(() => sessionStore.supportsImages);
 const imageHint = computed(
   () => `Images and text files (max ${formatBytes(MAX_IMAGE_ATTACHMENT_BYTES)} / ${formatBytes(MAX_TEXT_ATTACHMENT_BYTES)})`
@@ -108,6 +110,55 @@ watch(messages, async () => {
     messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
   }
 }, { deep: true });
+
+// Composer autosize: the field rests at one line — the same height as the
+// row's icon buttons (34px desktop, 44px touch) — and grows with content up
+// to ~8 lines, then scrolls internally. The collapse-and-measure happens in
+// one synchronous task so the transcript never sees an intermediate frame;
+// a feed pinned to the bottom is re-pinned so a growing composer doesn't
+// drag the last message up with it.
+const COMPOSER_MAX_PX = 200;
+
+function autosizeComposer() {
+  const el = composerEl.value;
+  if (!el) return;
+  const feed = messagesContainer.value;
+  const pinned = !!feed && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 4;
+  const min = parseFloat(getComputedStyle(el).minHeight) || 0;
+  el.style.height = 'auto';
+  const capped = el.scrollHeight > COMPOSER_MAX_PX;
+  el.style.height = `${Math.max(min, Math.min(el.scrollHeight, COMPOSER_MAX_PX))}px`;
+  el.style.overflowY = capped ? 'auto' : 'hidden';
+  if (pinned && feed) feed.scrollTop = feed.scrollHeight;
+}
+
+watch(inputText, async () => {
+  await nextTick();
+  autosizeComposer();
+});
+
+// Width changes (viewport resize, sidebar toggle) rewrap the text — the
+// height has to be recomputed. Height-only changes are ignored, which also
+// keeps the observer from feeding back into itself.
+let composerRo: ResizeObserver | null = null;
+let composerBoxWidth = 0;
+onMounted(() => {
+  autosizeComposer();
+  if (typeof ResizeObserver !== 'undefined' && composerBox.value) {
+    composerRo = new ResizeObserver((entries) => {
+      const w = entries[0].contentRect.width;
+      if (w !== composerBoxWidth) {
+        composerBoxWidth = w;
+        autosizeComposer();
+      }
+    });
+    composerRo.observe(composerBox.value);
+  }
+});
+onBeforeUnmount(() => {
+  composerRo?.disconnect();
+  composerRo = null;
+});
 
 async function handleSend() {
   const text = inputText.value.trim();
@@ -404,55 +455,75 @@ function getToolKind(kind: string): string {
       <div v-if="attachError" class="attach-error">{{ attachError }}</div>
 
       <div class="input-row">
+        <!-- Field + attach read as one control: the hairline frame is the
+             box, the ghost attach button sits inside it on the last line. -->
+        <div ref="composerBox" class="composer-box">
+          <button
+            class="icon-btn attach-btn"
+            :class="{ active: attachments.length > 0 }"
+            :disabled="isLoading || isReconnecting"
+            @click="openFilePicker"
+            :title="imageHint"
+            aria-label="Attach files"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M21.44 11.05l-8.49 8.49a5.5 5.5 0 01-7.78-7.78l8.49-8.49a3.5 3.5 0 014.95 4.95l-8.49 8.49a1.5 1.5 0 01-2.12-2.12l7.78-7.78" />
+            </svg>
+          </button>
+          <input
+            ref="fileInput"
+            class="file-input"
+            type="file"
+            multiple
+            accept="image/*,.txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.xml,.html,.css,.js,.mjs,.ts,.tsx,.vue,.py,.sh,.sql,.toml,.ini,.cfg,.conf,.diff,.patch"
+            @change="handleFilesPicked"
+          />
+          <textarea
+            ref="composerEl"
+            v-model="inputText"
+            :placeholder="
+              isReconnecting
+                ? 'Reconnecting…'
+                : (availableCommands.length > 0
+                    ? 'Type your message... (/ for commands)'
+                    : 'Type your message...')
+            "
+            :disabled="isLoading || isReconnecting"
+            @keydown="handleKeyDown"
+            rows="1"
+          />
+        </div>
         <button
-          class="attach-btn"
-          :class="{ active: attachments.length > 0 }"
-          :disabled="isLoading || isReconnecting"
-          @click="openFilePicker"
-          :title="imageHint"
-          aria-label="Attach files"
+          class="icon-btn send-btn"
+          :disabled="(!inputText.trim() && attachments.length === 0) || isLoading || isReconnecting"
+          @click="handleSend"
+          title="Send"
+          aria-label="Send"
         >
           <svg
             viewBox="0 0 24 24"
-            width="15"
-            height="15"
+            width="16"
+            height="16"
             fill="none"
             stroke="currentColor"
-            stroke-width="1.8"
+            stroke-width="1.5"
             stroke-linecap="round"
             stroke-linejoin="round"
             aria-hidden="true"
           >
-            <path d="M21.44 11.05l-8.49 8.49a5.5 5.5 0 01-7.78-7.78l8.49-8.49a3.5 3.5 0 014.95 4.95l-8.49 8.49a1.5 1.5 0 01-2.12-2.12l7.78-7.78" />
+            <path d="M22 2 11 13" />
+            <path d="M22 2 15 22l-4-9-9-4 20-7z" />
           </svg>
-        </button>
-        <input
-          ref="fileInput"
-          class="file-input"
-          type="file"
-          multiple
-          accept="image/*,.txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.xml,.html,.css,.js,.mjs,.ts,.tsx,.vue,.py,.sh,.sql,.toml,.ini,.cfg,.conf,.diff,.patch"
-          @change="handleFilesPicked"
-        />
-        <textarea
-          v-model="inputText"
-          :placeholder="
-            isReconnecting
-              ? 'Reconnecting…'
-              : (availableCommands.length > 0
-                  ? 'Type your message... (/ for commands)'
-                  : 'Type your message...')
-          "
-          :disabled="isLoading || isReconnecting"
-          @keydown="handleKeyDown"
-          rows="3"
-        />
-        <button 
-          class="send-btn"
-          :disabled="(!inputText.trim() && attachments.length === 0) || isLoading || isReconnecting"
-          @click="handleSend"
-        >
-          Send
         </button>
       </div>    </div>
 
@@ -787,40 +858,73 @@ function getToolKind(kind: string): string {
   gap: 0.5rem;
 }
 
-/* ---------------- Attachments ---------------- */
-
-/* Quiet square button: hairline, no fill until hover, so it doesn't compete
- * with Send. The glyph is a stroke icon in currentColor, not an emoji — a
- * grayscale-filtered emoji never matched the palette. */
-.attach-btn {
-  flex: 0 0 auto;
-  width: 32px;
-  height: 32px;
+/* The composer is one control: a single hairline frame wraps the field and
+ * the attach button. Everything inside is flex-end so the buttons keep
+ * sitting on the last line while the textarea grows. */
+.composer-box {
+  flex: 1;
+  min-width: 0;
   display: flex;
+  align-items: flex-end;
+  gap: 0.375rem;
+  padding: 0 0.375rem;
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border-radius: var(--radius-lg, 10px);
+  background: var(--bg-main, #fbf8f3);
+  transition: border-color 0.15s;
+}
+
+.composer-box:focus-within {
+  border-color: var(--text-accent, #b04a28);
+}
+
+/* One geometry for every composer button: a square stroke-icon hit area.
+ * No fills except the primary action, no shadows anywhere. */
+.icon-btn {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 0;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border: 1px solid transparent;
   border-radius: var(--radius-md, 6px);
   background: transparent;
   color: var(--text-secondary, #6b6259);
+  box-shadow: none;
   cursor: pointer;
 }
 
+.icon-btn svg {
+  display: block;
+}
+
+.icon-btn:focus-visible {
+  outline: 2px solid var(--text-accent, #b04a28);
+  outline-offset: 2px;
+}
+
+.icon-btn:disabled {
+  cursor: not-allowed;
+}
+
+/* ---------------- Attachments ---------------- */
+
+/* Attach lives inside the field's frame, so it carries no border of its
+ * own — a quiet glyph that tints on hover and marks staged files. */
 .attach-btn:hover:not(:disabled) {
   background: var(--tint-hover, rgba(43, 39, 35, 0.045));
   color: var(--text-primary, #2b2723);
 }
 
-/* Files staged: the one accent, same as an active row elsewhere. */
 .attach-btn.active {
-  border-color: var(--bg-primary, #c2532f);
-  color: var(--text-accent, #c2532f);
+  background: var(--tint-active, rgba(194, 83, 47, 0.10));
+  color: var(--text-accent, #b04a28);
 }
 
 .attach-btn:disabled {
-  cursor: not-allowed;
-  opacity: 0.4;
+  color: var(--text-muted, #786d62);
 }
 
 .file-input {
@@ -993,37 +1097,44 @@ function getToolKind(kind: string): string {
   word-break: break-word;
 }
 
-textarea {
+/* Borderless inside the shared frame; the box carries the hairline and the
+ * focus color. Rest height is exactly one line — 20px line + 14px padding
+ * = 34px, level with the icon buttons — and JS grows it to COMPOSER_MAX_PX. */
+.composer-box textarea {
   flex: 1;
-  padding: 0.5rem 0.625rem;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-lg, 10px);
+  min-width: 0;
+  min-height: 34px;
+  height: 34px;
+  padding: 7px 0.125rem;
+  border: none;
+  background: transparent;
   font-size: 0.875rem;
   font-family: inherit;
-  line-height: 1.45;
-  background: var(--bg-main, #fbf8f3);
-  color: inherit;
+  line-height: 20px;
+  color: var(--text-primary, #2b2723);
   resize: none;
+  overflow-y: hidden;
 }
 
-textarea:focus {
+.composer-box textarea:focus {
   outline: none;
-  border-color: var(--text-accent, #c2532f);
 }
 
+.composer-box textarea::placeholder {
+  color: var(--text-muted, #786d62);
+  opacity: 1;
+}
+
+.composer-box textarea:disabled {
+  color: var(--text-muted, #786d62);
+}
+
+/* The only filled element in the row: accent when armed, a quiet hairline
+ * when there is nothing to send — not a faded fill. */
 .send-btn {
-  align-self: flex-end;
-  height: 32px;
-  padding: 0 1rem;
   background: var(--bg-primary, #c2532f);
   color: var(--text-on-accent, #fbf8f3);
-  border: none;
-  border-radius: var(--radius-md, 6px);
-  font-family: inherit;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
 .send-btn:hover:not(:disabled) {
@@ -1031,8 +1142,9 @@ textarea:focus {
 }
 
 .send-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+  background: transparent;
+  border-color: var(--border-faint, rgba(43, 39, 35, 0.09));
+  color: var(--text-muted, #786d62);
 }
 
 /* ---------- Mobile / narrow-viewport tweaks ---------- */
@@ -1067,9 +1179,13 @@ textarea:focus {
     gap: 0.5rem;
   }
 
-  textarea {
-    /* Avoid iOS auto-zoom on focus when font-size < 16px. */
+  .composer-box textarea {
+    /* Avoid iOS auto-zoom on focus when font-size < 16px. Rest height
+     * stays level with the 44px touch buttons: 22px line + 22px padding. */
     font-size: 16px;
+    line-height: 22px;
+    padding-top: 11px;
+    padding-bottom: 11px;
     min-height: 44px;
   }
 
@@ -1077,16 +1193,10 @@ textarea:focus {
     min-height: 44px;
   }
 
-  .send-btn {
-    min-width: 64px;
-    min-height: 44px;
-    padding: 0.5rem 1rem;
-  }
-
-  .attach-btn {
+  /* Touch targets: same square geometry, bumped to 44px. */
+  .icon-btn {
     width: 44px;
     height: 44px;
-    font-size: 1.0625rem;
   }
 
   /* Narrow screens: give the reading column the full width back. */
