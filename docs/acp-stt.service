@@ -1,0 +1,16 @@
+[Unit]
+Description=GigaAM STT service (local speech-to-text for the panel)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/acp-ui/server
+ExecStart=%h/.hermes/gigaam-venv/bin/python %h/projects/acp-ui/server/stt-server.py
+Environment=PORT=25905
+Environment=STT_WINDOW_S=6
+Environment=STT_HOP_S=1
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
