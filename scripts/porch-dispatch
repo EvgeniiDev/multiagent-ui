@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Dispatch a workstream to a CLI agent — refusing to collide.
+
+Two collisions cost real time tonight:
+  * two runs launched into the SAME worktree, where both edit the same files;
+  * a card already claimed by another agent (the board forbids it, but a dispatch
+    that ignores the claim starts duplicate work anyway).
+
+This wrapper checks both before it hands anything to `porch`:
+  1. is a porch run already active in this cwd?  -> refuse (exit 3)
+  2. does the board card carry a live claim held by someone else? -> refuse (exit 3)
+  3. otherwise dispatch, or print the exact command with --dry-run.
+
+Usage:
+  porch-dispatch -a devin --cwd ~/projects/acp-ui-w6-pipeline \
+      --brief ~/projects/acp-ui-w6-pipeline/BRIEF.md [--card b52f42c3] \
+      [--dry-run] "<task text>"
+
+Exit codes: 0 dispatched (or dry-run), 2 not found / bad args, 3 refused.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+PORCH_CANDIDATES = [
+    Path.home() / ".pi/agent/skills/pragmatic-orchestration/scripts/porch",
+]
+BOARDCTL_CANDIDATES = [
+    Path.home() / ".local/bin/boardctl",
+    Path.home() / "projects/acp-ui/scripts/boardctl",
+]
+
+
+class Refused(Exception):
+    """A real collision: do not dispatch."""
+
+
+def porch() -> str:
+    for candidate in PORCH_CANDIDATES:
+        if candidate.exists():
+            return str(candidate)
+    found = shutil.which("porch")
+    if found:
+        return found
+    raise SystemExit("porch not found (checked ~/.pi/agent/skills/pragmatic-orchestration)")
+
+
+def boardctl() -> "str | None":
+    for candidate in BOARDCTL_CANDIDATES:
+        if candidate.exists():
+            return str(candidate)
+    return shutil.which("boardctl")
+
+
+def active_runs() -> "list[dict]":
+    """Running porch runs as [{run_id, agent, cwd, started}] — parsed from the
+    plain table (porch's --json shape varies between versions)."""
+    out = subprocess.run([porch(), "delegate", "list"], capture_output=True, text=True)
+    runs = []
+    for line in out.stdout.splitlines():
+        m = re.match(r"^(run_[A-Za-z0-9\-]+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)", line.strip())
+        if m and m.group(2) == "running":
+            runs.append({"run_id": m.group(1), "agent": m.group(3),
+                         "started": m.group(4), "cwd": m.group(5)})
+    return runs
+
+
+def same_dir(a: str, b: str) -> bool:
+    return os.path.realpath(os.path.expanduser(a)) == os.path.realpath(os.path.expanduser(b))
+
+
+def check_worktree_free(cwd: str) -> None:
+    busy = [r for r in active_runs() if same_dir(r["cwd"], cwd)]
+    if busy:
+        lines = ", ".join(f"{r['run_id']} ({r['agent']}, с {r['started']})" for r in busy)
+        raise Refused(
+            f"в этом дереве уже идёт ран: {lines}\n"
+            f"  либо дождись его, либо сделай отдельное дерево:\n"
+            f"  git -C ~/projects/acp-ui worktree add ../acp-ui-<name> -b cc/<name> control-center"
+        )
+
+
+def check_card_free(card: str, agent: str) -> None:
+    bc = boardctl()
+    if not bc:
+        print("warning: boardctl not found — claim check skipped", file=sys.stderr)
+        return
+    out = subprocess.run([bc, "show", card, "--json"], capture_output=True, text=True)
+    if out.returncode != 0:
+        raise SystemExit(f"boardctl show {card} failed: {out.stderr.strip() or out.returncode}")
+    data = json.loads(out.stdout)
+    claim = data.get("claim")
+    if claim and claim.get("agentName") not in (None, "", agent):
+        left = (int(claim.get("leaseUntil", 0)) - int(__import__("time").time() * 1000)) // 1000
+        raise Refused(
+            f"карточку {card} держит {claim['agentName']} ещё {left}s — "
+            f"чужой claim не перебиваем (boardctl release --force только осознанно)"
+        )
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="porch-dispatch",
+                                 description="Dispatch a workstream without colliding.")
+    ap.add_argument("-a", "--agent", required=True, help="exact porch agent id (devin, spark, ...)")
+    ap.add_argument("--cwd", required=True, help="worktree the run works in")
+    ap.add_argument("--brief", help="brief file the task text points at")
+    ap.add_argument("--card", help="board card id (claim checked)")
+    ap.add_argument("--dry-run", action="store_true", help="print the command, dispatch nothing")
+    ap.add_argument("--allow-busy", action="store_true",
+                    help="override the cwd check (only when you really mean it)")
+    ap.add_argument("task", nargs="+", help="task text for the agent")
+    args = ap.parse_args()
+
+    cwd = os.path.expanduser(args.cwd)
+    if not Path(cwd).is_dir():
+        print(f"porch-dispatch: cwd is not a directory: {cwd}", file=sys.stderr)
+        return 2
+
+    text = " ".join(args.task).strip()
+    if args.brief:
+        brief = Path(os.path.expanduser(args.brief))
+        if not brief.exists():
+            print(f"porch-dispatch: brief not found: {brief}", file=sys.stderr)
+            return 2
+        text = f"{text}\n\nRead {brief} and follow it."
+
+    try:
+        if not args.allow_busy:
+            check_worktree_free(cwd)
+        if args.card:
+            check_card_free(args.card, args.agent)
+    except Refused as exc:
+        print(f"porch-dispatch: ОТКАЗ — {exc}", file=sys.stderr)
+        return 3
+
+    cmd = [porch(), "delegate", "-a", args.agent, "--detach", text]
+    if args.dry_run:
+        print("dry-run, would run in", cwd, ":")
+        print(" ", " ".join(cmd[:5]), f"\"{text[:160]}{'…' if len(text) > 160 else ''}\"")
+        return 0
+
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    sys.stdout.write(proc.stdout)
+    sys.stderr.write(proc.stderr)
+    return proc.returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())
