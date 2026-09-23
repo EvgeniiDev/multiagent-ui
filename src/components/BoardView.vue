@@ -3,7 +3,7 @@
 // summary line, and hosts the card-edit drawer. Data lives in
 // src/stores/board.ts (cards) and src/stores/activity.ts (ledger).
 import { ref, computed, onMounted } from 'vue';
-import { useBoardStore, type BoardColumnId } from '../stores/board';
+import { useBoardStore, type BoardStageId } from '../stores/board';
 import { useActivityStore } from '../stores/activity';
 import { useSessionStore } from '../stores/session';
 import { useUiStore } from '../stores/ui';
@@ -36,19 +36,23 @@ onMounted(() => {
   void board.initBoardStore();
 });
 
-/** Compact per-column counters for the header — `ready 3 (1 blocked)` folds
- * the blocked column into the ready count, matching the reference board.
- * Counts reflect the active filter. */
+/** Compact per-stage counters for the header, plus the card-flag totals
+ * (blocked/cancelled are flags, not stages — they get their own counts).
+ * Counts reflect the active project scope and filter. */
 const summaryLine = computed(() => {
-  const n = (col: BoardColumnId) => board.cardsInColumn(col).length;
+  const n = (stage: BoardStageId) => board.cardsInStage(stage).length;
   const parts = [
-    `inbox ${n('inbox')}`,
-    `ready ${n('ready')} (${n('blocked')} blocked)`,
-    `active ${n('active')}`,
-    `review ${n('review')}`,
+    `backlog ${n('backlog')}`,
+    `spec ${n('spec')}`,
+    `plan ${n('plan')}`,
+    `dev ${n('dev')}`,
+    `reviewtest ${n('reviewtest')}`,
     `done ${n('done')}`,
-    `cancelled ${n('cancelled')}`,
   ];
+  const flagged = board.filteredCards.filter((c) => c.blocked).length;
+  const cancelled = board.filteredCards.filter((c) => c.cancelled).length;
+  if (flagged) parts.push(`blocked ${flagged}`);
+  if (cancelled) parts.push(`cancelled ${cancelled}`);
   return parts.join(' · ');
 });
 

@@ -6,10 +6,11 @@ Usage:
     cd dist-web && python3 -m http.server 25999 &
     ~/.hermes/tools-venv/bin/python scripts/e2e_board.py
 
-Asserts: rail switches to Board, all seven columns render, a card can be
-created into `inbox`, moved to `ready` via the card menu (counts update),
-survives a reload, the Events tab shows rows, and the page produces zero
-`pageerror` events. Screenshots land in docs/board-*.png.
+Asserts: rail switches to Board, all six pipeline stages render in order, a
+card can be created into `backlog`, moved to `spec` via the card menu (counts
+update, initial `in_progress` status chip shows), survives a reload, the
+Events tab shows rows, and the page produces zero `pageerror` events.
+Screenshots land in docs/board-*.png.
 """
 
 import json
@@ -85,16 +86,20 @@ def seed_ledger(context):
         {"id": "seed-card-1", "title": "Seed: review board PR", "description": "Seeded card.",
          "project": "acp-ui", "agent": "Hermes Agent", "priority": "medium",
          "acceptance": "", "verification": "", "links": [], "session": None,
-         "blockedBy": "", "status": "ready", "order": 10,
+         "blocked": False, "blockedReason": "", "cancelled": False,
+         "touches": [], "dependsOn": [], "blocks": [], "conflictsWith": [],
+         "stage": "spec", "status": "in_progress", "order": 10,
          "createdAt": now - H, "updatedAt": now - H},
         {"id": "seed-card-2", "title": "Triage incoming agent work",
          "description": "Seeded card.", "project": "infra", "agent": "OpenCode",
          "priority": "high", "acceptance": "", "verification": "",
          "links": [{"label": "brief", "url": "https://example.com/brief"}],
-         "session": None, "blockedBy": "waiting on api spec", "status": "blocked",
-         "order": 10, "createdAt": now - 2 * H, "updatedAt": now - 2 * H},
+         "session": None, "blocked": True, "blockedReason": "waiting on api spec",
+         "cancelled": False, "touches": [], "dependsOn": [], "blocks": [],
+         "conflictsWith": [], "stage": "backlog", "status": None, "order": 10,
+         "createdAt": now - 2 * H, "updatedAt": now - 2 * H},
     ]
-    board_payload = json.dumps({"version": 1, "cards": board_cards})
+    board_payload = json.dumps({"version": 2, "cards": board_cards})
     # Guarded: the init script runs on every navigation, so on reload the
     # app's own persisted state must win — otherwise the seed would wipe the
     # card the test just created.
@@ -125,49 +130,63 @@ def main():
         page.wait_for_selector(".view-pane .tab-bar", timeout=5000)
         check("rail switches to Board view", page.locator(".view-pane h2").inner_text() == "Board")
 
-        # 2. All seven columns render.
+        # 2. All six pipeline stages render.
         cols = page.locator(".board-col")
-        check("all seven columns render", cols.count() == 7, f"found {cols.count()}")
-        expected = ["inbox", "ready", "blocked", "active", "review", "done", "cancelled"]
+        check("all six stages render", cols.count() == 6, f"found {cols.count()}")
+        expected = ["backlog", "spec", "plan", "dev", "reviewtest", "done"]
         got = [cols.nth(i).get_attribute("data-col") for i in range(cols.count())]
-        check("column order inbox..cancelled", got == expected, ",".join(got))
+        check("stage order backlog..done", got == expected, ",".join(got))
 
-        # 3. Create a card -> lands in inbox, drawer opens, set title.
-        page.locator('[data-col="inbox"] .col-add').click()
+        # 3. Create a card -> lands in backlog, drawer opens, set title.
+        page.locator('[data-col="backlog"] .col-add').click()
         page.wait_for_selector(".card-drawer", timeout=5000)
         check("create opens the side drawer", True)
         page.fill('[data-field="title"]', "E2E board card")
         page.fill('[data-field="description"]', "created by e2e_board.py")
         page.click(".drawer-foot .btn:text-is('Done')")
         page.wait_for_selector(".card-drawer", state="detached", timeout=5000)
-        inbox_card = page.locator('[data-col="inbox"] .board-card', has_text="E2E board card")
-        check("new card appears in inbox", inbox_card.count() == 1)
+        backlog_card = page.locator('[data-col="backlog"] .board-card', has_text="E2E board card")
+        check("new card appears in backlog", backlog_card.count() == 1)
+        check("backlog card has no status chip (status-less stage)",
+              backlog_card.locator(".status-chip").count() == 0)
 
-        # 4. Move it to Ready via the card menu; counts update.
-        ready_before = page.locator('[data-col="ready"] .col-count').inner_text()
-        inbox_card.hover()
-        inbox_card.locator(".card-menu-btn").click()
-        page.locator(".card-menu .menu-item", has_text="Ready").first.click()
-        page.wait_for_selector('[data-col="ready"] .board-card', timeout=5000)
-        moved = page.locator('[data-col="ready"] .board-card', has_text="E2E board card")
-        ready_after = page.locator('[data-col="ready"] .col-count').inner_text()
-        check("card moved to ready via menu", moved.count() == 1)
-        check("ready count incremented", ready_after == str(int(ready_before or "0") + 1),
-              f"{ready_before} -> {ready_after}")
+        # 4. Move it to Spec via the card menu; counts + status chip update.
+        spec_before = page.locator('[data-col="spec"] .col-count').inner_text()
+        backlog_card.hover()
+        backlog_card.locator(".card-menu-btn").click()
+        page.locator(".card-menu .menu-item", has_text="Spec").first.click()
+        page.wait_for_selector('[data-col="spec"] .board-card', timeout=5000)
+        moved = page.locator('[data-col="spec"] .board-card', has_text="E2E board card")
+        spec_after = page.locator('[data-col="spec"] .col-count').inner_text()
+        check("card moved to spec via menu", moved.count() == 1)
+        check("spec count incremented", spec_after == str(int(spec_before or "0") + 1),
+              f"{spec_before} -> {spec_after}")
+        check("moved card carries spec's initial status",
+              moved.locator(".status-chip").inner_text() == "in_progress",
+              moved.locator(".status-chip").inner_text())
         note = page.locator(".pane-note").inner_text()
-        check("summary line updates", f"ready {ready_after}" in note, note)
+        check("summary line updates", f"spec {spec_after}" in note, note)
 
-        # 5. Reload -> card persists in ready. Give the debounced save a
+        # 5. Flag the seeded blocked card — flag, badge and column marker.
+        seeded_blocked = page.locator(".board-card", has_text="Triage incoming agent work")
+        check("seeded blocked flag renders as badge",
+              seeded_blocked.locator(".meta-chip.flag.blocked").count() == 1)
+        check("backlog header counts blocked flags",
+              page.locator('[data-col="backlog"] .col-blocked').inner_text() == "1 blocked")
+
+        # 6. Reload -> card persists in spec. Give the debounced save a
         # beat (there is also a pagehide flush), then wait for the card.
         page.wait_for_timeout(700)
         page.reload(wait_until="load")
         page.wait_for_selector(".view-rail", timeout=10000)
         page.click('button[aria-label="Board"]')
-        page.wait_for_selector('[data-col="ready"] .board-card', timeout=5000)
-        persisted = page.locator('[data-col="ready"] .board-card', has_text="E2E board card")
+        page.wait_for_selector('[data-col="spec"] .board-card', timeout=5000)
+        persisted = page.locator('[data-col="spec"] .board-card', has_text="E2E board card")
         check("card survives reload", persisted.count() == 1)
+        check("status chip survives reload",
+              persisted.locator(".status-chip").inner_text() == "in_progress")
 
-        # 6. Secondary tabs render content.
+        # 7. Secondary tabs render content.
         page.click('.tab-btn:text-is("Events")')
         page.wait_for_selector(".event-row", timeout=5000)
         n_events = page.locator(".event-row").count()
@@ -193,11 +212,11 @@ def main():
 
         # Screenshots: tasks view at the three required viewports.
         page.click('.tab-btn:text-is("Tasks")')
-        page.wait_for_selector('[data-col="inbox"]', timeout=5000)
+        page.wait_for_selector('[data-col="backlog"]', timeout=5000)
         page.screenshot(path=str(SHOTS / "board-1440x900.png"))
 
         # drawer screenshot for review
-        page.locator('[data-col="ready"] .board-card', has_text="E2E board card").first.click()
+        page.locator('[data-col="spec"] .board-card', has_text="E2E board card").first.click()
         page.wait_for_selector(".card-drawer", timeout=5000)
         page.screenshot(path=str(SHOTS / "board-drawer-1440x900.png"))
         page.keyboard.press("Escape")
@@ -219,14 +238,14 @@ def main():
         p2.wait_for_selector(".view-rail")
         p2.click('button[aria-label="Board"]')
         p2.wait_for_selector(".col-switcher", timeout=5000)
-        check("phone layout shows column switcher", True)
-        # switch to the column holding the moved card
-        p2.locator(".switch-btn", has_text="Ready").click()
+        check("phone layout shows stage switcher", p2.locator(".switch-btn").count() == 6)
+        # switch to the stage holding the moved card
+        p2.locator(".switch-btn", has_text="Spec").click()
         p2.wait_for_timeout(200)
         p2.screenshot(path=str(SHOTS / "board-390x844.png"))
         phone.close()
 
-        # 7. No page errors.
+        # 8. No page errors.
         check("zero pageerror events", len(page_errors) == 0,
               "; ".join(page_errors[:3]) if page_errors else "")
 
