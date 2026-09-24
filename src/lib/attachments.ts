@@ -7,6 +7,7 @@
 
 import { uuid } from './uuid';
 import type { Attachment, AttachmentKind, AttachmentMeta } from './types';
+import type { ContentBlock } from '@agentclientprotocol/sdk';
 
 /** Hermes truncates inlined ACP resources at 512 KiB, so the cap is ours to enforce. */
 export const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
@@ -143,8 +144,11 @@ const ATTACHMENT_MARKER =
  * attachment blocks, and returns the message text with markers and bodies
  * removed.
  *
- * Note: only text attachments survive a replay — agents do not echo image bytes
- * or an image marker, so an image sent earlier cannot be recovered from history.
+ * Note: only text attachments survive a replay as recoverable content — agents
+ * do not echo image bytes in the message text. An image marker still names the
+ * file, so those parse to explicit placeholders (`unavailableReason`) instead
+ * of a silent gap; the bytes themselves come back only via the panel's own
+ * attachment record (lib/attachmentHistory.ts) or a real image content block.
  */
 export function extractReplayedAttachments(text: string): {
   text: string;
@@ -189,7 +193,13 @@ export function extractReplayedAttachments(text: string): {
       mimeType: image ? 'image/*' : 'text/plain',
       // Bytes are gone on replay; the echoed text is all that is left to measure.
       size: body.length,
-      body: body || undefined,
+      // Whatever text followed an image marker is not the image — it is the
+      // next chunk of prose, so it stays out of `body`. The placeholder gets
+      // an explicit reason instead of pretending there was a text body.
+      body: image ? undefined : body || undefined,
+      unavailableReason: image
+        ? 'the agent replayed the marker but not the image bytes'
+        : undefined,
     });
   }
 
@@ -199,5 +209,89 @@ export function extractReplayedAttachments(text: string): {
     text: prose.replace(/[ \t]+$/, '').trim(),
     attachments,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Content blocks in a replayed / streamed message
+// ---------------------------------------------------------------------------
+
+/**
+ * Turn a non-text ACP `ContentBlock` from a `user_message_chunk` or
+ * `agent_message_chunk` into transcript attachment metadata.
+ *
+ * An agent that keeps a faithful history replays the original blocks on
+ * `session/load` — including `image` blocks with their base64 bytes, which
+ * this hands back as a data URL the transcript can render. Blocks that carry
+ * no recoverable bytes (an empty image block, a `resource_link` the panel
+ * cannot open) still produce a named placeholder so the turn does not pretend
+ * it had no file. Returns null only for `text` blocks — the caller handles
+ * those itself — and for shapes with nothing displayable.
+ */
+export function attachmentFromContentBlock(block: ContentBlock): AttachmentMeta | null {
+  switch (block.type) {
+    case 'image': {
+      const name = block.uri ? nameFromMarker(block.uri) : 'image';
+      const mimeType = block.mimeType || 'image/*';
+      if (block.data) {
+        return {
+          name, kind: 'image', mimeType, size: block.data.length,
+          previewUrl: `data:${block.mimeType || 'image/png'};base64,${block.data}`,
+        };
+      }
+      return {
+        name, kind: 'image', mimeType, size: 0,
+        unavailableReason: 'the agent replayed an empty image block — no bytes',
+      };
+    }
+    case 'resource': {
+      const res = block.resource;
+      const name = nameFromMarker(res.uri || 'resource');
+      if ('blob' in res && res.blob) {
+        if (looksLikeImage(name, res.mimeType)) {
+          return {
+            name, kind: 'image', mimeType: res.mimeType || 'image/*',
+            size: res.blob.length,
+            previewUrl: `data:${res.mimeType || 'image/png'};base64,${res.blob}`,
+          };
+        }
+        return {
+          name, kind: 'text', mimeType: res.mimeType || 'application/octet-stream',
+          size: res.blob.length,
+          unavailableReason: 'binary file — bytes were embedded but cannot be shown',
+        };
+      }
+      if ('text' in res && res.text != null) {
+        if (looksLikeImage(name, res.mimeType)) {
+          return {
+            name, kind: 'image', mimeType: res.mimeType || 'image/*', size: 0,
+            unavailableReason: 'the replay named this image but carried no bytes',
+          };
+        }
+        return {
+          name, kind: 'text', mimeType: res.mimeType || 'text/plain',
+          size: res.text.length, body: res.text,
+        };
+      }
+      return null;
+    }
+    case 'resource_link': {
+      const name = block.name || nameFromMarker(block.uri || 'resource');
+      const image = looksLikeImage(name, block.mimeType);
+      return {
+        name, kind: image ? 'image' : 'text',
+        mimeType: block.mimeType || (image ? 'image/*' : 'text/plain'),
+        size: block.size != null ? Number(block.size) : 0,
+        unavailableReason: 'the replay only carries a link — the panel cannot read it',
+      };
+    }
+    case 'audio':
+      return {
+        name: 'audio clip', kind: 'text',
+        mimeType: block.mimeType || 'audio/*', size: block.data.length,
+        unavailableReason: 'audio — the transcript cannot render it',
+      };
+    default:
+      return null;
+  }
 }
 
