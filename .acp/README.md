@@ -13,10 +13,38 @@
     { "id": "dev", "cli": "devin", "args": ["-p", "--model", "swe-2-max"],
       "promptFile": ".acp/roles/dev.md", "maxConcurrent": 2, "pollIntervalSec": 15 }
 
+Полный набор записей конвейера (`spec → plan → dev → reviewtest`); поля —
+`{id, cli, args, promptFile, maxConcurrent, pollIntervalSec, timeoutMin,
+maxRetries}`:
+
+    { "id": "orchestrator", "cli": "devin",
+      "args": ["-p", "--model", "swe-2-max", "--permission-mode", "dangerous"],
+      "promptFile": ".acp/roles/orchestrator.md", "maxConcurrent": 1,
+      "pollIntervalSec": 30, "timeoutMin": 120, "maxRetries": 1 }
+
+    { "id": "plan-writer", "cli": "devin",
+      "args": ["-p", "--model", "swe-2-max", "--permission-mode", "dangerous"],
+      "promptFile": ".acp/roles/plan-writer.md", "maxConcurrent": 2,
+      "pollIntervalSec": 15, "timeoutMin": 30, "maxRetries": 2 }
+
+    { "id": "dev", "cli": "devin",
+      "args": ["-p", "--model", "swe-2-max", "--permission-mode", "dangerous"],
+      "promptFile": ".acp/roles/dev.md", "maxConcurrent": 2,
+      "pollIntervalSec": 15, "timeoutMin": 45, "maxRetries": 1 }
+
+Привязка стадий (`stageRoles`): `spec → orchestrator`, `plan → plan-writer`,
+`dev → dev`, `reviewtest → reviewer`. Оркестратор держит claim карточки и
+сам двигает её по стадиям; планировщик, разработчики и ревьюеры — его
+субагенты (`boardctl delegate`), карточку они не трогают. `timeoutMin`
+оркестратора намеренно большой: один прогон — весь цикл карточки.
+
 Роль ревьюера несёт и правила цикла ревью — словарь северити, какие из них
 блокируют `agent_tested`, какие уходят в backlog, и лимит раундов:
 
-    { "id": "reviewer", "cli": "hermes", "promptFile": ".acp/roles/reviewer.md",
+    { "id": "reviewer", "cli": "hermes",
+      "args": ["-z"], "promptFile": ".acp/roles/reviewer.md",
+      "maxConcurrent": 1, "pollIntervalSec": 15,
+      "timeoutMin": 30, "maxRetries": 1,
       "review": { "severities": ["critical","major","minor","nit"],
                   "blocking": ["critical","major"], "backlog": ["minor","nit"],
                   "maxRounds": 3 } }
