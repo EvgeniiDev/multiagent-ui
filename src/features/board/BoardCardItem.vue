@@ -106,6 +106,25 @@ onMounted(() => {
 
 const PRIORITY_LABEL: Record<string, string> = { high: 'high', medium: 'med', low: 'low' };
 
+/** The blocked badge names what blocks the card when the reason carries
+ * the pm tool's provenance format `pm: blocked by <id8>` (F10.4); any other
+ * reason stays the plain `blocked` chip with the text in the tooltip. */
+const blockedBadge = computed(() => {
+  const m = /^pm:\s*blocked by\s+(\S+)/i.exec(props.card.blockedReason || '');
+  return m ? `blocked by ${m[1].slice(0, 8)}` : 'blocked';
+});
+
+/** id8 (+title when the card is on the board) for the relation chips'
+ * tooltips — full uuids don't fit a hover. */
+function relTitles(ids: string[]): string {
+  return ids
+    .map((id) => {
+      const c = board.cards.find((x) => x.id === id);
+      return c ? `${id.slice(0, 8)} ${c.title}` : id.slice(0, 8);
+    })
+    .join(', ');
+}
+
 function toggleMenu(event: Event) {
   event.stopPropagation();
   statusOpen.value = false;
@@ -269,16 +288,17 @@ onBeforeUnmount(() => {
         data-testid="card-no-runner"
         :title="`No configured agent runs CLI '${stageRole.cli}'`">no runner for role</span>
       <span v-if="card.blocked" class="meta-chip flag blocked"
+        data-testid="card-blocked-badge"
         :title="card.blockedReason ? `Blocked: ${card.blockedReason}` : 'Flagged blocked'"
-      >blocked</span>
+      >{{ blockedBadge }}</span>
       <span v-if="card.cancelled" class="meta-chip flag cancelled" title="Flagged cancelled">cancelled</span>
       <span v-if="unassigned" class="meta-chip unassigned" title="No project">unassigned</span>
       <span v-if="card.project" class="meta-chip" :title="card.project">{{ card.project }}</span>
       <span v-if="card.agent" class="meta-chip agent" :title="card.agent">{{ card.agent }}</span>
       <span class="meta-chip prio" :class="`p-${card.priority}`">{{ PRIORITY_LABEL[card.priority] }}</span>
-      <span v-if="card.dependsOn.length" class="meta-chip rel" :title="`Depends on: ${card.dependsOn.join(', ')}`">dep {{ card.dependsOn.length }}</span>
-      <span v-if="card.blocks.length" class="meta-chip rel" :title="`Blocks: ${card.blocks.join(', ')}`">blocks {{ card.blocks.length }}</span>
-      <span v-if="card.conflictsWith.length" class="meta-chip rel conflict" :title="`Conflicts with: ${card.conflictsWith.join(', ')}`">conflict {{ card.conflictsWith.length }}</span>
+      <span v-if="card.dependsOn.length" class="meta-chip rel" :title="`Depends on: ${relTitles(card.dependsOn)}`">dep {{ card.dependsOn.length }}</span>
+      <span v-if="card.blocks.length" class="meta-chip rel" :title="`Blocks: ${relTitles(card.blocks)}`">blocks {{ card.blocks.length }}</span>
+      <span v-if="card.conflictsWith.length" class="meta-chip rel conflict" :title="`Conflicts with: ${relTitles(card.conflictsWith)}`">conflict {{ card.conflictsWith.length }}</span>
       <span v-if="card.session" class="meta-chip sess" title="Attached session">
         <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor"
           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

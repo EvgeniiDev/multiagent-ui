@@ -1,0 +1,967 @@
+#!/usr/bin/env python3
+"""pmgraph — the deterministic half of the `pm` board role.
+
+The pm agent is an LLM: it reads the board, judges the semantic classes
+(contradiction, duplicate, overlap-without-touches) and writes a plan. This
+tool owns the arithmetic that must not depend on an LLM:
+
+    pmgraph scan  --project LABEL   # read-only graph facts + mechanical findings
+    pmgraph apply --plan FILE       # validate + apply the plan atomically
+
+Scope is mandatory on every command: `--project LABEL` (the card `project`
+label, or a registered project's name / path basename) limits the run to one
+project's cards; `--all` reviews the whole board. Out-of-scope cards are
+never modified — a link whose endpoint is out of scope is rejected.
+
+What `apply` may write — the safe set only:
+  * graph fields on in-scope cards: dependsOn / blocks / conflictsWith
+    (dependsOn <-> blocks are kept as mirrors; conflictsWith is symmetric);
+  * the `blocked` flag + `blockedReason`, DERIVED BY THE TOOL from the final
+    graph — a card waiting on an unfinished dependency gets
+    `pm: blocked by <id8>`. Marks the tool did not write (a reason not
+    starting with `pm:`) are never touched; pm's own marks are updated or
+    cleared when the graph no longer justifies them.
+
+Everything else — rewrites, merges, deletes, stage moves, clearing a foreign
+block — lands in `proposals` and is only written to
+<projectPath>/.acp/pm/proposals.md plus an audit entry. Never applied.
+
+Atomicity (N21): the command does ALL reads and the whole analysis first and
+writes nothing until the very end. The board goes out in ONE rev-guarded PUT;
+a 409 restarts read+validate+compute from scratch. A validation failure,
+transport failure or a plan that would create a cycle exits non-zero having
+written nothing — the board document stays byte-identical.
+
+Audit: one `kind:'pm'` ledger entry per applied change (role 'pm', the card
+title, what changed and what the pm saw), one per proposal, one run summary.
+Exit codes mirror boardctl: 0 ok, 1 plan/validation error, 3 transport.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+DEFAULT_URL = os.environ.get("BOARD_URL", "http://127.0.0.1:25900")
+ACTOR = os.environ.get("BOARD_AGENT", "pm")
+ROLE = "pm"
+PM_REASON_PREFIX = "pm:"
+GRAPH_FIELDS = ("dependsOn", "blocks", "conflictsWith")
+FINDING_CLASSES = (
+    "contradiction",
+    "module_overlap",
+    "duplicate",
+    "cycle",
+    "other",
+)
+MAX_ENTRIES = 5000
+RETRY_TRIES = 6
+
+
+class CliError(Exception):
+    def __init__(self, msg: str, code: int = 1) -> None:
+        super().__init__(msg)
+        self.code = code
+
+
+# --- state server (same wire protocol as scripts/boardctl) -------------------
+
+
+def _request(url: str, path: str, method: str = "GET", body: dict | None = None) -> dict:
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        f"{url}{path}",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")
+        raise CliError(f"{method} {path} -> {exc.code} {detail}", 3) from None
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise CliError(f"state server unreachable at {url} ({exc})", 3) from None
+
+
+def read_doc(url: str, name: str, default: dict) -> "tuple[dict, int]":
+    try:
+        payload = _request(url, f"/api/state/{name}")
+    except CliError as exc:
+        if exc.code != 3 or "404" not in str(exc):
+            raise
+        return json.loads(json.dumps(default)), 0
+    return payload.get("data") or default, int(payload.get("rev") or 0)
+
+
+def write_doc(url: str, name: str, data: dict, rev: int) -> int:
+    payload = _request(url, f"/api/state/{name}", "PUT", {"data": data, "rev": rev})
+    return int(payload.get("rev") or 0)
+
+
+def mutate(url: str, name: str, default: dict, fn, tries: int = RETRY_TRIES):
+    """Read-modify-write with bounded retries on rev conflicts (boardctl's)."""
+    last: Exception | None = None
+    for _ in range(tries):
+        data, rev = read_doc(url, name, json.loads(json.dumps(default)))
+        data, result = fn(data)
+        try:
+            write_doc(url, name, data, rev)
+            return result
+        except CliError as exc:
+            if exc.code == 3 and "409" in str(exc):
+                last = exc
+                time.sleep(0.3)
+                continue
+            raise
+    raise CliError(f"{name}: lost {tries} revision races ({last})", 3)
+
+
+def empty_activity() -> dict:
+    return {"entries": [], "usage": []}
+
+
+# --- model helpers -----------------------------------------------------------
+
+
+def norm_touch(path: str) -> str:
+    """Normalize a `touches` path for comparison: trim, dot-slash and
+    trailing-slash stripped, duplicate slashes collapsed. Case is kept —
+    paths are case-sensitive on the hosts this runs on."""
+    p = " ".join(str(path).strip().split())
+    while p.startswith("./"):
+        p = p[2:]
+    while "//" in p:
+        p = p.replace("//", "/")
+    return p.rstrip("/")
+
+
+def str_list(raw) -> "list[str]":
+    return [v for v in raw if isinstance(v, str)] if isinstance(raw, list) else []
+
+
+def id8(card_id: str) -> str:
+    return str(card_id)[:8]
+
+
+def card_index(cards: "list[dict]") -> "dict[str, dict]":
+    return {c.get("id"): c for c in cards if c.get("id")}
+
+
+def resolve_ref(cards: "list[dict]", ref: str) -> dict | None:
+    """Full id or unique prefix, boardctl semantics."""
+    needle = str(ref).strip().lower()
+    if not needle:
+        return None
+    exact = [c for c in cards if str(c.get("id", "")).lower() == needle]
+    if exact:
+        return exact[0]
+    partial = [c for c in cards if str(c.get("id", "")).lower().startswith(needle)]
+    return partial[0] if len(partial) == 1 else None
+
+
+def project_label_matches(card_label: str, wanted: str, projects: "list[dict]") -> bool:
+    """The panel's project matching (board.ts projectIdForCard): the free-text
+    card label equals the project name OR the project path's basename. For
+    scan/apply `wanted` may itself be a label, a project name, an id or a
+    path basename."""
+    label = (card_label or "").strip().lower()
+    want = (wanted or "").strip().lower()
+    if not want:
+        return False
+    if label == want:
+        return True
+    for p in projects:
+        if want in (
+            str(p.get("id") or "").lower(),
+            str(p.get("name") or "").lower(),
+            str(p.get("path") or "").rstrip("/").split("/")[-1].lower(),
+        ):
+            if label in (
+                str(p.get("name") or "").lower(),
+                str(p.get("path") or "").rstrip("/").split("/")[-1].lower(),
+            ):
+                return True
+    return False
+
+
+def scoped_cards(cards: "list[dict]", args, projects: "list[dict]") -> "list[dict]":
+    if getattr(args, "all", False):
+        return list(cards)
+    label = getattr(args, "project", "") or ""
+    return [c for c in cards if project_label_matches(c.get("project"), label, projects)]
+
+
+# --- wait-graph --------------------------------------------------------------
+#
+# A wait-edge X -> Y means "X waits for Y". `dependsOn` states it directly;
+# `blocks` states the same fact from the other side (B.blocks=[A] -> A waits
+# for B). conflictsWith carries no ordering and joins no wait-graph.
+
+
+def wait_edges(cards: "list[dict]", idx: "dict[str, dict]") -> "set[tuple[str, str]]":
+    edges: "set[tuple[str, str]]" = set()
+    for c in cards:
+        cid = c.get("id")
+        if not cid:
+            continue
+        for t in str_list(c.get("dependsOn")):
+            edges.add((cid, t))
+        for t in str_list(c.get("blocks")):
+            edges.add((t, cid))
+    return edges
+
+
+def sccs(nodes: "list[str]", edges: "set[tuple[str, str]]") -> "list[list[str]]":
+    """Tarjan SCC, iterative. Returns components of size > 1 plus every
+    self-loop as a single-member component."""
+    adj: "dict[str, list[str]]" = {n: [] for n in nodes}
+    for a, b in edges:
+        if a in adj and b in adj:
+            adj[a].append(b)
+    index_of: "dict[str, int]" = {}
+    low: "dict[str, int]" = {}
+    on_stack: "set[str]" = set()
+    stack: "list[str]" = []
+    out: "list[list[str]]" = []
+    counter = 0
+
+    for root in nodes:
+        if root in index_of:
+            continue
+        work = [(root, iter(adj[root]))]
+        index_of[root] = low[root] = counter
+        counter += 1
+        stack.append(root)
+        on_stack.add(root)
+        while work:
+            node, it = work[-1]
+            advanced = False
+            for nxt in it:
+                if nxt not in index_of:
+                    index_of[nxt] = low[nxt] = counter
+                    counter += 1
+                    stack.append(nxt)
+                    on_stack.add(nxt)
+                    work.append((nxt, iter(adj[nxt])))
+                    advanced = True
+                    break
+                if nxt in on_stack:
+                    low[node] = min(low[node], index_of[nxt])
+            if advanced:
+                continue
+            work.pop()
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[node])
+            if low[node] == index_of[node]:
+                comp = []
+                while True:
+                    w = stack.pop()
+                    on_stack.discard(w)
+                    comp.append(w)
+                    if w == node:
+                        break
+                out.append(comp)
+    return [c for c in out if len(c) > 1 or (c[0], c[0]) in edges]
+
+
+def dep_satisfied(target: dict) -> bool:
+    """A dependency is satisfied only by a card that is done and not
+    cancelled — a cancelled dep can never finish, so it still blocks."""
+    return target.get("stage") == "done" and not target.get("cancelled")
+
+
+def unfinished_deps(card: dict, idx: "dict[str, dict]") -> "list[str]":
+    out = []
+    for t in str_list(card.get("dependsOn")):
+        tgt = idx.get(t)
+        if tgt is not None and not dep_satisfied(tgt):
+            out.append(t)
+    return sorted(set(out))
+
+
+def pm_owned(card: dict) -> bool:
+    return str(card.get("blockedReason") or "").startswith(PM_REASON_PREFIX)
+
+
+def blocked_reason_for(deps: "list[str]", idx: "dict[str, dict]") -> str:
+    names = ", ".join(id8(d) for d in deps[:4])
+    if len(deps) > 4:
+        names += f" +{len(deps) - 4} more"
+    return f"{PM_REASON_PREFIX} blocked by {names}"
+
+
+# --- mechanical findings (scan) ----------------------------------------------
+
+
+def analyze(cards: "list[dict]", scope_ids: "set[str]") -> "tuple[list[dict], dict[str, list[str]]]":
+    """Mechanical findings over `cards`; `scope_ids` marks which cards a run
+    may modify (findings still report cross-scope edges — they are facts —
+    but only in-scope ids are offered as writable)."""
+    idx = card_index(cards)
+    findings: "list[dict]" = []
+
+    # Module overlap: normalized `touches` intersection, pairwise.
+    by_touch: "dict[str, list[str]]" = {}
+    for c in cards:
+        cid = c.get("id")
+        if not cid or cid not in scope_ids:
+            continue
+        for t in dict.fromkeys(norm_touch(p) for p in str_list(c.get("touches")) if norm_touch(p)):
+            by_touch.setdefault(t, []).append(cid)
+    seen_pairs = set()
+    for path, owners in sorted(by_touch.items()):
+        for i in range(len(owners)):
+            for j in range(i + 1, len(owners)):
+                pair = (owners[i], owners[j])
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                findings.append({
+                    "class": "module_overlap",
+                    "certainty": "mechanical",
+                    "cards": sorted(pair),
+                    "detail": f"touches intersect on {path}",
+                    "paths": [path],
+                })
+
+    # Cycles in the wait-graph (dependsOn union blocks).
+    edges = wait_edges(cards, idx)
+    nodes = [c["id"] for c in cards if c.get("id")]
+    for comp in sccs(nodes, edges):
+        comp_edges = sorted(
+            f"{id8(a)} waits {id8(b)}" for a, b in edges if a in comp and b in comp
+        )
+        findings.append({
+            "class": "cycle",
+            "certainty": "mechanical",
+            "cards": sorted(comp),
+            "detail": f"dependency loop over {len(comp)} card(s): "
+                      + "; ".join(comp_edges),
+        })
+
+    # Dangling refs, cancelled deps, unmirrored edges, stale pm marks.
+    for c in cards:
+        cid = c.get("id")
+        if not cid or cid not in scope_ids:
+            continue
+        for field in GRAPH_FIELDS:
+            for t in str_list(c.get(field)):
+                if t not in idx:
+                    findings.append({
+                        "class": "dangling_edge",
+                        "certainty": "mechanical",
+                        "cards": [cid],
+                        "detail": f"{field} -> {id8(t)}: no such card",
+                        "field": field,
+                        "target": t,
+                    })
+        for t in str_list(c.get("dependsOn")):
+            tgt = idx.get(t)
+            if tgt is not None and tgt.get("cancelled"):
+                findings.append({
+                    "class": "dep_on_cancelled",
+                    "certainty": "mechanical",
+                    "cards": sorted([cid, t]),
+                    "detail": f"depends on cancelled {id8(t)} — can never finish",
+                })
+        for t in str_list(c.get("dependsOn")):
+            tgt = idx.get(t)
+            if tgt is not None and t in idx and cid not in str_list(tgt.get("blocks")):
+                findings.append({
+                    "class": "unmirrored_edge",
+                    "certainty": "mechanical",
+                    "cards": sorted([cid, t]),
+                    "detail": f"{id8(cid)} dependsOn {id8(t)} but {id8(t)}.blocks misses it",
+                })
+        for t in str_list(c.get("blocks")):
+            tgt = idx.get(t)
+            if tgt is not None and cid not in str_list(tgt.get("dependsOn")):
+                findings.append({
+                    "class": "unmirrored_edge",
+                    "certainty": "mechanical",
+                    "cards": sorted([cid, t]),
+                    "detail": f"{id8(cid)} blocks {id8(t)} but {id8(t)}.dependsOn misses it",
+                })
+        if c.get("blocked") and pm_owned(c) and not unfinished_deps(c, idx):
+            findings.append({
+                "class": "stale_pm_block",
+                "certainty": "mechanical",
+                "cards": [cid],
+                "detail": "pm block mark has no unfinished dependency behind it",
+            })
+
+    implied = {
+        c["id"]: unfinished_deps(c, idx)
+        for c in cards
+        if c.get("id") in scope_ids and unfinished_deps(c, idx)
+    }
+    return findings, implied
+
+
+# --- plan validation + pure application --------------------------------------
+
+PLAN_OPS = ("link", "unlink")
+PROPOSAL_KINDS = (
+    "merge", "rewrite", "move", "delete", "cancel", "unblock", "split", "other",
+)
+
+
+def load_plan(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            plan = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise CliError(f"plan {path}: {exc}", 1) from None
+    if not isinstance(plan, dict):
+        raise CliError("plan must be a JSON object", 1)
+    for key in ("findings", "actions", "proposals"):
+        if key in plan and not isinstance(plan[key], list):
+            raise CliError(f"plan.{key} must be a list", 1)
+    return plan
+
+
+def _refs_exist(plan_list: "list[dict]", what: str, cards, scope_ids) -> "list[str]":
+    """Resolve every `cards` ref in findings/proposals. Returns errors."""
+    errors = []
+    for i, item in enumerate(plan_list):
+        if not isinstance(item, dict):
+            errors.append(f"{what}[{i}]: not an object")
+            continue
+        refs = item.get("cards")
+        if not isinstance(refs, list) or not refs:
+            errors.append(f"{what}[{i}]: cards must be a non-empty list")
+            continue
+        for r in refs:
+            c = resolve_ref(cards, r)
+            if c is None:
+                errors.append(f"{what}[{i}]: no card matches {r!r}")
+            elif c["id"] not in scope_ids:
+                errors.append(f"{what}[{i}]: card {id8(c['id'])} is outside the run scope")
+    return errors
+
+
+def _reachable(adj: "dict[str, list[str]]", src: str, dst: str) -> bool:
+    seen = {src}
+    stack = [src]
+    while stack:
+        for nxt in adj.get(stack.pop(), []):
+            if nxt == dst:
+                return True
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    return False
+
+
+def validate_plan(cards: "list[dict]", plan: dict, scope_ids: "set[str]") -> "tuple[list, list[str]]":
+    """Validate the plan against `cards`. Pure — returns (ops, errors);
+    nothing here touches the wire. `ops` are normalized (op, field, fromId,
+    toId) tuples on concrete ids."""
+    errors: "list[str]" = []
+    ops: "list[tuple[str, str, str, str]]" = []
+
+    for i, a in enumerate(plan.get("actions") or []):
+        if not isinstance(a, dict):
+            errors.append(f"actions[{i}]: not an object")
+            continue
+        op = a.get("op")
+        if op not in PLAN_OPS:
+            errors.append(
+                f"actions[{i}]: op {op!r} is not in the pm safe set "
+                f"({', '.join(PLAN_OPS)}) — substance changes belong in proposals"
+            )
+            continue
+        field = a.get("field")
+        if field not in GRAPH_FIELDS:
+            errors.append(f"actions[{i}]: field {field!r} is not a graph field")
+            continue
+        src = resolve_ref(cards, a.get("from"))
+        dst = resolve_ref(cards, a.get("to"))
+        if src is None:
+            errors.append(f"actions[{i}]: no card matches 'from' {a.get('from')!r}")
+            continue
+        if dst is None:
+            errors.append(f"actions[{i}]: no card matches 'to' {a.get('to')!r}")
+            continue
+        if src["id"] == dst["id"]:
+            errors.append(f"actions[{i}]: self-link on {id8(src['id'])} is meaningless")
+            continue
+        out = [id8(c["id"]) for c in (src, dst) if c["id"] not in scope_ids]
+        if out:
+            errors.append(
+                f"actions[{i}]: card(s) {', '.join(out)} are outside the run scope — "
+                "the pm may only edit its own project's cards"
+            )
+            continue
+        ops.append((op, field, src["id"], dst["id"]))
+
+    errors += _refs_exist(plan.get("findings") or [], "findings", cards, scope_ids)
+    errors += _refs_exist(plan.get("proposals") or [], "proposals", cards, scope_ids)
+
+    for i, p in enumerate(plan.get("proposals") or []):
+        if not isinstance(p, dict):
+            continue
+        kind = p.get("kind")
+        if kind not in PROPOSAL_KINDS:
+            errors.append(
+                f"proposals[{i}]: kind {kind!r} unknown "
+                f"({', '.join(PROPOSAL_KINDS)})"
+            )
+
+    # Cycle guard: a wait-edge this plan adds must never CLOSE a loop — i.e.
+    # the old graph must not already reach back from `to` to `from`.
+    # Pre-existing cycles are findings to report, not the pm's doing.
+    if not errors:
+        idx = card_index(cards)
+        old_edges = wait_edges(cards, idx)
+        adj: "dict[str, list[str]]" = {}
+        for a, b in old_edges:
+            adj.setdefault(a, []).append(b)
+        for op, field, frm, to in ops:
+            if op != "link" or field == "conflictsWith":
+                continue
+            waitee, waited = (to, frm) if field == "blocks" else (frm, to)
+            if _reachable(adj, waited, waitee):
+                errors.append(
+                    f"link {field} {id8(frm)}->{id8(to)} would close a "
+                    "dependency cycle — report the loop, do not assert it"
+                )
+    return ops, errors
+
+
+def compute_new_cards(cards: "list[dict]",
+                      ops: "list[tuple[str, str, str, str]]",
+                      scope_ids: "set[str]") -> "tuple[list[dict], list[dict]]":
+    """Pure core of `apply`: returns (new_cards, applied_changes).
+
+    applied_changes entries: {card, field, change, evidence} — one per real
+    mutation, already the audit text basis. No card outside scope_ids is
+    ever returned modified."""
+    new_cards = json.loads(json.dumps(cards))
+    idx = card_index(new_cards)
+    applied: "list[dict]" = []
+
+    def note(cid: str, field: str, change: str, evidence: str) -> None:
+        applied.append({
+            "card": cid,
+            "field": field,
+            "change": change,
+            "evidence": evidence,
+        })
+
+    # 1. explicit ops --------------------------------------------------------
+    #    dependsOn<->blocks and conflictsWith are ONE fact stated on two
+    #    cards, so an unlink clears every representation of the fact —
+    #    otherwise the mirror step below would re-add the other half.
+    for op, field, frm, to in ops:
+        src = idx[frm]
+        dst = idx[to]
+        if op == "link":
+            if to not in str_list(src.get(field)):
+                src[field] = sorted(str_list(src.get(field)) + [to])
+                note(frm, field, f"{field} += {id8(to)}", "pm plan link")
+        elif op == "unlink":
+            # Both directions of the same fact. For dependsOn/blocks the
+            # counterpart lives on the mirrored field of the other card;
+            # conflictsWith is the same field on both cards.
+            counterparts = [(src, field, to)]
+            if field == "conflictsWith":
+                counterparts.append((dst, "conflictsWith", frm))
+            elif field == "dependsOn":
+                counterparts.append((dst, "blocks", frm))
+            else:  # blocks
+                counterparts.append((dst, "dependsOn", frm))
+            for holder, hfield, target in counterparts:
+                if holder["id"] not in scope_ids:
+                    continue
+                lst = str_list(holder.get(hfield))
+                if target in lst:
+                    holder[hfield] = [x for x in lst if x != target]
+                    note(holder["id"], hfield, f"{hfield} -= {id8(target)}",
+                         "pm plan unlink")
+
+    # 2. mirror repair --------------------------------------------------------
+    #    dependsOn<->blocks and conflictsWith symmetry are the same fact
+    #    stated twice; only between in-scope cards (writing the other side
+    #    of a cross-scope edge would modify a card we may not touch).
+    for c in new_cards:
+        cid = c.get("id")
+        if not cid:
+            continue
+        for t in str_list(c.get("dependsOn")):
+            tgt = idx.get(t)
+            if tgt is not None and t in scope_ids and cid in scope_ids \
+                    and cid not in str_list(tgt.get("blocks")):
+                tgt["blocks"] = sorted(str_list(tgt.get("blocks")) + [cid])
+                note(t, "blocks", f"blocks += {id8(cid)}",
+                     f"mirror of {id8(cid)}.dependsOn")
+        for t in str_list(c.get("blocks")):
+            tgt = idx.get(t)
+            if tgt is not None and t in scope_ids and cid in scope_ids \
+                    and cid not in str_list(tgt.get("dependsOn")):
+                tgt["dependsOn"] = sorted(str_list(tgt.get("dependsOn")) + [cid])
+                note(t, "dependsOn", f"dependsOn += {id8(cid)}",
+                     f"mirror of {id8(cid)}.blocks")
+        for t in str_list(c.get("conflictsWith")):
+            tgt = idx.get(t)
+            if tgt is not None and t in scope_ids and cid in scope_ids \
+                    and cid not in str_list(tgt.get("conflictsWith")):
+                tgt["conflictsWith"] = sorted(str_list(tgt.get("conflictsWith")) + [cid])
+                note(t, "conflictsWith", f"conflictsWith += {id8(cid)}",
+                     f"mirror of {id8(cid)}.conflictsWith")
+
+    # 3. derived blocked flags ------------------------------------------------
+    #    The flag is tool arithmetic, never LLM output: a card waits on an
+    #    unfinished dependency -> pm: blocked by <id8>. pm-owned marks are
+    #    updated/cleared; foreign reasons are never touched.
+    for c in new_cards:
+        cid = c.get("id")
+        if not cid or cid not in scope_ids:
+            continue
+        deps = unfinished_deps(c, idx)
+        active = c.get("stage") != "done" and not c.get("cancelled")
+        if active and deps:
+            want = blocked_reason_for(deps, idx)
+            if not c.get("blocked"):
+                c["blocked"] = True
+                c["blockedReason"] = want
+                note(cid, "blocked", f"blocked ({want})",
+                     f"unfinished dependsOn -> {', '.join(id8(d) for d in deps)}")
+            elif pm_owned(c) and c.get("blockedReason") != want:
+                c["blockedReason"] = want
+                note(cid, "blockedReason", f"reason -> {want}",
+                     "dependency set changed")
+            # foreign mark (blocked or reason w/o pm: prefix) — leave it,
+            # it is not ours; the run report names it instead.
+        else:
+            if c.get("blocked") and pm_owned(c):
+                c["blocked"] = False
+                old = c.get("blockedReason") or ""
+                c["blockedReason"] = ""
+                note(cid, "blocked", "unblocked",
+                     f"pm mark no longer justified (was: {old})")
+
+    # 4. updatedAt on touched cards ------------------------------------------
+    touched = {a["card"] for a in applied}
+    now = int(time.time() * 1000)
+    for c in new_cards:
+        if c.get("id") in touched:
+            c["updatedAt"] = now
+
+    return new_cards, applied
+
+
+# --- output ------------------------------------------------------------------
+
+
+def digest(c: dict) -> dict:
+    """The card view the LLM judges from — full text, compact bookkeeping."""
+    return {
+        "id": c.get("id"),
+        "id8": id8(c.get("id", "")),
+        "title": c.get("title") or "",
+        "project": c.get("project") or "",
+        "stage": c.get("stage"),
+        "status": c.get("status"),
+        "blocked": bool(c.get("blocked")),
+        "blockedReason": c.get("blockedReason") or "",
+        "cancelled": bool(c.get("cancelled")),
+        "touches": str_list(c.get("touches")),
+        "dependsOn": str_list(c.get("dependsOn")),
+        "blocks": str_list(c.get("blocks")),
+        "conflictsWith": str_list(c.get("conflictsWith")),
+        "description": c.get("description") or "",
+        "acceptance": c.get("acceptance") or "",
+        "verification": c.get("verification") or "",
+    }
+
+
+def emit(payload, args) -> None:
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+# --- commands ----------------------------------------------------------------
+
+
+def _projects(url: str) -> "list[dict]":
+    data, _ = read_doc(url, "projects.json", {"version": 1, "projects": []})
+    return data.get("projects") or []
+
+
+def cmd_scan(args) -> int:
+    url = args.url.rstrip("/")
+    board, _rev = read_doc(url, "board.json", {"version": 2, "cards": []})
+    cards = board.get("cards") or []
+    projects = _projects(url)
+    in_scope = scoped_cards(cards, args, projects)
+    scope_ids = {c["id"] for c in in_scope if c.get("id")}
+    findings, implied = analyze(cards, scope_ids)
+    scope_label = "*" if args.all else args.project
+    emit({
+        "scope": scope_label,
+        "cardsInScope": len(scope_ids),
+        "cardsTotal": len(cards),
+        "cards": [digest(c) for c in in_scope],
+        "findings": findings,
+        "impliedBlocked": {k: v for k, v in implied.items()},
+        "planContract": {
+            "actions": [
+                {"op": "link|unlink",
+                 "field": "dependsOn|blocks|conflictsWith",
+                 "from": "card id or unique prefix",
+                 "to": "card id or unique prefix"}
+            ],
+            "findings": [{"class": "|".join(FINDING_CLASSES),
+                          "cards": ["id"], "summary": "what", "evidence": "what you saw"}],
+            "proposals": [{"kind": "|".join(PROPOSAL_KINDS),
+                           "cards": ["id"], "summary": "substance change for a human",
+                           "reason": "why"}],
+            "note": "blocked flags are derived by pmgraph from the final "
+                    "graph — never put them in the plan",
+        },
+    }, args)
+    return 0
+
+
+def _audit_entries(plan: dict, applied: "list[dict]", scope_label: str,
+                   actor: str, session: str, cards_now: "list[dict]",
+                   project_path: str) -> "list[dict]":
+    """The ledger rows this run appends — all kind:'pm', role 'pm'."""
+    idx = card_index(cards_now)
+    now = int(time.time() * 1000)
+    entries = []
+
+    def entry(title: str, detail: str) -> None:
+        entries.append({
+            "id": str(uuid.uuid4()),
+            "at": now,
+            "kind": "pm",
+            "agentName": actor,
+            "role": ROLE,
+            "sessionId": session,
+            "cwd": project_path or os.getcwd(),
+            "title": title,
+            "detail": detail,
+        })
+
+    for a in applied:
+        c = idx.get(a["card"]) or {}
+        entry(
+            c.get("title") or id8(a["card"]),
+            f"applied: {a['change']} — saw: {a['evidence']}",
+        )
+
+    for p in plan.get("proposals") or []:
+        refs = [resolve_ref(cards_now, r) for r in p.get("cards") or []]
+        names = ", ".join(id8(c["id"]) for c in refs if c)
+        entry(
+            "; ".join((c.get("title") or id8(c["id"])) for c in refs if c),
+            f"proposed: {p.get('kind')}: {p.get('summary') or ''} "
+            f"[{names}]" + (f" — {p.get('reason')}" if p.get("reason") else ""),
+        )
+
+    counts: "dict[str, int]" = {}
+    for f in plan.get("findings") or []:
+        cls = str(f.get("class") or "other")
+        counts[cls] = counts.get(cls, 0) + 1
+    classes = ", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "none"
+    entry(
+        "pm graph review",
+        f"run {session}: findings {len(plan.get('findings') or [])} ({classes}); "
+        f"applied {len(applied)}; proposed {len(plan.get('proposals') or [])}; "
+        f"scope {scope_label}",
+    )
+    return entries
+
+
+def _proposals_md(plan: dict, cards_now: "list[dict]", session: str,
+                  scope_label: str) -> str:
+    lines = [
+        "# PM proposals — for a human, never auto-applied",
+        "",
+        f"run {session} · scope {scope_label} · {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+    ]
+    proposals = plan.get("proposals") or []
+    if not proposals:
+        lines.append("No substance proposals this run — the graph edits that")
+        lines.append("were safe to apply landed on the cards themselves.")
+    for i, p in enumerate(proposals, 1):
+        refs = [resolve_ref(cards_now, r) for r in p.get("cards") or []]
+        names = ", ".join(
+            f"{id8(c['id'])} \"{c.get('title') or ''}\"" for c in refs if c
+        )
+        lines.append(f"{i}. **{p.get('kind')}** — {p.get('summary') or ''}")
+        lines.append(f"   cards: {names}")
+        if p.get("reason"):
+            lines.append(f"   why: {p.get('reason')}")
+        lines.append("")
+    lines.append("Applied changes (links, blocked flags) and their evidence are")
+    lines.append("in the board's activity ledger as `pm` events.")
+    return "\n".join(lines) + "\n"
+
+
+def cmd_apply(args) -> int:
+    url = args.url.rstrip("/")
+    plan = load_plan(args.plan)
+    if not args.all and not (args.project or plan.get("project")):
+        raise CliError("scope required: --project LABEL (or --all)", 1)
+    scope_label = "*" if args.all else (args.project or plan.get("project"))
+    session = args.session or f"pmrun-{int(time.time())}"
+    actor = args.actor or ACTOR
+    projects = _projects(url)
+
+    applied: "list[dict]" = []
+    new_rev = 0
+    board_wrote = False
+    last_cards: "list[dict]" = []
+
+    # Reads + analysis first, every attempt; the write is the last thing
+    # that happens inside the loop, and only when the diff is non-empty.
+    # --dry-run never reaches the write.
+    last_err: Exception | None = None
+    for _attempt in range(RETRY_TRIES):
+        board, rev = read_doc(url, "board.json", {"version": 2, "cards": []})
+        cards = board.get("cards") or []
+        in_scope = scoped_cards(
+            cards,
+            argparse.Namespace(all=args.all, project=scope_label),
+            projects,
+        )
+        scope_ids = {c["id"] for c in in_scope if c.get("id")}
+        if not scope_ids:
+            raise CliError(f"no cards in scope {scope_label!r}", 2)
+
+        ops, errors = validate_plan(cards, plan, scope_ids)
+        if errors:
+            for e in errors:
+                print(f"pmgraph: plan rejected: {e}", file=sys.stderr)
+            raise CliError(f"plan rejected ({len(errors)} problem(s)) — board untouched", 1)
+
+        new_cards, applied = compute_new_cards(cards, ops, scope_ids)
+        last_cards = new_cards
+        if args.dry_run or not applied:
+            board_wrote = False
+            new_rev = rev
+            break
+        next_doc = {"version": 2, "cards": new_cards}
+        try:
+            new_rev = write_doc(url, "board.json", next_doc, rev)
+            board_wrote = True
+            break
+        except CliError as exc:
+            if exc.code == 3 and "409" in str(exc):
+                last_err = exc
+                time.sleep(0.3)
+                continue
+            raise
+    else:
+        raise CliError(f"board.json: lost {RETRY_TRIES} revision races ({last_err})", 3)
+
+    # --- the write burst continues: audit entries, then the proposals file.
+    #    Everything below is additive bookkeeping; the board is already
+    #    consistent (or untouched) at this point.
+    audit_failed = None
+    if not args.dry_run:
+        entries = _audit_entries(plan, applied, scope_label, actor, session,
+                                 last_cards, args.project_path)
+
+        def fn(data):
+            data.setdefault("entries", [])
+            data.setdefault("usage", [])
+            data["entries"].extend(entries)
+            data["entries"] = data["entries"][-MAX_ENTRIES:]
+            return data, len(entries)
+
+        try:
+            mutate(url, "activity.json", empty_activity(), fn)
+        except CliError as exc:
+            audit_failed = str(exc)
+            print(f"pmgraph: audit write failed: {exc}", file=sys.stderr)
+
+        proposals_path = ""
+        if args.project_path:
+            try:
+                pm_dir = os.path.join(args.project_path, ".acp", "pm")
+                os.makedirs(pm_dir, exist_ok=True)
+                proposals_path = os.path.join(pm_dir, "proposals.md")
+                with open(proposals_path, "w", encoding="utf-8") as fh:
+                    fh.write(_proposals_md(plan, last_cards, session, scope_label))
+            except OSError as exc:
+                print(f"pmgraph: proposals file failed: {exc}", file=sys.stderr)
+                audit_failed = audit_failed or str(exc)
+
+    emit({
+        "ok": audit_failed is None,
+        "session": session,
+        "scope": scope_label,
+        "dryRun": bool(args.dry_run),
+        "boardWritten": board_wrote,
+        "boardRev": new_rev,
+        "applied": applied,
+        "proposals": plan.get("proposals") or [],
+        "findings": plan.get("findings") or [],
+        "auditError": audit_failed,
+    }, args)
+    return 0 if audit_failed is None else 1
+
+
+# --- argv --------------------------------------------------------------------
+
+
+def _scope_args(s) -> None:
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--project", default="", help="card project label / project name / path basename")
+    g.add_argument("--all", action="store_true", help="review every card on the board")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="pmgraph",
+        description="Deterministic graph half of the pm role (scan findings / apply safe edits).",
+    )
+    p.add_argument("--url", default=DEFAULT_URL, help=f"state server (default {DEFAULT_URL})")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("scan", help="read-only: card digests + mechanical findings")
+    _scope_args(s)
+    s.set_defaults(func=cmd_scan)
+
+    s = sub.add_parser("apply", help="validate a pm plan and apply the safe set atomically")
+    s.add_argument("--plan", required=True, help="plan JSON written by the pm agent")
+    _scope_args(s)
+    s.add_argument("--project-path", default="",
+                   help="project dir for .acp/pm/proposals.md (usually $PWD of the role run)")
+    s.add_argument("--actor", default="", help="ledger agentName (default 'pm')")
+    s.add_argument("--session", default="", help="run id stamped on this run's ledger rows")
+    s.add_argument("--dry-run", action="store_true",
+                   help="validate + preview; write nothing at all")
+    s.set_defaults(func=cmd_apply)
+    return p
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if getattr(args, "cmd", None) == "scan" and not args.all and not args.project:
+        print("pmgraph: scope required: --project LABEL (or --all)", file=sys.stderr)
+        return 1
+    try:
+        return args.func(args)
+    except CliError as exc:
+        print(f"pmgraph: {exc}", file=sys.stderr)
+        return exc.code
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

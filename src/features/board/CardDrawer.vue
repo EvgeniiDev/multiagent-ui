@@ -28,6 +28,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   close: [];
   'open-session': [session: { agentName: string; sessionId: string }];
+  'open-card': [cardId: string];
 }>();
 
 const board = useBoardStore();
@@ -210,6 +211,44 @@ function onOpenSession() {
   const s = attachedSession.value;
   if (s) emit('open-session', { agentName: s.agentName, sessionId: s.sessionId });
 }
+
+// ---- card graph (F10.3 fields) ----------------------------------------------
+//
+// Read-only view of this card's edges: the pm role owns dependsOn/blocks/
+// conflictsWith on the board; the drawer resolves ids to id8 + title and
+// offers a jump into the linked card's drawer.
+
+function relCard(id: string): BoardCard | null {
+  return board.cards.find((c) => c.id === id) ?? null;
+}
+
+function relLabel(id: string): string {
+  const c = relCard(id);
+  return c ? `${id.slice(0, 8)} ${c.title}` : `${id.slice(0, 8)} (gone)`;
+}
+
+interface RelGroup {
+  key: 'dependsOn' | 'blocks' | 'conflictsWith';
+  label: string;
+  ids: string[];
+}
+
+const relGroups = computed<RelGroup[]>(() => {
+  const c = card.value;
+  if (!c) return [];
+  const all: RelGroup[] = [
+    { key: 'dependsOn', label: 'depends on', ids: c.dependsOn },
+    { key: 'blocks', label: 'blocks', ids: c.blocks },
+    { key: 'conflictsWith', label: 'conflicts with', ids: c.conflictsWith },
+  ];
+  return all.filter((g) => g.ids.length > 0);
+});
+
+/** `pm:` is the pm tool's provenance prefix on blockedReason — its marks
+ * are graph-derived; anything else is a human's/dispatcher's text. */
+const pmBlocked = computed(() =>
+  (card.value?.blockedReason || '').startsWith('pm:')
+);
 
 function onEsc(event: KeyboardEvent) {
   if (event.key === 'Escape') {
@@ -460,6 +499,26 @@ onBeforeUnmount(() => {
           <button class="link-del" aria-label="Remove link" @click="removeLink(i)">×</button>
         </div>
         <button class="link-add" @click="addLink">+ Add link</button>
+      </div>
+
+      <div v-if="relGroups.length || pmBlocked" class="field" data-testid="card-relations">
+        <span class="field-label">Relations</span>
+        <div v-for="g in relGroups" :key="g.key" class="rel-row">
+          <span class="rel-kind mono">{{ g.label }}</span>
+          <button
+            v-for="rid in g.ids"
+            :key="rid"
+            class="rel-chip mono"
+            :class="{ gone: !relCard(rid) }"
+            :title="relLabel(rid)"
+            @click="emit('open-card', rid)"
+          >{{ rid.slice(0, 8) }}</button>
+        </div>
+        <div v-if="pmBlocked" class="rel-row">
+          <span class="rel-kind mono">mark</span>
+          <span class="rel-pm mono" title="pm-derived blocked flag — cleared by the next pm run when the dependency finishes">pm: blocked</span>
+          <span class="rel-note" :title="card?.blockedReason">{{ card?.blockedReason }}</span>
+        </div>
       </div>
 
       <label class="field">
@@ -761,6 +820,58 @@ textarea.f-input {
   border-color: var(--text-accent, #c2532f);
 }
 
+.rel-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.rel-kind {
+  flex: 0 0 5.5rem;
+  font-size: 0.625rem;
+  letter-spacing: 0.03em;
+  color: var(--text-muted, #a39a8e);
+}
+
+.rel-chip {
+  font-size: 0.625rem;
+  padding: 0.0625rem 0.3rem;
+  border: 1px solid var(--border-color, #e3dbcf);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  color: var(--text-accent, #c2532f);
+  cursor: pointer;
+}
+
+.rel-chip:hover {
+  border-color: var(--text-accent, #c2532f);
+}
+
+.rel-chip.gone {
+  color: var(--text-muted, #a39a8e);
+  text-decoration: line-through;
+}
+
+.rel-pm {
+  font-size: 0.625rem;
+  padding: 0.0625rem 0.3rem;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--accent-soft, rgba(194, 83, 47, 0.14));
+  color: var(--text-accent, #c2532f);
+}
+
+.rel-note {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.6875rem;
+  color: var(--text-secondary, #6b6259);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .drawer-stamps {
   margin: 0;
   font-size: 0.625rem;
@@ -817,6 +928,7 @@ textarea.f-input {
 .seg-btn:focus-visible,
 .link-add:focus-visible,
 .link-del:focus-visible,
+.rel-chip:focus-visible,
 .drawer-close:focus-visible,
 .art-refresh:focus-visible,
 .art-row:focus-visible {
