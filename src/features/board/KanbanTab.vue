@@ -71,7 +71,10 @@ function onMove(cardId: string, to: BoardStageId, beforeId?: string | null) {
 }
 
 function onSetStatus(cardId: string, status: CardStatus) {
-  board.setCardStatus(cardId, status);
+  const r = board.setCardStatus(cardId, status);
+  // The review-cycle gate refuses with a reason naming the open
+  // severities — surface it instead of silently swallowing the click.
+  if (!r.ok && r.reason) alert(r.reason);
 }
 
 function onSetFlag(cardId: string, flag: 'blocked' | 'cancelled', on: boolean) {

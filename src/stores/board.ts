@@ -29,6 +29,7 @@ import { uuid } from '../lib/uuid';
 import { useActivityStore } from './activity';
 import { useUiStore } from './ui';
 import { useProjectsStore } from '../features/scope/registry';
+import { useReviewStore } from './review';
 
 /** Column of the pipeline. Persisted on the card as `stage`. */
 export type BoardStageId =
@@ -130,6 +131,13 @@ export function initialStatusFor(stage: BoardStageId): CardStatus | null {
   return STAGE_STATUSES[stage][0] ?? null;
 }
 
+/** Result of a status mutation: `ok: false` with a human-readable `reason`
+ * when the review-cycle gate refused the change. */
+export interface MutationResult {
+  ok: boolean;
+  reason?: string;
+}
+
 const STORE_PATH = 'board.json';
 const STORE_VERSION = 2;
 const ORDER_STEP = 10;
@@ -165,6 +173,23 @@ function coerceStatus(stage: BoardStageId, raw: unknown): CardStatus | null {
   return allowed.includes(raw as CardStatus)
     ? (raw as CardStatus)
     : initialStatusFor(stage);
+}
+
+/** The review-cycle gate (workstream decision): a card in `reviewtest`
+ * must not take `agent_tested` while a blocking-severity finding is open.
+ * The findings live in the card's artifact dir and are mirrored into the
+ * review store by the artifacts loader; `prevStatus` guards so a card
+ * already sitting at `agent_tested` is not re-gated by unrelated edits.
+ * `boardctl` enforces the same rule reading the findings file directly. */
+function reviewGateRefusal(
+  cardId: string,
+  stage: BoardStageId,
+  status: CardStatus,
+  prevStatus: CardStatus | null
+): string | null {
+  if (stage !== 'reviewtest' || status !== 'agent_tested') return null;
+  if (prevStatus === 'agent_tested') return null;
+  return useReviewStore().gateRefusal(cardId);
 }
 
 /** Restore a persisted card, coercing anything malformed into a safe shape.
@@ -450,18 +475,25 @@ export const useBoardStore = defineStore('board', () => {
     return card;
   }
 
-  function updateCard(id: string, patch: Partial<BoardCard>): void {
+  function updateCard(id: string, patch: Partial<BoardCard>): MutationResult {
     const card = cards.value.find((c) => c.id === id);
-    if (!card) return;
+    if (!card) return { ok: false };
     const { status: _status, stage: _stage, ...rest } = patch;
     Object.assign(card, rest, { id: card.id, updatedAt: Date.now() });
     // Status/stage move through their own paths (setCardStatus / moveCard)
     // so the per-stage status rules always hold — but a direct patch that
-    // carries a valid status still applies.
+    // carries a valid status still applies, gated like setCardStatus.
+    let refusal: string | null = null;
     if (_status !== undefined && STAGE_STATUSES[card.stage].includes(_status as CardStatus)) {
-      card.status = _status as CardStatus;
+      refusal = reviewGateRefusal(card.id, card.stage, _status as CardStatus, card.status);
+      if (!refusal) card.status = _status as CardStatus;
     }
     scheduleSave();
+    if (refusal) {
+      logCardEvent(card, `status → ${_status} refused: ${refusal}`);
+      return { ok: false, reason: refusal };
+    }
+    return { ok: true };
   }
 
   function removeCard(id: string): void {
@@ -513,6 +545,7 @@ export const useBoardStore = defineStore('board', () => {
     if (!card || !BOARD_STAGE_IDS.includes(to)) return;
     const from = card.stage;
     if (from !== to) {
+      const prevStatus = card.status;
       if (card.status) {
         card.statusByStage = { ...card.statusByStage, [from]: card.status };
       }
@@ -522,6 +555,16 @@ export const useBoardStore = defineStore('board', () => {
         remembered && STAGE_STATUSES[to].includes(remembered)
           ? remembered
           : initialStatusFor(to);
+      // The agent_tested gate also guards a RESUMED status: a card sent
+      // back and returned to reviewtest must not quietly sit at
+      // agent_tested while blocking findings are (still) open.
+      if (card.status === 'agent_tested') {
+        const refusal = reviewGateRefusal(card.id, to, 'agent_tested', prevStatus);
+        if (refusal) {
+          card.status = 'in_progress';
+          logCardEvent(card, `resumed status agent_tested refused: ${refusal}`);
+        }
+      }
     }
     card.updatedAt = Date.now();
 
@@ -555,11 +598,16 @@ export const useBoardStore = defineStore('board', () => {
    * rejected. `accepted` in reviewtest is the pipeline's terminal step — the
    * card leaves for `done` (§C: "accepted → карточка уходит в Done").
    */
-  function setCardStatus(id: string, status: CardStatus): void {
+  function setCardStatus(id: string, status: CardStatus): MutationResult {
     const card = cards.value.find((c) => c.id === id);
-    if (!card || !STAGE_STATUSES[card.stage].includes(status)) return;
+    if (!card || !STAGE_STATUSES[card.stage].includes(status)) return { ok: false };
     const prev = card.status;
-    if (prev === status) return;
+    if (prev === status) return { ok: true };
+    const refusal = reviewGateRefusal(card.id, card.stage, status, prev);
+    if (refusal) {
+      logCardEvent(card, `status → ${status} refused: ${refusal}`);
+      return { ok: false, reason: refusal };
+    }
     card.status = status;
     card.updatedAt = Date.now();
     scheduleSave();
@@ -567,6 +615,7 @@ export const useBoardStore = defineStore('board', () => {
     if (card.stage === 'reviewtest' && status === 'accepted') {
       moveCard(id, 'done');
     }
+    return { ok: true };
   }
 
   /** Toggle a card flag. Flags live on the card across stages and mark it

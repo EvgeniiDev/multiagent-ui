@@ -28,6 +28,7 @@ SCRIPTS = [
     ("runner", REPO / "scripts/e2e_runner.py", None),
     ("dispatch", REPO / "scripts/e2e_dispatch.py", None),
     ("pm", REPO / "scripts/e2e_pm.py", None),
+    ("review", REPO / "scripts/e2e_review.py", None),
     ("dashboard math", REPO / "scripts/e2e_dash_math.py", None),
     ("voice", REPO / "scripts/e2e_voice.py", None),
 ]

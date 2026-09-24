@@ -6,6 +6,7 @@ import { useRolesStore } from '../../stores/roles';
 import { useUiStore } from '../../stores/ui';
 import { useProjectsStore } from '../../stores/projects';
 import { useArtifactsStore, pickStatusArtifact } from '../../stores/artifacts';
+import { useReviewStore } from '../../stores/review';
 import { useActivityStore } from '../../stores/activity';
 import { useClaimsStore } from '../../stores/claims';
 import { runInfoFor, subagentsFor, type SubagentRow } from './runInfo';
@@ -33,6 +34,7 @@ const uiStore = useUiStore();
 const rolesStore = useRolesStore();
 const projectsStore = useProjectsStore();
 const artifactsStore = useArtifactsStore();
+const reviewStore = useReviewStore();
 const activityStore = useActivityStore();
 const claimsStore = useClaimsStore();
 
@@ -62,6 +64,35 @@ const statusToken = computed(() => {
   const st = artifactsStore.byCard[props.card.id];
   if (!st || !st.artifacts.length) return null;
   return pickStatusArtifact(props.card.stage, st.artifacts)?.token ?? null;
+});
+
+const SEV_SHORT: Record<string, string> = {
+  critical: 'crit',
+  major: 'maj',
+  minor: 'min',
+  nit: 'nit',
+};
+
+/** Review-cycle counter chip: open findings per severity + the round,
+ * from the card's `review_findings.json` (review store). Severity names
+ * and the round limit come from the reviewtest role's `review` data. */
+const reviewInfo = computed(() => {
+  const st = reviewStore.byCard[props.card.id];
+  if (!st || st.error) return null;
+  if (!st.findings.length && st.round === null) return null;
+  const rules = rolesStore.reviewRulesForStage('reviewtest');
+  const counts = reviewStore.openCounts(props.card.id);
+  const parts = rules.severities.map(
+    (s) => `${SEV_SHORT[s] ?? s.slice(0, 4)} ${counts[s] ?? 0}`
+  );
+  for (const s of Object.keys(counts)) {
+    if (!rules.severities.includes(s)) parts.push(`${s.slice(0, 4)} ${counts[s]}`);
+  }
+  const blockers = rules.blocking.reduce((n, s) => n + (counts[s] ?? 0), 0);
+  const round = st.round !== null ? `r${st.round}/${rules.maxRounds}` : null;
+  const text = `${round ? `${round} ` : ''}${parts.join(' · ')}`;
+  const title = `Open review findings — round ${st.round ?? '—'} of ${rules.maxRounds}: ${parts.join(', ')}`;
+  return { text, title, blockers };
 });
 
 /** The card's orchestrator run (P7): who runs it, which session, how the
@@ -282,6 +313,9 @@ onBeforeUnmount(() => {
       <span v-if="statusToken" class="meta-chip st-token" :class="`tok-${statusToken.toLowerCase()}`"
         data-testid="card-status-token"
         :title="`STATUS: ${statusToken} — from .acp/cards artifacts`">{{ statusToken }}</span>
+      <span v-if="reviewInfo" class="meta-chip review" :class="{ 'has-blockers': reviewInfo.blockers > 0 }"
+        data-testid="review-findings"
+        :title="reviewInfo.title">{{ reviewInfo.text }}</span>
       <span v-if="stageRole" class="meta-chip role" data-testid="card-role-badge"
         :title="`Stage role: ${stageRole.label} (${stageRole.cli})`">{{ stageRole.label }}</span>
       <span v-if="stageRole && !stageRoleHasRunner" class="meta-chip no-runner"
@@ -539,6 +573,16 @@ onBeforeUnmount(() => {
 }
 
 .meta-chip.rel.conflict {
+  color: var(--bg-danger, #b3402e);
+}
+
+/* Review-findings counter: one flat chip; goes danger-coloured while a
+   blocking severity is open. */
+.meta-chip.review {
+  max-width: none;
+}
+
+.meta-chip.review.has-blockers {
   color: var(--bg-danger, #b3402e);
 }
 
