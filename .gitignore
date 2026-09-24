@@ -61,3 +61,6 @@ tmp-*-test/
 
 # Local devin config for the sandbox tree (workspace trust off).
 devin.json
+
+# e2e suites regenerate these every run (binary, conflicts on every merge)
+docs/*.png
