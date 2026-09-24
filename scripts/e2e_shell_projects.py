@@ -28,7 +28,9 @@ with sync_playwright() as p:
     for r in rows[:8]:
         print("   ", r)
     assert rows, "no project rows"
-    page.click(".project-row")
+    # Click the project that actually has sessions in its tree (Common = ~/projects),
+    # not just the first row: an empty sandbox project legitimately shows 0 sessions.
+    page.click('.project-row:has-text("Common")')
     page.wait_for_timeout(500)
     detail = page.evaluate("""() => ({
       name: document.querySelector('.project-detail h3')?.textContent,
