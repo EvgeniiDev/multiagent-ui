@@ -36,13 +36,13 @@ Usage:
 
 import json
 import re
-import socket
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
+from _e2e_harness import serve_web, stop
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist-web"
@@ -172,29 +172,6 @@ def down_state(route):
                   body=json.dumps({"error": "state server down"}))
 
 
-def start_server():
-    try:
-        socket.create_connection(("127.0.0.1", PORT), 0.3).close()
-    except OSError:
-        pass
-    else:
-        print(f"FAIL  port {PORT} already in use — refusing to test a stale server")
-        sys.exit(1)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(PORT), "--bind", "127.0.0.1"],
-        cwd=DIST, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    for _ in range(100):
-        try:
-            socket.create_connection(("127.0.0.1", PORT), 0.2).close()
-            return proc
-        except OSError:
-            time.sleep(0.1)
-    proc.kill()
-    print(f"FAIL  could not serve {DIST} on port {PORT}")
-    sys.exit(1)
-
-
 def dev_card(page, cid):
     return page.locator(f'[data-col="dev"] .board-card[data-card-id="{cid}"]')
 
@@ -206,7 +183,8 @@ def main():
     SHOTS.mkdir(exist_ok=True)
     now = int(time.time() * 1000)
 
-    server = start_server()
+    global BASE
+    server, BASE = serve_web(PORT, DIST)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -319,11 +297,7 @@ def main():
 
             browser.close()
     finally:
-        server.terminate()
-        try:
-            server.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            server.kill()
+        stop(server)
 
     failed = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(failed)}/{len(results)} assertions passed")

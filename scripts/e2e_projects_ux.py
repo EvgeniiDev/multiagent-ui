@@ -28,13 +28,13 @@ Prints PASS/FAIL per assertion and exits non-zero on any failure.
 
 import json
 import re
-import socket
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
+from _e2e_harness import serve_web, stop
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist-web"
@@ -104,8 +104,10 @@ def fs_api(route):
 
 
 def seed(context):
-    """localStorage: two ws agents, telemetry off, N_PROJECTS sessions each
-    with a distinct cwd so the Projects list is longer than any viewport.
+    """localStorage: two ws agents, telemetry off, a projects REGISTRY of
+    N_PROJECTS entries plus a matching session each (the Projects view lists
+    registered projects; sessions attach by longest-prefix cwd ownership)
+    so the list is longer than any viewport.
 
     Guarded (`if (!localStorage.getItem ...)`) so a reload mid-test keeps the
     app's own persisted state rather than re-seeding over it.
@@ -118,6 +120,19 @@ def seed(context):
     }
     prefs = {"telemetryEnabled": False}
     now = int(time.time() * 1000)
+    registry = {
+        "version": 1,
+        "projects": [
+            {
+                "id": f"proj-{i:02d}",
+                "name": f"proj-{i:02d}",
+                "path": f"/home/hermes/projects/proj-{i:02d}",
+                "createdAt": now - i * 60_000,
+            }
+            for i in range(N_PROJECTS)
+        ],
+        "activeProjectId": "all",
+    }
     sessions = {
         "sessions": [
             {
@@ -136,35 +151,13 @@ def seed(context):
     for key, val in (
         ("acp-ui:agents", agents),
         ("acp-ui:preferences.json", prefs),
+        ("acp-ui:projects.json", registry),
         ("acp-ui:sessions.json", sessions),
     ):
         context.add_init_script(
             f"if (!localStorage.getItem({json.dumps(key)}))"
             f" localStorage.setItem({json.dumps(key)}, {json.dumps(json.dumps(val))});"
         )
-
-
-def start_server():
-    try:
-        socket.create_connection(("127.0.0.1", PORT), 0.3).close()
-    except OSError:
-        pass
-    else:
-        print(f"FAIL  port {PORT} already in use — refusing to test a stale server")
-        sys.exit(1)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(PORT), "--bind", "127.0.0.1"],
-        cwd=DIST, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    for _ in range(100):
-        try:
-            socket.create_connection(("127.0.0.1", PORT), 0.2).close()
-            return proc
-        except OSError:
-            time.sleep(0.1)
-    proc.kill()
-    print(f"FAIL  could not serve {DIST} on port {PORT}")
-    sys.exit(1)
 
 
 def goto_projects(page):
@@ -189,12 +182,12 @@ def main():
         print(f"FAIL  {DIST} missing — run `npm run build:web` first")
         sys.exit(1)
     SHOTS.mkdir(exist_ok=True)
-    server = start_server()
+    global BASE
+    server, BASE = serve_web(PORT, DIST)
     try:
         run_checks()
     finally:
-        server.terminate()
-        server.wait(timeout=5)
+        stop(server)
 
     check("zero pageerror events", len(page_errors) == 0,
           "; ".join(page_errors[:3]) if page_errors else "")
@@ -216,6 +209,7 @@ def run_checks():
         page = ctx.new_page()
         page.on("pageerror", lambda exc: page_errors.append(str(exc)))
         page.route(re.compile(r"/api/fs/"), fs_api)
+        page.route(re.compile(r":25900/"), lambda r: r.abort())
         page.route_web_socket(re.compile(r"^wss?://"), acp_ws)
 
         page.goto(BASE, wait_until="load")
@@ -306,6 +300,7 @@ def run_checks():
         p2 = phone.new_page()
         p2.on("pageerror", lambda exc: page_errors.append(str(exc)))
         p2.route(re.compile(r"/api/fs/"), fs_api)
+        p2.route(re.compile(r":25900/"), lambda r: r.abort())
         p2.route_web_socket(re.compile(r"^wss?://"), acp_ws)
         p2.goto(BASE, wait_until="load")
         p2.wait_for_selector(".view-rail", timeout=10000)

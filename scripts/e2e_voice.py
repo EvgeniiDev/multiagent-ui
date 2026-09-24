@@ -32,13 +32,13 @@ Prints PASS/FAIL per assertion and exits non-zero on any failure.
 
 import json
 import re
-import socket
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
+from _e2e_harness import serve_web, stop
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist-web"
@@ -194,34 +194,6 @@ def deny_mic(context):
         })();
         """
     )
-
-
-def start_server():
-    for _ in range(30):
-        s = socket.socket()
-        try:
-            s.bind(("127.0.0.1", PORT))
-            break
-        except OSError:
-            time.sleep(1)
-        finally:
-            s.close()
-    else:
-        print(f"FAIL  port {PORT} still busy after 30s — refusing a stale server")
-        sys.exit(1)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(PORT), "--bind", "127.0.0.1"],
-        cwd=DIST, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    for _ in range(50):
-        try:
-            socket.create_connection(("127.0.0.1", PORT), 0.2).close()
-            return proc
-        except OSError:
-            time.sleep(0.1)
-    proc.kill()
-    print(f"FAIL  could not serve {DIST} on port {PORT}")
-    sys.exit(1)
 
 
 def wire_routes(page, tag, health=health_ok):
@@ -503,12 +475,12 @@ def main():
         json.dumps({"partials": [PARTIAL_1, PARTIAL_2], "final": FINAL_TEXT},
                    indent=2)
     )
-    server = start_server()
+    global BASE
+    server, BASE = serve_web(PORT, DIST)
     try:
         run_checks()
     finally:
-        server.terminate()
-        server.wait(timeout=5)
+        stop(server)
 
     check("zero pageerror events", len(page_errors) == 0,
           "; ".join(page_errors[:3]) if page_errors else "")

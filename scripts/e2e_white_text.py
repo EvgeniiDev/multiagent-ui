@@ -27,13 +27,14 @@ any failure.
 
 import json
 import re
-import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
+from _e2e_harness import serve_web, stop
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist-web"
@@ -214,29 +215,6 @@ def seed(context):
         )
 
 
-def start_server():
-    try:
-        socket.create_connection(("127.0.0.1", PORT), 0.3).close()
-    except OSError:
-        pass
-    else:
-        print(f"FAIL  port {PORT} already in use — refusing to test a stale server")
-        sys.exit(1)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(PORT), "--bind", "127.0.0.1"],
-        cwd=DIST, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    for _ in range(100):
-        try:
-            socket.create_connection(("127.0.0.1", PORT), 0.2).close()
-            return proc
-        except OSError:
-            time.sleep(0.1)
-    proc.kill()
-    print(f"FAIL  could not serve {DIST} on port {PORT}")
-    sys.exit(1)
-
-
 def run_scheme(browser, scheme):
     ctx = browser.new_context(
         ignore_https_errors=True,
@@ -247,6 +225,7 @@ def run_scheme(browser, scheme):
     page = ctx.new_page()
     page.on("pageerror", lambda exc: page_errors.append(f"[{scheme}] {exc}"))
     page.route(re.compile(r"/api/fs/"), fs_api)
+    page.route(re.compile(r":25900/"), lambda r: r.abort())
     page.route_web_socket(re.compile(r"^wss?://"), acp_ws)
 
     page.goto(BASE, wait_until="load")
@@ -268,7 +247,7 @@ def run_scheme(browser, scheme):
 
     # Settings overlay: .add-btn and .delete-btn carry the token only on
     # :hover; .save-btn lives in the agent form opened via .add-btn.
-    page.click('.settings-btn[aria-label="Settings"]')
+    page.click('.scope-icon-btn[aria-label="Settings"]')
     page.wait_for_selector(".settings-overlay .add-btn", timeout=5000)
     measure(page, scheme, ".add-btn", "SettingsView.vue:457 :hover", hover=True)
     measure(page, scheme, ".agent-item .delete-btn", "SettingsView.vue:621 :hover", hover=True)
@@ -310,7 +289,8 @@ def main():
         print("FAIL  npm run build:web")
         sys.exit(1)
 
-    server = start_server()
+    global BASE
+    server, BASE = serve_web(PORT, DIST)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -318,8 +298,7 @@ def main():
                 run_scheme(browser, scheme)
             browser.close()
     finally:
-        server.terminate()
-        server.wait(timeout=5)
+        stop(server)
 
     check("zero pageerror events", len(page_errors) == 0,
           "; ".join(page_errors[:3]) if page_errors else "")

@@ -27,14 +27,14 @@ import csv
 import io
 import json
 import re
-import socket
-import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
+from _e2e_harness import serve_web, stop
 
 PORT = 25992
 BASE = f"http://127.0.0.1:{PORT}/"
@@ -50,34 +50,6 @@ page_errors: list[str] = []
 def check(name, ok, detail=""):
     checks.append((bool(ok), name, detail))
     print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f"  ({detail})" if detail else ""))
-
-
-def start_server():
-    for _ in range(30):
-        s = socket.socket()
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind(("127.0.0.1", PORT))
-            break
-        except OSError:
-            time.sleep(1)
-        finally:
-            s.close()
-    else:
-        print(f"FAIL  port {PORT} busy — refusing a stale server")
-        sys.exit(1)
-    proc = subprocess.Popen([sys.executable, "-m", "http.server", str(PORT),
-                             "--bind", "127.0.0.1"], cwd=str(DIST),
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(50):
-        try:
-            socket.create_connection(("127.0.0.1", PORT), 0.2).close()
-            return proc
-        except OSError:
-            time.sleep(0.1)
-    proc.kill()
-    print(f"FAIL  could not serve {DIST} on {PORT}")
-    sys.exit(1)
 
 
 def fixture() -> dict:
@@ -110,7 +82,8 @@ def seed(context):
 
 
 def main():
-    proc = start_server()
+    global BASE
+    proc, BASE = serve_web(PORT, DIST)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -172,7 +145,7 @@ def main():
             check("zero pageerrors", page_errors == [], repr(page_errors[:2]))
             browser.close()
     finally:
-        proc.terminate()
+        stop(proc)
 
     passed = sum(1 for ok, _, _ in checks if ok)
     print(f"\n{passed}/{len(checks)} assertions passed")

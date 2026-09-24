@@ -35,7 +35,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import time
@@ -44,6 +43,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from _e2e_harness import serve_state, serve_web, stop, wait_port
+
 ROOT = Path(__file__).resolve().parent.parent
 STATE_SERVER = ROOT / "server" / "acp-state-server.mjs"
 BOARDCTL = ROOT / "scripts" / "boardctl"
@@ -51,10 +52,10 @@ WORK = ROOT / "tmp-review-test"
 STATE_DATA = WORK / "state"
 PROJ = WORK / "proj"
 DIST = WORK / "dist-web"
-STATE_PORT = 25914
-STATE_URL = f"http://127.0.0.1:{STATE_PORT}"
+STATE_PORT = 25914               # preferred; harness falls back when busy
+STATE_URL = f"http://127.0.0.1:{STATE_PORT}"   # rebased in main()
 WEB_PORT = 25979
-WEB_URL = f"http://127.0.0.1:{WEB_PORT}"
+WEB_URL = f"http://127.0.0.1:{WEB_PORT}"       # rebased in leg_ui()
 AGENT_PORT = 25978  # seeded ws agent -> bridge base http://127.0.0.1:25978 (stubbed)
 
 PROJ_NAME = "review-proj"
@@ -73,39 +74,6 @@ page_errors = []
 def check(name, ok, extra=""):
     results.append((name, bool(ok), extra))
     print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f"  ({extra})" if extra else ""))
-
-
-def port_free(port):
-    try:
-        out = subprocess.run(
-            ["ss", "-ltn"], capture_output=True, text=True, timeout=5
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        out = ""
-    if out:
-        for line in out.splitlines()[1:]:
-            parts = line.split()
-            if len(parts) >= 4 and parts[3].rsplit(":", 1)[-1] == str(port):
-                return False
-        return True
-    with socket.socket() as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind(("127.0.0.1", port))
-            return True
-        except OSError:
-            return False
-
-
-def wait_port(port, timeout=10.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            socket.create_connection(("127.0.0.1", port), 0.2).close()
-            return True
-        except OSError:
-            time.sleep(0.1)
-    return False
 
 
 def wait_for(fn, timeout=15.0, interval=0.2):
@@ -499,12 +467,12 @@ def leg_ui():
     if build.returncode != 0:
         return
 
-    httpd = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(WEB_PORT), "--bind", "127.0.0.1"],
-        cwd=str(DIST), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    global WEB_URL
+    httpd, WEB_URL = serve_web(WEB_PORT, DIST)
     dialogs = []
     try:
-        check("ui: web server up", wait_port(WEB_PORT, 10))
+        check("ui: web server up",
+              wait_port(urllib.parse.urlparse(WEB_URL).port, 10))
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(
@@ -524,6 +492,7 @@ def leg_ui():
             page.on("pageerror", lambda exc: page_errors.append(str(exc)))
             page.on("dialog", lambda d: (dialogs.append(d.message), d.accept()))
             page.route(re.compile(r"/api/fs/"), fs_api)
+            page.route(re.compile(r":25900/"), lambda r: r.abort())
             page.route_web_socket(re.compile(r"^wss?://"), acp_ws)
 
             page.goto(WEB_URL, wait_until="load")
@@ -628,27 +597,18 @@ def leg_ui():
                   "; ".join(page_errors[:3]) if page_errors else "")
             browser.close()
     finally:
-        httpd.terminate()
-        try:
-            httpd.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            httpd.kill()
+        stop(httpd)
 
 
 def main():
-    if not port_free(STATE_PORT):
-        print(f"FAIL  port {STATE_PORT} is not free")
-        sys.exit(1)
+    global STATE_PORT, STATE_URL
     if WORK.exists():
         shutil.rmtree(WORK)
     STATE_DATA.mkdir(parents=True)
     PROJ.mkdir(parents=True)
 
-    state = subprocess.Popen(
-        ["node", str(STATE_SERVER)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        env={**os.environ, "PORT": str(STATE_PORT),
-             "STATE_DIR": str(STATE_DATA)})
+    state, STATE_PORT = serve_state(STATE_PORT, STATE_DATA)
+    STATE_URL = f"http://127.0.0.1:{STATE_PORT}"
     try:
         check("state server up", wait_port(STATE_PORT, 10))
         seed()
@@ -659,11 +619,7 @@ def main():
         leg_failures()
         leg_ui()
     finally:
-        state.terminate()
-        try:
-            state.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            state.kill()
+        stop(state)
 
     failed = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(failed)}/{len(results)} assertions passed")

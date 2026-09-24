@@ -2,7 +2,7 @@
 // Project detail pane — the right-hand column on wide viewports, inlined
 // under the clicked row inside the list on narrow ones. Shows the metrics
 // roll-up for the selected range, the per-project session list, and the
-// project-scoped "New session here" action. A ✕ dismisses the pane (the
+// project-scoped "New session here" action. An × dismisses the pane (the
 // selection itself is cleared by the parent).
 import type { SavedSession } from '../../lib/types';
 import type { ProjectRow } from './types';

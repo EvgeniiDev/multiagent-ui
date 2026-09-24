@@ -18,10 +18,12 @@ import sys
 import time
 from pathlib import Path
 
+from _e2e_harness import serve_web, stop
+
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist-web"
 PORT = 25997
-URL = f"http://127.0.0.1:{PORT}/"
+URL = f"http://127.0.0.1:{PORT}/"  # rebased in main() to the served port
 
 EMOJI = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F\u2B00-\u2BFF]")
 
@@ -59,14 +61,15 @@ def main() -> int:
     if r.returncode != 0:
         return report()
 
-    server = subprocess.Popen([sys.executable, "-m", "http.server", str(PORT)],
-                              cwd=DIST, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    global URL
+    server, URL = serve_web(PORT, DIST)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             ctx = browser.new_context(ignore_https_errors=True,
                                       viewport={"width": 1440, "height": 900})
             page = ctx.new_page()
+            page.route(re.compile(r":25900/"), lambda r: r.abort())
             errors: list[str] = []
             page.on("pageerror", lambda e: errors.append(str(e)))
             page.goto(URL, wait_until="domcontentloaded")
@@ -77,7 +80,7 @@ def main() -> int:
             check("load: zero emoji in DOM", bad == [], str(bad))
 
             # Settings open/close (also hosts SettingsView + EnvVarEditor).
-            page.click('.settings-btn[title="Settings"]')
+            page.click('.scope-icon-btn[title="Settings"]')
             page.wait_for_selector(".settings-panel", timeout=5000)
             settings_open = page.is_visible(".settings-panel")
             bad = page.evaluate(SCAN_JS)
@@ -103,7 +106,7 @@ def main() -> int:
             check("settings closes", not page.query_selector(".settings-panel"))
 
             # Traffic panel open/close (hosts TrafficMonitor).
-            page.click('.settings-btn[title="ACP Traffic Monitor"]')
+            page.click('.scope-icon-btn[title="ACP Traffic Monitor"]')
             page.wait_for_selector(".traffic-monitor", timeout=5000)
             traffic_open = page.is_visible(".traffic-monitor")
             has_svg = page.query_selector(".traffic-monitor svg") is not None
@@ -125,7 +128,7 @@ def main() -> int:
 
             # Error banner path: add a fake ws agent, try New Session with
             # empty cwd -> store error -> banner with SVG icon, dismissable.
-            page.click('.settings-btn[title="Settings"]')
+            page.click('.scope-icon-btn[title="Settings"]')
             page.wait_for_selector(".settings-panel", timeout=5000)
             page.click(".settings-panel .add-btn")
             page.wait_for_timeout(300)
@@ -156,9 +159,9 @@ def main() -> int:
 
             # Zero-emoji scan with Settings + Traffic both open (traffic
             # first: the settings overlay covers the header buttons).
-            page.click('.settings-btn[title="ACP Traffic Monitor"]')
+            page.click('.scope-icon-btn[title="ACP Traffic Monitor"]')
             page.wait_for_selector(".traffic-monitor", timeout=5000)
-            page.click('.settings-btn[title="Settings"]')
+            page.click('.scope-icon-btn[title="Settings"]')
             page.wait_for_selector(".settings-panel", timeout=5000)
             page.wait_for_timeout(400)
             bad = page.evaluate(SCAN_JS)
@@ -169,6 +172,7 @@ def main() -> int:
             # Hamburger on a narrow viewport.
             narrow = browser.new_context(ignore_https_errors=True,
                                          viewport={"width": 500, "height": 900}).new_page()
+            narrow.route(re.compile(r":25900/"), lambda r: r.abort())
             narrow.on("pageerror", lambda e: errors.append("narrow: " + str(e)))
             narrow.goto(URL, wait_until="domcontentloaded")
             narrow.wait_for_selector(".app-container", timeout=20000)
@@ -200,7 +204,7 @@ def main() -> int:
                 if EMOJI.search(line)]
         check("src/** free of emoji-range glyphs", not hits, str(hits[:10]))
     finally:
-        server.terminate()
+        stop(server)
     return report()
 
 
