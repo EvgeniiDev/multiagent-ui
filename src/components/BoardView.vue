@@ -13,12 +13,14 @@ import AgentsTab from '../features/board/AgentsTab.vue';
 import LocksTab from '../features/board/LocksTab.vue';
 import TimelineTab from '../features/board/TimelineTab.vue';
 import EventsTab from '../features/board/EventsTab.vue';
+import LinksTab from '../features/board/LinksTab.vue';
 import CardDrawer from '../features/board/CardDrawer.vue';
 
-type BoardTab = 'tasks' | 'agents' | 'locks' | 'timeline' | 'events';
+type BoardTab = 'tasks' | 'links' | 'agents' | 'locks' | 'timeline' | 'events';
 
 const TABS: { id: BoardTab; label: string }[] = [
   { id: 'tasks', label: 'Tasks' },
+  { id: 'links', label: 'Links' },
   { id: 'agents', label: 'Agents' },
   { id: 'locks', label: 'Locks' },
   { id: 'timeline', label: 'Timeline' },
@@ -63,10 +65,17 @@ const lockCount = computed(
   () => activity.entries.filter((e) => e.kind === 'lock').length
 );
 
+/** Cards in scope carrying a visible graph problem — the Links tab's
+ * count badge (blocked flag or a declared conflict). */
+const linksProblemCount = computed(
+  () => board.scopedCards.filter((c) => c.blocked || c.conflictsWith.length).length
+);
+
 function tabNote(tab: BoardTab): string {
   if (tab === 'tasks' && board.isFiltering) {
     return `${board.filteredCards.length}/${board.cards.length}`;
   }
+  if (tab === 'links' && linksProblemCount.value > 0) return String(linksProblemCount.value);
   if (tab === 'locks' && lockCount.value > 0) return String(lockCount.value);
   return '';
 }
@@ -113,6 +122,7 @@ async function onOpenSession(session: { agentName: string; sessionId: string }) 
 
     <div class="pane-body">
       <KanbanTab v-show="activeTab === 'tasks'" @open-card="onOpenCard" />
+      <LinksTab v-if="activeTab === 'links'" @open-card="onOpenCard" />
       <AgentsTab v-if="activeTab === 'agents'" />
       <LocksTab v-if="activeTab === 'locks'" />
       <TimelineTab v-if="activeTab === 'timeline'" />
@@ -123,6 +133,7 @@ async function onOpenSession(session: { agentName: string; sessionId: string }) 
         :card-id="openCardId"
         @close="openCardId = null"
         @open-session="onOpenSession"
+        @open-card="onOpenCard"
       />
     </div>
   </div>

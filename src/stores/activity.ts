@@ -32,6 +32,7 @@ export type ActivityKind =
   | 'lock'
   | 'card'
   | 'delegate'
+  | 'pm'
   | 'sync';
 
 export interface ActivityEntry {
