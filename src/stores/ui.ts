@@ -55,21 +55,26 @@ export const useUiStore = defineStore('ui', () => {
     }
   }
 
-  // 1-4 switch views, Esc closes overlays. Registered once; ignored while the
-  // user is typing in a field so shortcuts never eat a prompt.
+  // 1-4 switch views, Esc closes overlays. This is the single owner of the
+  // view-switch shortcuts, registered once at store init; ignored while the
+  // user is typing in a field (any <input> — including type="number" —
+  // textarea, select or contentEditable) so shortcuts never eat a prompt.
   function bindShortcuts(): void {
     if (typeof window === 'undefined') return;
     window.addEventListener('keydown', (event) => {
       const target = event.target as HTMLElement | null;
       const typing =
         target &&
-        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable);
       if (event.key === 'Escape') {
         showSettings.value = false;
         showTraffic.value = false;
         return;
       }
-      if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (typing || event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
       const hit = VIEWS.find((v) => v.key === event.key);
       if (hit) {
         event.preventDefault();
