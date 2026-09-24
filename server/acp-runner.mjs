@@ -505,7 +505,12 @@ async function runCard(card, project, role, attemptsSoFar) {
   await fs.writeFile(briefPath, briefText(card, dir, role), 'utf-8');
 
   const promptLine = `Прочитай бриф ${briefPath} и файл роли ${role.promptFile || '(нет)'}.`;
-  const args = [...(role.args || []), promptLine];
+  // The prompt goes to the CLI as a FILE, not as a quoted positional argument
+  // (long multi-line text on a command line is fragile). The role's args MUST
+  // carry the print/one-shot flag itself (devin: `-p`, pi: `-p`, codex: exec):
+  // --prompt-file alone leaves devin in interactive REPL mode, which dies with
+  // "Scrollback error: io error" when there is no TTY.
+  const args = [...(role.args || []), '--prompt-file', briefPath];
 
   if (DRY_RUN) {
     console.log(`[dry-run] ${cmdForLog(role.cli, args)} (cwd=${project.path})`);
@@ -547,6 +552,12 @@ async function runCard(card, project, role, attemptsSoFar) {
       const errChunks = [];
       const child = spawn(role.cli, args, {
         cwd,
+        env: {
+          ...process.env,
+          // No TTY here (stdio are pipes): without TERM set the devin CLI's
+          // scrollback layer dies with "Scrollback error: io error".
+          TERM: process.env.TERM || 'dumb',
+        },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       let scanTail = '';
@@ -777,7 +788,18 @@ async function passOnce() {
     }
     const maxC = Number(role.maxConcurrent) >= 1 ? Math.floor(Number(role.maxConcurrent)) : 1;
     if ((running.get(roleId) || 0) + (taken.get(roleId) || 0) >= maxC) continue;
-    const project = (projects.projects || []).find((p) => p?.id === card.project) || null;
+    // `card.project` is a free-text LABEL (see stores/board.ts projectIdForCard),
+    // not the registry id: resolve it by name or by the path's basename,
+    // case-insensitive — the same rule the panel uses, so a card written in the
+    // UI and a card written by boardctl both land on the same project.
+    const label = String(card.project || '').trim().toLowerCase();
+    const project =
+      (projects.projects || []).find((p) => String(p?.name || '').trim().toLowerCase() === label) ||
+      (projects.projects || []).find((p) => {
+        const base = String(p?.path || '').split('/').filter(Boolean).pop() || '';
+        return base.toLowerCase() === label;
+      }) ||
+      null;
     if (!project || !project.path || !underRoot(project.path)) {
       console.error(
         `skip ${card.id}: project ${JSON.stringify(card.project)} missing or outside ROOT_DIR`,
