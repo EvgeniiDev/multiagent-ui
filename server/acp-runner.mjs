@@ -3,31 +3,43 @@
 // The runner is deliberately dumb: it knows no prompts and does no planning.
 // For every card whose stage is bound to a role (roles.json `stageRoles`)
 // and that holds no live claim, it:
-//   1. puts a rev-safe claim into `claims.json` (lease + pid),
+//   1. puts a rev-safe claim into `claims.json` (lease + pid + runnerPid +
+//      the stage the card was claimed from),
 //   2. writes a SHORT brief to <projectPath>/.acp/cards/<cardId>/00_brief.md,
-//   3. spawns the role's CLI once with cwd = projectPath,
-//      stdout/stderr -> .acp/cards/<cardId>/run-<N>.log,
-//   4. on exit writes one `kind: 'card'` event to activity.json,
-//      releases the claim, and NEVER moves the card.
+//   3. spawns the role's CLI with cwd = projectPath (up to `maxRetries`
+//      attempts on a non-zero exit), stdout/stderr -> run-<N>.log,
+//   4. renews `leaseUntil` on a heartbeat while the child runs,
+//   5. on exit writes `kind: 'card'` events (with `role` + `sessionId`) to
+//      activity.json, releases the claim, and NEVER moves the card.
 //
 // Modes:
-//   node server/acp-runner.mjs --once      # single pass, then exit (tests)
-//   node server/acp-runner.mjs --serve     # loop with the roles' poll interval
-//   node server/acp-runner.mjs --stop-all  # release own claims, kill own procs
+//   node server/acp-runner.mjs --once           # single pass, then exit
+//   node server/acp-runner.mjs --serve          # loop with the roles' poll interval
+//   node server/acp-runner.mjs stop-all         # SIGTERM own children, release own claims
+//   node server/acp-runner.mjs release-all      # release own claims, kill nothing
+//   node server/acp-runner.mjs cancel <cardId>  # kill that card's child + flag it blocked
 //
 // Env: STATE_URL (default http://127.0.0.1:25900), ROOT_DIR (directory the
 // project paths must live under; default $HOME/projects), DRY_RUN=1 (print
-// the command instead of spawning), RUNNER_ID (default `runner-<pid>`).
+// the command instead of spawning), RUNNER_ID (default `runner-<pid>`),
+// RUNNER_DEBUG=1 (heartbeat/sweep traces on stderr — renewals never hit the
+// ledger).
 //
 // Guards: timeoutMin -> SIGTERM, SIGKILL after 10 s; maxConcurrent per role
-// is strict; cards in done/backlog or flagged blocked/cancelled are never
-// taken; an unreachable state server is reported on stderr without exiting
-// (in --serve); cards are never moved.
+// is strict; maxRetries (default 1 = no retry) caps attempts per card and the
+// exhausted card is flagged `blocked`; cards in done/backlog or flagged
+// blocked/cancelled are never taken; a sweep on every pass drops claims
+// whose lease expired while their pid is dead and returns those cards to
+// the stage they were claimed from, flagged `blocked`; an unreachable state
+// server is reported on stderr without exiting (in --serve); cards are
+// never moved. stop-all/cancel only ever signal pids that are still
+// children of the runner pid recorded in the claim (or spawned by this
+// process) — a foreign runner's process is never touched.
 //
 // Node only, zero dependencies.
 
-import { spawn } from 'node:child_process';
-import { promises as fs } from 'node:fs';
+import { spawn, execFileSync } from 'node:child_process';
+import { promises as fs, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 
@@ -35,14 +47,20 @@ const STATE_URL = (process.env.STATE_URL || 'http://127.0.0.1:25900').replace(/\
 const ROOT_DIR = resolve(process.env.ROOT_DIR || join(homedir(), 'projects'));
 const DRY_RUN = process.env.DRY_RUN === '1';
 const RUNNER_ID = process.env.RUNNER_ID || `runner-${process.pid}`;
+const DEBUG = /^(1|true|yes|on)$/i.test(process.env.RUNNER_DEBUG || '');
 
 const RETRY_TRIES = 6;
 const RETRY_DELAY_MS = 300;
 const KILL_GRACE_MS = 10_000;
 const MAX_ENTRIES = 5000;
+const MIN_HEARTBEAT_MS = 5_000;
 
-// pid -> ChildProcess for runs started by this process (used by --stop-all).
+// pid -> ChildProcess for runs started by this process (used by stop-all).
 const liveProcs = new Map();
+
+function debug(msg) {
+  if (DEBUG) console.error(`[runner ${new Date().toISOString()}] ${msg}`);
+}
 
 // ---------------------------------------------------------------------------
 // State-server HTTP client (same protocol as server/acp-state-server.mjs:
@@ -124,11 +142,27 @@ function emptyRoles() {
   return { version: 1, roles: [], stageRoles: {} };
 }
 function emptyClaims() {
-  return { version: 1, claims: {} };
+  // `attempts` is the dispatcher's per-card failure counter: it survives
+  // claim release so a card cannot be retaken forever. A successful run
+  // clears it; exhausting `maxRetries` flags the card blocked.
+  return { version: 1, claims: {}, attempts: {} };
 }
 function emptyActivity() {
   return { entries: [], usage: [] };
 }
+
+// Mirrors STAGE_STATUSES in src/stores/board.ts — needed to put a card back
+// into the stage it was claimed from without inventing statuses.
+const STAGE_STATUSES = {
+  backlog: [],
+  spec: ['in_progress', 'review', 'done'],
+  plan: ['in_progress', 'review', 'done'],
+  dev: ['in_progress', 'review', 'done'],
+  reviewtest: ['in_progress', 'agent_tested', 'accepted'],
+  done: [],
+};
+const validStage = (s) => Object.prototype.hasOwnProperty.call(STAGE_STATUSES, s);
+const initialStatusFor = (s) => (STAGE_STATUSES[s] || [])[0] ?? null;
 
 function underRoot(p) {
   const abs = resolve(p);
@@ -192,7 +226,71 @@ function briefText(card, dir, role) {
   ].join('\n');
 }
 
-async function appendActivity({ agentName, cwd, title, detail }) {
+// ---------------------------------------------------------------------------
+// Process liveness / ownership. The dispatcher only ever signals pids it can
+// prove are children of the runner that claimed them (or spawned itself).
+// ---------------------------------------------------------------------------
+
+function pidAlive(pid) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch (e) {
+    return !!e && e.code === 'EPERM';
+  }
+}
+
+function ppidOf(pid) {
+  // Linux fast path.
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const close = stat.lastIndexOf(')');
+    if (close > -1) {
+      const ppid = Number(stat.slice(close + 1).trim().split(/\s+/)[1]);
+      if (Number.isFinite(ppid)) return ppid;
+    }
+  } catch {
+    // No /proc — fall through to `ps`.
+  }
+  try {
+    const out = execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const ppid = Number(out.trim());
+    return Number.isFinite(ppid) ? ppid : null;
+  } catch {
+    return null;
+  }
+}
+
+// Is `pid` our own child? True when this process spawned it, or when the
+// pid is still parented to the runner pid the claim recorded at spawn time.
+// Anything else — recycled pids, orphans reparented to init, other runners'
+// children — is not ours and must never be signalled.
+function ownChildPid(pid, claim) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  if (liveProcs.has(n)) return true;
+  const rp = Number(claim?.runnerPid);
+  return Number.isInteger(rp) && rp > 0 && ppidOf(n) === rp;
+}
+
+function ownClaim(c) {
+  return (
+    !!c &&
+    (c.runnerId === RUNNER_ID || String(c.agentName || '').startsWith(`${RUNNER_ID}:`))
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Ledger + claims.
+// ---------------------------------------------------------------------------
+
+async function appendActivity({ agentName, cwd, title, detail, role, sessionId }) {
   await mutate('activity.json', emptyActivity(), (doc) => {
     doc.entries = doc.entries || [];
     doc.usage = doc.usage || [];
@@ -204,10 +302,55 @@ async function appendActivity({ agentName, cwd, title, detail }) {
       cwd,
       title,
       detail,
+      role: role || '',
+      sessionId: sessionId || '',
     });
     doc.entries = doc.entries.slice(-MAX_ENTRIES);
     return doc;
   });
+}
+
+// Flag a card `blocked` (the board's visible mark — no new card fields) and,
+// when `stage` is a valid stage the card moved away from, put it back —
+// remembering per-stage statuses exactly like board.ts moveCard does.
+async function markCard(cardId, { stage, blockedReason }) {
+  let marked = null;
+  await mutate('board.json', emptyBoard(), (doc) => {
+    const card = (doc.cards || []).find((c) => c && c.id === cardId);
+    if (!card) return doc;
+    if (stage && validStage(stage) && card.stage !== stage) {
+      if (card.status) {
+        card.statusByStage = { ...(card.statusByStage || {}), [card.stage]: card.status };
+      }
+      const remembered = (card.statusByStage || {})[stage];
+      card.stage = stage;
+      card.status =
+        remembered && (STAGE_STATUSES[stage] || []).includes(remembered)
+          ? remembered
+          : initialStatusFor(stage);
+    }
+    card.blocked = true;
+    card.blockedReason = blockedReason || '';
+    card.updatedAt = Date.now();
+    marked = card;
+    doc.version = 2;
+    return doc;
+  });
+  return marked;
+}
+
+async function setAttempts(cardId, n) {
+  try {
+    await mutate('claims.json', emptyClaims(), (doc) => {
+      doc.attempts = doc.attempts || {};
+      if (n > 0) doc.attempts[cardId] = n;
+      else delete doc.attempts[cardId];
+      doc.version = 1;
+      return doc;
+    });
+  } catch (e) {
+    console.error(`attempts ${cardId}: ${e.message}`);
+  }
 }
 
 async function releaseClaim(cardId, agentName) {
@@ -224,7 +367,9 @@ async function releaseClaim(cardId, agentName) {
 }
 
 // Claim a card rev-safely. Returns the claim, or null when someone else
-// holds a live claim (their lease wins; we never steal).
+// holds a live claim (their lease wins; we never steal). The claim records
+// the stage the card was in — the lease-expiry sweep puts it back there —
+// and this process's pid so kill commands can prove child ownership.
 async function claimCard(card, role, timeoutMin, pid) {
   const agentName = `${RUNNER_ID}:${role.id}`;
   let rival = null;
@@ -246,6 +391,8 @@ async function claimCard(card, role, timeoutMin, pid) {
       pid: pid ?? null,
       roleId: role.id,
       runnerId: RUNNER_ID,
+      runnerPid: process.pid,
+      stage: card.stage,
     };
     doc.version = 1;
     return doc;
@@ -256,16 +403,102 @@ async function claimCard(card, role, timeoutMin, pid) {
   return cur && cur.agentName === agentName ? cur : null;
 }
 
+// Heartbeat: extend leaseUntil while our child runs. Debug-level only —
+// renewals are not a transition and never hit the ledger.
+async function renewLease(cardId, agentName, timeoutMin) {
+  try {
+    await mutate('claims.json', emptyClaims(), (doc) => {
+      const cur = (doc.claims || {})[cardId];
+      if (cur && cur.agentName === agentName) {
+        cur.leaseUntil = Date.now() + timeoutMin * 60_000;
+        cur.hbAt = Date.now();
+      }
+      doc.version = 1;
+      return doc;
+    });
+    debug(`lease renewed ${cardId} (+${timeoutMin}m)`);
+  } catch (e) {
+    debug(`lease renewal failed ${cardId}: ${e.message}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
-// One card run: brief -> claim -> spawn -> wait (with timeout) ->
-// ledger -> release. The card itself is never modified.
+// Expired-lease sweep: runs at the top of every pass. A claim whose lease
+// lapsed while its pid is dead is dropped, and its card goes back to the
+// stage it was claimed from, visibly flagged — and into the ledger.
 // ---------------------------------------------------------------------------
 
-async function runCard(card, project, role) {
+async function sweepExpiredClaims() {
+  let claimsDoc;
+  try {
+    ({ data: claimsDoc } = await readDoc('claims.json', emptyClaims()));
+  } catch (e) {
+    debug(`sweep: claims read failed: ${e.message}`);
+    return;
+  }
+  const now = Date.now();
+  const expired = [];
+  for (const [cid, claim] of Object.entries(claimsDoc.claims || {})) {
+    if (Number(claim?.leaseUntil) <= now && !pidAlive(claim?.pid)) {
+      expired.push([cid, claim]);
+    }
+  }
+  if (!expired.length) return;
+
+  await mutate('claims.json', emptyClaims(), (doc) => {
+    for (const [cid] of expired) {
+      const cur = (doc.claims || {})[cid];
+      if (cur && Number(cur.leaseUntil) <= Date.now() && !pidAlive(cur.pid)) {
+        delete doc.claims[cid];
+      }
+    }
+    doc.version = 1;
+    return doc;
+  });
+
+  for (const [cid, claim] of expired) {
+    try {
+      const card = await markCard(cid, {
+        stage: validStage(claim?.stage) ? claim.stage : null,
+        blockedReason: `claim expired (${claim?.agentName || 'unknown'})`,
+      });
+      await appendActivity({
+        agentName: RUNNER_ID,
+        title: card?.title || cid,
+        role: claim?.roleId || '',
+        sessionId: claim?.sessionId || '',
+        detail:
+          `lease expired — claim dropped for ${cid} ` +
+          `(held by ${claim?.agentName || '?'}); card returned to ` +
+          `${card?.stage || claim?.stage || '?'} flagged blocked`,
+      });
+      debug(`swept expired claim ${cid} (was held by ${claim?.agentName || '?'})`);
+    } catch (e) {
+      console.error(`sweep ${cid}: ${e.message}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// One card run: brief -> claim -> spawn/wait (heartbeat + timeout), retrying
+// non-zero exits up to maxRetries -> ledger -> release. Never moves a card.
+// ---------------------------------------------------------------------------
+
+// Session-id sniffing: CLIs surface it as `session_id: x`, `sessionId=x`,
+// or an uppercase `SESSION: x` convention line (same style as `STATUS:`).
+const SESSION_RE =
+  /\bsession[\s_-]?id\s*[:=]\s*["']?([A-Za-z0-9][\w.-]{2,})|\bSESSION:\s*["']?([A-Za-z0-9][\w.-]{2,})/i;
+
+function maxAttemptsFor(role) {
+  const n = Math.floor(Number(role?.maxRetries));
+  return Number.isFinite(n) && n >= 1 ? n : 1;
+}
+
+async function runCard(card, project, role, attemptsSoFar) {
   const agentName = `${RUNNER_ID}:${role.id}`;
   const timeoutMin = Number(role.timeoutMin) > 0 ? Number(role.timeoutMin) : 45;
+  const maxAttempts = maxAttemptsFor(role);
   const dir = runDir(project.path, card.id);
-  const runN = await nextRunIndex(dir);
   await fs.mkdir(dir, { recursive: true });
 
   const briefPath = join(dir, '00_brief.md');
@@ -282,86 +515,206 @@ async function runCard(card, project, role) {
   const pre = await claimCard(card, role, timeoutMin, null);
   if (!pre) return { card: card.id, skipped: 'claim-lost' };
 
-  const startedAt = Date.now();
-  const logPath = join(dir, `run-${runN}.log`);
-  await fs.writeFile(logPath, '', 'utf-8');
-  const outChunks = [];
-  const errChunks = [];
-  const child = spawn(role.cli, args, {
-    cwd: resolve(project.path),
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  child.stdout.on('data', (c) => outChunks.push(c));
-  child.stderr.on('data', (c) => errChunks.push(c));
-  // Attach the exit wait SYNCHRONOUSLY at spawn: a fast child can 'close'
-  // before any later await yields, and a late .on('close') would never fire.
-  const exitPromise = new Promise((resolveDone) => {
-    child.on('error', () => resolveDone(127));
-    child.on('close', (code) => resolveDone(code ?? 127));
-  });
-  liveProcs.set(child.pid, child);
-  // Publish the real pid rev-safely (only if the claim is still ours).
-  try {
-    await mutate('claims.json', emptyClaims(), (doc) => {
-      const cur = (doc.claims || {})[card.id];
-      if (cur && cur.agentName === agentName) cur.pid = child.pid;
-      return doc;
-    });
-  } catch (e) {
-    console.error(`publish pid ${card.id}: ${e.message}`);
-  }
-
-  let timedOut = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    try {
-      child.kill('SIGTERM');
-    } catch {
-      /* already exited */
-    }
-    const finisher = setTimeout(() => {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        /* already exited */
-      }
-    }, KILL_GRACE_MS);
-    finisher.unref?.();
-  }, timeoutMin * 60_000);
-  timeout.unref?.();
-
-  const exitCode = await exitPromise;
-  clearTimeout(timeout);
-  liveProcs.delete(child.pid);
-  await fs.writeFile(
-    logPath,
-    Buffer.concat([
-      ...outChunks,
-      ...(errChunks.length ? [Buffer.from('\n--- stderr ---\n'), ...errChunks] : []),
-    ]),
-  );
-
-  const secs = Math.round((Date.now() - startedAt) / 1000);
-  const verdict = await verdictHint(dir);
+  const cwd = resolve(project.path);
+  const title = card.title || card.id;
+  let sessionId = pre.sessionId || '';
   await appendActivity({
     agentName,
-    cwd: resolve(project.path),
-    title: card.title || card.id,
-    detail: [
-      `cmd: ${cmdForLog(role.cli, args)}`,
-      `exit=${exitCode}`,
-      `dur=${secs}s`,
-      timedOut ? 'timeout' : 'finished',
-      verdict ? `verdict: ${verdict}` : 'verdict: none',
-      `log: run-${runN}.log`,
-    ].join(' '),
+    cwd,
+    title,
+    role: role.id,
+    sessionId,
+    detail: `claimed ${card.id} lease=${timeoutMin}m role=${role.id}`,
   });
-  await releaseClaim(card.id, agentName);
-  return { card: card.id, exitCode, log: logPath };
+
+  // Heartbeat: pollIntervalSec as the tick, never below 5 s.
+  const hbMs = Math.max(
+    MIN_HEARTBEAT_MS,
+    Math.floor((Number(role.pollIntervalSec) || 15) * 1000),
+  );
+  const hb = setInterval(() => {
+    void renewLease(card.id, agentName, timeoutMin);
+  }, hbMs);
+  hb.unref?.();
+
+  try {
+    for (let attempt = attemptsSoFar + 1; attempt <= maxAttempts; attempt++) {
+      const runN = await nextRunIndex(dir);
+      const logPath = join(dir, `run-${runN}.log`);
+      await fs.writeFile(logPath, '', 'utf-8');
+      const startedAt = Date.now();
+      const outChunks = [];
+      const errChunks = [];
+      const child = spawn(role.cli, args, {
+        cwd,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let scanTail = '';
+      child.stdout.on('data', (c) => {
+        outChunks.push(c);
+        if (!sessionId) {
+          scanTail = (scanTail + c.toString('utf8')).slice(-65536);
+          const m = SESSION_RE.exec(scanTail);
+          const sid = m ? m[1] || m[2] : null;
+          if (sid) {
+            sessionId = sid;
+            void (async () => {
+              try {
+                await mutate('claims.json', emptyClaims(), (doc) => {
+                  const cur = (doc.claims || {})[card.id];
+                  if (cur && cur.agentName === agentName && !cur.sessionId) {
+                    cur.sessionId = sessionId;
+                  }
+                  doc.version = 1;
+                  return doc;
+                });
+              } catch (e) {
+                debug(`publish sessionId ${card.id}: ${e.message}`);
+              }
+            })();
+          }
+        }
+      });
+      child.stderr.on('data', (c) => errChunks.push(c));
+      // Attach the exit wait SYNCHRONOUSLY at spawn: a fast child can 'close'
+      // before any later await yields, and a late .on('close') never fires.
+      const exitPromise = new Promise((resolveDone) => {
+        child.on('error', () => resolveDone(127));
+        child.on('close', (code) => resolveDone(code ?? 127));
+      });
+      liveProcs.set(child.pid, child);
+      // Publish the real pid rev-safely (only if the claim is still ours).
+      try {
+        await mutate('claims.json', emptyClaims(), (doc) => {
+          const cur = (doc.claims || {})[card.id];
+          if (cur && cur.agentName === agentName) cur.pid = child.pid;
+          doc.version = 1;
+          return doc;
+        });
+      } catch (e) {
+        console.error(`publish pid ${card.id}: ${e.message}`);
+      }
+
+      await appendActivity({
+        agentName,
+        cwd,
+        title,
+        role: role.id,
+        sessionId,
+        detail:
+          `start ${card.id} attempt=${attempt}/${maxAttempts} pid=${child.pid} ` +
+          `cmd: ${cmdForLog(role.cli, args)}` +
+          (attempt > 1 ? ' (retry)' : ''),
+      });
+
+      let timedOut = false;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          /* already exited */
+        }
+        const finisher = setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            /* already exited */
+          }
+        }, KILL_GRACE_MS);
+        finisher.unref?.();
+      }, timeoutMin * 60_000);
+      timeout.unref?.();
+
+      const exitCode = await exitPromise;
+      clearTimeout(timeout);
+      liveProcs.delete(child.pid);
+      await fs.writeFile(
+        logPath,
+        Buffer.concat([
+          ...outChunks,
+          ...(errChunks.length ? [Buffer.from('\n--- stderr ---\n'), ...errChunks] : []),
+        ]),
+      );
+
+      const secs = Math.round((Date.now() - startedAt) / 1000);
+      const verdict = await verdictHint(dir);
+      await appendActivity({
+        agentName,
+        cwd,
+        title,
+        role: role.id,
+        sessionId,
+        detail: [
+          `cmd: ${cmdForLog(role.cli, args)}`,
+          `exit=${exitCode}`,
+          `dur=${secs}s`,
+          `attempt=${attempt}/${maxAttempts}`,
+          timedOut ? 'timeout' : 'finished',
+          verdict ? `verdict: ${verdict}` : 'verdict: none',
+          `log: run-${runN}.log`,
+          `role=${role.id}`,
+          `session=${sessionId || '-'}`,
+        ].join(' '),
+      });
+
+      if (exitCode === 0) {
+        // A successful retry clears the counter.
+        if (attemptsSoFar || attempt > 1) await setAttempts(card.id, 0);
+        return { card: card.id, exitCode, log: logPath, attempts: attempt };
+      }
+
+      // A non-zero exit while our claim is already gone is not a failed
+      // attempt: stop-all / release-all / cancel released it (or a sweep
+      // dropped it) — the card keeps whatever mark that path left, and the
+      // failure counter is untouched. Only OUR still-held claim's failures
+      // count toward maxRetries.
+      let claimStillOurs = true;
+      try {
+        const { data } = await readDoc('claims.json', emptyClaims());
+        claimStillOurs = (data.claims || {})[card.id]?.agentName === agentName;
+      } catch {
+        // Server unreachable mid-bookkeeping — count it like a normal run.
+      }
+      if (!claimStillOurs) {
+        return { card: card.id, exitCode, aborted: true, log: logPath };
+      }
+
+      await setAttempts(card.id, attempt);
+      if (attempt < maxAttempts) {
+        await appendActivity({
+          agentName,
+          cwd,
+          title,
+          role: role.id,
+          sessionId,
+          detail: `retry ${card.id} — exit=${exitCode}, running attempt ${attempt + 1}/${maxAttempts}`,
+        });
+        continue;
+      }
+
+      await markCard(card.id, {
+        blockedReason: `maxRetries ${maxAttempts} exhausted (last exit ${exitCode})`,
+      });
+      await appendActivity({
+        agentName,
+        cwd,
+        title,
+        role: role.id,
+        sessionId,
+        detail: `maxRetries ${maxAttempts} exhausted on ${card.id} — card flagged blocked`,
+      });
+      return { card: card.id, exitCode, retriesExhausted: true, log: logPath };
+    }
+  } finally {
+    clearInterval(hb);
+    await releaseClaim(card.id, agentName);
+  }
+  return { card: card.id, exitCode: 127 };
 }
 
 // ---------------------------------------------------------------------------
-// A pass: read docs, pick candidates, run them sequentially.
+// A pass: sweep dead claims, read docs, pick candidates, run sequentially.
 // ---------------------------------------------------------------------------
 
 async function pollIntervalMs() {
@@ -377,6 +730,8 @@ async function pollIntervalMs() {
 }
 
 async function passOnce() {
+  await sweepExpiredClaims();
+
   const [{ data: board }, { data: projects }, { data: roles }, { data: claims }] =
     await Promise.all([
       readDoc('board.json', emptyBoard()),
@@ -387,6 +742,7 @@ async function passOnce() {
 
   const now = Date.now();
   const live = liveClaims(claims, now);
+  const attempts = claims.attempts || {};
   const roleById = new Map((roles.roles || []).map((r) => [r?.id, r]));
   const running = new Map(); // roleId -> live claims held now
   for (const c of Object.values(live)) {
@@ -405,6 +761,20 @@ async function passOnce() {
     const role = roleById.get(roleId);
     if (!role || !role.cli) continue;
     if (live[card.id]) continue;
+    const maxAttempts = maxAttemptsFor(role);
+    if ((Number(attempts[card.id]) || 0) >= maxAttempts) {
+      // Belt and braces: an exhausted card should already be blocked from
+      // the run that exhausted it — flag it again if a hand cleared the mark.
+      try {
+        await markCard(card.id, {
+          blockedReason: `maxRetries ${maxAttempts} exhausted`,
+        });
+      } catch (e) {
+        console.error(`mark ${card.id}: ${e.message}`);
+      }
+      results.push({ card: card.id, skipped: 'retries-exhausted' });
+      continue;
+    }
     const maxC = Number(role.maxConcurrent) >= 1 ? Math.floor(Number(role.maxConcurrent)) : 1;
     if ((running.get(roleId) || 0) + (taken.get(roleId) || 0) >= maxC) continue;
     const project = (projects.projects || []).find((p) => p?.id === card.project) || null;
@@ -416,7 +786,7 @@ async function passOnce() {
     }
     taken.set(roleId, (taken.get(roleId) || 0) + 1);
     try {
-      results.push(await runCard(card, project, role));
+      results.push(await runCard(card, project, role, Number(attempts[card.id]) || 0));
     } catch (e) {
       console.error(`run ${card.id}: ${e.message}`);
       await releaseClaim(card.id, `${RUNNER_ID}:${role.id}`);
@@ -440,46 +810,178 @@ async function passOnce() {
 }
 
 // ---------------------------------------------------------------------------
-// --stop-all: kill live procs, release own claims. No live process remains.
+// Stop cranks — always available as separate invocations, even mid-pass:
+// they act on claims.json + recorded pids, not on the running process.
+//   kill=false -> release our claims only (cards stay where they are);
+//   kill=true  -> SIGTERM our own children first, then release.
+// A pid is only signalled when it is provably ours (ownChildPid).
 // ---------------------------------------------------------------------------
 
-async function stopAll() {
-  let killed = 0;
-  for (const [pid, child] of [...liveProcs]) {
+async function killClaimChild(claim) {
+  const pid = Number(claim?.pid);
+  const child = liveProcs.get(pid);
+  if (child) {
     try {
       child.kill('SIGTERM');
-      killed++;
+      return 'sigterm';
     } catch {
-      /* gone */
+      return 'gone';
     }
-    liveProcs.delete(pid);
   }
-  // Belt and braces: our claims carry pids — SIGTERM those too (same host).
-  let released = 0;
+  if (!ownChildPid(pid, claim)) {
+    return pidAlive(pid) ? 'not-our-child' : 'no-live-pid';
+  }
   try {
-    await mutate('claims.json', emptyClaims(), (doc) => {
-      for (const [cid, c] of Object.entries(doc.claims || {})) {
-        if (c?.runnerId === RUNNER_ID || String(c?.agentName || '').startsWith(`${RUNNER_ID}:`)) {
-          if (Number(c?.pid) > 0) {
-            try {
-              process.kill(Number(c.pid), 'SIGTERM');
-              killed++;
-            } catch {
-              /* gone */
-            }
-          }
-          delete doc.claims[cid];
-          released++;
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    return 'gone';
+  }
+  for (let i = 0; i < 15; i++) {
+    if (!pidAlive(pid)) return 'killed';
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return 'sigterm-sent'; // still alive after the grace window
+}
+
+async function stopAll({ kill = true } = {}) {
+  let killed = 0;
+  if (kill) {
+    for (const [pid, child] of [...liveProcs]) {
+      try {
+        child.kill('SIGTERM');
+        killed++;
+      } catch {
+        /* gone */
+      }
+      liveProcs.delete(pid);
+    }
+  }
+  let released = 0;
+  const outcomes = [];
+  try {
+    const { data: claimsDoc } = await readDoc('claims.json', emptyClaims());
+    const mine = Object.entries(claimsDoc.claims || {}).filter(([, c]) => ownClaim(c));
+    let titles = {};
+    try {
+      const { data: b } = await readDoc('board.json', emptyBoard());
+      titles = Object.fromEntries((b.cards || []).map((c) => [c.id, c.title]));
+    } catch {
+      /* titles are cosmetic */
+    }
+    for (const [cid, claim] of mine) {
+      let outcome = 'released';
+      // Release BEFORE signalling: when the owning runner's child exits it
+      // checks the claim to tell "killed on purpose" from a real failure —
+      // the claim must already be gone or it would miscount an attempt.
+      try {
+        await mutate('claims.json', emptyClaims(), (doc) => {
+          const cur = (doc.claims || {})[cid];
+          if (cur && ownClaim(cur)) delete doc.claims[cid];
+          doc.version = 1;
+          return doc;
+        });
+        released++;
+      } catch (e) {
+        console.error(`release ${cid}: ${e.message}`);
+        outcome += ' release-failed';
+      }
+      if (kill) {
+        outcome = await killClaimChild(claim);
+        if (outcome === 'killed' || outcome === 'sigterm' || outcome === 'sigterm-sent') {
+          killed++;
         }
       }
-      return doc;
-    });
+      try {
+        await appendActivity({
+          agentName: RUNNER_ID,
+          title: titles[cid] || cid,
+          role: claim?.roleId || '',
+          sessionId: claim?.sessionId || '',
+          detail: `${kill ? 'stop-all' : 'release-all'} card=${cid} ${outcome} role=${claim?.roleId || '-'}`,
+        });
+      } catch (e) {
+        console.error(`audit ${cid}: ${e.message}`);
+      }
+      outcomes.push({ card: cid, outcome });
+    }
   } catch (e) {
     console.error(`stop-all: ${e.message}`);
     process.exitCode = 1;
   }
-  await new Promise((r) => setTimeout(r, 500));
-  console.log(JSON.stringify({ killed, released }));
+  await new Promise((r) => setTimeout(r, 300));
+  console.log(JSON.stringify({ killed, released, claims: outcomes }));
+}
+
+// `cancel <cardId>`: kill the child of that card only, then flag it blocked
+// (an operator-cancelled card must not be silently re-dispatched on the next
+// poll) and release our claim — in that order, so the live claim keeps the
+// card out of pickup until the mark is on. Refuses claims that are not ours.
+async function cancelCard(ref) {
+  let claimsDoc;
+  try {
+    ({ data: claimsDoc } = await readDoc('claims.json', emptyClaims()));
+  } catch (e) {
+    console.error(`cancel: ${e.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  const claims = claimsDoc.claims || {};
+  let cid = claims[ref] ? ref : null;
+  if (!cid) {
+    const matches = Object.keys(claims).filter((k) => k.startsWith(ref));
+    if (matches.length === 1) cid = matches[0];
+    else if (matches.length > 1) {
+      console.error(`cancel: ${ref} is ambiguous (${matches.join(', ')})`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+  const claim = cid ? claims[cid] : null;
+  if (!claim) {
+    console.error(`cancel: no claim for ${ref}`);
+    process.exitCode = 2;
+    return;
+  }
+  if (!ownClaim(claim)) {
+    console.error(`cancel: ${cid} is held by ${claim.agentName} — not ours, refusing`);
+    process.exitCode = 3;
+    return;
+  }
+
+  // Order matters: flag the card, release the claim, THEN signal the child.
+  // The live claim keeps the card out of pickup until the mark is on, and a
+  // released claim is what tells the owning runner's exit path this was a
+  // deliberate kill, not a failed attempt.
+  let card = null;
+  try {
+    card = await markCard(cid, { blockedReason: `turn cancelled by ${RUNNER_ID}` });
+  } catch (e) {
+    console.error(`cancel: mark ${cid}: ${e.message}`);
+  }
+  try {
+    await mutate('claims.json', emptyClaims(), (doc) => {
+      const cur = (doc.claims || {})[cid];
+      if (cur && ownClaim(cur)) delete doc.claims[cid];
+      doc.version = 1;
+      return doc;
+    });
+  } catch (e) {
+    console.error(`cancel: release ${cid}: ${e.message}`);
+    process.exitCode = 1;
+  }
+  const outcome = await killClaimChild(claim);
+  try {
+    await appendActivity({
+      agentName: RUNNER_ID,
+      title: card?.title || cid,
+      role: claim?.roleId || '',
+      sessionId: claim?.sessionId || '',
+      detail: `cancel ${cid}: ${outcome}; claim released; card flagged blocked`,
+    });
+  } catch (e) {
+    console.error(`cancel: audit ${cid}: ${e.message}`);
+  }
+  console.log(JSON.stringify({ card: cid, outcome }));
 }
 
 // ---------------------------------------------------------------------------
@@ -487,8 +989,18 @@ async function stopAll() {
 // ---------------------------------------------------------------------------
 
 const mode = process.argv[2];
-if (mode === '--stop-all') {
-  await stopAll();
+if (mode === 'stop-all' || mode === '--stop-all') {
+  await stopAll({ kill: true });
+} else if (mode === 'release-all' || mode === '--release-all') {
+  await stopAll({ kill: false });
+} else if (mode === 'cancel' || mode === '--cancel') {
+  const ref = process.argv[3];
+  if (!ref) {
+    console.error('usage: node server/acp-runner.mjs cancel <cardId>');
+    process.exitCode = 2;
+  } else {
+    await cancelCard(ref);
+  }
 } else if (mode === '--once') {
   try {
     const results = await passOnce();
@@ -519,6 +1031,8 @@ if (mode === '--stop-all') {
     await new Promise((r) => setTimeout(r, waitMs));
   }
 } else {
-  console.error('usage: node server/acp-runner.mjs --once | --serve | --stop-all');
+  console.error(
+    'usage: node server/acp-runner.mjs --once | --serve | stop-all | release-all | cancel <cardId>',
+  );
   process.exitCode = 2;
 }

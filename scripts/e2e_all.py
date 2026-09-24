@@ -26,6 +26,7 @@ SCRIPTS = [
     ("card pipeline", REPO / "scripts/e2e_card_pipeline.py", None),
     ("auto approve", REPO / "scripts/e2e_auto_approve.py", None),
     ("runner", REPO / "scripts/e2e_runner.py", None),
+    ("dispatch", REPO / "scripts/e2e_dispatch.py", None),
     ("dashboard math", REPO / "scripts/e2e_dash_math.py", None),
     ("voice", REPO / "scripts/e2e_voice.py", None),
 ]

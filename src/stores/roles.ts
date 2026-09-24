@@ -47,6 +47,8 @@ export interface Role {
   maxConcurrent: number;
   pollIntervalSec: number;
   timeoutMin: number;
+  /** Attempts per card before the dispatcher flags it blocked. 1 = no retry. */
+  maxRetries: number;
 }
 
 const STORE_PATH = 'roles.json';
@@ -55,6 +57,7 @@ const STORE_VERSION = 1;
 const MIN_CONCURRENT = 1;
 const MIN_POLL_SEC = 5;
 const MIN_TIMEOUT_MIN = 1;
+const MIN_RETRIES = 1;
 
 function strList(raw: unknown): string[] {
   return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === 'string') : [];
@@ -84,6 +87,7 @@ function sanitizeRole(raw: unknown): Role | null {
     maxConcurrent: intAtLeast(r.maxConcurrent, MIN_CONCURRENT, 1),
     pollIntervalSec: intAtLeast(r.pollIntervalSec, MIN_POLL_SEC, 15),
     timeoutMin: intAtLeast(r.timeoutMin, MIN_TIMEOUT_MIN, 45),
+    maxRetries: intAtLeast(r.maxRetries, MIN_RETRIES, 1),
   };
 }
 
@@ -218,6 +222,10 @@ export const useRolesStore = defineStore('roles', () => {
     if (!Number.isFinite(timeoutMin) || timeoutMin < MIN_TIMEOUT_MIN) {
       throw new Error(`timeoutMin must be >= ${MIN_TIMEOUT_MIN}`);
     }
+    const maxRetries = Math.floor(Number(input.maxRetries ?? 1));
+    if (!Number.isFinite(maxRetries) || maxRetries < MIN_RETRIES) {
+      throw new Error(`maxRetries must be >= ${MIN_RETRIES}`);
+    }
     const label = (input.label ?? '').trim() || id;
     return {
       id,
@@ -228,6 +236,7 @@ export const useRolesStore = defineStore('roles', () => {
       maxConcurrent,
       pollIntervalSec,
       timeoutMin,
+      maxRetries,
     };
   }
 
