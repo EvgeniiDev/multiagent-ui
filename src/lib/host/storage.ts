@@ -317,11 +317,12 @@ class RemoteKVStore implements KVStore {
       }
       this.down = false;
       if (this.dirty) {
-        // The server can take our edits again — unless its copy is already
-        // newer, in which case `save()`'s conflict path resolves it.
-        if (remote === 'missing' || this.touchedAt >= remote.updatedAt) {
-          await this.push();
-        }
+        // Push unconditionally — the conflict path inside push() resolves
+        // a newer remote by adopting it (or force-puts when the local edit
+        // is newer). Skipping the push when the remote is newer wedges the
+        // store for good: `dirty` never clears and no remote document is
+        // ever adopted again.
+        await this.push();
         return;
       }
       if (remote !== 'missing' && remote.updatedAt > this.updatedAt) {
@@ -329,6 +330,69 @@ class RemoteKVStore implements KVStore {
       }
     });
   }
+}
+
+/**
+ * Rev-safe read-modify-write on a shared state document — the same
+ * GET -> mutate -> PUT-with-rev -> retry-on-409 protocol the runner's
+ * `mutate()` and boardctl use (server/acp-runner.mjs, scripts/boardctl).
+ * `fn` receives the current document and returns the next one, or `null`
+ * to abort the write. Returns false when no state server is reachable —
+ * callers then fall back to the KV store path (Tauri / offline web).
+ */
+export async function mutateRemoteDoc(
+  name: string,
+  fn: (data: Record<string, unknown>) => Record<string, unknown> | null,
+  tries = 6,
+): Promise<boolean> {
+  if (isTauriHost() || !(await probeStateServer())) return false;
+  const base = stateServerBase();
+  const url = `${base}/api/state/${encodeURIComponent(name)}`;
+  for (let i = 0; i < tries; i++) {
+    let data: Record<string, unknown> = {};
+    let rev = 0;
+    try {
+      const res = await fetchWithTimeout(url, {}, REQUEST_TIMEOUT_MS);
+      if (res.status === 404) {
+        data = {};
+        rev = 0;
+      } else if (res.ok) {
+        const body = (await res.json().catch(() => null)) as {
+          data?: Record<string, unknown>;
+          rev?: number;
+        } | null;
+        if (!body || typeof body !== 'object') return false;
+        data = body.data && typeof body.data === 'object' ? body.data : {};
+        rev = typeof body.rev === 'number' ? body.rev : 0;
+      } else {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+    const next = fn(structuredClone(data));
+    if (next === null) return true;
+    try {
+      const put = await fetchWithTimeout(
+        url,
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ data: next, rev }),
+        },
+        REQUEST_TIMEOUT_MS,
+      );
+      if (put.ok) return true;
+      if (put.status === 409) {
+        await new Promise((r) => setTimeout(r, 300));
+        continue;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 // Web stores are cached per document name so every call site shares one

@@ -198,8 +198,12 @@ def main():
         page.screenshot(path=str(SHOTS / "board-events-1440x900.png"))
 
         page.click('.tab-btn:text-is("Agents")')
-        n_agents = page.locator(".agent-row").count()
-        check("Agents tab lists configured agents", n_agents >= 1, f"{n_agents} rows")
+        # The tab's rows are executors keyed on `role.cli` (see AgentsTab.vue);
+        # its fixture has no roles, so the honest empty state is shown instead.
+        check("Agents tab shows its honest empty state",
+              page.locator(".tab-empty").count() == 1
+              and "No roles or claims yet" in page.locator(".tab-empty").inner_text(),
+              page.locator(".tab-empty").inner_text()[:80])
 
         page.click('.tab-btn:text-is("Locks")')
         n_locks = page.locator(".lock-row").count()

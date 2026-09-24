@@ -27,6 +27,7 @@ SCRIPTS = [
     ("auto approve", REPO / "scripts/e2e_auto_approve.py", None),
     ("runner", REPO / "scripts/e2e_runner.py", None),
     ("dispatch", REPO / "scripts/e2e_dispatch.py", None),
+    ("agents tab", REPO / "scripts/e2e_agents_tab.py", None),
     ("pm", REPO / "scripts/e2e_pm.py", None),
     ("review", REPO / "scripts/e2e_review.py", None),
     ("dashboard math", REPO / "scripts/e2e_dash_math.py", None),
