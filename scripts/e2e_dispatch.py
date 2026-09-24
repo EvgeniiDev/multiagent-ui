@@ -58,7 +58,22 @@ def check(name, ok, extra=""):
 
 
 def port_free(port):
+    """True when nothing is LISTENING on the port (a TIME_WAIT leftover is fine)."""
+    try:
+        out = subprocess.run(
+            ["ss", "-ltn"], capture_output=True, text=True, timeout=5
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    if out:
+        for line in out.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 4 and parts[3].rsplit(":", 1)[-1] == str(port):
+                return False
+        return True
+    # No `ss`: fall back to a bind probe that tolerates TIME_WAIT.
     with socket.socket() as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("127.0.0.1", port))
             return True
