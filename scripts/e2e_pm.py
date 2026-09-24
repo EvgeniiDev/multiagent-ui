@@ -540,9 +540,18 @@ def leg_ui():
             proposals = page.locator('[data-testid="pm-proposals"]')
             check("ui: proposals section shows the merge proposal",
                   "merge" in proposals.inner_text())
+            # The file arrives from the fs bridge asynchronously: wait for either
+            # the content or the honest error instead of sampling one frame.
+            file_or_error = page.locator(
+                '[data-testid="pm-proposals-file"], '
+                '[data-testid="pm-proposals-error"]')
+            waited = 0
+            while waited < 10000 and file_or_error.count() == 0:
+                page.wait_for_timeout(250)
+                waited += 250
             check("ui: proposals file or honest error rendered",
-                  page.locator('[data-testid="pm-proposals-file"], '
-                               '[data-testid="pm-proposals-error"]').count() == 1)
+                  file_or_error.count() == 1,
+                  f"after {waited}ms; section={proposals.inner_text()[:160]!r}")
             graph = page.locator('[data-testid="pm-graph"]')
             check("ui: graph section shows depends/conflicts rows",
                   "depends on" in graph.inner_text()
