@@ -14,6 +14,9 @@ device, and a card claimed here is not taken twice.
     boardctl claim 3f2a --agent hermes --session sess-1 --lease 900
     boardctl release 3f2a --reason "handing over"
     boardctl note 3f2a "measured: panel writes 41 rows"
+    boardctl review 3f2a                 # findings, round, the agent_tested gate
+    boardctl review 3f2a --sync          # minor/nit -> backlog cards, round-limit flag
+    boardctl review 3f2a --round 2 --close f-crit
     boardctl events --limit 20 --card 3f2a
     boardctl delegate --session sess-1 --subagent explore --goal "map auth flow"
     boardctl delegate --session sess-1 --subagent explore --end --outcome done \
@@ -145,6 +148,174 @@ def empty_claims() -> dict:
 
 def empty_activity() -> dict:
     return {"entries": [], "usage": []}
+
+
+# --- review cycle (severity findings + the agent_tested gate) ---------------
+#
+# The review LOOP lives in the role prompt files and the agents' skills —
+# boardctl only mirrors the same contract the panel enforces:
+#
+#   * findings are structured state in the card's artifact dir,
+#     `.acp/cards/<id>/review_findings.json`:
+#       {"version": 1, "round": <n>,
+#        "findings": [{"id", "round", "severity", "text", "where",
+#                      "status": "open"|"closed", "closedInRound"?}]}
+#   * the severity vocabulary and the round limit are DATA on the
+#     reviewtest role's `review` field in roles.json (defaults below when
+#     the role carries none);
+#   * `move`/`set` into `agent_tested` refuses while a blocking-severity
+#     finding is open, naming severity + count;
+#   * `review --sync` materialises open backlog-severity findings as
+#     backlog cards (links + dependsOn/blocks, deduped by finding id) and
+#     maintains the round-limit `blocked` flag. Read/analyse first, write
+#     only at the end — a failed run changes nothing.
+
+REVIEW_FILE = "review_findings.json"
+REVIEW_REASON_PREFIX = "review:"
+DEFAULT_REVIEW_RULES = {
+    "severities": ["critical", "major", "minor", "nit"],
+    "blocking": ["critical", "major"],
+    "backlog": ["minor", "nit"],
+    "maxRounds": 3,
+}
+SEV_PRIORITY = {"critical": "high", "major": "medium", "minor": "low", "nit": "low"}
+
+
+def _projects_list() -> "list[dict]":
+    data, _ = read_doc("projects.json", {"version": 1, "projects": []})
+    return data.get("projects") or []
+
+
+def _registry_path_for(card: dict) -> "str | None":
+    """board.ts projectIdForCard: the card's free-text `project` label is
+    matched to a registry project by name, else by the path's basename."""
+    label = (card.get("project") or "").strip().lower()
+    if not label:
+        return None
+    projects = _projects_list()
+    for p in projects:
+        if str(p.get("name") or "").strip().lower() == label:
+            return p.get("path") or None
+    for p in projects:
+        base = str(p.get("path") or "").rstrip("/\\").split("/")[-1].lower()
+        if base and base == label:
+            return p.get("path") or None
+    return None
+
+
+def _card_dir_candidates(card: dict, project_path: str = "") -> "list[str]":
+    """Ordered dirs that may hold the card's .acp/cards/<id> home:
+    --project-path > $ACP_PROJECT_PATH > registry lookup > cwd."""
+    out: "list[str]" = []
+    for cand in (
+        project_path,
+        os.environ.get("ACP_PROJECT_PATH", ""),
+        _registry_path_for(card) or "",
+        os.getcwd(),
+    ):
+        if cand and cand not in out:
+            out.append(cand)
+    return out
+
+
+def _findings_file(card: dict, project_path: str = "") -> "str | None":
+    for base in _card_dir_candidates(card, project_path):
+        f = os.path.join(base, ".acp", "cards", card["id"], REVIEW_FILE)
+        if os.path.isfile(f):
+            return f
+    return None
+
+
+def _findings_file_for_write(card: dict, project_path: str = "") -> str:
+    """Where a new findings doc goes: the existing card dir, else the first
+    candidate's .acp/cards/<id> (created on write)."""
+    for base in _card_dir_candidates(card, project_path):
+        d = os.path.join(base, ".acp", "cards", card["id"])
+        if os.path.isdir(d):
+            return os.path.join(d, REVIEW_FILE)
+    base = _card_dir_candidates(card, project_path)[0]
+    return os.path.join(base, ".acp", "cards", card["id"], REVIEW_FILE)
+
+
+def _load_review_doc(card: dict, project_path: str = "") -> "tuple[dict | None, str | None]":
+    """(doc, path) or (None, None) when no findings file exists. A file that
+    exists but cannot be parsed fails CLOSED — the gate cannot verify that
+    nothing blocking is open."""
+    f = _findings_file(card, project_path)
+    if f is None:
+        return None, None
+    try:
+        with open(f, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise CliError(f"review findings {f}: unreadable ({exc})", 1)
+    if not isinstance(doc, dict) or not isinstance(doc.get("findings", []), list):
+        raise CliError(f"review findings {f}: malformed doc", 1)
+    doc.setdefault("findings", [])
+    return doc, f
+
+
+def _review_rules() -> dict:
+    """Severity vocabulary + limits — the reviewtest role's `review` data,
+    DEFAULT_REVIEW_RULES when the role carries none."""
+    rules = dict(DEFAULT_REVIEW_RULES)
+    data, _ = read_doc("roles.json", {"version": 1, "roles": [], "stageRoles": {}})
+    rid = (data.get("stageRoles") or {}).get("reviewtest")
+    role = next((r for r in data.get("roles") or [] if r.get("id") == rid), None)
+    raw = (role or {}).get("review") or {}
+    for key in ("severities", "blocking", "backlog"):
+        vals = raw.get(key)
+        if isinstance(vals, list) and vals:
+            rules[key] = [str(v) for v in vals]
+    if isinstance(raw.get("maxRounds"), (int, float)) and raw["maxRounds"] >= 1:
+        rules["maxRounds"] = int(raw["maxRounds"])
+    return rules
+
+
+def _open_counts(doc: dict, severities: "list[str] | None" = None) -> "dict[str, int]":
+    counts: "dict[str, int]" = {}
+    for f in doc.get("findings") or []:
+        if not isinstance(f, dict) or f.get("status", "open") != "open":
+            continue
+        sev = str(f.get("severity") or "")
+        if severities is not None and sev not in severities:
+            continue
+        counts[sev] = counts.get(sev, 0) + 1
+    return counts
+
+
+def _blocking_text(doc: dict, rules: dict) -> str:
+    counts = _open_counts(doc, rules["blocking"])
+    return ", ".join(f"{counts[s]} {s}" for s in rules["blocking"] if counts.get(s))
+
+
+def _gate_agent_tested(prev_status: "str | None", card: dict) -> None:
+    """Refuse a transition INTO `agent_tested` while blocking findings are
+    open — same rule as the panel store's reviewGateRefusal, read straight
+    from the findings file so the CLI is bound by the same gate."""
+    if card.get("stage") != "reviewtest" or card.get("status") != "agent_tested":
+        return
+    if prev_status == "agent_tested":
+        return  # already there — not a new transition
+    doc, f = _load_review_doc(card)
+    if doc is None:
+        return  # no findings file: nothing is known to be open
+    text = _blocking_text(doc, _review_rules())
+    if text:
+        raise CliError(
+            f"agent_tested refused: open review findings — {text} "
+            f"({os.path.basename(f)})",
+            1,
+        )
+
+
+def _write_doc_file(path: str, doc: dict) -> None:
+    """Atomic file write (tmp + rename) — same rule as the state server's."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(doc, ensure_ascii=False, indent=2) + "\n")
+    os.replace(tmp, path)
 
 
 def load_cards() -> "list[dict]":
@@ -447,11 +618,13 @@ def _save_card(card: dict, actor_note: str) -> dict:
 def cmd_set(args) -> int:
     cards = load_cards()
     card = resolve(cards, args.card)
+    prev_status = card.get("status")
     changes: "list[str]" = []
     _apply(card, args, changes)
     if not changes:
         emit(card, args, lambda: "nothing to change")
         return 0
+    _gate_agent_tested(prev_status, card)
     card = _save_card(card, ACTOR)
     log(title=card["title"], detail="; ".join(changes) + f" by {ACTOR}")
     emit(card, args, lambda: f"{card['id'][:8]}: " + "; ".join(changes))
@@ -461,6 +634,7 @@ def cmd_set(args) -> int:
 def cmd_move(args) -> int:
     cards = load_cards()
     card = resolve(cards, args.card)
+    prev_status = card.get("status")
     stage, status = check_stage_status(args.stage, args.status)
     changes: "list[str]" = []
     ns = argparse.Namespace(stage=stage, status=status)
@@ -468,6 +642,7 @@ def cmd_move(args) -> int:
     if not changes:
         emit(card, args, lambda: f"{card['id'][:8]} is already in {stage}")
         return 0
+    _gate_agent_tested(prev_status, card)
     card = _save_card(card, ACTOR)
     log(title=card["title"], detail="; ".join(changes) + f" by {ACTOR}")
     emit(card, args, lambda: f"{card['id'][:8]}: " + "; ".join(changes))
@@ -717,6 +892,214 @@ def cmd_rm(args) -> int:
     return 0
 
 
+def cmd_review(args) -> int:
+    """`boardctl review <card>` — show the findings doc; `--round N` records
+    the round; `--close FID` closes findings; `--sync` applies the derived
+    board state (backlog cards + round-limit flag)."""
+    cards = load_cards()
+    card = resolve(cards, args.card)
+    if args.sync:
+        return _review_sync(card, args)
+    if args.round is not None or args.close:
+        return _review_write(card, args)
+    return _review_show(card, args)
+
+
+def _review_show(card: dict, args) -> int:
+    doc, f = _load_review_doc(card, args.project_path)
+    if doc is None:
+        emit({"card": card["id"], "review": None}, args,
+             lambda: f"{card['id'][:8]}: no review findings ({REVIEW_FILE} not found)")
+        return 0
+    rules = _review_rules()
+    counts = _open_counts(doc)
+    findings = [x for x in doc.get("findings") or [] if isinstance(x, dict)]
+    gate = _blocking_text(doc, rules)
+    payload = {
+        "card": card["id"], "file": f, "round": doc.get("round"),
+        "maxRounds": rules["maxRounds"], "open": counts,
+        "gate": f"agent_tested refused: {gate}" if gate else "clear",
+        "findings": findings,
+    }
+
+    def render() -> str:
+        head = (f"round {doc.get('round') or '-'} / {rules['maxRounds']}   open: "
+                + "  ".join(f"{s} {counts.get(s, 0)}" for s in rules["severities"])
+                + (f"   gate: refuse agent_tested ({gate})" if gate else "   gate: clear"))
+        rows = [head]
+        for x in findings:
+            st = x.get("status") or "open"
+            rows.append(
+                f"  {str(x.get('id')):<10} {str(x.get('severity')):<9} {st:<7}"
+                f" r{x.get('round', '-')}"
+                + (f"→r{x['closedInRound']}" if st == "closed" and x.get("closedInRound") else "")
+                + f"  {str(x.get('where') or '-'):<24} {str(x.get('text') or '')}"
+            )
+        return "\n".join(rows)
+
+    emit(payload, args, render)
+    return 0
+
+
+def _review_write(card: dict, args) -> int:
+    """`--round`/`--close`: mutate ONLY the findings file (the board doc is
+    untouched — `--sync` is the command that writes board state)."""
+    doc, f = _load_review_doc(card, args.project_path)
+    if doc is None:
+        f = _findings_file_for_write(card, args.project_path)
+        doc = {"version": 1, "round": None, "findings": []}
+    changed: "list[str]" = []
+    if args.round is not None:
+        if args.round < 1:
+            raise CliError("--round must be >= 1")
+        if doc.get("round") != args.round:
+            doc["round"] = args.round
+            changed.append(f"round → {args.round}")
+    for fid in args.close or []:
+        hit = next(
+            (x for x in doc["findings"] if isinstance(x, dict) and x.get("id") == fid),
+            None,
+        )
+        if hit is None:
+            raise CliError(f"no finding {fid!r} on {card['id'][:8]}", 2)
+        if hit.get("status") == "closed":
+            continue
+        hit["status"] = "closed"
+        hit["closedInRound"] = doc.get("round") or hit.get("round")
+        changed.append(f"{fid} closed")
+    if not changed:
+        emit({"card": card["id"], "changed": []}, args, lambda: "nothing to change")
+        return 0
+    _write_doc_file(f, doc)
+    log(title=card["title"], detail=f"review: {'; '.join(changed)} by {ACTOR}")
+    emit({"card": card["id"], "file": f, "changed": changed}, args,
+         lambda: f"{card['id'][:8]}: {'; '.join(changed)}")
+    return 0
+
+
+class _SyncNoChange(Exception):
+    """Internal: the sync pass computed no board changes — raised inside the
+    mutate fn so the write never happens (idempotent second passes must not
+    bump the board revision)."""
+
+
+def _review_sync(card: dict, args) -> int:
+    """Apply the derived board state for the findings doc — the only
+    boardctl command that writes board state from review data.
+
+    Atomicity (same rule the pm role follows): the findings file is read
+    and validated first; every change is computed before the single board
+    write; a malformed file or a finding outside the role's vocabulary
+    fails before anything is written."""
+    doc, f = _load_review_doc(card, args.project_path)
+    if doc is None:
+        raise CliError(
+            f"no review findings for {card['id'][:8]} — the reviewer writes "
+            f"{REVIEW_FILE} first", 2)
+    rules = _review_rules()
+    findings = [x for x in doc.get("findings") or [] if isinstance(x, dict)]
+    bad = [str(x.get("id")) for x in findings
+           if str(x.get("severity")) not in rules["severities"]]
+    if bad:
+        raise CliError(
+            f"findings {', '.join(bad)} carry severity outside the role "
+            f"vocabulary ({', '.join(rules['severities'])})", 1)
+    src_id = card["id"]
+    blocking_text = _blocking_text(doc, rules)
+    round_no = doc.get("round")
+    over_limit = (isinstance(round_no, (int, float)) and round_no >= rules["maxRounds"]
+                  and bool(blocking_text))
+    flag_reason = (f"{REVIEW_REASON_PREFIX} round limit {rules['maxRounds']} "
+                   f"reached with open findings ({blocking_text})")
+
+    def fn(data):
+        cards_now = data.get("cards") or []
+        src = next((c for c in cards_now if c.get("id") == src_id), None)
+        if src is None:
+            raise CliError("card vanished from the board", 3)
+        created: "list[dict]" = []
+        changed: "list[str]" = []
+        # 1. Each open backlog-severity finding materialises as a backlog
+        #    card. The finding's own id is the natural dedup key — its
+        #    acp:// link already on some card means this pass adds nothing.
+        for x in findings:
+            fid = str(x.get("id") or "")
+            sev = str(x.get("severity") or "")
+            if not fid or sev not in rules["backlog"] or x.get("status", "open") != "open":
+                continue
+            url = f"acp://card/{src_id}/finding/{fid}"
+            already = any(
+                url in [str(l.get("url")) for l in (c.get("links") or [])
+                        if isinstance(l, dict)]
+                for c in cards_now
+            )
+            if already:
+                continue
+            now = int(time.time() * 1000)
+            text = str(x.get("text") or "").strip() or fid
+            child = new_card(
+                title=f"[{sev}] {text}",
+                description=(
+                    f"review finding {fid} (round {x.get('round', '-')}) on "
+                    f"{src_id[:8]} \"{src.get('title', '')}\""
+                    + (f"\nseen at: {x.get('where')}" if x.get("where") else "")
+                ),
+                project=src.get("project") or "",
+                priority=SEV_PRIORITY.get(sev, "low"),
+                links=[{"label": f"review finding on {src_id[:8]}", "url": url}],
+                dependsOn=[src_id],
+                stage="backlog",
+                status=None,
+                order=max([c.get("order", 10) for c in cards_now] or [10]) + 10,
+                createdAt=now,
+                updatedAt=now,
+            )
+            cards_now.append(child)
+            src.setdefault("blocks", [])
+            if child["id"] not in src["blocks"]:
+                src["blocks"] = sorted(set(src["blocks"]) | {child["id"]})
+            src["updatedAt"] = now
+            created.append(child)
+            changed.append(f"backlog +1 [{sev}] {child['id'][:8]} ({fid})")
+        # 2. The round-limit flag — only `review:`-owned marks are managed;
+        #    a foreign blocked reason is never overwritten or cleared.
+        src = next(c for c in cards_now if c.get("id") == src_id)
+        owned = str(src.get("blockedReason") or "").startswith(REVIEW_REASON_PREFIX)
+        if over_limit:
+            if not src.get("blocked"):
+                src["blocked"] = True
+                src["blockedReason"] = flag_reason
+                src["updatedAt"] = int(time.time() * 1000)
+                changed.append(f"flagged blocked: {flag_reason}")
+            elif owned and src.get("blockedReason") != flag_reason:
+                src["blockedReason"] = flag_reason
+                src["updatedAt"] = int(time.time() * 1000)
+                changed.append("blocked reason updated")
+        elif src.get("blocked") and owned:
+            src["blocked"] = False
+            src["blockedReason"] = ""
+            src["updatedAt"] = int(time.time() * 1000)
+            changed.append("review flag cleared")
+        if not changed:
+            # Nothing to write — skip the PUT entirely so a repeated --sync
+            # is a true no-op (no revision bump, doc byte-identical).
+            raise _SyncNoChange()
+        data["cards"] = cards_now
+        data["version"] = 2
+        return data, {"created": created, "changed": changed}
+
+    try:
+        result = mutate("board.json", empty_board(), fn)
+    except _SyncNoChange:
+        emit({"card": src_id, "changed": []}, args, lambda: "in sync — nothing to change")
+        return 0
+    for line in result["changed"]:
+        log(title=card["title"], detail=f"review: {line} by {ACTOR}")
+    emit({"card": src_id, "created": result["created"], "changed": result["changed"]},
+         args, lambda: f"{src_id[:8]}: " + "; ".join(result["changed"]))
+    return 0
+
+
 # --- argv -------------------------------------------------------------------
 
 
@@ -867,6 +1250,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("card")
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_rm)
+
+    s = sub.add_parser("review", parents=[common],
+                       help="review-cycle state: findings, round, sync")
+    s.add_argument("card")
+    s.add_argument("--round", type=int, metavar="N",
+                   help="record the current review round in the findings doc")
+    s.add_argument("--close", action="append", metavar="FID",
+                   help="mark a finding closed (repeatable)")
+    s.add_argument("--sync", action="store_true",
+                   help="apply derived state: backlog findings -> backlog "
+                        "cards, round-limit flag")
+    s.add_argument("--project-path", default="",
+                   help="dir holding .acp/cards/<id> "
+                        "(default: registry lookup / $ACP_PROJECT_PATH / cwd)")
+    s.set_defaults(func=cmd_review)
     return p
 
 

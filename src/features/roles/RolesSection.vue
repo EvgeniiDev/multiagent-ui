@@ -3,7 +3,13 @@ import { computed, onMounted, ref } from 'vue';
 import { useConfigStore } from '../../stores/config';
 import { useProjectsStore } from '../../stores/projects';
 import type { BoardStageId } from '../../stores/board';
-import { KNOWN_CLIS, useRolesStore, type Role } from '../../stores/roles';
+import {
+  KNOWN_CLIS,
+  useRolesStore,
+  DEFAULT_REVIEW_RULES,
+  type Role,
+  type ReviewRules,
+} from '../../stores/roles';
 import { BOARD_STAGES } from '../board/columns';
 import {
   bridgeBaseUrlForAgentUrl,
@@ -46,6 +52,14 @@ const formMaxConcurrent = ref(1);
 const formPollIntervalSec = ref(15);
 const formTimeoutMin = ref(45);
 const formMaxRetries = ref(1);
+// Review-cycle rules (the severity vocabulary, the gate/backlog severities
+// and the round limit) are role DATA — text fields here, `role.review` in
+// roles.json. All empty = the role carries no review data and defaults
+// apply at read time.
+const formReviewSev = ref('');
+const formReviewBlocking = ref('');
+const formReviewBacklog = ref('');
+const formReviewRounds = ref('');
 const error = ref('');
 const busy = ref(false);
 /** Role whose last delete was rejected because it is still assigned — its
@@ -62,6 +76,10 @@ function resetForm(): void {
   formPollIntervalSec.value = 15;
   formTimeoutMin.value = 45;
   formMaxRetries.value = 1;
+  formReviewSev.value = '';
+  formReviewBlocking.value = '';
+  formReviewBacklog.value = '';
+  formReviewRounds.value = '';
   showForm.value = false;
   editingId.value = null;
 }
@@ -83,6 +101,10 @@ function startEdit(r: Role): void {
   formPollIntervalSec.value = r.pollIntervalSec;
   formTimeoutMin.value = r.timeoutMin;
   formMaxRetries.value = r.maxRetries;
+  formReviewSev.value = r.review?.severities.join(' ') ?? '';
+  formReviewBlocking.value = r.review?.blocking.join(' ') ?? '';
+  formReviewBacklog.value = r.review?.backlog.join(' ') ?? '';
+  formReviewRounds.value = r.review ? String(r.review.maxRounds) : '';
   error.value = '';
 }
 
@@ -111,6 +133,28 @@ function parseArgs(argsString: string): string[] {
 }
 
 function formToRole(id: string): Role {
+  const anyReview =
+    formReviewSev.value.trim() ||
+    formReviewBlocking.value.trim() ||
+    formReviewBacklog.value.trim() ||
+    formReviewRounds.value.trim();
+  // Any field set → the role carries review data; a field left empty takes
+  // the default list/limit so a half-filled form still yields a coherent
+  // record (the store's validateReview checks subsets afterwards).
+  const review: ReviewRules | undefined = anyReview
+    ? {
+        severities: formReviewSev.value.trim()
+          ? formReviewSev.value.trim().split(/\s+/)
+          : [...DEFAULT_REVIEW_RULES.severities],
+        blocking: formReviewBlocking.value.trim()
+          ? formReviewBlocking.value.trim().split(/\s+/)
+          : [...DEFAULT_REVIEW_RULES.blocking],
+        backlog: formReviewBacklog.value.trim()
+          ? formReviewBacklog.value.trim().split(/\s+/)
+          : [...DEFAULT_REVIEW_RULES.backlog],
+        maxRounds: Number(formReviewRounds.value) || DEFAULT_REVIEW_RULES.maxRounds,
+      }
+    : undefined;
   return {
     id,
     label: formLabel.value,
@@ -121,6 +165,7 @@ function formToRole(id: string): Role {
     pollIntervalSec: Number(formPollIntervalSec.value),
     timeoutMin: Number(formTimeoutMin.value),
     maxRetries: Number(formMaxRetries.value),
+    review,
   };
 }
 
@@ -314,6 +359,26 @@ onMounted(async () => {
           <input v-model.number="formMaxRetries" type="number" min="1" step="1" data-testid="role-retries" />
           <small>Attempts per card; 1 = no retry, then the card is flagged blocked.</small>
         </div>
+        <div class="form-group">
+          <label>Review severities</label>
+          <input v-model="formReviewSev" type="text" placeholder="critical major minor nit" data-testid="role-review-sev" />
+          <small>Space-separated vocabulary; empty = no review data on the role.</small>
+        </div>
+        <div class="form-group">
+          <label>Review blocking severities</label>
+          <input v-model="formReviewBlocking" type="text" placeholder="critical major" data-testid="role-review-blocking" />
+          <small>Open findings of these severities refuse agent_tested.</small>
+        </div>
+        <div class="form-group">
+          <label>Review backlog severities</label>
+          <input v-model="formReviewBacklog" type="text" placeholder="minor nit" data-testid="role-review-backlog" />
+          <small>These never block; each becomes a backlog card on sync.</small>
+        </div>
+        <div class="form-group">
+          <label>Review round limit</label>
+          <input v-model="formReviewRounds" type="number" min="1" step="1" placeholder="3" data-testid="role-review-rounds" />
+          <small>Reaching the limit with open blocking findings flags the card blocked.</small>
+        </div>
       </div>
       <div class="form-actions">
         <button class="save-btn" type="button" :disabled="busy" data-testid="role-save" @click="handleSubmit">
@@ -350,6 +415,11 @@ onMounted(async () => {
           <div class="role-limits">
             id <code>{{ r.id }}</code> · args <code>{{ r.args.join(' ') || '—' }}</code>
             · max {{ r.maxConcurrent }} · poll {{ r.pollIntervalSec }}s · timeout {{ r.timeoutMin }}m · retries {{ r.maxRetries }}
+            <template v-if="r.review">
+              · review <code data-testid="role-review-{{ r.id }}">{{ r.review.severities.join(' ') }}</code>
+              · gate {{ r.review.blocking.join(',') || '—' }} · backlog {{ r.review.backlog.join(',') || '—' }}
+              · rounds {{ r.review.maxRounds }}
+            </template>
             <template v-if="isAssigned(r)"> · stage: {{ rolesStore.stagesForRole(r.id).join(', ') }}</template>
           </div>
         </div>

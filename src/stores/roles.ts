@@ -49,7 +49,32 @@ export interface Role {
   timeoutMin: number;
   /** Attempts per card before the dispatcher flags it blocked. 1 = no retry. */
   maxRetries: number;
+  /** Review-cycle rules (convention: carried by the reviewtest role). The
+   * severity vocabulary, the severities that gate `agent_tested`, the ones
+   * that spawn backlog cards, and the round limit are DATA — the panel
+   * displays them, `boardctl` reads the same roles.json, and the role's
+   * prompt file states them for the CLI agent. */
+  review?: ReviewRules;
 }
+
+export interface ReviewRules {
+  /** Severity vocabulary, worst-first (e.g. critical major minor nit). */
+  severities: string[];
+  /** Severities that refuse the `agent_tested` transition while open. */
+  blocking: string[];
+  /** Severities that materialise as backlog cards on `review --sync`. */
+  backlog: string[];
+  /** Review-round limit; reaching it with open blocking findings flags the
+   * card `blocked`. */
+  maxRounds: number;
+}
+
+export const DEFAULT_REVIEW_RULES: ReviewRules = {
+  severities: ['critical', 'major', 'minor', 'nit'],
+  blocking: ['critical', 'major'],
+  backlog: ['minor', 'nit'],
+  maxRounds: 3,
+};
 
 const STORE_PATH = 'roles.json';
 const STORE_VERSION = 1;
@@ -88,6 +113,27 @@ function sanitizeRole(raw: unknown): Role | null {
     pollIntervalSec: intAtLeast(r.pollIntervalSec, MIN_POLL_SEC, 15),
     timeoutMin: intAtLeast(r.timeoutMin, MIN_TIMEOUT_MIN, 45),
     maxRetries: intAtLeast(r.maxRetries, MIN_RETRIES, 1),
+    review: sanitizeReview(r.review),
+  };
+}
+
+/** Permissive restore of a persisted `role.review`: absent/non-object stays
+ * absent (defaults apply at read time); partial entries fall back to the
+ * defaults per field; severities outside the vocabulary are dropped. */
+function sanitizeReview(raw: unknown): ReviewRules | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Partial<ReviewRules>;
+  const severities = strList(r.severities);
+  const vocab = severities.length ? severities : [...DEFAULT_REVIEW_RULES.severities];
+  const subset = (xs: unknown, dflt: string[]): string[] => {
+    const l = strList(xs).filter((s) => vocab.includes(s));
+    return l.length ? l : dflt.filter((s) => vocab.includes(s));
+  };
+  return {
+    severities: vocab,
+    blocking: subset(r.blocking, DEFAULT_REVIEW_RULES.blocking),
+    backlog: subset(r.backlog, DEFAULT_REVIEW_RULES.backlog),
+    maxRounds: intAtLeast(r.maxRounds, 1, DEFAULT_REVIEW_RULES.maxRounds),
   };
 }
 
@@ -175,6 +221,12 @@ export const useRolesStore = defineStore('roles', () => {
     return BOARD_STAGE_IDS.filter((s) => stageRoles.value[s] === id);
   }
 
+  /** Review-cycle rules for a stage: the assigned role's `review` data, or
+   * the defaults when the role carries none / no role is assigned. */
+  function reviewRulesForStage(stage: BoardStageId): ReviewRules {
+    return roleForStage(stage)?.review ?? DEFAULT_REVIEW_RULES;
+  }
+
   /** A runner exists when a configured agent's name carries the cli as a
    * word — `Hermes Agent` runs `hermes`, `OpenCode` runs `opencode`. Word
    * matching (not substring) keeps `Pilot` from claiming `pi`. */
@@ -237,6 +289,39 @@ export const useRolesStore = defineStore('roles', () => {
       pollIntervalSec,
       timeoutMin,
       maxRetries,
+      review: validateReview(input.review),
+    };
+  }
+
+  /** Strict check for a `role.review` written through the UI: the severity
+   * vocabulary must be non-empty, `blocking`/`backlog` must be subsets of
+   * it, and `maxRounds` >= 1. `undefined` stays `undefined` (the role just
+   * carries no review data; defaults apply at read time). */
+  function validateReview(raw: ReviewRules | undefined): ReviewRules | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    const severities = strList(raw.severities)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!severities.length) {
+      throw new Error('review.severities must be a non-empty list');
+    }
+    const subset = (xs: unknown, name: string): string[] => {
+      const l = strList(xs).map((s) => s.trim()).filter(Boolean);
+      const bad = l.filter((s) => !severities.includes(s));
+      if (bad.length) {
+        throw new Error(`review.${name}: ${bad.join(', ')} not in severities`);
+      }
+      return l;
+    };
+    const maxRounds = Math.floor(Number(raw.maxRounds));
+    if (!Number.isFinite(maxRounds) || maxRounds < 1) {
+      throw new Error('review.maxRounds must be >= 1');
+    }
+    return {
+      severities,
+      blocking: subset(raw.blocking, 'blocking'),
+      backlog: subset(raw.backlog, 'backlog'),
+      maxRounds,
     };
   }
 
@@ -297,6 +382,7 @@ export const useRolesStore = defineStore('roles', () => {
     roleById,
     roleForStage,
     stagesForRole,
+    reviewRulesForStage,
     cliHasRunner,
     roleHasRunner,
     initRolesStore,

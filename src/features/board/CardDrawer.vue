@@ -9,6 +9,8 @@ import {
 import { useSessionStore } from '../../stores/session';
 import { useConfigStore } from '../../stores/config';
 import { useProjectsStore } from '../../stores/projects';
+import { useRolesStore } from '../../stores/roles';
+import { useReviewStore } from '../../stores/review';
 import { projectName } from '../../stores/activity';
 import {
   useArtifactsStore,
@@ -35,6 +37,8 @@ const board = useBoardStore();
 const sessionStore = useSessionStore();
 const configStore = useConfigStore();
 const projectsStore = useProjectsStore();
+const rolesStore = useRolesStore();
+const reviewStore = useReviewStore();
 const artifactsStore = useArtifactsStore();
 
 const card = computed(() => board.cards.find((c) => c.id === props.cardId) ?? null);
@@ -122,7 +126,13 @@ function flush() {
     board.moveCard(c.id, d.stage);
   }
   if (d.status && d.status !== c.status) {
-    board.setCardStatus(c.id, d.status);
+    const r = board.setCardStatus(c.id, d.status);
+    // The review-cycle gate refuses `agent_tested` while blocking findings
+    // are open — surface the reason and snap the draft back to reality.
+    if (!r.ok && r.reason) {
+      alert(r.reason);
+      draft.value.status = c.status;
+    }
   }
   if (d.blocked !== c.blocked) board.setCardFlag(c.id, 'blocked', d.blocked);
   if (d.cancelled !== c.cancelled) board.setCardFlag(c.id, 'cancelled', d.cancelled);
@@ -286,6 +296,24 @@ const tokenArtifact = computed(() =>
 );
 const reviewRound = computed(() => reviewRoundOf(artState.value.artifacts));
 
+// ---- review findings (review cycle) ------------------------------------------
+//
+// The structured findings file `.acp/cards/<id>/review_findings.json` is
+// mirrored into the review store by the artifacts loader. This block shows
+// the per-severity open counts, the round, and each finding's status — the
+// same state the `agent_tested` gate and `boardctl review` read.
+
+const reviewState = computed(() => reviewStore.stateFor(props.cardId));
+const reviewRules = computed(() => rolesStore.reviewRulesForStage('reviewtest'));
+const reviewCounts = computed(() => reviewStore.openCounts(props.cardId));
+const reviewCountsLine = computed(() => {
+  const c = reviewCounts.value;
+  const open = Object.values(c).reduce((a, b) => a + b, 0);
+  const parts = reviewRules.value.severities.map((s) => `${s} ${c[s] ?? 0}`);
+  return `${open} open — ${parts.join(' · ')}`;
+});
+const reviewGateHint = computed(() => reviewStore.gateRefusal(props.cardId));
+
 const proposal = computed(() =>
   card.value
     ? proposeTransition(
@@ -343,8 +371,10 @@ function onApplyTransition() {
   if (!c || p.kind === 'none') return;
   flush();
   if (p.kind === 'move') board.moveCard(c.id, p.to);
-  else if (p.kind === 'status') board.setCardStatus(c.id, p.status);
-  else {
+  else if (p.kind === 'status') {
+    const r = board.setCardStatus(c.id, p.status);
+    if (!r.ok && r.reason) alert(r.reason);
+  } else {
     board.setCardFlag(c.id, 'blocked', true);
     if (p.reason) board.updateCard(c.id, { blockedReason: p.reason });
   }
@@ -532,6 +562,40 @@ onBeforeUnmount(() => {
           >{{ s.agentName }} · {{ s.title }}</option>
         </select>
       </label>
+
+      <div
+        v-if="reviewState && (reviewState.findings.length || reviewState.round !== null || reviewState.error)"
+        class="field"
+        data-testid="review-block"
+      >
+        <div class="art-head">
+          <span class="field-label">Review findings</span>
+          <span
+            class="status-token mono"
+            data-testid="review-round"
+            :title="`Current review round — limit ${reviewRules.maxRounds}`"
+          >round {{ reviewState.round ?? '—' }} / {{ reviewRules.maxRounds }}</span>
+        </div>
+        <p v-if="reviewState.error" class="art-error" data-testid="review-error">{{ reviewState.error }}</p>
+        <template v-else>
+          <p class="art-note" data-testid="review-counts">{{ reviewCountsLine }}</p>
+          <p v-if="reviewGateHint" class="art-note gate-note" data-testid="review-gate">{{ reviewGateHint }}</p>
+          <ul v-if="reviewState.findings.length" class="art-list" data-testid="review-list">
+            <li
+              v-for="f in reviewState.findings"
+              :key="f.id"
+              class="find-row mono"
+              :class="{ 'find-closed': f.status === 'closed' }"
+            >
+              <span class="find-sev" :class="`sev-${f.severity}`">{{ f.severity }}</span>
+              <span class="find-text" :title="f.where">{{ f.text || f.id }}</span>
+              <span class="find-st">{{
+                f.status === 'closed' ? `closed r${f.closedInRound ?? f.round}` : `open · r${f.round}`
+              }}</span>
+            </li>
+          </ul>
+        </template>
+      </div>
 
       <div class="field artifacts" data-testid="artifacts-block">
         <div class="art-head">
@@ -1008,6 +1072,60 @@ textarea.f-input {
   font-size: 0.75rem;
   line-height: 1.4;
   color: var(--text-muted, #a39a8e);
+}
+
+/* Review findings: flat severity word + finding text + state, same row
+   vocabulary as the artifact list (mono, muted, no buttons). */
+.gate-note {
+  color: var(--bg-danger, #b3402e);
+}
+
+.find-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.375rem;
+  min-width: 0;
+  padding: 0.125rem 0.375rem;
+  font-size: 0.6875rem;
+  line-height: 1.4;
+  color: var(--text-primary, #2b2723);
+}
+
+.find-row.find-closed {
+  color: var(--text-muted, #a39a8e);
+}
+
+.find-sev {
+  flex: 0 0 auto;
+  padding: 0 0.25rem;
+  border: 1px solid var(--border-color, #e3dbcf);
+  border-radius: var(--radius-sm, 4px);
+  font-size: 0.625rem;
+}
+
+.find-sev.sev-critical,
+.find-sev.sev-major {
+  color: var(--bg-danger, #b3402e);
+  border-color: var(--bg-danger, #b3402e);
+}
+
+.find-sev.sev-minor,
+.find-sev.sev-nit {
+  color: var(--text-secondary, #6b6259);
+}
+
+.find-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.find-st {
+  flex: 0 0 auto;
+  color: var(--text-muted, #a39a8e);
+  white-space: nowrap;
 }
 
 .art-error {

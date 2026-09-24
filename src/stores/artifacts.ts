@@ -26,6 +26,12 @@ import type { BoardStageId, CardStatus } from './board';
 import { stageLabel } from '../features/board/columns';
 import { useConfigStore } from './config';
 import {
+  REVIEW_FILE,
+  emptyReview,
+  parseReviewDoc,
+  useReviewStore,
+} from './review';
+import {
   bridgeBaseUrlForAgentUrl,
   defaultBridgeBaseUrl,
 } from '../features/settings/fsApi';
@@ -407,13 +413,20 @@ export const useArtifactsStore = defineStore('artifacts', () => {
         st.artifacts = [];
         st.phase = 'ready';
         st.loadedAt = Date.now();
+        // No card dir → no findings file; reset the review state so the
+        // card stops showing stale counters/flags.
+        useReviewStore().set(cardId, { ...emptyReview(), loadedAt: Date.now() });
         return;
       }
       const meta = new Map((listing.files ?? []).map((f) => [f.name, f]));
       const out: CardArtifact[] = [];
       if (meta.size) {
         // Newer bridge: the listing itself names the files — read them all.
-        for (const name of meta.keys()) await readInto(base, dir, name, meta, out);
+        // The findings doc is loaded separately below; it is state, not a
+        // prose artifact, and does not appear in the artifacts list.
+        for (const name of meta.keys()) {
+          if (name !== REVIEW_FILE) await readInto(base, dir, name, meta, out);
+        }
       } else {
         // Today's bridge lists directories only — probe the fixed pipeline
         // names, then the numbered families until the first gap.
@@ -428,6 +441,40 @@ export const useArtifactsStore = defineStore('artifacts', () => {
       st.artifacts = out.sort(rankCmp);
       st.phase = 'ready';
       st.loadedAt = Date.now();
+      // The review cycle's structured findings ride alongside the prose
+      // artifacts. A malformed file surfaces as the review state's own
+      // `unreadable` error (the agent_tested gate fails closed on it); a
+      // bridge read failure is an honest `error` only.
+      try {
+        const r = await bridgeRead(base, `${dir}/${REVIEW_FILE}`);
+        if (!r) {
+          useReviewStore().set(cardId, { ...emptyReview(), loadedAt: Date.now() });
+        } else {
+          try {
+            const parsed = parseReviewDoc(r.content);
+            useReviewStore().set(cardId, {
+              ...parsed,
+              error: '',
+              unreadable: false,
+              loadedAt: Date.now(),
+            });
+          } catch (pe) {
+            useReviewStore().set(cardId, {
+              ...emptyReview(),
+              error: pe instanceof Error ? pe.message : String(pe),
+              unreadable: true,
+              loadedAt: Date.now(),
+            });
+          }
+        }
+      } catch (re) {
+        useReviewStore().set(cardId, {
+          ...emptyReview(),
+          error: re instanceof Error ? re.message : String(re),
+          unreadable: false,
+          loadedAt: Date.now(),
+        });
+      }
     } catch (e) {
       // Honest failure: keep any previously loaded artifacts visible and
       // put the bridge's own message on the record.
