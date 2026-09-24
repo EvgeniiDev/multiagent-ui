@@ -48,6 +48,19 @@ function getTrafficStore() {
 /** JSON-RPC method-not-found error code. */
 const JSONRPC_METHOD_NOT_FOUND = -32601;
 
+/**
+ * In-flight RPCs are abandoned only after the wire has been silent this long —
+ * any frame in either direction is progress and re-arms the deadline, so a
+ * long agent turn that keeps streaming `session/update`s is never cut (the old
+ * fixed 60 s cap did exactly that). Mirrors the request watchdog in
+ * `server/acp-ws-bridge.mjs`, which applies the same policy at the process
+ * boundary and reports the failure as "no traffic for Ns". <= 0 disables.
+ */
+export let RPC_IDLE_TIMEOUT_MS = 180000;
+export function setRpcIdleTimeoutMs(ms: number): void {
+  RPC_IDLE_TIMEOUT_MS = ms;
+}
+
 export class AcpClientBridge implements Client {
   private transport: AcpTransport;
   /**
@@ -63,6 +76,8 @@ export class AcpClientBridge implements Client {
   private nextRequestId = 0;
   private unlistenMessage: Unsubscribe | null = null;
   private unlistenClose: Unsubscribe | null = null;
+  /** Idle deadline for in-flight requests (see RPC_IDLE_TIMEOUT_MS). */
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Permission request handling
   public pendingPermissionRequest: Ref<LocalPermissionRequest | null> = ref(null);
@@ -82,6 +97,7 @@ export class AcpClientBridge implements Client {
     this.unlistenMessage = this.transport.onMessage((msg) => this.handleMessage(msg));
     this.unlistenClose = this.transport.onClose((reason) => {
       // Reject all in-flight requests so callers stop hanging.
+      this.clearIdleTimer();
       const err = new Error(`transport closed: ${reason ?? 'unknown reason'}`);
       for (const reject of this.messageRejecters.values()) {
         try {
@@ -122,6 +138,7 @@ export class AcpClientBridge implements Client {
       this.unlistenClose();
       this.unlistenClose = null;
     }
+    this.clearIdleTimer();
     if (this.messageRejecters.size > 0) {
       const err = new Error('transport closed: client disconnected');
       for (const reject of this.messageRejecters.values()) {
@@ -138,7 +155,57 @@ export class AcpClientBridge implements Client {
     await this.transport.close();
   }
 
+  /**
+   * Any frame on the wire — request, response, or notification, inbound or
+   * outbound — is progress: re-arm the idle deadline for the in-flight
+   * requests. A request that is still producing traffic is never abandoned.
+   */
+  private noteTraffic(): void {
+    if (this.messageResolvers.size === 0 || RPC_IDLE_TIMEOUT_MS <= 0) return;
+    this.armIdleTimer();
+  }
+
+  private armIdleTimer(): void {
+    if (this.idleTimer !== null) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => this.onIdleTimeout(), RPC_IDLE_TIMEOUT_MS);
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer !== null) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+
+  /**
+   * The wire has been silent for RPC_IDLE_TIMEOUT_MS with requests still
+   * pending — a wedged agent, not a slow one (a live turn keeps the stream
+   * busy). While the agent is waiting on US for a permission answer, silence
+   * is expected: stand down and re-arm rather than failing the turn.
+   */
+  private onIdleTimeout(): void {
+    this.idleTimer = null;
+    if (this.permissionResolver) {
+      this.armIdleTimer();
+      return;
+    }
+    const secs = Math.round(RPC_IDLE_TIMEOUT_MS / 1000);
+    const methods = [...this.pendingMethods.values()].join(', ') || 'unknown';
+    const err = new Error(`no traffic for ${secs}s — RPC abandoned: ${methods}`);
+    for (const reject of this.messageRejecters.values()) {
+      try {
+        reject(err);
+      } catch {
+        /* ignore */
+      }
+    }
+    this.messageResolvers.clear();
+    this.messageRejecters.clear();
+    this.pendingMethods.clear();
+  }
+
   private handleMessage(message: string): void {
+    this.noteTraffic();
     try {
       const parsed = JSON.parse(message);
       const store = getTrafficStore();
@@ -197,6 +264,8 @@ export class AcpClientBridge implements Client {
     } catch (e) {
       console.error('Failed to parse message:', message, e);
     }
+    // A response may have drained the last in-flight request.
+    if (this.messageResolvers.size === 0) this.clearIdleTimer();
   }
 
   private async handleRequest(id: number | string, method: string, params: unknown): Promise<void> {
@@ -245,6 +314,7 @@ export class AcpClientBridge implements Client {
       error: !!error,
     });
 
+    this.noteTraffic();
     await this.transport.send(JSON.stringify(response));
   }
 
@@ -283,23 +353,15 @@ export class AcpClientBridge implements Client {
         resolve(response as T);
       });
       this.messageRejecters.set(id, reject);
+      this.noteTraffic();
 
       this.transport.send(JSON.stringify(request)).catch((e) => {
         this.messageResolvers.delete(id);
         this.messageRejecters.delete(id);
         this.pendingMethods.delete(id);
+        if (this.messageResolvers.size === 0) this.clearIdleTimer();
         reject(e);
       });
-
-      // Timeout after 60 seconds (increased for auth flows)
-      setTimeout(() => {
-        if (this.messageResolvers.has(id)) {
-          this.messageResolvers.delete(id);
-          this.messageRejecters.delete(id);
-          this.pendingMethods.delete(id);
-          reject(new Error(`Request timeout: ${method}`));
-        }
-      }, 60000);
     });
   }
 
@@ -319,6 +381,7 @@ export class AcpClientBridge implements Client {
       payload: notification,
     });
 
+    this.noteTraffic();
     await this.transport.send(JSON.stringify(notification));
   }
 
