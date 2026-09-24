@@ -17,25 +17,26 @@ Usage:
     npm run build:web
     ~/.hermes/tools-venv/bin/python scripts/e2e_touch.py
 
-The script serves dist-web itself on http://127.0.0.1:25996/ and writes
-docs/polish-board-390x844.png / docs/polish-projects-390x844.png.
+The script serves dist-web itself via scripts/_e2e_harness.py (preferred
+port 25996, falls back to the next free port when a stale/foreign server
+holds it) and writes docs/polish-board-390x844.png /
+docs/polish-projects-390x844.png.
 """
 
 import json
 import re
-import socket
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+from _e2e_harness import DIST, serve_web, stop
+
 ROOT = Path(__file__).resolve().parent.parent
-DIST = ROOT / "dist-web"
 SHOTS = ROOT / "docs"
 PORT = 25996
-BASE = f"http://127.0.0.1:{PORT}/"
+BASE = f"http://127.0.0.1:{PORT}/"  # rebased in main() to the served port
 MIN_TOUCH = 44.0
 # getBoundingClientRect is subpixel; allow a hair of rounding slack.
 EPS = 0.6
@@ -202,40 +203,14 @@ def check_desktop_density(page, selectors, what):
         )
 
 
-def start_server():
-    try:
-        socket.create_connection(("127.0.0.1", PORT), 0.3).close()
-    except OSError:
-        pass
-    else:
-        print(f"FAIL  port {PORT} already in use — refusing to test a stale server")
-        sys.exit(1)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(PORT), "--bind", "127.0.0.1"],
-        cwd=DIST, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    for _ in range(100):
-        try:
-            socket.create_connection(("127.0.0.1", PORT), 0.2).close()
-            return proc
-        except OSError:
-            time.sleep(0.1)
-    proc.kill()
-    print(f"FAIL  could not serve {DIST} on port {PORT}")
-    sys.exit(1)
-
-
 def main():
-    if not (DIST / "index.html").exists():
-        print(f"FAIL  {DIST} missing — run `npm run build:web` first")
-        sys.exit(1)
+    global BASE
     SHOTS.mkdir(exist_ok=True)
-    server = start_server()
+    server, BASE = serve_web(PORT, DIST)
     try:
         run_checks()
     finally:
-        server.terminate()
-        server.wait(timeout=5)
+        stop(server)
 
     failed = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(failed)}/{len(results)} assertions passed")

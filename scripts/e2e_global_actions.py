@@ -24,6 +24,11 @@ Usage:
     npm run build:web
     ~/.hermes/tools-venv/bin/python scripts/e2e_global_actions.py
 
+NEEDS THE LIVE BRIDGE: the mkdir assertion only makes sense against the
+real Hermes bridge on http://127.0.0.1:25901. The web bundle is served by
+the suite itself; when the bridge is unreachable the suite prints SKIP and
+exits 0 instead of failing.
+
 Screenshots land in docs/global-actions-1440x900.png and
 docs/global-actions-390x844.png.
 Prints PASS/FAIL per assertion and exits non-zero on any failure.
@@ -31,8 +36,6 @@ Prints PASS/FAIL per assertion and exits non-zero on any failure.
 
 import json
 import re
-import socket
-import subprocess
 import sys
 import time
 import urllib.parse
@@ -40,6 +43,8 @@ import urllib.request
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
+from _e2e_harness import serve_web, stop
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist-web"
@@ -231,30 +236,8 @@ def wire(page):
         fs_api(route)
 
     page.route(re.compile(r"/api/fs/"), handle_fs)
+    page.route(re.compile(r":25900/"), lambda r: r.abort())
     page.route_web_socket(re.compile(r"^wss?://"), acp_ws)
-
-
-def start_server() -> subprocess.Popen:
-    try:
-        socket.create_connection(("127.0.0.1", PORT), 0.3).close()
-    except OSError:
-        pass
-    else:
-        print(f"FAIL  port {PORT} already in use — refusing to test a stale server")
-        sys.exit(1)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(PORT), "--bind", "127.0.0.1"],
-        cwd=DIST, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    for _ in range(100):
-        try:
-            socket.create_connection(("127.0.0.1", PORT), 0.2).close()
-            return proc
-        except OSError:
-            time.sleep(0.1)
-    proc.kill()
-    print(f"FAIL  could not serve {DIST} on port {PORT}")
-    sys.exit(1)
 
 
 def goto_view(page, label: str, wait_sel: str) -> None:
@@ -500,14 +483,16 @@ def main() -> int:
     try:
         bridge_list_dirs(COMMON_PATH)
     except Exception as e:  # noqa: BLE001
-        print(f"FAIL  host bridge unreachable at {BRIDGE}: {e}")
-        return 1
+        print(f"SKIP: live Hermes bridge unreachable at {BRIDGE} ({e}) — "
+              "this suite's mkdir assertion needs the real bridge")
+        return 0
     if not (DIST / "index.html").exists():
         print(f"FAIL  {DIST} missing — run `npm run build:web` first")
         return 1
     SHOTS.mkdir(exist_ok=True)
     uniq = str(int(time.time()))[-6:]
-    server = start_server()
+    global BASE
+    server, BASE = serve_web(PORT, DIST)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -515,8 +500,7 @@ def main() -> int:
             run_phone(browser)
             browser.close()
     finally:
-        server.terminate()
-        server.wait(timeout=5)
+        stop(server)
 
     check("zero pageerror events", len(page_errors) == 0,
           "; ".join(page_errors[:3]) if page_errors else "")

@@ -33,7 +33,6 @@ import json
 import os
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -41,12 +40,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from _e2e_harness import STATE_SERVER, serve_state, stop
+
 ROOT = Path(__file__).resolve().parent.parent
-STATE_SERVER = ROOT / "server" / "acp-state-server.mjs"
 RUNNER = ROOT / "server" / "acp-runner.mjs"
 STATE_DIR = ROOT / "tmp-dispatch-test"
-STATE_PORT = 25908
-STATE_URL = f"http://127.0.0.1:{STATE_PORT}"
+STATE_PORT = 25908               # preferred; harness falls back when busy
+STATE_URL = f"http://127.0.0.1:{STATE_PORT}"   # rebased in main()
 PROJ = STATE_DIR / "proj"
 
 results = []
@@ -55,41 +55,6 @@ results = []
 def check(name, ok, extra=""):
     results.append((name, bool(ok), extra))
     print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f"  ({extra})" if extra else ""))
-
-
-def port_free(port):
-    """True when nothing is LISTENING on the port (a TIME_WAIT leftover is fine)."""
-    try:
-        out = subprocess.run(
-            ["ss", "-ltn"], capture_output=True, text=True, timeout=5
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        out = ""
-    if out:
-        for line in out.splitlines()[1:]:
-            parts = line.split()
-            if len(parts) >= 4 and parts[3].rsplit(":", 1)[-1] == str(port):
-                return False
-        return True
-    # No `ss`: fall back to a bind probe that tolerates TIME_WAIT.
-    with socket.socket() as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind(("127.0.0.1", port))
-            return True
-        except OSError:
-            return False
-
-
-def wait_port(port, timeout=10.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            socket.create_connection(("127.0.0.1", port), 0.2).close()
-            return True
-        except OSError:
-            time.sleep(0.1)
-    return False
 
 
 def wait_for(fn, timeout=15.0, interval=0.2):
@@ -293,14 +258,12 @@ def write_stub():
 
 
 def main():
+    global STATE_PORT, STATE_URL
     if not STATE_SERVER.exists():
         print(f"FAIL  {STATE_SERVER} missing")
         sys.exit(1)
     if not RUNNER.exists():
         print(f"FAIL  {RUNNER} missing")
-        sys.exit(1)
-    if not port_free(STATE_PORT):
-        print(f"FAIL  port {STATE_PORT} in use — refusing a stale server")
         sys.exit(1)
 
     shutil.rmtree(STATE_DIR, ignore_errors=True)
@@ -311,15 +274,9 @@ def main():
     strays = []  # child pids we may have to clean up
     serves = []
 
-    state = subprocess.Popen(
-        ["node", str(STATE_SERVER)],
-        env={**os.environ, "STATE_DIR": str(STATE_DIR), "PORT": str(STATE_PORT)},
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    state, STATE_PORT = serve_state(STATE_PORT, STATE_DIR)
+    STATE_URL = f"http://127.0.0.1:{STATE_PORT}"
     try:
-        if not wait_port(STATE_PORT):
-            print("FAIL  state server did not start")
-            sys.exit(1)
-
         now = int(time.time() * 1000)
         projects = {"version": 1,
                     "projects": [{"id": "p1", "name": "P1",
@@ -672,11 +629,7 @@ def main():
                 os.kill(pid, signal.SIGKILL)
             except OSError:
                 pass
-        state.terminate()
-        try:
-            state.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            state.kill()
+        stop(state)
         shutil.rmtree(STATE_DIR, ignore_errors=True)
 
     failed = [r for r in results if not r[1]]

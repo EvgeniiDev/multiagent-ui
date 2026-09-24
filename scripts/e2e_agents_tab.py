@@ -34,8 +34,6 @@ import json
 import os
 import re
 import shutil
-import socket
-import subprocess
 import sys
 import time
 import urllib.error
@@ -44,6 +42,8 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+from _e2e_harness import serve_state, serve_web, stop
+
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist-web"
 STATE_SERVER = ROOT / "server" / "acp-state-server.mjs"
@@ -51,7 +51,7 @@ STATE_DIR = ROOT / "tmp-agents-tab-test"
 UI_PORT = 25911
 STATE_PORT = 25912
 BASE = f"http://127.0.0.1:{UI_PORT}/"
-STATE_URL = f"http://127.0.0.1:{STATE_PORT}"
+STATE_URL = f"http://127.0.0.1:{STATE_PORT}"  # rebased in main()
 MIN_TOUCH = 44.0
 EPS = 0.6
 
@@ -62,25 +62,6 @@ page_errors = []
 def check(name, ok, extra=""):
     results.append((name, bool(ok), extra))
     print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f"  ({extra})" if extra else ""))
-
-
-def port_free(port):
-    try:
-        socket.create_connection(("127.0.0.1", port), 0.3).close()
-    except OSError:
-        return True
-    return False
-
-
-def wait_port(port, timeout=10.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            socket.create_connection(("127.0.0.1", port), 0.2).close()
-            return True
-        except OSError:
-            time.sleep(0.1)
-    return False
 
 
 def wait_for(page, fn, timeout=16.0, interval=0.4):
@@ -310,32 +291,18 @@ def controls(scope_sel, page):
 
 
 def main():
-    if not (DIST / "index.html").exists():
-        print(f"FAIL  {DIST} missing — run `npm run build:web` first")
-        return 1
+    global BASE, STATE_PORT, STATE_URL
     if not STATE_SERVER.exists():
         print(f"FAIL  {STATE_SERVER} missing")
         return 1
-    for p in (UI_PORT, STATE_PORT):
-        if not port_free(p):
-            print(f"FAIL  port {p} in use — refusing a stale server")
-            return 1
 
     shutil.rmtree(STATE_DIR, ignore_errors=True)
     STATE_DIR.mkdir(parents=True)
 
-    state = subprocess.Popen(
-        ["node", str(STATE_SERVER)],
-        env={**os.environ,
-             "STATE_DIR": str(STATE_DIR), "PORT": str(STATE_PORT)},
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    ui = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(UI_PORT), "--bind", "127.0.0.1"],
-        cwd=DIST, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    state, STATE_PORT = serve_state(STATE_PORT, STATE_DIR)
+    STATE_URL = f"http://127.0.0.1:{STATE_PORT}"
+    ui, BASE = serve_web(UI_PORT, DIST)
     try:
-        if not wait_port(STATE_PORT) or not wait_port(UI_PORT):
-            print("FAIL  servers did not start")
-            return 1
         seed_docs()
 
         with sync_playwright() as p:
@@ -480,13 +447,8 @@ def main():
             ctx.close()
             browser.close()
     finally:
-        ui.terminate()
-        state.terminate()
-        for proc in (ui, state):
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+        stop(ui)
+        stop(state)
         shutil.rmtree(STATE_DIR, ignore_errors=True)
 
     check("zero pageerror events", len(page_errors) == 0,

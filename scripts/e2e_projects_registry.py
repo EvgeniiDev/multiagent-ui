@@ -3,7 +3,11 @@
 
 Run: npm run build:web, then run this with the tools venv python
 (sync_playwright, chromium headless). The script serves dist-web itself
-on http://127.0.0.1:25988/.
+on http://127.0.0.1:25988/ (falls back to the next free port when busy).
+
+NEEDS THE LIVE BRIDGE: folder-on-disk assertions go through the real
+Hermes bridge on http://127.0.0.1:25901. When it is unreachable the
+suite prints SKIP and exits 0 instead of failing.
 
 Asserts, on 1440 and 390 widths:
   * fresh profile: `Common` exists, points at /home/hermes/projects
@@ -24,14 +28,15 @@ docs/projects-admin-390x844.png.
 """
 
 import json
-import socket
-import subprocess
+import re
 import sys
 import time
 import urllib.request
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
+from _e2e_harness import serve_web, stop
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist-web"
@@ -48,36 +53,6 @@ errors: list[str] = []
 def check(name: str, ok: bool, detail: str = "") -> None:
     results.append((name, bool(ok), detail))
     print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail and not ok else ""))
-
-
-def start_server() -> subprocess.Popen:
-    # The port may sit in TIME_WAIT after a crashed run (no listener, bind
-    # fails, connect fails). Retry the bind briefly instead of refusing.
-    for _ in range(30):
-        s = socket.socket()
-        try:
-            s.bind(("127.0.0.1", PORT))
-            break
-        except OSError:
-            time.sleep(1)
-        finally:
-            s.close()
-    else:
-        print(f"FAIL  port {PORT} still busy after 30s — refusing a stale server")
-        sys.exit(1)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(PORT), "--bind", "127.0.0.1"],
-        cwd=str(DIST), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    for _ in range(50):
-        try:
-            urllib.request.urlopen(BASE, timeout=1)
-            return proc
-        except Exception:  # noqa: BLE001
-            time.sleep(0.2)
-    print(f"FAIL  could not serve {DIST} on port {PORT}")
-    proc.terminate()
-    sys.exit(1)
 
 
 def bridge_mkdir(path: str) -> tuple[bool, str]:
@@ -138,6 +113,7 @@ def run_width(browser, width: int, height: int, tag: str, uniq: str) -> None:
         ignore_https_errors=True, viewport={"width": width, "height": height}
     )
     page = ctx.new_page()
+    page.route(re.compile(r":25900/"), lambda r: r.abort())
     page.on("pageerror", lambda e: errors.append(f"{tag}: {e}"))
     page.on("dialog", lambda d: d.accept())
 
@@ -317,8 +293,15 @@ def run_width(browser, width: int, height: int, tag: str, uniq: str) -> None:
 
 
 def main() -> int:
+    try:
+        urllib.request.urlopen(f"{BRIDGE}/api/fs/root", timeout=5)
+    except Exception as e:  # noqa: BLE001
+        print(f"SKIP: live Hermes bridge unreachable at {BRIDGE} ({e}) — "
+              "this suite's folder assertions need the real bridge")
+        return 0
     SHOTS.mkdir(exist_ok=True)
-    server = start_server()
+    global BASE
+    server, BASE = serve_web(PORT, DIST)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -326,8 +309,7 @@ def main() -> int:
             run_width(browser, 390, 844, "390", "w1e2e-mob")
             browser.close()
     finally:
-        server.terminate()
-        server.wait(timeout=5)
+        stop(server)
 
     check("zero pageerrors", len(errors) == 0, "; ".join(errors[:3]))
     failed = [r for r in results if not r[1]]

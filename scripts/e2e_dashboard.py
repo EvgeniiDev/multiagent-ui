@@ -1,7 +1,10 @@
 """Dashboard E2E (F5/F6): seed the ledger via localStorage, assert the real build.
 
-Run: npm run build:web, serve dist-web on 25998, then run this with the
-tools venv python (sync_playwright, chromium headless).
+Run: npm run build:web, then run this with the tools venv python
+(sync_playwright, chromium headless). The script serves dist-web itself via
+scripts/_e2e_harness.py (preferred port 25998, falls back to the next free
+port when a stale/foreign server holds it) and fails every `:25900`
+state-server call so the panel uses localStorage — no live services needed.
 """
 import json
 import re
@@ -10,7 +13,10 @@ from datetime import datetime, timedelta, timezone
 
 from playwright.sync_api import sync_playwright
 
-BASE = "http://127.0.0.1:25998/"
+from _e2e_harness import DIST, serve_web, stop
+
+PORT = 25998
+BASE = f"http://127.0.0.1:{PORT}/"  # rebased in main() to the served port
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
@@ -66,6 +72,15 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 
 def main() -> int:
+    global BASE
+    server, BASE = serve_web(PORT, DIST)
+    try:
+        return run_checks()
+    finally:
+        stop(server)
+
+
+def run_checks() -> int:
     errors: list[str] = []
     with sync_playwright() as p:
         browser = p.chromium.launch()

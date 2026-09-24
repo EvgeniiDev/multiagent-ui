@@ -34,14 +34,14 @@ import json
 import os
 import re
 import shutil
-import socket
-import subprocess
 import sys
 import time
 import urllib.parse
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
+from _e2e_harness import serve_web, stop
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist-web"
@@ -286,29 +286,6 @@ def acp_ws(ws):
     ws.on_message(on_message)
 
 
-def start_server():
-    try:
-        socket.create_connection(("127.0.0.1", PORT), 0.3).close()
-    except OSError:
-        pass
-    else:
-        print(f"FAIL  port {PORT} already in use — refusing to test a stale server")
-        sys.exit(1)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(PORT), "--bind", "127.0.0.1"],
-        cwd=DIST, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    for _ in range(100):
-        try:
-            socket.create_connection(("127.0.0.1", PORT), 0.2).close()
-            return proc
-        except OSError:
-            time.sleep(0.1)
-    proc.kill()
-    print(f"FAIL  could not serve {DIST} on port {PORT}")
-    sys.exit(1)
-
-
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
@@ -336,12 +313,12 @@ def main():
         print(f"FAIL  {DIST} missing — run `npm run build:web` first")
         sys.exit(1)
     write_fixtures()
-    server = start_server()
+    global BASE
+    server, BASE = serve_web(PORT, DIST)
     try:
         run_checks()
     finally:
-        server.terminate()
-        server.wait(timeout=5)
+        stop(server)
 
     check("zero pageerror events", len(page_errors) == 0,
           "; ".join(page_errors[:3]) if page_errors else "")

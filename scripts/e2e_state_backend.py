@@ -37,11 +37,8 @@ Prints PASS/FAIL per assertion and exits non-zero on any failure.
 """
 
 import json
-import os
 import re
 import shutil
-import socket
-import subprocess
 import sys
 import time
 import urllib.request
@@ -49,15 +46,16 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+from _e2e_harness import serve_state, serve_web, stop
+
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist-web"
 STATE_DIR = ROOT / "tmp-state-test"
-STATE_SERVER = ROOT / "server" / "acp-state-server.mjs"
-WEB_PORT = 25982
-BASE = f"http://127.0.0.1:{WEB_PORT}/"
+WEB_PORT = 25982                 # preferred; harness falls back when busy
+BASE = f"http://127.0.0.1:{WEB_PORT}/"      # rebased in main()
 PROD_STATE_PORT = 25900          # the port the panel probes
 STATE_PORT = 25908               # the test server actually listening
-STATE_API = f"http://127.0.0.1:{STATE_PORT}/api/state"
+STATE_API = f"http://127.0.0.1:{STATE_PORT}/api/state"  # rebased in main()
 
 ALPHA_PATH = "/home/hermes/projects/alpha"
 BETA_PATH = "/home/hermes/projects/beta"
@@ -212,49 +210,17 @@ def wire(page, state_route):
 
 
 # --------------------------------------------------------------------------
-# Processes + tiny state-server client (stdlib urllib)
+# Tiny state-server client (stdlib urllib)
 # --------------------------------------------------------------------------
 
-def port_free(port):
-    try:
-        socket.create_connection(("127.0.0.1", port), 0.3).close()
-        return False
-    except OSError:
-        return True
-
-
-def wait_port(port, timeout=10.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            socket.create_connection(("127.0.0.1", port), 0.2).close()
-            return True
-        except OSError:
-            time.sleep(0.1)
-    return False
-
-
 def start_servers():
-    for port in (WEB_PORT, STATE_PORT):
-        if not port_free(port):
-            print(f"FAIL  port {port} already in use — refusing to test a stale server")
-            sys.exit(1)
+    """Spawn the suite's own state server + web server on free ports."""
+    global BASE, STATE_PORT, STATE_API
     shutil.rmtree(STATE_DIR, ignore_errors=True)
     STATE_DIR.mkdir(parents=True)
-    state = subprocess.Popen(
-        ["node", str(STATE_SERVER)],
-        env={**os.environ, "STATE_DIR": str(STATE_DIR), "PORT": str(STATE_PORT)},
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    web = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(WEB_PORT), "--bind", "127.0.0.1"],
-        cwd=DIST, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    if not wait_port(STATE_PORT) or not wait_port(WEB_PORT):
-        state.kill()
-        web.kill()
-        print("FAIL  could not start test servers")
-        sys.exit(1)
+    state, STATE_PORT = serve_state(STATE_PORT, STATE_DIR)
+    STATE_API = f"http://127.0.0.1:{STATE_PORT}/api/state"
+    web, BASE = serve_web(WEB_PORT, DIST)
     return state, web
 
 
@@ -436,10 +402,8 @@ def main():
     try:
         run_checks()
     finally:
-        state.terminate()
-        web.terminate()
-        state.wait(timeout=5)
-        web.wait(timeout=5)
+        stop(state)
+        stop(web)
         shutil.rmtree(STATE_DIR, ignore_errors=True)
 
     check("zero pageerror events", len(page_errors) == 0,

@@ -3,8 +3,12 @@
 
 Usage:
     npm run build:web
-    cd dist-web && python3 -m http.server 25999 &
     ~/.hermes/tools-venv/bin/python scripts/e2e_board.py
+
+The script serves dist-web itself via scripts/_e2e_harness.py (preferred
+port 25999, falls back to the next free port when a stale/foreign server
+holds it) and fails every `:25900` state-server call so the panel uses
+localStorage — no live services needed.
 
 Asserts: rail switches to Board, all six pipeline stages render in order, a
 card can be created into `backlog`, moved to `spec` via the card menu (counts
@@ -21,7 +25,10 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-BASE = "http://127.0.0.1:25999/"
+from _e2e_harness import DIST, serve_web, stop
+
+PORT = 25999
+BASE = f"http://127.0.0.1:{PORT}/"  # rebased in main() to the served port
 ROOT = Path(__file__).resolve().parent.parent
 SHOTS = ROOT / "docs"
 
@@ -113,7 +120,21 @@ def seed_ledger(context):
 
 
 def main():
+    global BASE
     SHOTS.mkdir(exist_ok=True)
+    server, BASE = serve_web(PORT, DIST)
+    try:
+        run_checks()
+    finally:
+        stop(server)
+
+    failed = [r for r in results if not r[1]]
+    print(f"\n{len(results) - len(failed)}/{len(results)} assertions passed")
+    if failed:
+        sys.exit(1)
+
+
+def run_checks():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(ignore_https_errors=True,
@@ -259,11 +280,6 @@ def main():
               "; ".join(page_errors[:3]) if page_errors else "")
 
         browser.close()
-
-    failed = [r for r in results if not r[1]]
-    print(f"\n{len(results) - len(failed)}/{len(results)} assertions passed")
-    if failed:
-        sys.exit(1)
 
 
 if __name__ == "__main__":

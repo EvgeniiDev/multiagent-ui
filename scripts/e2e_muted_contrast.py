@@ -16,13 +16,15 @@ has zero failures, zero pageerror events. Prints before/after ratios
 for --text-muted. Screenshots land in docs/muted-*.png.
 """
 
-import socket
 import subprocess
+import re
 import sys
 import time
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
+from _e2e_harness import serve_web, stop
 
 PORT = 25991
 ROOT = Path(__file__).resolve().parent.parent
@@ -122,33 +124,11 @@ def is_accent_exception(r):
     return False
 
 
-def start_server():
-    try:
-        socket.create_connection(("127.0.0.1", PORT), 0.3).close()
-    except OSError:
-        pass
-    else:
-        print(f"FAIL  port {PORT} already in use — refusing to test a stale server")
-        sys.exit(1)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(PORT), "--bind", "127.0.0.1"],
-        cwd=DIST, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    for _ in range(100):
-        try:
-            socket.create_connection(("127.0.0.1", PORT), 0.2).close()
-            return proc
-        except OSError:
-            time.sleep(0.1)
-    proc.kill()
-    print(f"FAIL  could not serve {DIST} on port {PORT}")
-    sys.exit(1)
-
-
 def audit(browser, scheme):
     ctx = browser.new_context(
         color_scheme=scheme, viewport={"width": 1440, "height": 900})
     page = ctx.new_page()
+    page.route(re.compile(r":25900/"), lambda r: r.abort())
     page.on("pageerror", lambda exc: page_errors.append(f"{scheme}: {exc}"))
     page.goto(BASE, wait_until="networkidle")
     page.wait_for_timeout(1500)
@@ -209,7 +189,8 @@ def main():
         print("FAIL  build failed")
         sys.exit(1)
     SHOTS.mkdir(exist_ok=True)
-    server = start_server()
+    global BASE
+    server, BASE = serve_web(PORT, DIST)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -254,6 +235,7 @@ def main():
 
             # Before/after for --text-muted.
             tok = browser.new_context(color_scheme="light").new_page()
+            tok.route(re.compile(r":25900/"), lambda r: r.abort())
             tok.goto(BASE, wait_until="networkidle")
             tok.wait_for_timeout(1200)
             print(f"BEFORE  --text-muted #a39a8e on paper #fbf8f3: "
@@ -281,8 +263,7 @@ def main():
                   "; ".join(page_errors[:3]) if page_errors else "")
             browser.close()
     finally:
-        server.terminate()
-        server.wait(timeout=5)
+        stop(server)
 
     failed = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(failed)}/{len(results)} assertions passed")

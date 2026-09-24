@@ -25,13 +25,13 @@ Usage:  npm run build:web && ~/.hermes/tools-venv/bin/python scripts/e2e_live_st
 """
 import json
 import re
-import socket
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
+from _e2e_harness import serve_web, stop
 
 PORT = 25986
 BASE = f"http://127.0.0.1:{PORT}/"
@@ -117,37 +117,6 @@ def seed(context):
             f" localStorage.setItem({json.dumps(key)}, {json.dumps(json.dumps(val))});")
 
 
-def start_server():
-    for _ in range(30):
-        s = socket.socket()
-        # SO_REUSEADDR: a socket left in TIME_WAIT by the previous run would
-        # otherwise fail this availability probe for up to a minute while the
-        # real server would have bound fine.
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind(("127.0.0.1", PORT))
-            break
-        except OSError:
-            time.sleep(1)
-        finally:
-            s.close()
-    else:
-        print(f"FAIL  port {PORT} busy — refusing a stale server")
-        sys.exit(1)
-    proc = subprocess.Popen([sys.executable, "-m", "http.server", str(PORT),
-                             "--bind", "127.0.0.1"], cwd=str(DIST),
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(50):
-        try:
-            socket.create_connection(("127.0.0.1", PORT), 0.2).close()
-            return proc
-        except OSError:
-            time.sleep(0.1)
-    proc.kill()
-    print(f"FAIL  could not serve {DIST} on {PORT}")
-    sys.exit(1)
-
-
 TRANSCRIPT = """() => {
   const msgs = [...document.querySelectorAll('.messages .message')];
   const assistant = msgs.filter(m => m.classList.contains('message-assistant'));
@@ -176,7 +145,8 @@ def send(page, text):
 
 
 def run_checks():
-    proc = start_server()
+    global BASE
+    proc, BASE = serve_web(PORT, DIST)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -234,7 +204,7 @@ def run_checks():
             check("zero pageerrors", page_errors == [], repr(page_errors[:2]))
             browser.close()
     finally:
-        proc.terminate()
+        stop(proc)
 
     passed = sum(1 for ok, _, _ in checks if ok)
     print(f"\n{passed}/{len(checks)} assertions passed")
