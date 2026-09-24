@@ -10,7 +10,7 @@ import ModelPicker from './ModelPicker.vue';
 import CommandPalette from './CommandPalette.vue';
 import VoiceInput from './VoiceInput.vue';
 import NewSessionDialog from '../features/projects/NewSessionDialog.vue';
-import type { Attachment, SlashCommand } from '../lib/types';
+import type { Attachment, AttachmentMeta, SlashCommand } from '../lib/types';
 import type { SttPartial } from '../lib/stt';
 
 const sessionStore = useSessionStore();
@@ -46,6 +46,30 @@ const expandedThoughts = ref<Set<string>>(new Set());
 const messages = computed(() => sessionStore.messageList);
 
 /**
+ * One file can reach a message twice: as a real content block (or the panel's
+ * own record — both already in `message.attachments`) and as a marker the
+ * agent echoed into the text (what `extractReplayedAttachments` finds). Same
+ * name+kind is the same file — keep the entry with the recoverable bytes.
+ */
+function mergeAttachments(
+  base: AttachmentMeta[],
+  extra: AttachmentMeta[]
+): AttachmentMeta[] {
+  const out = base.map((a) => ({ ...a }));
+  for (const r of extra) {
+    const dup = out.find((a) => a.name === r.name && a.kind === r.kind);
+    if (!dup) {
+      out.push(r);
+      continue;
+    }
+    if (!dup.previewUrl && r.previewUrl) dup.previewUrl = r.previewUrl;
+    if (!dup.body && r.body) dup.body = r.body;
+    if (dup.previewUrl || dup.body) dup.unavailableReason = undefined;
+  }
+  return out;
+}
+
+/**
  * Messages with their attachments in a renderable shape.
  *
  * A turn sent here carries `attachments` metadata directly. A turn the agent
@@ -62,7 +86,7 @@ const renderedMessages = computed(() =>
     return {
       ...message,
       content: text,
-      attachments: [...(message.attachments ?? []), ...replayed],
+      attachments: mergeAttachments(message.attachments ?? [], replayed),
     };
   })
 );
@@ -493,7 +517,13 @@ function getToolKind(kind: string): string {
               >
                 {{ isAttachmentExpanded(message.id, i) ? 'Hide file' : 'Show file' }}
               </button>
-              <span v-else-if="att.kind === 'image'" class="attachment-note">no preview in history</span>
+              <!-- An image/file whose bytes could not be recovered is a named
+                   placeholder with a reason — never a silent gap. -->
+              <span
+                v-else-if="att.unavailableReason"
+                class="attachment-note attachment-missing"
+              >{{ att.unavailableReason }}</span>
+              <span v-else-if="att.kind === 'image' && !att.previewUrl" class="attachment-note">no preview in history</span>
             </div>
             <pre
               v-if="att.body && isAttachmentExpanded(message.id, i)"
@@ -1239,6 +1269,12 @@ function getToolKind(kind: string): string {
   margin-left: auto;
   font-size: 0.6875rem;
   color: var(--text-muted, #a39a8e);
+}
+
+/* A file that is KNOWN missing (not just unpreviewed) reads as a warning,
+   not a quiet aside — the transcript must admit the gap. */
+.attachment-missing {
+  color: var(--bg-danger, #b3402e);
 }
 
 .attachment-image {

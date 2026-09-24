@@ -116,6 +116,18 @@ export interface AttachmentMeta {
    * their bytes in `Attachment.data` instead and leave this unset.
    */
   body?: string;
+  /**
+   * Why this attachment cannot be shown, when it can't. The transcript
+   * renders it as an explicit "which file + why" placeholder — an image that
+   * is known to have existed must never silently disappear from history.
+   */
+  unavailableReason?: string;
+  /**
+   * Pointer into the local attachment cache for bytes too large to keep in
+   * the shared state document (see `lib/attachmentHistory.ts`). `cache:` is a
+   * file under the OS cache dir (Tauri), `local:` a localStorage key (web).
+   */
+  cachePath?: string;
 }
 
 /**

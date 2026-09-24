@@ -5,8 +5,10 @@ import { loadKvStore, type KVStore } from '../lib/host/storage';
 import { getAppVersion } from '../lib/host';
 import { trackEvent, trackError } from '../lib/telemetry';
 import { uuid } from '../lib/uuid';
-import type { SavedSession, ChatMessage, ToolCallInfo, PermissionRequest, SessionMode, SlashCommand, ModelInfo, AgentConfig, Attachment } from '../lib/types';
+import type { SavedSession, ChatMessage, ToolCallInfo, PermissionRequest, SessionMode, SlashCommand, ModelInfo, AgentConfig, Attachment, AttachmentMeta } from '../lib/types';
 import { getTransportKind } from '../lib/types';
+import { attachmentFromContentBlock } from '../lib/attachments';
+import { loadAttachmentHistory, recordTurnAttachments, turnAttachments, forgetSessionAttachments, resolveCachedBytes } from '../lib/attachmentHistory';
 import { AcpClientBridge, createAcpClient } from '../lib/acp-bridge';
 import { onAgentStderr, spawnAgent, killAgent } from '../lib/host';
 import { isDesktop } from '../lib/platform';
@@ -413,6 +415,10 @@ export const useSessionStore = defineStore('session', () => {
     // Sidebar rows the user removed while the agent still holds them.
     dismissedSessions = (await store.get<string[]>('dismissedSessions')) ?? [];
     lastAgentName.value = (await store.get<string>('lastAgent')) ?? '';
+    // The panel's own attachment record (which files rode on which user turn,
+    // and their bytes or a cache ref) — needed before any `session/load`
+    // replay so image turns can be restored when the agent echoes no bytes.
+    await loadAttachmentHistory();
 
     // Load app version (Tauri API on desktop/mobile, build-time inject on web)
     try {
@@ -552,6 +558,83 @@ export const useSessionStore = defineStore('session', () => {
     if (pendingPermission.value && !autonomous.value) armPermissionTimer();
   }
 
+  // ---- Attachment plumbing for replayed/streamed messages ------------------
+  // A content block is not always text: a replayed user or agent turn can
+  // carry `image`, `resource`, `resource_link`, `audio` blocks. Dropping them
+  // made multimodal turns vanish from history on reload. Blocks with real
+  // bytes become renderable attachments; blocks with none still become named
+  // placeholders, so the transcript never pretends the file was not there.
+
+  /**
+   * Agent behind the session currently being created/resumed. During a
+   * replay `currentSession` is not set yet (it lands after `session/load`
+   * resolves), so the merge below can't ask it — this is filled in by
+   * `createSession`/`resumeSession` before the replay starts.
+   */
+  let replayAgentName = '';
+  function attachmentScope(sessionId: string): string {
+    const agent = replayAgentName || currentSession.value?.agentName || '';
+    return `${agent}::${sessionId}`;
+  }
+
+  /** Copy recoverable fields from `src` into `dst` when `dst` lacks them. */
+  function fillAttachment(dst: AttachmentMeta, src: AttachmentMeta): void {
+    if (!dst.previewUrl && src.previewUrl) dst.previewUrl = src.previewUrl;
+    if (!dst.body && src.body) dst.body = src.body;
+    if (!dst.cachePath && src.cachePath) dst.cachePath = src.cachePath;
+    if (dst.previewUrl || dst.body) dst.unavailableReason = undefined;
+  }
+
+  /** Attach a non-text content block to a message, deduped by name+kind. */
+  function attachContentBlock(msg: ChatMessage, block: ContentBlock): void {
+    const meta = attachmentFromContentBlock(block);
+    if (!meta) {
+      console.log('Unhandled content block:', block.type);
+      return;
+    }
+    msg.attachments = msg.attachments ?? [];
+    const existing = msg.attachments.find(
+      (a) => a.name === meta.name && a.kind === meta.kind
+    );
+    if (existing) fillAttachment(existing, meta);
+    else msg.attachments.push(meta);
+  }
+
+  /**
+   * Merge the panel's own attachment record into a replayed user message.
+   * `userTurnIndex` is the message's ordinal among user turns — the same
+   * numbering `sendPrompt` used when recording, so position correlates them
+   * regardless of which device sent the turn.
+   */
+  function mergeRecordedAttachments(sessionId: string, msg: ChatMessage): void {
+    const userTurnIndex = messages.value.reduce(
+      (n, m) => n + (m.role === 'user' ? 1 : 0),
+      0
+    );
+    const recorded = turnAttachments(attachmentScope(sessionId), userTurnIndex);
+    if (!recorded.length) return;
+    msg.attachments = msg.attachments ?? [];
+    for (const rec of recorded) {
+      const existing = msg.attachments.find(
+        (a) => a.name === rec.name && a.kind === rec.kind
+      );
+      if (existing) {
+        fillAttachment(existing, rec);
+        continue;
+      }
+      // Clone: resolving a `cache:`/`local:` ref fills previewUrl lazily —
+      // that must not leak back into the stored document.
+      const meta: AttachmentMeta = { ...rec };
+      if (!meta.previewUrl && !meta.body) {
+        if (meta.cachePath) void resolveCachedBytes(meta);
+        else if (!meta.unavailableReason) {
+          meta.unavailableReason = 'the panel record kept no bytes for this file';
+        }
+      }
+      msg.attachments.push(meta);
+    }
+  }
+
   // Session update handler
   function handleSessionUpdate(notification: SessionNotification) {
     const update = notification.update;
@@ -579,40 +662,49 @@ export const useSessionStore = defineStore('session', () => {
     }
 
     switch (update.sessionUpdate) {
-      case 'user_message_chunk':
+      case 'user_message_chunk': {
         // Append to last user message or create new (for replay)
-        const lastUserMsg = messages.value[messages.value.length - 1];
-        if (lastUserMsg && lastUserMsg.role === 'user') {
-          if (update.content.type === 'text') {
-            lastUserMsg.content += update.content.text;
-          }
-        } else {
-          messages.value.push({
+        let target = messages.value[messages.value.length - 1];
+        if (!target || target.role !== 'user') {
+          target = {
             id: uuid(),
             role: 'user',
-            content: update.content.type === 'text' ? update.content.text : '',
+            content: '',
             timestamp: Date.now(),
-          });
+          };
+          messages.value.push(target);
+          // A brand-new replayed user turn: restore the files the panel
+          // recorded for this ordinal (agents don't echo image bytes).
+          mergeRecordedAttachments(notification.sessionId, target);
+        }
+        if (update.content.type === 'text') {
+          target.content += update.content.text;
+        } else {
+          attachContentBlock(target, update.content);
         }
         break;
+      }
 
-      case 'agent_message_chunk':
+      case 'agent_message_chunk': {
         // Append to last assistant message or create new
-        const lastMsg = messages.value[messages.value.length - 1];
-        if (lastMsg && lastMsg.role === 'assistant') {
-          if (update.content.type === 'text') {
-            lastMsg.content += update.content.text;
-          }
-        } else {
-          messages.value.push({
+        let target = messages.value[messages.value.length - 1];
+        if (!target || target.role !== 'assistant') {
+          target = {
             id: uuid(),
             role: 'assistant',
-            content: update.content.type === 'text' ? update.content.text : '',
+            content: '',
             timestamp: Date.now(),
             toolCalls: [],
-          });
+          };
+          messages.value.push(target);
+        }
+        if (update.content.type === 'text') {
+          target.content += update.content.text;
+        } else {
+          attachContentBlock(target, update.content);
         }
         break;
+      }
 
       case 'agent_thought_chunk':
         // Append to last assistant message's thought field or create new
@@ -776,6 +868,10 @@ export const useSessionStore = defineStore('session', () => {
     // Autonomous is per-run, not a global toggle: reset on every connect so
     // a manual session never inherits it from a previous run.
     autonomous.value = options?.autonomous ?? false;
+    // Attachment records are keyed agent::session — known before the session
+    // id exists, so the replay merge can look them up while currentSession
+    // is still null.
+    replayAgentName = agentName;
 
     // Look up the agent's transport kind so we know whether to do the
     // stdio-only startup choreography (spawn → stderr progress) or the
@@ -1067,6 +1163,7 @@ export const useSessionStore = defineStore('session', () => {
     isLoading.value = true;
     error.value = null;
     autonomous.value = options?.autonomous ?? false;
+    replayAgentName = savedSession.agentName;
 
     try {
       const configStore = useConfigStore();
@@ -1238,6 +1335,22 @@ export const useSessionStore = defineStore('session', () => {
       })),
     });
 
+    // Persist the turn's files against its user-turn ordinal so a later
+    // `session/load` replay can restore them — agents do not imprint image
+    // bytes into the history they stream back. Best-effort: a failed write
+    // must not stall the prompt.
+    if (attachments.length) {
+      const userTurnIndex = messages.value.reduce(
+        (n, m) => n + (m.role === 'user' ? 1 : 0),
+        0
+      );
+      void recordTurnAttachments(
+        attachmentScope(currentSession.value.sessionId),
+        userTurnIndex,
+        attachments
+      );
+    }
+
     isLoading.value = true;
     const activity = useActivityStore();
     activity.recordEntry({
@@ -1394,6 +1507,10 @@ export const useSessionStore = defineStore('session', () => {
     }
     savedSessions.value = savedSessions.value.filter(s => s.id !== sessionId);
     await saveSessionsToStore();
+    // The panel's attachment record for that session goes too — otherwise a
+    // different session that later reuses the same id would inherit files.
+    if (doomed)
+      void forgetSessionAttachments(`${doomed.agentName}::${doomed.sessionId}`);
   }
 
   // Set session mode
