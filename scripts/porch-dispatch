@@ -109,6 +109,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(prog="porch-dispatch",
                                  description="Dispatch a workstream without colliding.")
     ap.add_argument("-a", "--agent", required=True, help="exact porch agent id (devin, spark, ...)")
+    ap.add_argument("--owner", default=os.environ.get("BOARD_AGENT", "hermes-orchestrator"),
+                    help="who owns the board claim (the orchestrator, NOT the executor)")
     ap.add_argument("--cwd", required=True, help="worktree the run works in")
     ap.add_argument("--brief", help="brief file the task text points at")
     ap.add_argument("--card", help="board card id (claim checked)")
@@ -135,7 +137,9 @@ def main() -> int:
         if not args.allow_busy:
             check_worktree_free(cwd)
         if args.card:
-            check_card_free(args.card, args.agent)
+            # The claim belongs to the OWNER (the orchestrator that took the card
+            # and will move it), not to the executor the card is handed to.
+            check_card_free(args.card, args.owner)
     except Refused as exc:
         print(f"porch-dispatch: ОТКАЗ — {exc}", file=sys.stderr)
         return 3

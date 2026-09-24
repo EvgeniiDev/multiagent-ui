@@ -55,3 +55,6 @@ Desktop.ini
 
 # python bytecode from the e2e suites
 scripts/__pycache__/
+
+# e2e scratch dirs (each suite makes its own; never source)
+tmp-*-test/
