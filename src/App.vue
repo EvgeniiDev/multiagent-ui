@@ -20,6 +20,7 @@ import ProjectScopeSelector from './components/ProjectScopeSelector.vue';
 import NewSessionDialog from './features/projects/NewSessionDialog.vue';
 import { useUiStore, VIEWS } from './stores/ui';
 import { useActivityStore } from './stores/activity';
+import { useClaimsStore } from './stores/claims';
 import { useProjectsStore } from './features/scope/registry';
 import type { SavedSession } from './lib/types';
 
@@ -27,6 +28,7 @@ const configStore = useConfigStore();
 const sessionStore = useSessionStore();
 const uiStore = useUiStore();
 const activityStore = useActivityStore();
+const claimsStore = useClaimsStore();
 const projectsStore = useProjectsStore();
 
 const selectedAgent = ref('');
@@ -156,6 +158,10 @@ onMounted(async () => {
   await configStore.setupHotReload();
   await sessionStore.initStore();
   await activityStore.initActivityStore();
+  await claimsStore.initClaimsStore();
+  // e2e seam — same shape as window.__projects / __pipeline: the ledger
+  // write path tests use to append facts (recordEntry) on a live page.
+  (window as unknown as { __activity: unknown }).__activity = activityStore;
   // Registry first: ui's project-scope reads delegate to it.
   await projectsStore.initProjectsStore();
   await uiStore.initUiStore();

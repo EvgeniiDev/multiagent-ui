@@ -15,6 +15,9 @@ device, and a card claimed here is not taken twice.
     boardctl release 3f2a --reason "handing over"
     boardctl note 3f2a "measured: panel writes 41 rows"
     boardctl events --limit 20 --card 3f2a
+    boardctl delegate --session sess-1 --subagent explore --goal "map auth flow"
+    boardctl delegate --session sess-1 --subagent explore --end --outcome done \
+        --detail "mapped 3 entry points"
 
 Every command takes --json for machine-readable output. The acting agent name
 comes from --agent, else $BOARD_AGENT, else "boardctl".
@@ -577,6 +580,48 @@ def cmd_note(args) -> int:
     return 0
 
 
+def cmd_delegate(args) -> int:
+    """Record a delegation fact in the shared activity ledger.
+
+    One event per lifecycle step, keyed to the ORCHESTRATOR's sessionId —
+    that is the join the panel's card run-block makes (pipeline §E):
+      spawn:  --session SID --subagent NAME --goal "what for"
+      finish: --session SID --subagent NAME --end --outcome done|failed|cancelled
+    """
+    agent = args.agent or ACTOR
+    state = args.outcome if args.end else "running"
+    now = int(time.time() * 1000)
+    entry = {
+        "id": str(uuid.uuid4()),
+        "at": now,
+        "kind": "delegate",
+        "agentName": agent,
+        "sessionId": args.session,
+        "cwd": os.getcwd(),
+        "title": args.subagent,
+        "detail": args.detail or args.goal
+                  or ("delegation finished" if args.end else "delegated"),
+        "subagent": args.subagent,
+        "subState": state,
+    }
+    if args.goal:
+        entry["goal"] = args.goal
+    if args.end:
+        entry["endedAt"] = now
+
+    def fn(data):
+        data.setdefault("entries", [])
+        data.setdefault("usage", [])
+        data["entries"].append(entry)
+        data["entries"] = data["entries"][-MAX_ENTRIES:]
+        return data, entry
+
+    mutate("activity.json", empty_activity(), fn)
+    emit(entry, args,
+         lambda: f"delegate {state}: {args.subagent} (session {args.session})")
+    return 0
+
+
 def cmd_events(args) -> int:
     data = read_doc("activity.json", empty_activity())[0]
     entries = data.get("entries") or []
@@ -788,6 +833,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("card")
     s.add_argument("text", nargs="+")
     s.set_defaults(func=cmd_note)
+
+    s = sub.add_parser("delegate", parents=[common],
+                       help="record a subagent delegation in the activity ledger")
+    s.add_argument("--session", required=True,
+                   help="orchestrator sessionId the delegation belongs to")
+    s.add_argument("--subagent", required=True, help="subagent name/id")
+    s.add_argument("--goal", default="", help="what the subagent was asked to do")
+    s.add_argument("--end", action="store_true",
+                   help="mark the subagent finished instead of running")
+    s.add_argument("--outcome", choices=["done", "failed", "cancelled"],
+                   default="done", help="how the delegation ended (with --end)")
+    s.add_argument("--detail", default="", help="outcome/summary text (with --end)")
+    s.add_argument("--agent", default="",
+                   help="orchestrator name (default $BOARD_AGENT or 'boardctl')")
+    s.set_defaults(func=cmd_delegate)
 
     s = sub.add_parser("events", parents=[common], help="recent activity entries (card lifecycle = --kind card)")
     s.add_argument("--limit", type=int, default=20)

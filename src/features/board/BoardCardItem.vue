@@ -6,8 +6,11 @@ import { useRolesStore } from '../../stores/roles';
 import { useUiStore } from '../../stores/ui';
 import { useProjectsStore } from '../../stores/projects';
 import { useArtifactsStore, pickStatusArtifact } from '../../stores/artifacts';
+import { useActivityStore } from '../../stores/activity';
+import { useClaimsStore } from '../../stores/claims';
+import { runInfoFor, subagentsFor, type SubagentRow } from './runInfo';
 import { BOARD_STAGES, stageLabel, statusesForStage } from './columns';
-import { fmtStamp } from './format';
+import { fmtStamp, fmtDur } from './format';
 
 const props = defineProps<{
   card: BoardCard;
@@ -30,6 +33,8 @@ const uiStore = useUiStore();
 const rolesStore = useRolesStore();
 const projectsStore = useProjectsStore();
 const artifactsStore = useArtifactsStore();
+const activityStore = useActivityStore();
+const claimsStore = useClaimsStore();
 
 const menuOpen = ref(false);
 const statusOpen = ref(false);
@@ -58,6 +63,40 @@ const statusToken = computed(() => {
   if (!st || !st.artifacts.length) return null;
   return pickStatusArtifact(props.card.stage, st.artifacts)?.token ?? null;
 });
+
+/** The card's orchestrator run (P7): who runs it, which session, how the
+ * run is doing and for how long — all derived from claims.json and the
+ * activity ledger, never stored on the card itself. `claimsStore.now`
+ * ticks so the state and durations stay live. */
+const runInfo = computed(() =>
+  runInfoFor(props.card, claimsStore.claimFor(props.card.id), activityStore.entries, claimsStore.now)
+);
+
+/** Subagents the run delegated to — `delegate` ledger entries keyed to
+ * the run's sessionId. No events, no rows. */
+const subagents = computed(() =>
+  runInfo.value
+    ? subagentsFor(runInfo.value.sessionId, activityStore.entries, claimsStore.now)
+    : []
+);
+
+const RUN_LABEL: Record<string, string> = {
+  running: 'идёт',
+  waiting: 'ждёт',
+  finished: 'завершён',
+};
+
+const SUB_LABEL: Record<string, string> = {
+  running: 'идёт',
+  done: 'завершён',
+  failed: 'ошибка',
+  cancelled: 'отменён',
+};
+
+function subTitle(s: SubagentRow): string {
+  const parts = [s.name, s.goal, s.outcome].filter(Boolean);
+  return parts.join(' — ');
+}
 
 onMounted(() => {
   const pid = board.projectIdForCard(props.card);
@@ -252,6 +291,31 @@ onBeforeUnmount(() => {
     </div>
 
     <p v-if="card.description" class="card-desc">{{ card.description }}</p>
+
+    <!-- Orchestrator run + subagents (P7): derived from claims.json and
+         `delegate` ledger entries keyed to the run's sessionId. -->
+    <div v-if="runInfo" class="run-block" data-testid="run-block">
+      <div class="run-line">
+        <span class="run-state" :class="`rs-${runInfo.state}`" data-testid="run-state">{{ RUN_LABEL[runInfo.state] }}</span>
+        <span class="run-agent" :title="`Orchestrator: ${runInfo.agentName}`">{{ runInfo.agentName || '—' }}</span>
+        <span v-if="runInfo.sessionId" class="run-sess" :title="`Session ${runInfo.sessionId}`">{{ runInfo.sessionId }}</span>
+        <span v-if="runInfo.durationMs != null" class="run-dur" data-testid="run-duration">{{ fmtDur(runInfo.durationMs) }}</span>
+      </div>
+      <ul v-if="subagents.length" class="sub-list" data-testid="subagent-list">
+        <li
+          v-for="s in subagents"
+          :key="s.key"
+          class="sub-row"
+          data-testid="subagent-row"
+          :data-state="s.state"
+          :title="subTitle(s)"
+        >
+          <span class="sub-name">{{ s.name }}</span>
+          <span class="sub-state" :class="`ss-${s.state}`">{{ SUB_LABEL[s.state] }}</span>
+          <span v-if="s.durationMs != null" class="sub-dur">{{ fmtDur(s.durationMs) }}</span>
+        </li>
+      </ul>
+    </div>
 
     <!-- Status picker — the compact per-card control from the brief: click
          the chip, pick one of this stage's statuses, no modal. -->
@@ -495,6 +559,99 @@ onBeforeUnmount(() => {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* Orchestrator run + subagent rows (P7). Same chip vocabulary as the meta
+   row; the block reads as one fact line plus one line per subagent. */
+.run-block {
+  margin-top: 0.25rem;
+  padding: 0.1875rem 0.375rem;
+  border-left: 2px solid var(--border-color, #e3dbcf);
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.run-line,
+.sub-row {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.625rem;
+  letter-spacing: 0.02em;
+}
+
+.run-state {
+  flex: 0 0 auto;
+  padding: 0.0625rem 0.3rem;
+  border-radius: var(--radius-sm, 4px);
+  color: var(--text-secondary, #6b6259);
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+}
+
+.run-state.rs-running {
+  color: var(--text-accent, #c2532f);
+  background: var(--accent-soft, rgba(194, 83, 47, 0.14));
+}
+
+.run-state.rs-finished {
+  color: var(--bg-success, #5a7d4f);
+}
+
+.run-agent,
+.sub-name {
+  min-width: 0;
+  max-width: 9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-primary, #2b2723);
+}
+
+.run-sess {
+  min-width: 0;
+  max-width: 8rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-muted, #a39a8e);
+}
+
+.run-dur,
+.sub-dur {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted, #a39a8e);
+}
+
+.sub-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.sub-state {
+  flex: 0 0 auto;
+  color: var(--text-muted, #a39a8e);
+}
+
+.sub-state.ss-running {
+  color: var(--text-accent, #c2532f);
+}
+
+.sub-state.ss-done {
+  color: var(--bg-success, #5a7d4f);
+}
+
+.sub-state.ss-failed,
+.sub-state.ss-cancelled {
+  color: var(--bg-danger, #b3402e);
 }
 
 /* Card menus — "Move to"/flags and the status picker share one look. The

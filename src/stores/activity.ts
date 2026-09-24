@@ -31,6 +31,7 @@ export type ActivityKind =
   | 'error'
   | 'lock'
   | 'card'
+  | 'delegate'
   | 'sync';
 
 export interface ActivityEntry {
@@ -48,6 +49,16 @@ export interface ActivityEntry {
   value?: number;
   cost?: number;
   currency?: string;
+  /** Delegation facts (kind === 'delegate'): the subagent this event is
+   * about. `title` carries the human label; `subagent` is the stable key
+   * start/finish events correlate on (defaults to `title` when absent). */
+  subagent?: string;
+  /** Lifecycle state this event asserts for the subagent. */
+  subState?: 'running' | 'done' | 'failed' | 'cancelled';
+  /** What the subagent was asked to do (spawn events). */
+  goal?: string;
+  /** Epoch ms the subagent stopped (terminal events). */
+  endedAt?: number;
 }
 
 /** One `usage_update` sample from the agent: tokens used against a window. */
@@ -83,6 +94,7 @@ export const useActivityStore = defineStore('activity', () => {
   const usage = ref<UsageSample[]>([]);
   let store: KVStore | null = null;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  let syncTimer: ReturnType<typeof setInterval> | null = null;
 
   const recent = (limit = 50): ActivityEntry[] => entries.value.slice(-limit).reverse();
 
@@ -339,10 +351,36 @@ export const useActivityStore = defineStore('activity', () => {
     await store.save();
   }
 
+  // The server-side doc gains entries from other writers too (boardctl,
+  // the runner, agents on other devices); RemoteKVStore adopts the newer
+  // doc on its own poll, but this ref was filled once at init. A periodic
+  // re-read + id-merge keeps it in step without dropping locally recorded
+  // rows that haven't been pushed yet.
+  async function syncEntries(): Promise<void> {
+    if (!store) return;
+    const remote = (await store.get<ActivityEntry[]>('entries')) ?? [];
+    const byId = new Map(entries.value.map((e) => [e.id, e]));
+    let changed = false;
+    for (const e of remote) {
+      if (e && typeof e.id === 'string' && !byId.has(e.id)) {
+        byId.set(e.id, e);
+        changed = true;
+      }
+    }
+    if (changed) {
+      entries.value = [...byId.values()]
+        .sort((a, b) => a.at - b.at)
+        .slice(-MAX_ENTRIES);
+    }
+  }
+
   async function initActivityStore(): Promise<void> {
     store = await loadKvStore(STORE_PATH);
     entries.value = (await store.get<ActivityEntry[]>('entries')) ?? [];
     usage.value = (await store.get<UsageSample[]>('usage')) ?? [];
+    if (typeof window !== 'undefined' && !syncTimer) {
+      syncTimer = setInterval(() => void syncEntries(), 5000);
+    }
   }
 
   async function clear(): Promise<void> {
