@@ -33,6 +33,7 @@ SCRIPTS = [
     ("review", REPO / "scripts/e2e_review.py", None),
     ("dashboard math", REPO / "scripts/e2e_dash_math.py", None),
     ("voice", REPO / "scripts/e2e_voice.py", None),
+    ("bridge timeout", REPO / "scripts/e2e_bridge_timeout.py", None),
 ]
 
 
