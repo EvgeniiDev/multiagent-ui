@@ -58,3 +58,6 @@ scripts/__pycache__/
 
 # e2e scratch dirs (each suite makes its own; never source)
 tmp-*-test/
+
+# Local devin config for the sandbox tree (workspace trust off).
+devin.json
