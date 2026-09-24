@@ -25,6 +25,7 @@ SCRIPTS = [
     ("history images", REPO / "scripts/e2e_history_images.py", None),
     ("scrollbars", REPO / "scripts/e2e_scrollbars.py", None),
     ("roles", REPO / "scripts/e2e_roles.py", None),
+    ("role files", REPO / "scripts/e2e_role_files.py", None),
     ("card pipeline", REPO / "scripts/e2e_card_pipeline.py", None),
     ("auto approve", REPO / "scripts/e2e_auto_approve.py", None),
     ("runner", REPO / "scripts/e2e_runner.py", None),
