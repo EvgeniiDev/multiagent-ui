@@ -43,6 +43,9 @@ export interface ActivityEntry {
   sessionId?: string;
   /** Role the dispatcher ran under, on `card` events it wrote. */
   role?: string;
+  /** Model the dispatcher's run/claim used for this step, on `card`
+   * events — present only when the role carries `models` (never invented). */
+  model?: string;
   cwd?: string;
   title?: string;
   detail?: string;

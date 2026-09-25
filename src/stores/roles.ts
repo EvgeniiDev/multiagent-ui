@@ -49,12 +49,25 @@ export interface Role {
   timeoutMin: number;
   /** Attempts per card before the dispatcher flags it blocked. 1 = no retry. */
   maxRetries: number;
+  /** Optional per-step models: the args template may reference
+   * `{models.plan}` / `{models.execute}` and the runner substitutes the
+   * value for the CURRENT step at spawn time (`plan` stage -> `plan`,
+   * anything else -> `execute`). Free strings — the panel knows no model
+   * names. Absent = one model baked into the args, exactly as before. */
+  models?: RoleModels;
   /** Review-cycle rules (convention: carried by the reviewtest role). The
    * severity vocabulary, the severities that gate `agent_tested`, the ones
    * that spawn backlog cards, and the round limit are DATA — the panel
    * displays them, `boardctl` reads the same roles.json, and the role's
    * prompt file states them for the CLI agent. */
   review?: ReviewRules;
+}
+
+export interface RoleModels {
+  /** Model for the planning/slicing step (card claimed in the `plan` stage). */
+  plan: string;
+  /** Model for every other step (spec, dev, reviewtest). */
+  execute: string;
 }
 
 export interface ReviewRules {
@@ -113,8 +126,21 @@ function sanitizeRole(raw: unknown): Role | null {
     pollIntervalSec: intAtLeast(r.pollIntervalSec, MIN_POLL_SEC, 15),
     timeoutMin: intAtLeast(r.timeoutMin, MIN_TIMEOUT_MIN, 45),
     maxRetries: intAtLeast(r.maxRetries, MIN_RETRIES, 1),
+    models: sanitizeModels(r.models),
     review: sanitizeReview(r.review),
   };
+}
+
+/** Permissive restore of a persisted `role.models`: kept only when both
+ * step values are non-empty strings; anything malformed drops the field,
+ * not the role (a role without `models` is the simple case). */
+function sanitizeModels(raw: unknown): RoleModels | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const m = raw as Partial<RoleModels>;
+  const plan = typeof m.plan === 'string' ? m.plan.trim() : '';
+  const execute = typeof m.execute === 'string' ? m.execute.trim() : '';
+  if (!plan || !execute) return undefined;
+  return { plan, execute };
 }
 
 /** Permissive restore of a persisted `role.review`: absent/non-object stays
@@ -289,8 +315,23 @@ export const useRolesStore = defineStore('roles', () => {
       pollIntervalSec,
       timeoutMin,
       maxRetries,
+      models: validateModels(input.models),
       review: validateReview(input.review),
     };
+  }
+
+  /** Strict check for a `role.models` written through the UI: when the
+   * field is present it must hold BOTH step models as non-empty strings —
+   * a half pair would leave one step untemplated. `undefined` stays
+   * `undefined` (the role keeps the single model baked into its args). */
+  function validateModels(raw: RoleModels | undefined): RoleModels | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    const plan = typeof raw.plan === 'string' ? raw.plan.trim() : '';
+    const execute = typeof raw.execute === 'string' ? raw.execute.trim() : '';
+    if (!plan || !execute) {
+      throw new Error('models.plan and models.execute must be non-empty strings');
+    }
+    return { plan, execute };
   }
 
   /** Strict check for a `role.review` written through the UI: the severity
