@@ -21,7 +21,12 @@ the card; the runner never does). Asserts:
   5. cancel <card> kills that card's child only + flags it blocked;
      cancel on a foreign claim refuses; stop-all releases only this
      dispatcher's claims and kills only its own children;
-  6. ledger entries written by the dispatcher carry `role` + `sessionId`.
+  6. ledger entries written by the dispatcher carry `role` + `sessionId`;
+  7. the blocked flag is a dispatch veto applied atomically: `boardctl
+     block` puts flag + reason on the card in one write WITHOUT moving it
+     (blocked is a flag, not a column), the dispatcher refuses it, and
+     `boardctl unblock` clears the pair leaving the card in the same
+     stage, where the next pass takes it again.
 
 Usage:
     ~/.hermes/tools-venv/bin/python scripts/e2e_dispatch.py
@@ -153,6 +158,18 @@ def run_runner(*args, runner_id="e2e-runner", env_extra=None, timeout=120):
     return subprocess.run(
         ["node", str(RUNNER), *args], capture_output=True, text=True,
         timeout=timeout, env=runner_env(runner_id, env_extra), cwd=ROOT)
+
+
+BOARDCTL = ROOT / "scripts" / "boardctl"
+
+
+def run_boardctl(*args):
+    """boardctl against this suite's state server — the same flag/write
+    path the orchestrator uses, so flag changes are the real one-write
+    action, not a hand-built doc."""
+    return subprocess.run(
+        [sys.executable, str(BOARDCTL), "--url", STATE_URL, *args],
+        capture_output=True, text=True, timeout=30, cwd=ROOT)
 
 
 def serve_runner(runner_id, env_extra=None):
@@ -599,6 +616,66 @@ def main():
                   and any(e.get("sessionId") == f"sess-{a_card}"
                           for e in cranks),
                   json.dumps(cranks)[:400])
+
+        # ============== leg 5b: the blocked flag is a dispatch veto ==========
+        # The rule under test: `blocked` is a flag, not a column — flagging
+        # is one atomic write (flag + reason together) that never moves the
+        # card, no dispatcher may take a flagged card, and clearing the flag
+        # leaves the card in the same stage, eligible again.
+        seed([mk_card("card-flag", "dev", "in_progress")],
+             {"timeoutMin": 0.5, "maxRetries": 1})
+
+        proc = run_boardctl("block", "card-flag", "--reason", "e2e hold")
+        check("flag rule: boardctl block exits 0",
+              proc.returncode == 0, proc.stderr[:200])
+        card = board_card("card-flag") or {}
+        check("flag rule: block lands flag+reason, card keeps its stage",
+              card.get("blocked") is True
+              and card.get("blockedReason") == "e2e hold"
+              and card.get("stage") == "dev"
+              and card.get("status") == "in_progress",
+              json.dumps(card)[:250])
+
+        proc = run_runner("--once")
+        try:
+            runs = json.loads(proc.stdout).get("runs", [])
+        except ValueError:
+            runs = None
+        check("flag rule: dispatcher refuses the flagged card",
+              runs == [] and "card-flag" not in claims_map(),
+              proc.stdout[:250])
+        check("flag rule: no card dir was created for the flagged card",
+              not card_dir("card-flag").exists())
+        card = board_card("card-flag") or {}
+        check("flag rule: still blocked in dev after the refused pass",
+              card.get("blocked") is True and card.get("stage") == "dev",
+              json.dumps(card)[:200])
+
+        proc = run_boardctl("unblock", "card-flag")
+        check("flag rule: boardctl unblock exits 0",
+              proc.returncode == 0, proc.stderr[:200])
+        card = board_card("card-flag") or {}
+        check("flag rule: unblock clears flag+reason, stage untouched",
+              card.get("blocked") is not True
+              and not card.get("blockedReason")
+              and card.get("stage") == "dev",
+              json.dumps(card)[:250])
+
+        proc = run_runner("--once")
+        try:
+            runs = json.loads(proc.stdout).get("runs", [])
+        except ValueError:
+            runs = None
+        check("flag rule: dispatcher takes the card again once cleared",
+              bool(runs) and runs[0].get("card") == "card-flag"
+              and runs[0].get("exitCode") == 0
+              and card_dir("card-flag").exists(),
+              json.dumps(runs)[:250])
+        check("flag rule: run ended and claim released",
+              "card-flag" not in claims_map())
+        card = board_card("card-flag") or {}
+        check("flag rule: card is not flagged after the successful run",
+              card.get("blocked") is not True, json.dumps(card)[:200])
 
         # ================= leg 6: audit fields across the suite ==============
         disp = [e for e in activity_entries()

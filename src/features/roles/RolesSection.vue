@@ -726,7 +726,7 @@ onMounted(async () => {
   color: var(--bg-danger);
 }
 .delete-btn:hover {
-  background: var(--bg-danger);
+  background: var(--bg-danger-hover);
   color: var(--text-on-accent, #fbf8f3);
 }
 .no-roles {

@@ -96,6 +96,17 @@ def check_card_free(card: str, agent: str) -> None:
     if out.returncode != 0:
         raise SystemExit(f"boardctl show {card} failed: {out.stderr.strip() or out.returncode}")
     data = json.loads(out.stdout)
+    # A blocking flag is a veto the same way a live claim is: `blocked` is a
+    # flag on the card, not a stage — it stays in place, visibly marked, and
+    # nothing may be dispatched onto it until the flag clears.
+    if data.get("cancelled"):
+        raise Refused(f"карточка {card} отменена (cancelled) — диспетчить нечего")
+    if data.get("blocked"):
+        reason = data.get("blockedReason") or "без причины"
+        raise Refused(
+            f"карточка {card} заблокирована ({reason}) — "
+            f"сначала сними флаг (boardctl unblock {card[:8]})"
+        )
     claim = data.get("claim")
     if claim and claim.get("agentName") not in (None, "", agent):
         left = (int(claim.get("leaseUntil", 0)) - int(__import__("time").time() * 1000)) // 1000

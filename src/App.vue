@@ -626,6 +626,7 @@ function clearError() {
   --bg-code: #2b2723;
   --bg-success: #5a7d4f;
   --bg-danger: #b3402e;
+  --bg-danger-hover: #9c3524;
   --bg-warning: #f5e9cf;
   --text-primary: #2b2723;
   --text-secondary: #6b6259;
@@ -668,6 +669,12 @@ function clearError() {
     --bg-hover: #363029;
     --bg-user: #3d3128;
     --bg-assistant: #332d28;
+    /* Danger follows the accent's dark-scheme rule: the fill lightens so the
+     * dark --text-on-accent ink still reads >= 4.5:1 on it (deep #b3402e
+     * measured 2.94:1). As a text/border ink the lighter red also keeps its
+     * contrast on the dark surfaces. */
+    --bg-danger: #d9775f;
+    --bg-danger-hover: #e08a70;
     --text-primary: #ece5da;
     --text-secondary: #b0a496;
     --text-muted: #b3a79b;
@@ -894,7 +901,7 @@ html, body, #app {
 }
 
 .disconnect-btn:hover {
-  background: #c82333;
+  background: var(--bg-danger-hover);
 }
 
 .sidebar-toggle-collapsed {
