@@ -52,6 +52,11 @@ const formMaxConcurrent = ref(1);
 const formPollIntervalSec = ref(15);
 const formTimeoutMin = ref(45);
 const formMaxRetries = ref(1);
+// Optional per-step model pair — only meaningful when the args template
+// references a `{models.*}` placeholder, so the fields stay hidden until
+// then (the simple single-model case is not bothered by them).
+const formModelPlan = ref('');
+const formModelExecute = ref('');
 const formIdleTimeoutMin = ref(15);
 // Review-cycle rules (the severity vocabulary, the gate/backlog severities
 // and the round limit) are role DATA — text fields here, `role.review` in
@@ -77,6 +82,8 @@ function resetForm(): void {
   formPollIntervalSec.value = 15;
   formTimeoutMin.value = 45;
   formMaxRetries.value = 1;
+  formModelPlan.value = '';
+  formModelExecute.value = '';
   formIdleTimeoutMin.value = 15;
   formReviewSev.value = '';
   formReviewBlocking.value = '';
@@ -103,6 +110,8 @@ function startEdit(r: Role): void {
   formPollIntervalSec.value = r.pollIntervalSec;
   formTimeoutMin.value = r.timeoutMin;
   formMaxRetries.value = r.maxRetries;
+  formModelPlan.value = r.models?.plan ?? '';
+  formModelExecute.value = r.models?.execute ?? '';
   formIdleTimeoutMin.value = r.idleTimeoutMin;
   formReviewSev.value = r.review?.severities.join(' ') ?? '';
   formReviewBlocking.value = r.review?.blocking.join(' ') ?? '';
@@ -135,7 +144,22 @@ function parseArgs(argsString: string): string[] {
   return args;
 }
 
+/** Show the model pair only when the args template references a
+ * `{models.*}` placeholder — or when a pair is already filled in (a role
+ * that carries `models` keeps them visible for review/removal even if the
+ * args were since simplified). */
+const showModelFields = computed(
+  () =>
+    /\{models\.(plan|execute)\}/.test(formArgs.value) ||
+    !!formModelPlan.value.trim() ||
+    !!formModelExecute.value.trim()
+);
+
 function formToRole(id: string): Role {
+  const anyModels = formModelPlan.value.trim() || formModelExecute.value.trim();
+  const models = anyModels
+    ? { plan: formModelPlan.value.trim(), execute: formModelExecute.value.trim() }
+    : undefined;
   const anyReview =
     formReviewSev.value.trim() ||
     formReviewBlocking.value.trim() ||
@@ -168,6 +192,7 @@ function formToRole(id: string): Role {
     pollIntervalSec: Number(formPollIntervalSec.value),
     timeoutMin: Number(formTimeoutMin.value),
     maxRetries: Number(formMaxRetries.value),
+    models,
     idleTimeoutMin: Number(formIdleTimeoutMin.value),
     review,
   };
@@ -344,7 +369,19 @@ onMounted(async () => {
         <div class="form-group form-group-wide">
           <label>Arguments</label>
           <input v-model="formArgs" type="text" placeholder="-p --model swe-2-max" data-testid="role-args" />
-          <small>Space-separated. Use quotes for args with spaces.</small>
+          <small>Space-separated. Use quotes for args with spaces. Reference
+            <code>{models.plan}</code> / <code>{models.execute}</code> to take
+            the step model from the pair below.</small>
+        </div>
+        <div class="form-group" v-if="showModelFields">
+          <label>Model for planning (optional)</label>
+          <input v-model="formModelPlan" type="text" placeholder="model for the plan stage" data-testid="role-model-plan" />
+          <small>Substituted into <code>{models.*}</code> args while the card is in the plan stage.</small>
+        </div>
+        <div class="form-group" v-if="showModelFields">
+          <label>Model for execution (optional)</label>
+          <input v-model="formModelExecute" type="text" placeholder="model for all other stages" data-testid="role-model-execute" />
+          <small>Substituted on every other step. Both fields are required to store the pair.</small>
         </div>
         <div class="form-group">
           <label>Max concurrent</label>
@@ -424,6 +461,9 @@ onMounted(async () => {
           <div class="role-limits">
             id <code>{{ r.id }}</code> · args <code>{{ r.args.join(' ') || '—' }}</code>
             · max {{ r.maxConcurrent }} · poll {{ r.pollIntervalSec }}s · timeout {{ r.timeoutMin }}m · retries {{ r.maxRetries }}
+            <template v-if="r.models">
+              · models <code :data-testid="`role-models-${r.id}`">plan→{{ r.models.plan }} execute→{{ r.models.execute }}</code>
+            </template>
             · idle {{ r.idleTimeoutMin > 0 ? `${r.idleTimeoutMin}m` : 'off' }}
             <template v-if="r.review">
               · review <code data-testid="role-review-{{ r.id }}">{{ r.review.severities.join(' ') }}</code>

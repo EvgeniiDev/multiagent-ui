@@ -31,6 +31,7 @@ SCRIPTS = [
     ("runner", REPO / "scripts/e2e_runner.py"),
     ("plan queue", REPO / "scripts/e2e_planqueue.py"),
     ("dispatch", REPO / "scripts/e2e_dispatch.py"),
+    ("model step", REPO / "scripts/e2e_modelstep.py"),
     ("watchdog", REPO / "scripts/e2e_watchdog.py"),
     ("agents tab", REPO / "scripts/e2e_agents_tab.py"),
     ("pm", REPO / "scripts/e2e_pm.py"),

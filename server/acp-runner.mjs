@@ -12,7 +12,8 @@
 //   3. spawns the role's CLI with cwd = projectPath (up to `maxRetries`
 //      attempts on a non-zero exit), stdout/stderr -> run-<N>.log,
 //   4. renews `leaseUntil` on a heartbeat while the child runs,
-//   5. on exit writes `kind: 'card'` events (with `role` + `sessionId`) to
+//   5. on exit writes `kind: 'card'` events (with `role` + `sessionId` and,
+//      when the role carries `models`, the step's `model`) to
 //      activity.json, releases the claim, and NEVER moves the card.
 //
 // Modes:
@@ -355,7 +356,7 @@ function ownClaim(c) {
 // Ledger + claims.
 // ---------------------------------------------------------------------------
 
-async function appendActivity({ agentName, cwd, title, detail, role, sessionId }) {
+async function appendActivity({ agentName, cwd, title, detail, role, sessionId, model }) {
   await mutate('activity.json', emptyActivity(), (doc) => {
     doc.entries = doc.entries || [];
     doc.usage = doc.usage || [];
@@ -369,6 +370,9 @@ async function appendActivity({ agentName, cwd, title, detail, role, sessionId }
       detail,
       role: role || '',
       sessionId: sessionId || '',
+      // `model` is the step model the claim/run actually used; absent when
+      // the role carries no `models` — never invented.
+      ...(model ? { model } : {}),
     });
     doc.entries = doc.entries.slice(-MAX_ENTRIES);
     return doc;
@@ -447,6 +451,7 @@ async function claimCard(card, role, timeoutMin, pid) {
     }
     const prev = doc.claims[card.id] || {};
     const now = Date.now();
+    const model = stepModel(role, card.stage);
     doc.claims[card.id] = {
       agentName,
       sessionId: prev.sessionId || '',
@@ -459,6 +464,9 @@ async function claimCard(card, role, timeoutMin, pid) {
       runnerId: RUNNER_ID,
       runnerPid: process.pid,
       stage: card.stage,
+      // The step model in effect for this claim — lets later audit entries
+      // (sweep, cancel, stop-all) name it without re-reading the role.
+      ...(model ? { model } : {}),
     };
     doc.version = 1;
     return doc;
@@ -536,6 +544,7 @@ async function sweepExpiredClaims() {
         title: card?.title || cid,
         role: claim?.roleId || '',
         sessionId: claim?.sessionId || '',
+        model: claim?.model,
         detail:
           `lease expired — claim dropped for ${cid} ` +
           `(held by ${claim?.agentName || '?'}); card returned to ` +
@@ -563,6 +572,30 @@ function maxAttemptsFor(role) {
   return Number.isFinite(n) && n >= 1 ? n : 1;
 }
 
+// A role may declare ONE model for planning and another for the rest of
+// the run: `role.models = {plan, execute}` and `role.args` entries may
+// reference `{models.plan}` / `{models.execute}`. Both spellings resolve
+// to the model for the CURRENT step — the card's stage decides the step
+// (`plan` -> models.plan, anything else -> models.execute) — so one role
+// bound to several stages switches model mid-pipeline. A role without
+// valid `models` gets no substitution and no `model` field on its ledger
+// entries: the ledger stays honest instead of inventing a value.
+const MODEL_REF_RE = /\{models\.(?:plan|execute)\}/g;
+const MODEL_REF_TEST = /\{models\.(?:plan|execute)\}/;
+
+function stepModel(role, stage) {
+  const m = role?.models;
+  if (!m || typeof m !== 'object') return null;
+  const step = stage === 'plan' ? 'plan' : 'execute';
+  const v = m[step];
+  return typeof v === 'string' && v.trim() ? v.trim() : null;
+}
+
+function substArgs(args, model) {
+  if (!model) return [...(args || [])];
+  return (args || []).map((a) => String(a).replace(MODEL_REF_RE, model));
+}
+
 // Minutes of child silence the watchdog tolerates. 0 disables it (long
 // non-streaming commands are legitimate); absent/malformed -> the 15 min
 // default. Fractional values are honoured (e2e uses absurdly low ones).
@@ -588,7 +621,14 @@ async function runCard(card, project, role, attemptsSoFar) {
   // carry the print/one-shot flag itself (devin: `-p`, pi: `-p`, codex: exec):
   // --prompt-file alone leaves devin in interactive REPL mode, which dies with
   // "Scrollback error: io error" when there is no TTY.
-  const args = [...(role.args || []), '--prompt-file', briefPath];
+  const model = stepModel(role, card.stage);
+  const args = [...substArgs(role.args, model), '--prompt-file', briefPath];
+  if (args.some((a) => MODEL_REF_TEST.test(a))) {
+    console.error(
+      `run ${card.id}: args reference {models.*} but role '${role.id}' ` +
+        `carries no valid models — placeholder left literal`,
+    );
+  }
 
   if (DRY_RUN) {
     console.log(`[dry-run] ${cmdForLog(role.cli, args)} (cwd=${project.path})`);
@@ -607,6 +647,7 @@ async function runCard(card, project, role, attemptsSoFar) {
     title,
     role: role.id,
     sessionId,
+    model,
     detail: `claimed ${card.id} lease=${timeoutMin}m role=${role.id}`,
   });
 
@@ -744,6 +785,7 @@ async function runCard(card, project, role, attemptsSoFar) {
         title,
         role: role.id,
         sessionId,
+        model,
         detail:
           `start ${card.id} attempt=${attempt}/${maxAttempts} pid=${child.pid} ` +
           `cmd: ${cmdForLog(role.cli, args)}` +
@@ -796,6 +838,7 @@ async function runCard(card, project, role, attemptsSoFar) {
         title,
         role: role.id,
         sessionId,
+        model,
         detail: [
           `cmd: ${cmdForLog(role.cli, args)}`,
           `exit=${exitCode}`,
@@ -843,6 +886,7 @@ async function runCard(card, project, role, attemptsSoFar) {
           title,
           role: role.id,
           sessionId,
+          model,
           detail: `retry ${card.id} — exit=${exitCode}, running attempt ${attempt + 1}/${maxAttempts}`,
         });
         continue;
@@ -857,6 +901,7 @@ async function runCard(card, project, role, attemptsSoFar) {
         title,
         role: role.id,
         sessionId,
+        model,
         detail: `maxRetries ${maxAttempts} exhausted on ${card.id} — card flagged blocked`,
       });
       return { card: card.id, exitCode, retriesExhausted: true, log: logPath };
@@ -1063,6 +1108,7 @@ async function stopAll({ kill = true } = {}) {
           title: titles[cid] || cid,
           role: claim?.roleId || '',
           sessionId: claim?.sessionId || '',
+          model: claim?.model,
           detail: `${kill ? 'stop-all' : 'release-all'} card=${cid} ${outcome} role=${claim?.roleId || '-'}`,
         });
       } catch (e) {
@@ -1142,6 +1188,7 @@ async function cancelCard(ref) {
       title: card?.title || cid,
       role: claim?.roleId || '',
       sessionId: claim?.sessionId || '',
+      model: claim?.model,
       detail: `cancel ${cid}: ${outcome}; claim released; card flagged blocked`,
     });
   } catch (e) {
