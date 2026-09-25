@@ -68,3 +68,6 @@ docs/*.png
 # per-workstream brief written by the orchestrator (scratch, not source)
 BRIEF.md
 CONTINUE.md
+
+# pm-wakeup run artefacts (briefs, logs, reports — runtime, not source)
+.acp/pm/
