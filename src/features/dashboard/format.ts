@@ -4,6 +4,18 @@ export function fmtInt(n: number): string {
   return Math.round(n).toLocaleString('en-US');
 }
 
+/**
+ * Token figure with its estimated part marked. Exact numbers stay plain;
+ * bridge estimates are prefixed `~` — "8,345 + ~4,500" when a row mixes both
+ * layers, "~4,500" when the whole figure is an estimate.
+ */
+export function fmtTokensWithEst(tokens: number, estTokens = 0): string {
+  const est = Math.min(Math.max(0, estTokens), Math.max(0, tokens));
+  if (est <= 0) return fmtInt(tokens);
+  if (est >= tokens) return `~${fmtInt(tokens)}`;
+  return `${fmtInt(tokens - est)} + ~${fmtInt(est)}`;
+}
+
 /** Compact axis scale: 950 -> "950", 1500 -> "1.5k", 2.3M etc. */
 export function fmtCompact(n: number): string {
   const abs = Math.abs(n);

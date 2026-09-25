@@ -18,6 +18,7 @@ import {
   fmtInt,
   fmtCompact,
   fmtCostGroups,
+  fmtTokensWithEst,
   groupCost,
   shortDate,
   fmtStamp,
@@ -59,6 +60,7 @@ const summary = computed(() => {
 interface AgentRow {
   name: string;
   tokens: number;
+  estTokens: number;
   cost: number;
   turns: number;
   share: number;
@@ -78,6 +80,7 @@ const agentRows = computed<AgentRow[]>(() => {
     return {
       name: r.agentName,
       tokens: r.tokens,
+      estTokens: r.estTokens,
       cost: r.cost,
       turns: r.turns,
       share: total > 0 ? (r.tokens / total) * 100 : 0,
@@ -94,6 +97,7 @@ interface ProjectRow {
   project: string;
   cwd: string;
   tokens: number;
+  estTokens: number;
   cost: number;
   turns: number;
   share: number;
@@ -117,6 +121,7 @@ const projectRows = computed<ProjectRow[]>(() => {
       project: r.project,
       cwd: cur || r.cwd || '',
       tokens: r.tokens,
+      estTokens: r.estTokens,
       cost: r.cost,
       turns: r.turns,
       share: total > 0 ? (r.tokens / total) * 100 : 0,
@@ -130,6 +135,7 @@ interface DayPoint {
   day: string;
   label: string;
   tokens: number;
+  estTokens: number;
   cost: number;
   turns: number;
   costs: string;
@@ -162,6 +168,7 @@ const dayPoints = computed<DayPoint[]>(() => {
   const out: DayPoint[] = [];
   for (let t = start.getTime(); t <= end.getTime(); t += step * 86400000) {
     let tokens = 0;
+    let estTokens = 0;
     let cost = 0;
     let turns = 0;
     let key = '';
@@ -170,6 +177,7 @@ const dayPoints = computed<DayPoint[]>(() => {
       const r = filled.get(key);
       if (r) {
         tokens = r.tokens;
+        estTokens = r.estTokens;
         cost = r.cost;
         turns = r.turns;
       }
@@ -179,12 +187,13 @@ const dayPoints = computed<DayPoint[]>(() => {
         const r = filled.get(iso(new Date(t + k * 86400000)));
         if (r) {
           tokens += r.tokens;
+          estTokens += r.estTokens;
           cost += r.cost;
           turns += r.turns;
         }
       }
     }
-    out.push({ day: key, label: labelFor(key, t, step), tokens, cost, turns, costs: fmtCostGroups(
+    out.push({ day: key, label: labelFor(key, t, step), tokens, estTokens, cost, turns, costs: fmtCostGroups(
         groupCost(
           samples.filter((s) => {
             const sd = new Date(s.at).toISOString().slice(0, 10);
@@ -239,11 +248,20 @@ const chartGeom = computed(() => {
   const barW = Math.max(2, Math.min(28, slot * 0.6));
   return dayPoints.value.map((d, i) => {
     const h = (d.tokens / max) * plotH;
+    // The estimate share stacks on top and renders hatched, so a day's bar
+    // never presents a bridge guess as agent-measured tokens.
+    const hTotal = Math.max(d.tokens > 0 ? 2 : 0, h);
+    const hEst = Math.min((Math.min(d.estTokens, d.tokens) / max) * plotH, hTotal);
+    const hFact = hTotal - hEst;
     return {
       x: PAD_L + slot * i + (slot - barW) / 2,
-      y: PAD_T + plotH - h,
+      y: PAD_T + plotH - hTotal,
       w: barW,
-      h: Math.max(d.tokens > 0 ? 2 : 0, h),
+      h: hTotal,
+      yFact: PAD_T + plotH - hFact,
+      hFact,
+      yEst: PAD_T + plotH - hFact - hEst,
+      hEst,
     };
   });
 });
@@ -261,6 +279,7 @@ interface SessionRow {
   agentName: string;
   project: string;
   tokens: number;
+  estTokens: number;
   cost: number;
   lastAt: number;
   sessionId: string;
@@ -269,17 +288,21 @@ interface SessionRow {
 
 const sessionRows = computed<SessionRow[]>(() => {
   const { from, to } = bounds.value;
+  // deltaRows: what each session consumed in the window (last minus baseline),
+  // not the sum of its running totals — summing `used` across samples
+  // multiplied a session by its sample count, the same xN bug the summary had.
+  const deltas = activity.deltaRows(from, to);
   const samples = activity.usageInRange(from, to);
-  const entries = activity.entriesInRange(from, to);
-  const bySession = new Map<string, { tokens: number; samples: UsageSample[] }>();
+  const lastSampleAt = new Map<string, number>();
+  const samplesBySession = new Map<string, UsageSample[]>();
   for (const s of samples) {
-    const acc = bySession.get(s.sessionId) ?? { tokens: 0, samples: [] };
-    acc.tokens += Math.max(0, s.used);
-    acc.samples.push(s);
-    bySession.set(s.sessionId, acc);
+    lastSampleAt.set(s.sessionId, Math.max(lastSampleAt.get(s.sessionId) ?? 0, s.at));
+    const list = samplesBySession.get(s.sessionId) ?? [];
+    list.push(s);
+    samplesBySession.set(s.sessionId, list);
   }
   const meta = new Map<string, { title: string; agentName: string; cwd?: string; at: number }>();
-  for (const e of entries) {
+  for (const e of activity.entriesInRange(from, to)) {
     if (!e.sessionId) continue;
     const m = meta.get(e.sessionId);
     if (!m || e.at > m.at) {
@@ -291,20 +314,22 @@ const sessionRows = computed<SessionRow[]>(() => {
       });
     }
   }
-  return [...bySession.entries()]
-    .map(([sessionId, acc]) => {
+  return deltas
+    .map((row) => {
+      const sessionId = row.sessionId ?? '';
       const m = meta.get(sessionId);
-      const first = acc.samples[0];
+      const sessionSamples = samplesBySession.get(sessionId) ?? [];
       return {
         key: sessionId,
-        title: m?.title ?? first.sessionId.slice(0, 8),
-        agentName: m?.agentName ?? first.agentName,
-        project: projectName(m?.cwd ?? first.cwd),
-        tokens: acc.tokens,
-        cost: acc.samples.reduce((s, x) => s + (x.cost ?? 0), 0),
-        lastAt: Math.max(m?.at ?? 0, ...acc.samples.map((x) => x.at)),
+        title: m?.title ?? sessionId.slice(0, 8),
+        agentName: m?.agentName ?? row.agentName,
+        project: projectName(m?.cwd ?? row.cwd),
+        tokens: row.tokens,
+        estTokens: row.source === 'estimate' ? row.tokens : 0,
+        cost: row.cost,
+        lastAt: Math.max(m?.at ?? 0, lastSampleAt.get(sessionId) ?? 0),
         sessionId,
-        costs: fmtCostGroups(groupCost(acc.samples)),
+        costs: fmtCostGroups(groupCost(sessionSamples)),
       };
     })
     .sort((a, b) => b.tokens - a.tokens)
@@ -329,8 +354,10 @@ const limitForm = ref({ label: '', scope: 'global' as 'agent' | 'project' | 'glo
 
 function limitUsage(l: UsageLimit, nowMs: number): number {
   const from = periodStart(l.period, nowMs);
-  const rows = activity.usageInRange(from, nowMs);
-  return rows
+  // Quotas compare against what was actually consumed in the period — the
+  // per-session delta, not the sum of every running-total sample.
+  return activity
+    .deltaRows(from, nowMs)
     .filter((r) =>
       l.scope === 'global'
         ? true
@@ -338,7 +365,7 @@ function limitUsage(l: UsageLimit, nowMs: number): number {
           ? r.agentName === l.target
           : projectName(r.cwd) === l.target
     )
-    .reduce((s, r) => s + Math.max(0, r.used), 0);
+    .reduce((s, r) => s + r.tokens, 0);
 }
 
 const limitRows = computed(() =>
@@ -526,12 +553,16 @@ watch(
       <section class="panel" aria-label="Summary" data-testid="summary-strip">
         <div class="panel-title">Summary <span class="muted">· {{ windowLabel }}</span></div>
         <dl class="summary">
-          <div class="sum-row"><dt>Tokens used</dt><dd data-testid="sum-tokens">{{ fmtInt(summary.tokens) }}</dd></div>
+          <div class="sum-row"><dt>Tokens used</dt><dd data-testid="sum-tokens" :data-est="summary.estTokens > 0">{{ fmtTokensWithEst(summary.tokens, summary.estTokens) }}</dd></div>
           <div class="sum-row"><dt>Cost</dt><dd data-testid="sum-cost">{{ fmtCostGroups(summary.costs) }}</dd></div>
           <div class="sum-row"><dt>Turns</dt><dd data-testid="sum-turns">{{ fmtInt(summary.turns) }}</dd></div>
           <div class="sum-row"><dt>Sessions touched</dt><dd data-testid="sum-sessions">{{ fmtInt(summary.sessions) }}</dd></div>
           <div class="sum-row"><dt>Tool calls</dt><dd data-testid="sum-tools">{{ fmtInt(summary.toolCalls) }}</dd></div>
         </dl>
+        <p class="legend muted" data-testid="usage-legend">
+          plain = reported by the agent · <span class="est-mark">~</span> = bridge
+          estimate (chars ÷ 4) for agents that don't report usage
+        </p>
       </section>
 
       <!-- Agent state strip (F6) -->
@@ -558,16 +589,16 @@ watch(
           <div class="panel-title">By agent <span class="muted">· {{ windowLabel }}</span></div>
           <p v-if="agentRows.length === 0" class="empty" data-testid="agents-empty">
             no usage recorded yet<br />
-            <span class="muted">Numbers come from the agents' usage_update notifications.</span>
+            <span class="muted">Numbers come from the agents' usage_update notifications and the bridges' estimates.</span>
           </p>
           <table v-else class="dense" data-testid="by-agent-table">
             <thead>
               <tr><th scope="col">Agent</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th><th scope="col">Share</th><th scope="col">Last activity</th></tr>
             </thead>
             <tbody>
-              <tr v-for="r in agentRows" :key="r.name" data-testid="by-agent-row" :data-agent="r.name" :data-tokens="r.tokens">
+              <tr v-for="r in agentRows" :key="r.name" data-testid="by-agent-row" :data-agent="r.name" :data-tokens="r.tokens" :data-est="r.estTokens > 0">
                 <td data-label="Agent">{{ r.name }}</td>
-                <td class="num mono" data-label="Tokens">{{ fmtInt(r.tokens) }}</td>
+                <td class="num mono" data-label="Tokens" :title="r.estTokens > 0 ? `${fmtInt(r.estTokens)} of these are a bridge estimate` : ''">{{ fmtTokensWithEst(r.tokens, r.estTokens) }}</td>
                 <td class="num mono" data-label="Cost">{{ r.costs }}</td>
                 <td class="num mono" data-label="Turns">{{ fmtInt(r.turns) }}</td>
                 <td class="share-cell" data-label="Share">
@@ -585,16 +616,16 @@ watch(
           <div class="panel-title">By project <span class="muted">· {{ windowLabel }}</span></div>
           <p v-if="projectRows.length === 0" class="empty">
             no usage recorded yet<br />
-            <span class="muted">Numbers come from the agents' usage_update notifications.</span>
+            <span class="muted">Numbers come from the agents' usage_update notifications and the bridges' estimates.</span>
           </p>
           <table v-else class="dense" data-testid="by-project-table">
             <thead>
               <tr><th scope="col">Project</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th><th scope="col">Share</th><th scope="col">Last activity</th></tr>
             </thead>
             <tbody>
-              <tr v-for="r in projectRows" :key="r.project" :title="r.cwd">
+              <tr v-for="r in projectRows" :key="r.project" :title="r.cwd" :data-est="r.estTokens > 0">
                 <td data-label="Project"><span :title="r.cwd" class="mono">{{ r.project }}</span></td>
-                <td class="num mono" data-label="Tokens">{{ fmtInt(r.tokens) }}</td>
+                <td class="num mono" data-label="Tokens" :title="r.estTokens > 0 ? `${fmtInt(r.estTokens)} of these are a bridge estimate` : ''">{{ fmtTokensWithEst(r.tokens, r.estTokens) }}</td>
                 <td class="num mono" data-label="Cost">{{ r.costs }}</td>
                 <td class="num mono" data-label="Turns">{{ fmtInt(r.turns) }}</td>
                 <td class="share-cell" data-label="Share">
@@ -631,16 +662,27 @@ watch(
             </g>
             <g v-for="(d, i) in dayPoints" :key="d.day">
               <rect
+                v-if="chartGeom[i].hEst > 0"
                 :x="chartGeom[i].x"
-                :y="chartGeom[i].y"
+                :y="chartGeom[i].yEst"
                 :width="chartGeom[i].w"
-                :height="chartGeom[i].h"
+                :height="chartGeom[i].hEst"
+                class="bar-rect bar-est"
+                data-testid="day-bar-est"
+                :data-day="d.day"
+                :data-tokens="d.estTokens"
+              />
+              <rect
+                :x="chartGeom[i].x"
+                :y="chartGeom[i].hEst > 0 ? chartGeom[i].yFact : chartGeom[i].y"
+                :width="chartGeom[i].w"
+                :height="chartGeom[i].hEst > 0 ? chartGeom[i].hFact : chartGeom[i].h"
                 class="bar-rect"
                 data-testid="day-bar"
                 :data-day="d.day"
                 :data-tokens="d.tokens"
               >
-                <title>{{ d.label }}: {{ fmtInt(d.tokens) }} tokens, {{ d.turns }} turns</title>
+                <title>{{ d.label }}: {{ fmtTokensWithEst(d.tokens, d.estTokens) }} tokens, {{ d.turns }} turns</title>
               </rect>
             </g>
             <g v-for="(d, i) in dayPoints" :key="'x' + d.day">
@@ -661,9 +703,9 @@ watch(
             <tr><th scope="col">Day / week</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th></tr>
           </thead>
           <tbody>
-            <tr v-for="d in tableRows" :key="d.day" data-testid="by-day-row" :data-day="d.day">
+            <tr v-for="d in tableRows" :key="d.day" data-testid="by-day-row" :data-day="d.day" :data-est="d.estTokens > 0">
               <td data-label="Day">{{ d.label }}</td>
-              <td class="num mono" data-label="Tokens">{{ fmtInt(d.tokens) }}</td>
+              <td class="num mono" data-label="Tokens">{{ fmtTokensWithEst(d.tokens, d.estTokens) }}</td>
               <td class="num mono" data-label="Cost">{{ d.costs }}</td>
               <td class="num mono" data-label="Turns">{{ fmtInt(d.turns) }}</td>
             </tr>
@@ -680,13 +722,13 @@ watch(
             <tr><th scope="col">Session</th><th scope="col">Agent</th><th scope="col">Project</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col">Last turn</th></tr>
           </thead>
           <tbody>
-            <tr v-for="s in sessionRows" :key="s.key">
+            <tr v-for="s in sessionRows" :key="s.key" :data-est="s.estTokens > 0">
               <td data-label="Session">
                 <button class="link" :title="`Open ${s.title} in chat`" @click="openSession(s)">{{ s.title }}</button>
               </td>
               <td data-label="Agent">{{ s.agentName }}</td>
               <td class="mono" data-label="Project">{{ s.project }}</td>
-              <td class="num mono" data-label="Tokens">{{ fmtInt(s.tokens) }}</td>
+              <td class="num mono" data-label="Tokens" :title="s.estTokens > 0 ? 'bridge estimate' : ''">{{ fmtTokensWithEst(s.tokens, s.estTokens) }}</td>
               <td class="num mono" data-label="Cost">{{ s.costs }}</td>
               <td class="muted mono" data-label="Last turn" :title="fmtStamp(s.lastAt)">{{ fmtAgo(s.lastAt, now) }}</td>
             </tr>
@@ -1036,6 +1078,22 @@ table.dense th.num {
 
 .chart .bar-rect {
   fill: var(--text-accent, #c2532f);
+}
+
+/* The estimate share of a day bar: same hue, diagonal hatch — visible as
+ * "not exact" at a glance. */
+.chart .bar-est {
+  fill: var(--text-accent, #c2532f);
+  opacity: 0.45;
+}
+
+.legend {
+  margin: 0.375rem 0 0;
+  font-size: 0.6875rem;
+}
+
+.est-mark {
+  font-weight: 600;
 }
 
 /* State strip */

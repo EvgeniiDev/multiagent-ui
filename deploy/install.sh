@@ -39,6 +39,16 @@ mkdir -p "$HOME/.hermes" "$UNIT_DST"
 install -m 0755 "$BRIDGE_SRC" "$BRIDGE_DST"
 echo "installed bridge -> $BRIDGE_DST"
 
+# OpenCode token-meter plugin: exact usage figures land in the panel ledger
+# via `session.idle`. Global plugin dir — opencode auto-loads it at startup.
+PLUGIN_SRC="$REPO_DIR/deploy/opencode/plugins/acp-token-meter.js"
+PLUGIN_DST_DIR="$HOME/.config/opencode/plugins"
+if [[ -f "$PLUGIN_SRC" ]]; then
+  mkdir -p "$PLUGIN_DST_DIR"
+  install -m 0644 "$PLUGIN_SRC" "$PLUGIN_DST_DIR/acp-token-meter.js"
+  echo "installed plugin  -> $PLUGIN_DST_DIR/acp-token-meter.js"
+fi
+
 for unit in "$UNIT_SRC"/*.service; do
   name="$(basename "$unit")"
   sed "s|%h/projects/acp-ui/dist-web|$WEB_DIR|" "$unit" > "$UNIT_DST/$name"
