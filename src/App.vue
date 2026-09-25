@@ -125,6 +125,10 @@ const canManuallyReconnect = computed(
     !!sessionStore.currentSession?.supportsLoadSession
 );
 
+// A cached tail keeps the chat up while the replay is in flight — and when
+// the replay died, the tail is all there is (marked stale by the store).
+const hasCachedHistory = computed(() => sessionStore.historyCacheNote !== null);
+
 async function handleManualReconnect() {
   await sessionStore.tryReconnect();
 }
@@ -562,8 +566,10 @@ function clearError() {
           <button class="error-close" @click="clearError" title="Dismiss">×</button>
         </div>
         
-        <!-- Chat View when connected -->
-        <ChatView v-if="uiStore.activeView === 'chat' && isConnected" />
+        <!-- Chat View when connected — or while a cached tail stands in for
+             the transcript (replaying, or the replay died and it's all we
+             have). The composer disables itself when !isConnected. -->
+        <ChatView v-if="uiStore.activeView === 'chat' && (isConnected || hasCachedHistory)" />
 
         <!-- Welcome screen when the chat view has no session yet. The New
              session dialog is reachable here too — a session start must not
