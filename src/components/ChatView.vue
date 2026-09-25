@@ -1213,7 +1213,7 @@ function getToolKind(kind: string): string {
 }
 
 .attach-remove:hover {
-  background: var(--bg-danger, #b3402e);
+  background: var(--bg-danger-hover, #9c3524);
   color: var(--text-on-accent, #fbf8f3);
 }
 
@@ -1422,7 +1422,9 @@ function getToolKind(kind: string): string {
 .send-btn {
   background: var(--bg-primary, #c2532f);
   color: var(--text-on-accent, #fbf8f3);
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  /* No colour transition: arming the button changes fill + ink, and any
+   * mid-flight frame reads sub-contrast (measured 2.18–3.32:1 at ~80 ms
+   * into a 150 ms fade). The state snaps like every other flat control. */
 }
 
 .send-btn:hover:not(:disabled) {

@@ -618,15 +618,45 @@ export const useBoardStore = defineStore('board', () => {
     return { ok: true };
   }
 
-  /** Toggle a card flag. Flags live on the card across stages and mark it
-   * out of any future auto-pickup. */
-  function setCardFlag(id: string, flag: 'blocked' | 'cancelled', on: boolean): void {
+  /**
+   * Toggle a card flag. Flags live on the card across stages and mark it
+   * out of any future auto-pickup — blocked is a FLAG, not a column, so the
+   * card keeps its stage and stays visibly marked there.
+   *
+   * `blocked` and its `blockedReason` are written in the SAME mutation: a
+   * flag without a reason ("blocked in dev — why?") or a reason with no
+   * flag is the inconsistent pair the pipeline flagged live, so the two
+   * never land in separate writes. `reason` overrides the stored text;
+   * clearing the flag clears the reason unless one is given (mirrors
+   * `boardctl block/unblock`).
+   */
+  function setCardFlag(
+    id: string,
+    flag: 'blocked' | 'cancelled',
+    on: boolean,
+    reason?: string
+  ): void {
     const card = cards.value.find((c) => c.id === id);
-    if (!card || card[flag] === on) return;
+    if (!card) return;
+    // No-op only when nothing would change — a reason passed for an
+    // already-set flag is still written (the pair stays in one mutation).
+    if (
+      card[flag] === on &&
+      (flag !== 'blocked' || reason === undefined || reason === card.blockedReason)
+    ) {
+      return;
+    }
     card[flag] = on;
+    if (flag === 'blocked') {
+      if (reason !== undefined) card.blockedReason = reason;
+      else if (!on) card.blockedReason = '';
+    }
     card.updatedAt = Date.now();
     scheduleSave();
-    logCardEvent(card, on ? `flagged ${flag}` : `${flag} flag cleared`);
+    const detail = flag === 'blocked' && on && card.blockedReason
+      ? `: ${card.blockedReason}`
+      : '';
+    logCardEvent(card, on ? `flagged ${flag}${detail}` : `${flag} flag cleared`);
   }
 
   function clearFilters(): void {

@@ -378,7 +378,7 @@ ul {
 }
 
 .row-delete:hover {
-  background: var(--bg-danger, #b3402e);
+  background: var(--bg-danger-hover, #9c3524);
   color: var(--text-on-accent, #fbf8f3);
 }
 </style>

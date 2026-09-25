@@ -134,7 +134,8 @@ function flush() {
       draft.value.status = c.status;
     }
   }
-  if (d.blocked !== c.blocked) board.setCardFlag(c.id, 'blocked', d.blocked);
+  if (d.blocked !== c.blocked)
+    board.setCardFlag(c.id, 'blocked', d.blocked, d.blocked ? d.blockedReason.trim() : '');
   if (d.cancelled !== c.cancelled) board.setCardFlag(c.id, 'cancelled', d.cancelled);
   const sessionKey = d.sessionKey;
   const session = sessionKey
@@ -148,7 +149,9 @@ function flush() {
     priority: d.priority,
     acceptance: d.acceptance,
     verification: d.verification,
-    blockedReason: d.blockedReason.trim(),
+    // A cleared flag never keeps a reason — the flag/reason pair is written
+    // through setCardFlag above, so this stays consistent with it.
+    blockedReason: d.blocked ? d.blockedReason.trim() : '',
     links: d.links
       .filter((l) => l.label.trim() || l.url.trim())
       .map((l) => ({ label: l.label.trim(), url: l.url.trim() })),
@@ -380,8 +383,7 @@ function onApplyTransition() {
     const r = board.setCardStatus(c.id, p.status);
     if (!r.ok && r.reason) alert(r.reason);
   } else {
-    board.setCardFlag(c.id, 'blocked', true);
-    if (p.reason) board.updateCard(c.id, { blockedReason: p.reason });
+    board.setCardFlag(c.id, 'blocked', true, p.reason);
   }
   if (card.value) draft.value = draftFromCard(card.value);
 }

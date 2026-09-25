@@ -277,17 +277,16 @@ export const useReviewStore = defineStore('review', () => {
     const reason = `review: round limit ${rules.maxRounds} reached with open findings (${detail})`;
     const reviewOwned = card.blockedReason.startsWith(REVIEW_REASON_PREFIX);
     if (over) {
-      if (!card.blocked) {
-        board.updateCard(cardId, { blockedReason: reason });
-        board.setCardFlag(cardId, 'blocked', true);
-      } else if (reviewOwned && card.blockedReason !== reason) {
-        board.updateCard(cardId, { blockedReason: reason });
+      if (!card.blocked || (reviewOwned && card.blockedReason !== reason)) {
+        // Flag and reason land in one mutation — no frame shows a blocked
+        // card without its reason.
+        board.setCardFlag(cardId, 'blocked', true, reason);
       }
       // card.blocked with a foreign reason: the flag is already on — the
       // human's reason stands.
     } else if (card.blocked && reviewOwned) {
+      // Clearing the flag clears the review-owned reason in the same write.
       board.setCardFlag(cardId, 'blocked', false);
-      board.updateCard(cardId, { blockedReason: '' });
     }
   }
 
