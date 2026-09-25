@@ -22,6 +22,7 @@ import type {
 } from '../types';
 import { getTransportKind } from '../types';
 import { isTauriHost, isDesktop } from '../platform';
+import { toSecureUrl } from './secure';
 
 export type Unlisten = () => void;
 
@@ -60,7 +61,10 @@ function defaultWebConfig(): AgentsConfig {
     (typeof location !== 'undefined' && location.hostname) || '127.0.0.1';
   const agents: Record<string, AgentConfig> = {};
   for (const [name, port] of Object.entries(BRIDGE_PORTS)) {
-    agents[name] = { transport: 'websocket', url: `ws://${hostname}:${port}/` };
+    // Over https the browser blocks ws:// as mixed content, so the seed
+    // points at the bridge's TLS front (port + 10) — over http the raw
+    // ws:// URL comes back untouched.
+    agents[name] = { transport: 'websocket', url: toSecureUrl(`ws://${hostname}:${port}/`) };
   }
   return { agents };
 }

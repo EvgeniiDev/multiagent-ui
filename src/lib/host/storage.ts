@@ -2,7 +2,9 @@
 //  - on Tauri, defers to `@tauri-apps/plugin-store` so behaviour matches
 //    today's persistence (keyed JSON file in the app's data dir);
 //  - on web, if the host's state server answers
-//    `GET http://<hostname>:25900/health` (probed once per session), keeps
+//    `GET http://<hostname>:25900/health` (probed once per session; on an
+//    https page the TLS twin `https://<hostname>:25910/health` is probed
+//    instead — see `secure.ts`), keeps
 //    each document on the server so every device on the host reads/writes
 //    the same state — with localStorage as an always-on mirror;
 //  - otherwise uses `localStorage` under a single `acp-ui:<name>` namespace.
@@ -12,6 +14,7 @@
 // sites in the session/preferences stores.
 
 import { isTauriHost } from '../platform';
+import { toSecureUrl } from './secure';
 
 export interface KVStore {
   get<T>(key: string): Promise<T | null>;
@@ -89,7 +92,10 @@ function stateServerBase(): string {
   if (env) return env.replace(/\/+$/, '');
   const hostname =
     (typeof location !== 'undefined' && location.hostname) || '127.0.0.1';
-  return `http://${hostname}:${STATE_SERVER_PORT}`;
+  // On an https page the plain-http base would be blocked as mixed content;
+  // the state's TLS front listens on port + 10. Over http this returns the
+  // original URL byte-for-byte.
+  return toSecureUrl(`http://${hostname}:${STATE_SERVER_PORT}`);
 }
 
 async function fetchWithTimeout(
