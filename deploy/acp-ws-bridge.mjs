@@ -20,7 +20,32 @@
 //   GET /api/fs/list?path=...&hidden=1   (include dot-directories)
 // Listing is scoped to the root subtree.
 //
+// Request watchdog: ACP requests (session/prompt above all) routinely run for
+// many minutes, so a fixed wall-clock timeout abandons healthy turns. This
+// bridge instead watches TRAFFIC — any JSON-RPC frame in either direction is
+// progress — and fails pending requests only after the wire has been silent
+// for --idle-timeout-ms (default 180000, env ACP_IDLE_TIMEOUT_MS). A request
+// that times out this way is answered with a JSON-RPC error reading
+// "no traffic for Ns"; a child that dies is reported as "agent CLI exited".
+// The two failure modes are therefore distinguishable in the log and in the
+// panel's traffic monitor.
+//
+// Token meter (estimate): the bridge sees every JSON-RPC frame either way,
+// so agents that never emit `usage_update` (Devin, Pi) still get coverage —
+// the bridge counts user-text characters on `session/prompt` (client->agent)
+// and reply text on `agent_message_chunk`/`user_message_chunk`/
+// `agent_thought_chunk` (agent->client), then writes a running-total sample
+// into the shared activity.json ledger tagged `source:"estimate"`. The panel
+// renders those with a `~` mark and always prefers exact agent numbers for
+// the same session. ~4 chars per token is a latin/code heuristic; Cyrillic
+// packs denser. All of it is best-effort: metering never throws into the
+// data path and never blocks a frame.
+//
 // Usage: node acp-ws-bridge.mjs --port 25901 --cmd "hermes acp" [--root /home/x]
+//        [--idle-timeout-ms 180000] [--agent-name "Hermes Agent"]
+// Env:   ACP_TOKEN_METER=0 disables metering (default on),
+//        ACP_STATE_URL=http://127.0.0.1:25900 state server for the ledger,
+//        ACP_TOKEN_METER_INTERVAL_MS=10000 min write interval per session.
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import http from 'node:http';
@@ -49,6 +74,196 @@ if (!Number.isInteger(port) || port <= 0 || !command) {
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 // ---------------------------------------------------------------------------
+// Token meter — bridge-side estimate for agents that do not report usage.
+// ---------------------------------------------------------------------------
+
+const TOKEN_METER = (process.env.ACP_TOKEN_METER ?? '1') !== '0';
+const METER_STATE_URL = (process.env.ACP_STATE_URL || 'http://127.0.0.1:25900').replace(/\/+$/, '');
+const METER_INTERVAL_MS = Number(process.env.ACP_TOKEN_METER_INTERVAL_MS || 10_000);
+const CHARS_PER_TOKEN = 4;
+const METER_MAX_USAGE = 5000;
+const METER_RETRIES = 6;
+
+// Agent display names keyed by the bridge command's binary — the systemd
+// units pass no flag, so the label matches the panel's agent names by default.
+const AGENT_NAME_BY_CMD = {
+  devin: 'Devin',
+  'pi-acp': 'Pi',
+  pi: 'Pi',
+  hermes: 'Hermes Agent',
+  opencode: 'OpenCode',
+};
+const METER_AGENT_NAME = String(
+  argValue('--agent-name', AGENT_NAME_BY_CMD[command.split(/\s+/)[0]] ?? command.split(/\s+/)[0])
+);
+
+/** sessionId -> { cwd?, chars, lastWriteAt, lastWrittenUsed, writing, agentReports } */
+const meterSessions = new Map();
+/** request id -> cwd, for `session/new` requests awaiting their response. */
+const meterNewReqs = new Map();
+/** request id -> sessionId, for `session/prompt` requests awaiting their
+ * response — the turn's end is the natural moment to flush the estimate. */
+const meterPromptReqs = new Map();
+
+function meterSession(sessionId, cwd) {
+  let s = meterSessions.get(sessionId);
+  if (!s) {
+    s = { cwd, chars: 0, lastWriteAt: 0, lastWrittenUsed: -1, writing: false, agentReports: false };
+    meterSessions.set(sessionId, s);
+  }
+  if (cwd && !s.cwd) s.cwd = cwd;
+  return s;
+}
+
+/** Characters in an ACP content block or prompt-part array — text only. */
+function meterTextLen(content) {
+  if (!content) return 0;
+  if (Array.isArray(content)) {
+    return content.reduce((n, b) => n + meterTextLen(b), 0);
+  }
+  if (typeof content === 'object' && content.type === 'text' && typeof content.text === 'string') {
+    return content.text.length;
+  }
+  return 0;
+}
+
+/** client -> agent frames that carry countable text or session metadata. */
+function meterOutbound(msg) {
+  if (!msg || typeof msg.method !== 'string') return;
+  const p = msg.params || {};
+  switch (msg.method) {
+    case 'session/new':
+      if (msg.id !== undefined && msg.id !== null) meterNewReqs.set(msg.id, p.cwd);
+      break;
+    case 'session/load':
+      if (typeof p.sessionId === 'string') meterSession(p.sessionId, p.cwd);
+      break;
+    case 'session/prompt': {
+      if (typeof p.sessionId !== 'string') return;
+      const s = meterSession(p.sessionId, p.cwd);
+      s.chars += meterTextLen(p.prompt);
+      if (msg.id !== undefined && msg.id !== null) meterPromptReqs.set(msg.id, p.sessionId);
+      meterMaybeWrite(p.sessionId, s);
+      break;
+    }
+  }
+}
+
+/** agent -> client frames: chunk text is reply surface; `usage_update` means
+ * the agent reports exact numbers itself and the shadow estimate stands down. */
+function meterInbound(msg) {
+  if (!msg) return;
+  if (typeof msg.method === 'string') {
+    if (msg.method !== 'session/update') return;
+    const p = msg.params || {};
+    const sessionId = p.sessionId;
+    if (typeof sessionId !== 'string') return;
+    const update = p.update || {};
+    if (update.sessionUpdate === 'usage_update') {
+      meterSession(sessionId).agentReports = true;
+      return;
+    }
+    if (
+      update.sessionUpdate === 'agent_message_chunk' ||
+      update.sessionUpdate === 'user_message_chunk' ||
+      update.sessionUpdate === 'agent_thought_chunk'
+    ) {
+      const s = meterSession(sessionId);
+      s.chars += meterTextLen(update.content);
+      meterMaybeWrite(sessionId, s);
+    }
+    return;
+  }
+  // A response frame: correlate by id to learn sessionIds / flush on turn end.
+  if (msg.id === undefined || msg.id === null) return;
+  if (meterNewReqs.has(msg.id)) {
+    const cwd = meterNewReqs.get(msg.id);
+    meterNewReqs.delete(msg.id);
+    const sid = msg.result?.sessionId;
+    if (typeof sid === 'string') meterSession(sid, cwd);
+    return;
+  }
+  if (meterPromptReqs.has(msg.id)) {
+    const sessionId = meterPromptReqs.get(msg.id);
+    meterPromptReqs.delete(msg.id);
+    meterFlush(sessionId);
+  }
+}
+
+function meterMaybeWrite(sessionId, s) {
+  if (!TOKEN_METER || s.agentReports) return;
+  if (Date.now() - s.lastWriteAt < METER_INTERVAL_MS) return;
+  meterFlush(sessionId, s);
+}
+
+/** Fire-and-forget ledger write; serialized per session, never awaited on
+ * the wire path and never thrown out of a message handler. */
+function meterFlush(sessionId, s) {
+  if (!TOKEN_METER) return;
+  s = s ?? meterSessions.get(sessionId);
+  if (!s || s.writing || s.agentReports) return;
+  const used = Math.ceil(s.chars / CHARS_PER_TOKEN);
+  if (used <= 0 || used === s.lastWrittenUsed) return;
+  s.writing = true;
+  meterAppend({
+    at: Date.now(),
+    agentName: METER_AGENT_NAME,
+    sessionId,
+    cwd: s.cwd,
+    used,
+    size: 0,
+    source: 'estimate',
+  })
+    .then((wrote) => {
+      s.lastWriteAt = Date.now();
+      if (wrote) s.lastWrittenUsed = used;
+    })
+    .catch((e) => log('token-meter write failed:', e instanceof Error ? e.message : e))
+    .finally(() => {
+      s.writing = false;
+    });
+}
+
+/** Append one sample to activity.json -> usage[] via the shared rev protocol
+ * (GET -> mutate -> PUT with rev, retry on 409 — same as the runner's
+ * mutate()). Dedupes a repeat of the session's last identical sample. */
+async function meterAppend(sample) {
+  for (let i = 0; i < METER_RETRIES; i++) {
+    const got = await fetch(`${METER_STATE_URL}/api/state/activity.json`).catch(() => null);
+    if (!got) return false;
+    let doc = { entries: [], usage: [] };
+    let rev = 0;
+    if (got.status === 200) {
+      const body = await got.json().catch(() => null);
+      if (body && typeof body === 'object') {
+        doc = body.data && typeof body.data === 'object' ? body.data : doc;
+        rev = Number(body.rev) || 0;
+      }
+    } else if (got.status !== 404) {
+      return false;
+    }
+    if (!Array.isArray(doc.usage)) doc.usage = [];
+    const last = [...doc.usage].reverse().find((u) => u && u.sessionId === sample.sessionId && (u.source ?? 'agent') === 'estimate');
+    if (last && last.used === sample.used) return true; // nothing new to say
+    doc.usage = [...doc.usage.slice(-(METER_MAX_USAGE - 1)), sample];
+    const put = await fetch(`${METER_STATE_URL}/api/state/activity.json`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ data: doc, rev }),
+    }).catch(() => null);
+    if (!put) return false;
+    if (put.status === 200) return true;
+    if (put.status === 409) {
+      await new Promise((r) => setTimeout(r, 300));
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
+
+// ---------------------------------------------------------------------------
 // HTTP filesystem API (for the acp-ui tree picker)
 // ---------------------------------------------------------------------------
 
@@ -56,7 +271,7 @@ function json(res, code, obj) {
   res.writeHead(code, {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': '*',
   });
   res.end(JSON.stringify(obj));
@@ -69,6 +284,10 @@ function resolveScoped(p) {
   const inside = abs === root || abs.startsWith(root + path.sep);
   return { abs, inside };
 }
+
+/** Text reads/writes are for role prompts and card artefacts, not for blobs;
+ * past this size the panel must hand the path to an agent instead. */
+const MAX_TEXT_BYTES = 512 * 1024;
 
 function listDirs(abs, hidden) {
   const dirents = fs.readdirSync(abs, { withFileTypes: true });
@@ -93,17 +312,130 @@ function handleHttp(req, res) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': '*',
     });
     res.end();
     return;
   }
+  const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+
+  // POST /api/fs/mkdir  { path } -> create a directory tree inside root.
+  // The panel's project registry needs this: a project is just a folder, and the
+  // browser build has no filesystem access of its own. Scoped exactly like
+  // /api/fs/list, so it can never write outside root.
+  if (u.pathname === '/api/fs/mkdir') {
+    if (req.method !== 'POST') {
+      json(res, 405, { error: 'method not allowed' });
+      return;
+    }
+    let raw = '';
+    let aborted = false;
+    req.on('data', (chunk) => {
+      raw += chunk;
+      if (raw.length > 64 * 1024) {
+        aborted = true;
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      if (aborted) {
+        json(res, 413, { error: 'body too large' });
+        return;
+      }
+      let body;
+      try {
+        body = raw ? JSON.parse(raw) : {};
+      } catch {
+        json(res, 400, { error: 'invalid json' });
+        return;
+      }
+      const target = typeof body?.path === 'string' ? body.path.trim() : '';
+      if (!target) {
+        json(res, 400, { error: 'path required' });
+        return;
+      }
+      const { abs, inside } = resolveScoped(target);
+      if (!inside) {
+        json(res, 403, { error: `path outside root: ${abs}` });
+        return;
+      }
+      try {
+        const existed = fs.existsSync(abs);
+        fs.mkdirSync(abs, { recursive: true });
+        json(res, 200, { path: abs, created: !existed });
+      } catch (e) {
+        json(res, 500, { error: e instanceof Error ? e.message : String(e) });
+      }
+    });
+    return;
+  }
+
+  // POST /api/fs/write  { path, content } -> write a text file inside root.
+  // Role prompts (`.acp/roles/<role>.md`) and per-card artefacts live in the
+  // project directory, and the browser build can only reach the filesystem
+  // through this API. Scoped like the other fs routes; the write goes through a
+  // temp file plus rename so a reader never sees a half-written prompt.
+  if (u.pathname === '/api/fs/write') {
+    if (req.method !== 'POST') {
+      json(res, 405, { error: 'method not allowed' });
+      return;
+    }
+    let raw = '';
+    let aborted = false;
+    req.on('data', (chunk) => {
+      raw += chunk;
+      if (raw.length > MAX_TEXT_BYTES * 2) {
+        aborted = true;
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      if (aborted) {
+        json(res, 413, { error: 'body too large' });
+        return;
+      }
+      let body;
+      try {
+        body = raw ? JSON.parse(raw) : {};
+      } catch {
+        json(res, 400, { error: 'invalid json' });
+        return;
+      }
+      const target = typeof body?.path === 'string' ? body.path.trim() : '';
+      const content = typeof body?.content === 'string' ? body.content : null;
+      if (!target || content === null) {
+        json(res, 400, { error: 'path and content required' });
+        return;
+      }
+      const bytes = Buffer.byteLength(content, 'utf8');
+      if (bytes > MAX_TEXT_BYTES) {
+        json(res, 413, { error: `content exceeds ${MAX_TEXT_BYTES} bytes` });
+        return;
+      }
+      const { abs, inside } = resolveScoped(target);
+      if (!inside) {
+        json(res, 403, { error: `path outside root: ${abs}` });
+        return;
+      }
+      try {
+        const existed = fs.existsSync(abs);
+        fs.mkdirSync(path.dirname(abs), { recursive: true });
+        const tmp = `${abs}.tmp-${process.pid}`;
+        fs.writeFileSync(tmp, content, 'utf8');
+        fs.renameSync(tmp, abs);
+        json(res, 200, { path: abs, created: !existed, bytes });
+      } catch (e) {
+        json(res, 500, { error: e instanceof Error ? e.message : String(e) });
+      }
+    });
+    return;
+  }
+
   if (req.method !== 'GET') {
     json(res, 405, { error: 'method not allowed' });
     return;
   }
-  const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
   if (u.pathname === '/api/fs/root') {
     json(res, 200, { root, home });
@@ -131,6 +463,47 @@ function handleHttp(req, res) {
     return;
   }
 
+  // GET /api/fs/read?path=<abs> -> { path, bytes, content } for a text file.
+  // Pairs with /api/fs/write: the panel shows and edits a role prompt that
+  // lives in the project directory. Binary files and blobs are refused by
+  // sniffing a NUL byte and by size, not by guessing from the extension.
+  if (u.pathname === '/api/fs/read') {
+    const p = u.searchParams.get('path') || '';
+    if (!p) {
+      json(res, 400, { error: 'path required' });
+      return;
+    }
+    const { abs, inside } = resolveScoped(p);
+    if (!inside) {
+      json(res, 403, { error: `path outside root: ${abs}` });
+      return;
+    }
+    try {
+      const st = fs.statSync(abs);
+      if (!st.isFile()) {
+        json(res, 400, { error: `not a file: ${abs}` });
+        return;
+      }
+      if (st.size > MAX_TEXT_BYTES) {
+        json(res, 413, { error: `file exceeds ${MAX_TEXT_BYTES} bytes` });
+        return;
+      }
+      const buf = fs.readFileSync(abs);
+      if (buf.includes(0)) {
+        json(res, 415, { error: 'binary file' });
+        return;
+      }
+      json(res, 200, { path: abs, bytes: st.size, content: buf.toString('utf8') });
+    } catch (e) {
+      if (e && e.code === 'ENOENT') {
+        json(res, 404, { error: `not found: ${abs}` });
+        return;
+      }
+      json(res, 500, { error: e instanceof Error ? e.message : String(e) });
+    }
+    return;
+  }
+
   json(res, 404, { error: 'not found' });
 }
 
@@ -141,6 +514,107 @@ function handleHttp(req, res) {
 const clients = new Set();
 let child = null;
 let buffer = '';
+
+// ---------------------------------------------------------------------------
+// Progress-aware request watchdog
+// ---------------------------------------------------------------------------
+// The panel used to abandon every RPC after a fixed 60 s, so a long agent turn
+// was reported as failed while the agent was still working — and a resend
+// duplicated the work. The watchdog fails a request only when the wire has
+// been SILENT for IDLE_TIMEOUT_MS: every frame in either direction is progress
+// and pushes the deadline out. While the agent is itself waiting on the client
+// (an unanswered agent->client request such as session/request_permission or
+// fs/read_text_file), silence is expected and the watchdog stands down; the
+// client's own answer is what re-arms the clock.
+const IDLE_TIMEOUT_MS = Number(
+  argValue('--idle-timeout-ms', process.env.ACP_IDLE_TIMEOUT_MS || 180_000)
+);
+const WATCHDOG_TICK_MS = Math.min(30_000, Math.max(500, Math.floor(IDLE_TIMEOUT_MS / 4)));
+/** client -> agent requests awaiting a response: id -> method. */
+const pendingClientReqs = new Map();
+/** agent -> client requests awaiting our response (agent is blocked on us). */
+const pendingAgentReqs = new Set();
+let lastTrafficAt = Date.now();
+
+/** Any frame on the wire — request, response, or notification — is progress. */
+function noteTraffic() {
+  lastTrafficAt = Date.now();
+}
+
+/** Track a client -> agent frame: a new pending request, or the answer to an
+ * agent -> client request that was holding the watchdog off. A WS message can
+ * carry several NDJSON lines, so each is parsed on its own. */
+function noteOutbound(payload) {
+  noteTraffic();
+  for (const line of payload.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let msg = null;
+    try {
+      msg = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    try {
+      meterOutbound(msg);
+    } catch {
+      /* metering must never break the pipe */
+    }
+    if (!msg || msg.id === undefined || msg.id === null) continue;
+    if (typeof msg.method === 'string') pendingClientReqs.set(msg.id, msg.method);
+    else pendingAgentReqs.delete(msg.id);
+  }
+}
+
+/** Track an agent -> client frame: clears a pending request when the response
+ * lands, and registers agent-originated requests while they await our answer. */
+function noteInbound(line) {
+  noteTraffic();
+  let msg = null;
+  try {
+    msg = JSON.parse(line);
+  } catch {
+    return;
+  }
+  try {
+    meterInbound(msg);
+  } catch {
+    /* metering must never break the pipe */
+  }
+  if (!msg || msg.id === undefined || msg.id === null) return;
+  if (typeof msg.method === 'string') pendingAgentReqs.add(msg.id);
+  else pendingClientReqs.delete(msg.id);
+}
+
+/** Answer every pending client request with a JSON-RPC error so the failure
+ * is attributable per-request, not just a bare socket close. */
+function failPending(message) {
+  for (const id of [...pendingClientReqs.keys()]) {
+    broadcast(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32000, message } }));
+    pendingClientReqs.delete(id);
+  }
+}
+
+const watchdog = setInterval(() => {
+  if (pendingClientReqs.size === 0 || pendingAgentReqs.size > 0) return;
+  const idleFor = Date.now() - lastTrafficAt;
+  if (idleFor < IDLE_TIMEOUT_MS) return;
+  const message =
+    `no traffic for ${Math.round(idleFor / 1000)}s — agent appears wedged ` +
+    `(idle limit ${Math.round(IDLE_TIMEOUT_MS / 1000)}s)`;
+  log(`watchdog: ${message}; failing ${pendingClientReqs.size} pending request(s)`);
+  failPending(message);
+  // The process produced nothing for a whole idle window; it cannot be
+  // trusted. Kill it — the next client message respawns a fresh one.
+  const stuck = child;
+  child = null;
+  try {
+    stuck?.kill('SIGKILL');
+  } catch {
+    /* ignore */
+  }
+}, WATCHDOG_TICK_MS);
+watchdog.unref?.();
 
 function broadcast(line) {
   for (const ws of clients) {
@@ -159,6 +633,7 @@ function spawnChild() {
   child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
   log(`spawned ${bin} pid=${child.pid}`);
   buffer = '';
+  pendingAgentReqs.clear();
 
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk) => {
@@ -168,7 +643,10 @@ function spawnChild() {
     while ((idx = buffer.indexOf('\n')) !== -1) {
       const line = buffer.slice(0, idx).trim();
       buffer = buffer.slice(idx + 1);
-      if (line) broadcast(line);
+      if (line) {
+        noteInbound(line);
+        broadcast(line);
+      }
     }
   });
 
@@ -178,9 +656,11 @@ function spawnChild() {
   child.on('error', (e) => {
     log('child error:', e.message);
     child = null;
+    failPending(`agent CLI failed to start: ${e.message}`);
+    pendingAgentReqs.clear();
     for (const ws of clients) {
       try {
-        ws.close();
+        ws.close(1011, 'child error');
       } catch {
         /* ignore */
       }
@@ -191,9 +671,11 @@ function spawnChild() {
     log(`child exited code=${code} signal=${signal}`);
     child = null;
     buffer = '';
+    failPending(`agent CLI exited (code=${code} signal=${signal})`);
+    pendingAgentReqs.clear();
     for (const ws of clients) {
       try {
-        ws.close();
+        ws.close(1011, `child exited code=${code}`);
       } catch {
         /* ignore */
       }
@@ -237,6 +719,7 @@ wss.on('connection', (ws) => {
         line = JSON.stringify(msg) + '\n';
         log(`resolved relative cwd -> ${msg.params.cwd}`);
       }
+      noteOutbound(line);
       child.stdin.write(line);
     } catch (e) {
       log('stdin write failed:', e.message);

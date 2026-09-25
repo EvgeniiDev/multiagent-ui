@@ -30,8 +30,22 @@
 // The two failure modes are therefore distinguishable in the log and in the
 // panel's traffic monitor.
 //
+// Token meter (estimate): the bridge sees every JSON-RPC frame either way,
+// so agents that never emit `usage_update` (Devin, Pi) still get coverage —
+// the bridge counts user-text characters on `session/prompt` (client->agent)
+// and reply text on `agent_message_chunk`/`user_message_chunk`/
+// `agent_thought_chunk` (agent->client), then writes a running-total sample
+// into the shared activity.json ledger tagged `source:"estimate"`. The panel
+// renders those with a `~` mark and always prefers exact agent numbers for
+// the same session. ~4 chars per token is a latin/code heuristic; Cyrillic
+// packs denser. All of it is best-effort: metering never throws into the
+// data path and never blocks a frame.
+//
 // Usage: node acp-ws-bridge.mjs --port 25901 --cmd "hermes acp" [--root /home/x]
-//        [--idle-timeout-ms 180000]
+//        [--idle-timeout-ms 180000] [--agent-name "Hermes Agent"]
+// Env:   ACP_TOKEN_METER=0 disables metering (default on),
+//        ACP_STATE_URL=http://127.0.0.1:25900 state server for the ledger,
+//        ACP_TOKEN_METER_INTERVAL_MS=10000 min write interval per session.
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import http from 'node:http';
@@ -58,6 +72,196 @@ if (!Number.isInteger(port) || port <= 0 || !command) {
 }
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
+
+// ---------------------------------------------------------------------------
+// Token meter — bridge-side estimate for agents that do not report usage.
+// ---------------------------------------------------------------------------
+
+const TOKEN_METER = (process.env.ACP_TOKEN_METER ?? '1') !== '0';
+const METER_STATE_URL = (process.env.ACP_STATE_URL || 'http://127.0.0.1:25900').replace(/\/+$/, '');
+const METER_INTERVAL_MS = Number(process.env.ACP_TOKEN_METER_INTERVAL_MS || 10_000);
+const CHARS_PER_TOKEN = 4;
+const METER_MAX_USAGE = 5000;
+const METER_RETRIES = 6;
+
+// Agent display names keyed by the bridge command's binary — the systemd
+// units pass no flag, so the label matches the panel's agent names by default.
+const AGENT_NAME_BY_CMD = {
+  devin: 'Devin',
+  'pi-acp': 'Pi',
+  pi: 'Pi',
+  hermes: 'Hermes Agent',
+  opencode: 'OpenCode',
+};
+const METER_AGENT_NAME = String(
+  argValue('--agent-name', AGENT_NAME_BY_CMD[command.split(/\s+/)[0]] ?? command.split(/\s+/)[0])
+);
+
+/** sessionId -> { cwd?, chars, lastWriteAt, lastWrittenUsed, writing, agentReports } */
+const meterSessions = new Map();
+/** request id -> cwd, for `session/new` requests awaiting their response. */
+const meterNewReqs = new Map();
+/** request id -> sessionId, for `session/prompt` requests awaiting their
+ * response — the turn's end is the natural moment to flush the estimate. */
+const meterPromptReqs = new Map();
+
+function meterSession(sessionId, cwd) {
+  let s = meterSessions.get(sessionId);
+  if (!s) {
+    s = { cwd, chars: 0, lastWriteAt: 0, lastWrittenUsed: -1, writing: false, agentReports: false };
+    meterSessions.set(sessionId, s);
+  }
+  if (cwd && !s.cwd) s.cwd = cwd;
+  return s;
+}
+
+/** Characters in an ACP content block or prompt-part array — text only. */
+function meterTextLen(content) {
+  if (!content) return 0;
+  if (Array.isArray(content)) {
+    return content.reduce((n, b) => n + meterTextLen(b), 0);
+  }
+  if (typeof content === 'object' && content.type === 'text' && typeof content.text === 'string') {
+    return content.text.length;
+  }
+  return 0;
+}
+
+/** client -> agent frames that carry countable text or session metadata. */
+function meterOutbound(msg) {
+  if (!msg || typeof msg.method !== 'string') return;
+  const p = msg.params || {};
+  switch (msg.method) {
+    case 'session/new':
+      if (msg.id !== undefined && msg.id !== null) meterNewReqs.set(msg.id, p.cwd);
+      break;
+    case 'session/load':
+      if (typeof p.sessionId === 'string') meterSession(p.sessionId, p.cwd);
+      break;
+    case 'session/prompt': {
+      if (typeof p.sessionId !== 'string') return;
+      const s = meterSession(p.sessionId, p.cwd);
+      s.chars += meterTextLen(p.prompt);
+      if (msg.id !== undefined && msg.id !== null) meterPromptReqs.set(msg.id, p.sessionId);
+      meterMaybeWrite(p.sessionId, s);
+      break;
+    }
+  }
+}
+
+/** agent -> client frames: chunk text is reply surface; `usage_update` means
+ * the agent reports exact numbers itself and the shadow estimate stands down. */
+function meterInbound(msg) {
+  if (!msg) return;
+  if (typeof msg.method === 'string') {
+    if (msg.method !== 'session/update') return;
+    const p = msg.params || {};
+    const sessionId = p.sessionId;
+    if (typeof sessionId !== 'string') return;
+    const update = p.update || {};
+    if (update.sessionUpdate === 'usage_update') {
+      meterSession(sessionId).agentReports = true;
+      return;
+    }
+    if (
+      update.sessionUpdate === 'agent_message_chunk' ||
+      update.sessionUpdate === 'user_message_chunk' ||
+      update.sessionUpdate === 'agent_thought_chunk'
+    ) {
+      const s = meterSession(sessionId);
+      s.chars += meterTextLen(update.content);
+      meterMaybeWrite(sessionId, s);
+    }
+    return;
+  }
+  // A response frame: correlate by id to learn sessionIds / flush on turn end.
+  if (msg.id === undefined || msg.id === null) return;
+  if (meterNewReqs.has(msg.id)) {
+    const cwd = meterNewReqs.get(msg.id);
+    meterNewReqs.delete(msg.id);
+    const sid = msg.result?.sessionId;
+    if (typeof sid === 'string') meterSession(sid, cwd);
+    return;
+  }
+  if (meterPromptReqs.has(msg.id)) {
+    const sessionId = meterPromptReqs.get(msg.id);
+    meterPromptReqs.delete(msg.id);
+    meterFlush(sessionId);
+  }
+}
+
+function meterMaybeWrite(sessionId, s) {
+  if (!TOKEN_METER || s.agentReports) return;
+  if (Date.now() - s.lastWriteAt < METER_INTERVAL_MS) return;
+  meterFlush(sessionId, s);
+}
+
+/** Fire-and-forget ledger write; serialized per session, never awaited on
+ * the wire path and never thrown out of a message handler. */
+function meterFlush(sessionId, s) {
+  if (!TOKEN_METER) return;
+  s = s ?? meterSessions.get(sessionId);
+  if (!s || s.writing || s.agentReports) return;
+  const used = Math.ceil(s.chars / CHARS_PER_TOKEN);
+  if (used <= 0 || used === s.lastWrittenUsed) return;
+  s.writing = true;
+  meterAppend({
+    at: Date.now(),
+    agentName: METER_AGENT_NAME,
+    sessionId,
+    cwd: s.cwd,
+    used,
+    size: 0,
+    source: 'estimate',
+  })
+    .then((wrote) => {
+      s.lastWriteAt = Date.now();
+      if (wrote) s.lastWrittenUsed = used;
+    })
+    .catch((e) => log('token-meter write failed:', e instanceof Error ? e.message : e))
+    .finally(() => {
+      s.writing = false;
+    });
+}
+
+/** Append one sample to activity.json -> usage[] via the shared rev protocol
+ * (GET -> mutate -> PUT with rev, retry on 409 — same as the runner's
+ * mutate()). Dedupes a repeat of the session's last identical sample. */
+async function meterAppend(sample) {
+  for (let i = 0; i < METER_RETRIES; i++) {
+    const got = await fetch(`${METER_STATE_URL}/api/state/activity.json`).catch(() => null);
+    if (!got) return false;
+    let doc = { entries: [], usage: [] };
+    let rev = 0;
+    if (got.status === 200) {
+      const body = await got.json().catch(() => null);
+      if (body && typeof body === 'object') {
+        doc = body.data && typeof body.data === 'object' ? body.data : doc;
+        rev = Number(body.rev) || 0;
+      }
+    } else if (got.status !== 404) {
+      return false;
+    }
+    if (!Array.isArray(doc.usage)) doc.usage = [];
+    const last = [...doc.usage].reverse().find((u) => u && u.sessionId === sample.sessionId && (u.source ?? 'agent') === 'estimate');
+    if (last && last.used === sample.used) return true; // nothing new to say
+    doc.usage = [...doc.usage.slice(-(METER_MAX_USAGE - 1)), sample];
+    const put = await fetch(`${METER_STATE_URL}/api/state/activity.json`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ data: doc, rev }),
+    }).catch(() => null);
+    if (!put) return false;
+    if (put.status === 200) return true;
+    if (put.status === 409) {
+      await new Promise((r) => setTimeout(r, 300));
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
 
 // ---------------------------------------------------------------------------
 // HTTP filesystem API (for the acp-ui tree picker)
@@ -351,6 +555,11 @@ function noteOutbound(payload) {
     } catch {
       continue;
     }
+    try {
+      meterOutbound(msg);
+    } catch {
+      /* metering must never break the pipe */
+    }
     if (!msg || msg.id === undefined || msg.id === null) continue;
     if (typeof msg.method === 'string') pendingClientReqs.set(msg.id, msg.method);
     else pendingAgentReqs.delete(msg.id);
@@ -366,6 +575,11 @@ function noteInbound(line) {
     msg = JSON.parse(line);
   } catch {
     return;
+  }
+  try {
+    meterInbound(msg);
+  } catch {
+    /* metering must never break the pipe */
   }
   if (!msg || msg.id === undefined || msg.id === null) return;
   if (typeof msg.method === 'string') pendingAgentReqs.add(msg.id);

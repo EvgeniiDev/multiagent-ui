@@ -65,7 +65,12 @@ export interface ActivityEntry {
   endedAt?: number;
 }
 
-/** One `usage_update` sample from the agent: tokens used against a window. */
+/** Who measured a usage sample: the agent's own `usage_update` (`agent`,
+ * exact) or the ws-bridge's chars/4 guess (`estimate`, approximate — the
+ * dashboard marks it `~`). Samples written before this field existed carry
+ * no source and are all agent-reported, so `undefined` reads as `agent`. */
+export type UsageSource = 'agent' | 'estimate';
+
 export interface UsageSample {
   at: number;
   agentName: string;
@@ -75,12 +80,34 @@ export interface UsageSample {
   size: number;
   cost?: number;
   currency?: string;
+  source?: UsageSource;
 }
 
 /** Last path segment of a working directory — the project's display name. */
 export function projectName(cwd?: string): string {
   if (!cwd) return 'unknown';
   return cwd.split(/[\\/]/).filter(Boolean).pop() || cwd;
+}
+
+const sampleSource = (row: UsageSample): UsageSource => row.source ?? 'agent';
+
+function sessionKey(row: UsageSample): string {
+  return row.sessionId ?? `${row.agentName}:${row.cwd ?? ''}`;
+}
+
+/**
+ * Rows eligible for delta math. The bridge writes a shadow estimate for the
+ * sessions it proxies, so a session can carry both layers; when even one
+ * agent-reported sample exists for it, only those count — mixing an estimate
+ * series with the real running total would double-count the session. A
+ * session with no agent rows keeps its estimate rows (Devin, Pi today).
+ */
+function countableRows(all: UsageSample[]): UsageSample[] {
+  const factual = new Set<string>();
+  for (const row of all) {
+    if (sampleSource(row) === 'agent') factual.add(sessionKey(row));
+  }
+  return all.filter((r) => sampleSource(r) === 'agent' || !factual.has(sessionKey(r)));
 }
 
 const STORE_PATH = 'activity.json';
@@ -125,10 +152,10 @@ export const useActivityStore = defineStore('activity', () => {
   function consumedInRange(
     from: number,
     to: number
-  ): { tokens: number; cost: number; sessions: number } {
+  ): { tokens: number; estTokens: number; cost: number; sessions: number } {
     const bySession = new Map<string, { before: UsageSample | null; inside: UsageSample[] }>();
-    for (const row of usage.value) {
-      const key = row.sessionId ?? `${row.agentName}:${row.cwd ?? ''}`;
+    for (const row of countableRows(usage.value)) {
+      const key = sessionKey(row);
       const acc = bySession.get(key) ?? { before: null, inside: [] };
       if (row.at < from) {
         if (!acc.before || row.at > acc.before.at) acc.before = row;
@@ -138,6 +165,7 @@ export const useActivityStore = defineStore('activity', () => {
       bySession.set(key, acc);
     }
     let tokens = 0;
+    let estTokens = 0;
     let cost = 0;
     let sessions = 0;
     for (const { before, inside } of bySession.values()) {
@@ -151,10 +179,12 @@ export const useActivityStore = defineStore('activity', () => {
       const baseCost = before ? before.cost ?? 0 : 0;
       const endTokens = Math.max(0, inside[inside.length - 1].used);
       const endCost = inside[inside.length - 1].cost ?? 0;
-      tokens += Math.max(0, endTokens - baseTokens);
+      const delta = Math.max(0, endTokens - baseTokens);
+      tokens += delta;
+      if (sampleSource(inside[inside.length - 1]) === 'estimate') estTokens += delta;
       cost += Math.max(0, endCost - baseCost);
     }
-    return { tokens, cost, sessions };
+    return { tokens, estTokens, cost, sessions };
   }
 
   /**
@@ -165,16 +195,16 @@ export const useActivityStore = defineStore('activity', () => {
   function deltaRows(
     from: number,
     to: number
-  ): { agentName: string; cwd?: string; sessionId?: string; tokens: number; cost: number }[] {
+  ): { agentName: string; cwd?: string; sessionId?: string; tokens: number; cost: number; source: UsageSource }[] {
     const bySession = new Map<string, UsageSample[]>();
-    for (const row of usage.value) {
+    for (const row of countableRows(usage.value)) {
       if (row.at > to) continue;
-      const key = row.sessionId ?? `${row.agentName}:${row.cwd ?? ''}`;
+      const key = sessionKey(row);
       const list = bySession.get(key) ?? [];
       list.push(row);
       bySession.set(key, list);
     }
-    const out: { agentName: string; cwd?: string; sessionId?: string; tokens: number; cost: number }[] = [];
+    const out: { agentName: string; cwd?: string; sessionId?: string; tokens: number; cost: number; source: UsageSource }[] = [];
     for (const list of bySession.values()) {
       list.sort((a, b) => a.at - b.at);
       const inside = list.filter((r) => r.at >= from);
@@ -189,6 +219,7 @@ export const useActivityStore = defineStore('activity', () => {
         sessionId: last.sessionId,
         tokens: Math.max(0, Math.max(0, last.used) - baseTokens),
         cost: Math.max(0, (last.cost ?? 0) - baseCost),
+        source: sampleSource(last),
       });
     }
     return out;
@@ -201,17 +232,17 @@ export const useActivityStore = defineStore('activity', () => {
   function consumedByDay(
     from: number,
     to: number
-  ): Map<string, { tokens: number; cost: number }> {
+  ): Map<string, { tokens: number; estTokens: number; cost: number }> {
     const dayKey = (ms: number) => new Date(ms).toISOString().slice(0, 10);
     const bySession = new Map<string, UsageSample[]>();
-    for (const row of usage.value) {
+    for (const row of countableRows(usage.value)) {
       if (row.at > to) continue;
-      const key = row.sessionId ?? `${row.agentName}:${row.cwd ?? ''}`;
+      const key = sessionKey(row);
       const list = bySession.get(key) ?? [];
       list.push(row);
       bySession.set(key, list);
     }
-    const out = new Map<string, { tokens: number; cost: number }>();
+    const out = new Map<string, { tokens: number; estTokens: number; cost: number }>();
     for (const list of bySession.values()) {
       list.sort((a, b) => a.at - b.at);
       // last cumulative value per day for this session
@@ -229,8 +260,9 @@ export const useActivityStore = defineStore('activity', () => {
         seenTokens = Math.max(seenTokens, Math.max(0, row.used));
         seenCost = Math.max(seenCost, row.cost ?? 0);
         if (day < dayKey(from)) continue;
-        const acc = out.get(day) ?? { tokens: 0, cost: 0 };
+        const acc = out.get(day) ?? { tokens: 0, estTokens: 0, cost: 0 };
         acc.tokens += tokens;
+        if (sampleSource(row) === 'estimate') acc.estTokens += tokens;
         acc.cost += cost;
         out.set(day, acc);
       }
@@ -238,24 +270,25 @@ export const useActivityStore = defineStore('activity', () => {
     return out;
   }
 
-  function totalUsage(from: number, to: number): { tokens: number; cost: number; turns: number } {
-    const { tokens, cost } = consumedInRange(from, to);
+  function totalUsage(from: number, to: number): { tokens: number; estTokens: number; cost: number; turns: number } {
+    const { tokens, estTokens, cost } = consumedInRange(from, to);
     const turns = entriesInRange(from, to).filter((e) => e.kind === 'turn-end').length;
-    return { tokens, cost, turns };
+    return { tokens, estTokens, cost, turns };
   }
 
   /** Cost is reported in the agent's own currency; mixed currencies stay separate. */
   function usageByAgent(from: number, to: number) {
-    const map = new Map<string, { agentName: string; tokens: number; cost: number; turns: number }>();
+    const map = new Map<string, { agentName: string; tokens: number; estTokens: number; cost: number; turns: number }>();
     for (const row of deltaRows(from, to)) {
-      const acc = map.get(row.agentName) ?? { agentName: row.agentName, tokens: 0, cost: 0, turns: 0 };
+      const acc = map.get(row.agentName) ?? { agentName: row.agentName, tokens: 0, estTokens: 0, cost: 0, turns: 0 };
       acc.tokens += row.tokens;
+      if (row.source === 'estimate') acc.estTokens += row.tokens;
       acc.cost += row.cost;
       map.set(row.agentName, acc);
     }
     const turns = turnsBy(from, to, (e) => e.agentName);
     for (const [key, value] of turns) {
-      const acc = map.get(key) ?? { agentName: key, tokens: 0, cost: 0, turns: 0 };
+      const acc = map.get(key) ?? { agentName: key, tokens: 0, estTokens: 0, cost: 0, turns: 0 };
       acc.turns = value;
       map.set(key, acc);
     }
@@ -263,17 +296,18 @@ export const useActivityStore = defineStore('activity', () => {
   }
 
   function usageByProject(from: number, to: number) {
-    const map = new Map<string, { project: string; cwd?: string; tokens: number; cost: number; turns: number }>();
+    const map = new Map<string, { project: string; cwd?: string; tokens: number; estTokens: number; cost: number; turns: number }>();
     for (const row of deltaRows(from, to)) {
       const project = projectName(row.cwd);
-      const acc = map.get(project) ?? { project, cwd: row.cwd, tokens: 0, cost: 0, turns: 0 };
+      const acc = map.get(project) ?? { project, cwd: row.cwd, tokens: 0, estTokens: 0, cost: 0, turns: 0 };
       acc.tokens += row.tokens;
+      if (row.source === 'estimate') acc.estTokens += row.tokens;
       acc.cost += row.cost;
       map.set(project, acc);
     }
     const turns = turnsBy(from, to, (e) => projectName(e.cwd));
     for (const [key, value] of turns) {
-      const acc = map.get(key) ?? { project: key, tokens: 0, cost: 0, turns: 0 };
+      const acc = map.get(key) ?? { project: key, tokens: 0, estTokens: 0, cost: 0, turns: 0 };
       acc.turns = value;
       map.set(key, acc);
     }
@@ -281,14 +315,14 @@ export const useActivityStore = defineStore('activity', () => {
   }
 
   function usageByDay(from: number, to: number) {
-    const map = new Map<string, { day: string; tokens: number; cost: number; turns: number }>();
+    const map = new Map<string, { day: string; tokens: number; estTokens: number; cost: number; turns: number }>();
     for (const [day, consumed] of consumedByDay(from, to)) {
-      map.set(day, { day, tokens: consumed.tokens, cost: consumed.cost, turns: 0 });
+      map.set(day, { day, tokens: consumed.tokens, estTokens: consumed.estTokens, cost: consumed.cost, turns: 0 });
     }
     for (const entry of entriesInRange(from, to)) {
       if (entry.kind !== 'turn-end') continue;
       const day = new Date(entry.at).toISOString().slice(0, 10);
-      const acc = map.get(day) ?? { day, tokens: 0, cost: 0, turns: 0 };
+      const acc = map.get(day) ?? { day, tokens: 0, estTokens: 0, cost: 0, turns: 0 };
       acc.turns += 1;
       map.set(day, acc);
     }
@@ -328,11 +362,13 @@ export const useActivityStore = defineStore('activity', () => {
     const at = sample.at ?? Date.now();
     const last = [...usage.value].reverse().find((u) => u.sessionId === sample.sessionId);
     // Skip a sample that repeats the previous one for this session: the agents
-    // report a running total, so an unchanged used/size/cost adds nothing.
+    // report a running total, so an unchanged used/size/cost adds nothing. The
+    // source matters too — an estimate may legitimately match an agent row.
     const sameCost =
       (sample.cost ?? null) === (last?.cost ?? null) &&
       (sample.currency ?? null) === (last?.currency ?? null);
-    if (last && sample.used === last.used && sample.size === last.size && sameCost) {
+    const sameSource = (sample.source ?? 'agent') === (last?.source ?? 'agent');
+    if (last && sample.used === last.used && sample.size === last.size && sameCost && sameSource) {
       return;
     }
     usage.value.push({ at, ...sample });
@@ -359,7 +395,9 @@ export const useActivityStore = defineStore('activity', () => {
   // the runner, agents on other devices); RemoteKVStore adopts the newer
   // doc on its own poll, but this ref was filled once at init. A periodic
   // re-read + id-merge keeps it in step without dropping locally recorded
-  // rows that haven't been pushed yet.
+  // rows that haven't been pushed yet. The same holds for `usage`: the
+  // ws-bridge estimator and the opencode plugin append samples straight to
+  // the doc, so usage rows merge on their identity tuple (no `id` field).
   async function syncEntries(): Promise<void> {
     if (!store) return;
     const remote = (await store.get<ActivityEntry[]>('entries')) ?? [];
@@ -375,6 +413,23 @@ export const useActivityStore = defineStore('activity', () => {
       entries.value = [...byId.values()]
         .sort((a, b) => a.at - b.at)
         .slice(-MAX_ENTRIES);
+    }
+
+    const remoteUsage = (await store.get<UsageSample[]>('usage')) ?? [];
+    const usageKey = (u: UsageSample) =>
+      `${u.sessionId}|${u.at}|${u.used}|${u.size}|${u.cost ?? ''}|${u.source ?? ''}`;
+    const byKey = new Map(usage.value.map((u) => [usageKey(u), u]));
+    let usageChanged = false;
+    for (const u of remoteUsage) {
+      if (u && typeof u.at === 'number' && typeof u.used === 'number' && !byKey.has(usageKey(u))) {
+        byKey.set(usageKey(u), u);
+        usageChanged = true;
+      }
+    }
+    if (usageChanged) {
+      usage.value = [...byKey.values()]
+        .sort((a, b) => a.at - b.at)
+        .slice(-MAX_USAGE);
     }
   }
 
@@ -413,6 +468,7 @@ export const useActivityStore = defineStore('activity', () => {
     recent,
     entriesInRange,
     usageInRange,
+    deltaRows,
     totalUsage,
     usageByAgent,
     usageByProject,

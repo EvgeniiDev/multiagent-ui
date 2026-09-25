@@ -875,6 +875,7 @@ export const useSessionStore = defineStore('session', () => {
         size: Number(untyped.size ?? 0),
         cost: typeof untyped.cost?.amount === 'number' ? untyped.cost.amount : undefined,
         currency: untyped.cost?.currency,
+        source: 'agent',
       });
       return;
     }
