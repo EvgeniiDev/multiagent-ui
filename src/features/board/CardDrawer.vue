@@ -17,7 +17,9 @@ import {
   pickStatusArtifact,
   proposeTransition,
   parseStatusToken,
+  parseChecklist,
   reviewRoundOf,
+  CHECKLIST_FILE,
   type CardArtifact,
 } from '../../stores/artifacts';
 import { BOARD_STAGES, PRIORITIES, statusesForStage, stageLabel } from './columns';
@@ -295,6 +297,21 @@ const tokenArtifact = computed(() =>
   pickStatusArtifact(card.value?.stage ?? 'backlog', artState.value.artifacts)
 );
 const reviewRound = computed(() => reviewRoundOf(artState.value.artifacts));
+
+// ---- plan checklist (W15 plan-queue) -----------------------------------------
+//
+// `03_checklist.md` is derived from the plan once, then its `- [ ]` / `- [x]`
+// marks are the run's progress state (executor / hand edits — never the
+// panel's). The block below is a read-only view of those marks; the file
+// itself stays reachable as an ordinary artifact row.
+
+const checklistItems = computed(() => {
+  const a = artState.value.artifacts.find((x) => x.name === CHECKLIST_FILE);
+  return a ? parseChecklist(a.content) : [];
+});
+const checklistDone = computed(
+  () => checklistItems.value.filter((i) => i.done).length
+);
 
 // ---- review findings (review cycle) ------------------------------------------
 //
@@ -661,6 +678,35 @@ onBeforeUnmount(() => {
               </button>
             </li>
           </ul>
+
+          <div v-if="checklistItems.length" class="check-block" data-testid="checklist">
+            <div class="check-head">
+              <span class="field-label">Plan checklist</span>
+              <span
+                class="check-progress mono"
+                data-testid="checklist-progress"
+                :title="`${checklistDone} of ${checklistItems.length} items marked done in ${CHECKLIST_FILE}`"
+              >{{ checklistDone }}/{{ checklistItems.length }}</span>
+            </div>
+            <ul class="check-list" data-testid="checklist-items">
+              <li
+                v-for="(item, i) in checklistItems"
+                :key="i"
+                class="check-row mono"
+                :class="{ done: item.done }"
+              >
+                <input
+                  class="check-box"
+                  type="checkbox"
+                  :checked="item.done"
+                  disabled
+                  tabindex="-1"
+                  :aria-label="item.text"
+                />
+                <span class="check-text">{{ item.text }}</span>
+              </li>
+            </ul>
+          </div>
 
           <pre
             v-if="openArtifact"
@@ -1229,6 +1275,70 @@ textarea.f-input {
   border-radius: var(--radius-sm, 4px);
   font-size: 0.625rem;
   white-space: nowrap;
+}
+
+/* Plan checklist — read-only view of 03_checklist.md marks, same row
+   vocabulary as the findings list (mono, flat, no buttons). */
+.check-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.check-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.check-progress {
+  font-size: 0.625rem;
+  padding: 0.0625rem 0.3rem;
+  border: 1px solid var(--border-color, #e3dbcf);
+  border-radius: var(--radius-sm, 4px);
+  color: var(--text-muted, #a39a8e);
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+}
+
+.check-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.check-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.375rem;
+  min-width: 0;
+  padding: 0.125rem 0.375rem;
+  font-size: 0.6875rem;
+  line-height: 1.4;
+  color: var(--text-primary, #2b2723);
+}
+
+.check-box {
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--text-accent, #c2532f);
+}
+
+.check-box:disabled {
+  cursor: default;
+}
+
+.check-row.done .check-text {
+  color: var(--text-muted, #a39a8e);
+  text-decoration: line-through;
+}
+
+.check-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .art-view {

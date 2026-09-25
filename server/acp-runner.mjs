@@ -5,7 +5,10 @@
 // and that holds no live claim, it:
 //   1. puts a rev-safe claim into `claims.json` (lease + pid + runnerPid +
 //      the stage the card was claimed from),
-//   2. writes a SHORT brief to <projectPath>/.acp/cards/<cardId>/00_brief.md,
+//   2. writes a SHORT brief to <projectPath>/.acp/cards/<cardId>/00_brief.md
+//      (first deriving 03_checklist.md from 02_plan.md's list items when it
+//      is missing — an existing checklist is progress state and is never
+//      regenerated — and naming the first open item in the brief),
 //   3. spawns the role's CLI with cwd = projectPath (up to `maxRetries`
 //      attempts on a non-zero exit), stdout/stderr -> run-<N>.log,
 //   4. renews `leaseUntil` on a heartbeat while the child runs,
@@ -212,7 +215,63 @@ function cmdForLog(cli, args) {
   return [cli, ...(args || [])].join(' ');
 }
 
-function briefText(card, dir, role) {
+// Plan-queue: 03_checklist.md is the card's in-plan progress state. It is
+// DERIVED from 02_plan.md once — when a run starts and finds it missing —
+// then its `- [ ]` / `- [x]` marks belong to the executor (or a hand edit)
+// and are never regenerated. The runner only reads the marks: it does not
+// parse plans beyond lifting list items into checkboxes.
+function planItems(plan) {
+  const out = [];
+  for (const raw of plan.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const cb = /^[-*]\s+\[([ xX])\]\s*(.*)$/.exec(line);
+    if (cb) {
+      if (cb[2]) out.push(`- [${cb[1]}] ${cb[2].trim()}`); // keep its mark
+      continue;
+    }
+    const m = /^[-*]\s+(\S.*)$/.exec(line) || /^\d+[.)]\s+(\S.*)$/.exec(line);
+    if (m) out.push(`- [ ] ${m[1].trim()}`);
+    // Anything else — headers, prose, tables, STATUS lines — is not an item.
+  }
+  return out;
+}
+
+// Returns the checklist text (existing or freshly derived), '' when there is
+// no usable plan. An existing file is returned unread for edits — its content
+// is the progress state.
+async function ensureChecklist(dir) {
+  const path = join(dir, '03_checklist.md');
+  try {
+    return await fs.readFile(path, 'utf-8');
+  } catch (e) {
+    if (!e || e.code !== 'ENOENT') throw e;
+  }
+  let plan = '';
+  try {
+    plan = await fs.readFile(join(dir, '02_plan.md'), 'utf-8');
+  } catch {
+    return ''; // no plan yet — nothing to derive
+  }
+  const items = planItems(plan);
+  if (!items.length) return ''; // a plan without list items yields no file
+  const text =
+    '# Checklist — derived from 02_plan.md; the executor marks items [x]\n\n' +
+    `${items.join('\n')}\n`;
+  await fs.writeFile(path, text, 'utf-8');
+  return text;
+}
+
+function firstOpenItem(checklist) {
+  for (const raw of checklist.split('\n')) {
+    const m = /^\s*[-*]\s+\[ \]\s+(\S.*)$/.exec(raw);
+    if (m) return m[1].trim();
+  }
+  return '';
+}
+
+function briefText(card, dir, role, checklist = '') {
+  const open = firstOpenItem(checklist);
   return [
     `# ${card.id} — ${card.title || '(no title)'}`,
     '',
@@ -222,6 +281,9 @@ function briefText(card, dir, role) {
     `role file: ${role.promptFile || '-'}`,
     '',
     'Последней строкой отчёта пиши `STATUS: DONE|BLOCKED|CHANGES_REQUIRED`.',
+    ...(open
+      ? ['', `Продолжай с первого незакрытого пункта 03_checklist.md: ${open}`]
+      : []),
     '',
   ].join('\n');
 }
@@ -501,8 +563,9 @@ async function runCard(card, project, role, attemptsSoFar) {
   const dir = runDir(project.path, card.id);
   await fs.mkdir(dir, { recursive: true });
 
+  const checklist = await ensureChecklist(dir);
   const briefPath = join(dir, '00_brief.md');
-  await fs.writeFile(briefPath, briefText(card, dir, role), 'utf-8');
+  await fs.writeFile(briefPath, briefText(card, dir, role, checklist), 'utf-8');
 
   const promptLine = `Прочитай бриф ${briefPath} и файл роли ${role.promptFile || '(нет)'}.`;
   // The prompt goes to the CLI as a FILE, not as a quoted positional argument
