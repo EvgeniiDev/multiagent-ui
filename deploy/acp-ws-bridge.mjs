@@ -97,10 +97,13 @@ const METER_AGENT_NAME = String(
   argValue('--agent-name', AGENT_NAME_BY_CMD[command.split(/\s+/)[0]] ?? command.split(/\s+/)[0])
 );
 
-/** sessionId -> { cwd?, chars, lastWriteAt, lastWrittenUsed, writing, agentReports } */
+/** sessionId -> { cwd?, chars, lastWriteAt, lastWrittenUsed, lastWrittenModel, writing, agentReports, model? } */
 const meterSessions = new Map();
 /** request id -> cwd, for `session/new` requests awaiting their response. */
 const meterNewReqs = new Map();
+/** request id -> sessionId, for `session/load` requests awaiting their
+ * response — the response may carry the session's model like new does. */
+const meterLoadReqs = new Map();
 /** request id -> sessionId, for `session/prompt` requests awaiting their
  * response — the turn's end is the natural moment to flush the estimate. */
 const meterPromptReqs = new Map();
@@ -108,11 +111,32 @@ const meterPromptReqs = new Map();
 function meterSession(sessionId, cwd) {
   let s = meterSessions.get(sessionId);
   if (!s) {
-    s = { cwd, chars: 0, lastWriteAt: 0, lastWrittenUsed: -1, writing: false, agentReports: false };
+    s = { cwd, chars: 0, lastWriteAt: 0, lastWrittenUsed: -1, lastWrittenModel: undefined, writing: false, agentReports: false, model: undefined };
     meterSessions.set(sessionId, s);
   }
   if (cwd && !s.cwd) s.cwd = cwd;
   return s;
+}
+
+/**
+ * The session's announced model, straight off a `session/new` or
+ * `session/load` result. Two real shapes exist on the wire (probed
+ * 2026-09-25): `models.currentModelId` (Hermes, Pi) and a `configOptions`
+ * select with category/id `model` carrying `currentValue` (OpenCode, Devin —
+ * which publish no `models` block at all). Returns undefined when neither is
+ * present — the estimate then records an honest 'unknown'.
+ */
+function meterModelFromResult(result) {
+  const direct = result?.models?.currentModelId;
+  if (typeof direct === 'string' && direct) return direct;
+  const opts = result?.configOptions;
+  if (Array.isArray(opts)) {
+    const opt = opts.find(
+      (o) => o && (o.category === 'model' || o.id === 'model') && typeof o.currentValue === 'string'
+    );
+    if (opt?.currentValue) return opt.currentValue;
+  }
+  return undefined;
 }
 
 /** Characters in an ACP content block or prompt-part array — text only. */
@@ -136,7 +160,24 @@ function meterOutbound(msg) {
       if (msg.id !== undefined && msg.id !== null) meterNewReqs.set(msg.id, p.cwd);
       break;
     case 'session/load':
-      if (typeof p.sessionId === 'string') meterSession(p.sessionId, p.cwd);
+      if (typeof p.sessionId === 'string') {
+        meterSession(p.sessionId, p.cwd);
+        if (msg.id !== undefined && msg.id !== null) meterLoadReqs.set(msg.id, p.sessionId);
+      }
+      break;
+    case 'session/set_model':
+      // The client switched the session's model mid-flight — later estimates
+      // carry the new id.
+      if (typeof p.sessionId === 'string' && typeof p.modelId === 'string') {
+        meterSession(p.sessionId).model = p.modelId;
+      }
+      break;
+    case 'session/set_config_option':
+      // Agents that expose the model as a config option (OpenCode, Devin)
+      // take model changes through this method instead of set_model.
+      if (typeof p.sessionId === 'string' && p.configId === 'model' && typeof p.value === 'string') {
+        meterSession(p.sessionId).model = p.value;
+      }
       break;
     case 'session/prompt': {
       if (typeof p.sessionId !== 'string') return;
@@ -180,7 +221,17 @@ function meterInbound(msg) {
     const cwd = meterNewReqs.get(msg.id);
     meterNewReqs.delete(msg.id);
     const sid = msg.result?.sessionId;
-    if (typeof sid === 'string') meterSession(sid, cwd);
+    if (typeof sid === 'string') {
+      const s = meterSession(sid, cwd);
+      s.model = meterModelFromResult(msg.result) ?? s.model;
+    }
+    return;
+  }
+  if (meterLoadReqs.has(msg.id)) {
+    const sid = meterLoadReqs.get(msg.id);
+    meterLoadReqs.delete(msg.id);
+    const s = meterSession(sid);
+    s.model = meterModelFromResult(msg.result) ?? s.model;
     return;
   }
   if (meterPromptReqs.has(msg.id)) {
@@ -203,7 +254,10 @@ function meterFlush(sessionId, s) {
   s = s ?? meterSessions.get(sessionId);
   if (!s || s.writing || s.agentReports) return;
   const used = Math.ceil(s.chars / CHARS_PER_TOKEN);
-  if (used <= 0 || used === s.lastWrittenUsed) return;
+  // A model switch alone (used unchanged) still earns a row — same rule the
+  // panel store applies.
+  const model = s.model ?? 'unknown';
+  if (used <= 0 || (used === s.lastWrittenUsed && model === s.lastWrittenModel)) return;
   s.writing = true;
   meterAppend({
     at: Date.now(),
@@ -213,10 +267,17 @@ function meterFlush(sessionId, s) {
     used,
     size: 0,
     source: 'estimate',
+    // `models.currentModelId` / the model config option as the agent announced
+    // it; the wire carries no structured provider, so 'unknown' it stays.
+    model,
+    provider: 'unknown',
   })
     .then((wrote) => {
       s.lastWriteAt = Date.now();
-      if (wrote) s.lastWrittenUsed = used;
+      if (wrote) {
+        s.lastWrittenUsed = used;
+        s.lastWrittenModel = model;
+      }
     })
     .catch((e) => log('token-meter write failed:', e instanceof Error ? e.message : e))
     .finally(() => {
@@ -244,7 +305,13 @@ async function meterAppend(sample) {
     }
     if (!Array.isArray(doc.usage)) doc.usage = [];
     const last = [...doc.usage].reverse().find((u) => u && u.sessionId === sample.sessionId && (u.source ?? 'agent') === 'estimate');
-    if (last && last.used === sample.used) return true; // nothing new to say
+    if (
+      last &&
+      last.used === sample.used &&
+      (last.model ?? 'unknown') === (sample.model ?? 'unknown') &&
+      (last.provider ?? 'unknown') === (sample.provider ?? 'unknown')
+    )
+      return true; // nothing new to say
     doc.usage = [...doc.usage.slice(-(METER_MAX_USAGE - 1)), sample];
     const put = await fetch(`${METER_STATE_URL}/api/state/activity.json`, {
       method: 'PUT',

@@ -12,6 +12,7 @@
 //   totalUsage(from, to)           { tokens, cost, turns }
 //   usageByAgent(from, to)         [{ agentName, tokens, cost, turns }]
 //   usageByProject(from, to)       [{ project, tokens, cost, turns }]
+//   usageByModel(from, to)         [{ model, provider, tokens, cost, turns }]
 //   usageByDay(from, to)           [{ day: 'YYYY-MM-DD', tokens, cost, turns }]
 //   dayRange(days)                 helpers: { from, to } for common windows
 import { defineStore } from 'pinia';
@@ -81,6 +82,16 @@ export interface UsageSample {
   cost?: number;
   currency?: string;
   source?: UsageSource;
+  /** The agent's session model identifier as announced on `session/new` /
+   * `session/load` (`models.currentModelId`, or the `model` config option's
+   * value), or the OpenCode plugin's `info.modelID`. Written verbatim — the
+   * same string the model picker shows. Samples written before this field
+   * existed carry none and read as `unknown`. */
+  model?: string;
+  /** Provider when the writer actually knows it (the plugin's
+   * `info.providerID`). `undefined` reads as `unknown` — the panel and the
+   * bridge see a model id, never a structured provider field. */
+  provider?: string;
 }
 
 /** Last path segment of a working directory — the project's display name. */
@@ -90,6 +101,8 @@ export function projectName(cwd?: string): string {
 }
 
 const sampleSource = (row: UsageSample): UsageSource => row.source ?? 'agent';
+const sampleModel = (row: UsageSample): string => row.model ?? 'unknown';
+const sampleProvider = (row: UsageSample): string => row.provider ?? 'unknown';
 
 function sessionKey(row: UsageSample): string {
   return row.sessionId ?? `${row.agentName}:${row.cwd ?? ''}`;
@@ -195,7 +208,7 @@ export const useActivityStore = defineStore('activity', () => {
   function deltaRows(
     from: number,
     to: number
-  ): { agentName: string; cwd?: string; sessionId?: string; tokens: number; cost: number; source: UsageSource }[] {
+  ): { agentName: string; cwd?: string; sessionId?: string; model: string; provider: string; tokens: number; cost: number; source: UsageSource }[] {
     const bySession = new Map<string, UsageSample[]>();
     for (const row of countableRows(usage.value)) {
       if (row.at > to) continue;
@@ -204,7 +217,7 @@ export const useActivityStore = defineStore('activity', () => {
       list.push(row);
       bySession.set(key, list);
     }
-    const out: { agentName: string; cwd?: string; sessionId?: string; tokens: number; cost: number; source: UsageSource }[] = [];
+    const out: { agentName: string; cwd?: string; sessionId?: string; model: string; provider: string; tokens: number; cost: number; source: UsageSource }[] = [];
     for (const list of bySession.values()) {
       list.sort((a, b) => a.at - b.at);
       const inside = list.filter((r) => r.at >= from);
@@ -217,6 +230,11 @@ export const useActivityStore = defineStore('activity', () => {
         agentName: last.agentName,
         cwd: last.cwd,
         sessionId: last.sessionId,
+        // A session that switched model mid-window attributes its whole
+        // delta to the latest sample's model — same last-row semantics as
+        // agentName/cwd above.
+        model: sampleModel(last),
+        provider: sampleProvider(last),
         tokens: Math.max(0, Math.max(0, last.used) - baseTokens),
         cost: Math.max(0, (last.cost ?? 0) - baseCost),
         source: sampleSource(last),
@@ -289,6 +307,33 @@ export const useActivityStore = defineStore('activity', () => {
     const turns = turnsBy(from, to, (e) => e.agentName);
     for (const [key, value] of turns) {
       const acc = map.get(key) ?? { agentName: key, tokens: 0, estTokens: 0, cost: 0, turns: 0 };
+      acc.turns = value;
+      map.set(key, acc);
+    }
+    return [...map.values()].sort((a, b) => b.tokens - a.tokens);
+  }
+
+  /**
+   * Spend grouped by session model. The model lives on usage samples, not on
+   * entries, so turns reach it through a sessionId -> model map built from the
+   * same delta rows (a turn-end whose session left no countable sample falls
+   * back to `unknown`).
+   */
+  function usageByModel(from: number, to: number) {
+    const map = new Map<string, { model: string; provider: string; tokens: number; estTokens: number; cost: number; turns: number }>();
+    const sessionModel = new Map<string, string>();
+    for (const row of deltaRows(from, to)) {
+      const acc = map.get(row.model) ?? { model: row.model, provider: row.provider, tokens: 0, estTokens: 0, cost: 0, turns: 0 };
+      acc.tokens += row.tokens;
+      if (row.source === 'estimate') acc.estTokens += row.tokens;
+      acc.cost += row.cost;
+      if (acc.provider === 'unknown' && row.provider !== 'unknown') acc.provider = row.provider;
+      map.set(row.model, acc);
+      if (row.sessionId) sessionModel.set(row.sessionId, row.model);
+    }
+    const turns = turnsBy(from, to, (e) => (e.sessionId ? sessionModel.get(e.sessionId) ?? 'unknown' : 'unknown'));
+    for (const [key, value] of turns) {
+      const acc = map.get(key) ?? { model: key, provider: 'unknown', tokens: 0, estTokens: 0, cost: 0, turns: 0 };
       acc.turns = value;
       map.set(key, acc);
     }
@@ -368,7 +413,12 @@ export const useActivityStore = defineStore('activity', () => {
       (sample.cost ?? null) === (last?.cost ?? null) &&
       (sample.currency ?? null) === (last?.currency ?? null);
     const sameSource = (sample.source ?? 'agent') === (last?.source ?? 'agent');
-    if (last && sample.used === last.used && sample.size === last.size && sameCost && sameSource) {
+    // A mid-session model switch is real information: identical totals under a
+    // different announced model still earn a new sample.
+    const sameModel =
+      (sample.model ?? 'unknown') === (last?.model ?? 'unknown') &&
+      (sample.provider ?? 'unknown') === (last?.provider ?? 'unknown');
+    if (last && sample.used === last.used && sample.size === last.size && sameCost && sameSource && sameModel) {
       return;
     }
     usage.value.push({ at, ...sample });
@@ -417,7 +467,7 @@ export const useActivityStore = defineStore('activity', () => {
 
     const remoteUsage = (await store.get<UsageSample[]>('usage')) ?? [];
     const usageKey = (u: UsageSample) =>
-      `${u.sessionId}|${u.at}|${u.used}|${u.size}|${u.cost ?? ''}|${u.source ?? ''}`;
+      `${u.sessionId}|${u.at}|${u.used}|${u.size}|${u.cost ?? ''}|${u.source ?? ''}|${u.model ?? ''}|${u.provider ?? ''}`;
     const byKey = new Map(usage.value.map((u) => [usageKey(u), u]));
     let usageChanged = false;
     for (const u of remoteUsage) {
@@ -471,6 +521,7 @@ export const useActivityStore = defineStore('activity', () => {
     deltaRows,
     totalUsage,
     usageByAgent,
+    usageByModel,
     usageByProject,
     usageByDay,
     dayRange,

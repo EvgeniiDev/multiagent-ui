@@ -131,6 +131,39 @@ const projectRows = computed<ProjectRow[]>(() => {
   });
 });
 
+interface ModelRow {
+  model: string;
+  provider: string;
+  tokens: number;
+  estTokens: number;
+  cost: number;
+  turns: number;
+  share: number;
+  lastAt: number;
+  costs: string;
+}
+
+const modelRows = computed<ModelRow[]>(() => {
+  const { from, to } = bounds.value;
+  const rows = activity.usageByModel(from, to);
+  const total = rows.reduce((s, r) => s + r.tokens, 0);
+  const samples = activity.usageInRange(from, to);
+  return rows.map((r) => {
+    const mine = samples.filter((s) => (s.model ?? 'unknown') === r.model);
+    return {
+      model: r.model,
+      provider: r.provider,
+      tokens: r.tokens,
+      estTokens: r.estTokens,
+      cost: r.cost,
+      turns: r.turns,
+      share: total > 0 ? (r.tokens / total) * 100 : 0,
+      lastAt: mine.length ? mine[mine.length - 1].at : 0,
+      costs: fmtCostGroups(groupCost(mine)),
+    };
+  });
+});
+
 interface DayPoint {
   day: string;
   label: string;
@@ -625,6 +658,34 @@ watch(
             <tbody>
               <tr v-for="r in projectRows" :key="r.project" :title="r.cwd" :data-est="r.estTokens > 0">
                 <td data-label="Project"><span :title="r.cwd" class="mono">{{ r.project }}</span></td>
+                <td class="num mono" data-label="Tokens" :title="r.estTokens > 0 ? `${fmtInt(r.estTokens)} of these are a bridge estimate` : ''">{{ fmtTokensWithEst(r.tokens, r.estTokens) }}</td>
+                <td class="num mono" data-label="Cost">{{ r.costs }}</td>
+                <td class="num mono" data-label="Turns">{{ fmtInt(r.turns) }}</td>
+                <td class="share-cell" data-label="Share">
+                  <span class="bar" aria-hidden="true"><span class="fill" :style="{ width: r.share.toFixed(1) + '%' }"></span></span>
+                  <span class="mono muted">{{ r.share.toFixed(0) }}%</span>
+                </td>
+                <td class="muted" data-label="Last activity" :title="r.lastAt ? fmtStamp(r.lastAt) : ''">{{ r.lastAt ? fmtAgo(r.lastAt, now) : '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <!-- By model -->
+        <section class="panel" aria-label="Usage by model">
+          <div class="panel-title">By model <span class="muted">· {{ windowLabel }}</span></div>
+          <p v-if="modelRows.length === 0" class="empty" data-testid="models-empty">
+            no usage recorded yet<br />
+            <span class="muted">The model comes from the session's announced model id; rows written before that field existed read as unknown.</span>
+          </p>
+          <table v-else class="dense" data-testid="by-model-table">
+            <thead>
+              <tr><th scope="col">Model</th><th scope="col">Provider</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th><th scope="col">Share</th><th scope="col">Last activity</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in modelRows" :key="r.model" data-testid="by-model-row" :data-model="r.model" :data-est="r.estTokens > 0">
+                <td data-label="Model"><span class="mono">{{ r.model }}</span></td>
+                <td class="muted" data-label="Provider">{{ r.provider }}</td>
                 <td class="num mono" data-label="Tokens" :title="r.estTokens > 0 ? `${fmtInt(r.estTokens)} of these are a bridge estimate` : ''">{{ fmtTokensWithEst(r.tokens, r.estTokens) }}</td>
                 <td class="num mono" data-label="Cost">{{ r.costs }}</td>
                 <td class="num mono" data-label="Turns">{{ fmtInt(r.turns) }}</td>
