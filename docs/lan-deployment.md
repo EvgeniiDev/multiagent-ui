@@ -100,6 +100,26 @@ HTTP API exposed by each bridge (same port as its WebSocket, CORS `*`):
    has no auth: anyone on the LAN can drive these agents. Bind it to a trusted
    network or put it behind a reverse proxy with auth if that matters.
 
+## PM wakeup timer (optional, off by default)
+
+`server/acp-pm-wakeup.mjs` runs one `pm` role session when — and only when —
+the board changed since the last run and has been quiet for `PM_QUIET_MIN`
+(default 10 min): unchanged or still-settling ticks cost a hash compare and
+no model calls. Reference user units ship as `docs/acp-pm-wakeup.service`
+(oneshot) and `docs/acp-pm-wakeup.timer` (every 30 min). To arm it:
+
+```bash
+install -m 0644 docs/acp-pm-wakeup.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now acp-pm-wakeup.timer   # owner's decision
+```
+
+Requires a `pm` entry in `roles.json` (its `cli`+`args` are what gets
+spawned, cwd = the checkout). Every fired run lands in `activity.json` as
+`kind: "pm"` entries with `role: "pm"`; artefacts live in
+`.acp/pm/wakeup/<session>/`. Manual runs are untouched — a live pm claim
+or fresh pm ledger activity makes the timer skip its tick.
+
 ## Updating
 
 ```bash

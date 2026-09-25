@@ -35,6 +35,7 @@ SCRIPTS = [
     ("watchdog", REPO / "scripts/e2e_watchdog.py"),
     ("agents tab", REPO / "scripts/e2e_agents_tab.py"),
     ("pm", REPO / "scripts/e2e_pm.py"),
+    ("pm wakeup", REPO / "scripts/e2e_pm_wakeup.py"),
     ("review", REPO / "scripts/e2e_review.py"),
     ("review checker", REPO / "scripts/e2e_review_checker.py"),
     ("dashboard math", REPO / "scripts/e2e_dash_math.py"),
