@@ -12,6 +12,7 @@ import { loadAttachmentHistory, recordTurnAttachments, turnAttachments, forgetSe
 import { AcpClientBridge, createAcpClient } from '../lib/acp-bridge';
 import { onAgentStderr, spawnAgent, killAgent } from '../lib/host';
 import { isDesktop } from '../lib/platform';
+import { setSessionInUrl } from '../lib/sessionUrl';
 import { useConfigStore } from './config';
 import { useActivityStore } from './activity';
 import type { SessionNotification, AuthMethod, SessionInfo, ContentBlock } from '@agentclientprotocol/sdk';
@@ -1493,6 +1494,9 @@ export const useSessionStore = defineStore('session', () => {
     // The open-session pointer must die with the disconnect — otherwise the
     // next boot would auto-resume a session the user explicitly closed.
     void saveSessionsToStore();
+    // The URL pointer dies with it: `?s=...` names the OPEN chat, and after a
+    // disconnect there is none (a stale ?s would resurrect the chat on F5).
+    setSessionInUrl('', null);
     messages.value = [];
     toolCalls.value.clear();
     clearPermissionTimer();

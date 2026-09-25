@@ -147,6 +147,10 @@ const FEED_BOTTOM_PX = 40;
 // wheel. Position matching (not a timed flag) so render-saturated replays
 // can't stretch the guard window into a real user scroll.
 let programmaticScrollTop: number | null = null;
+// The session the follow logic last saw — a clear WITHOUT a switch (a
+// same-session resume re-record) must not re-arm the intent: that would
+// undo a mid-replay scroll-up the user just made.
+let lastSeenSessionId: string | null = null;
 
 function distanceFromBottom(feed: HTMLElement): number {
   return feed.scrollHeight - feed.scrollTop - feed.clientHeight;
@@ -182,11 +186,20 @@ function onFeedWheel(event: WheelEvent): void {
 
 // New messages follow the intent — no threshold check on where the feed
 // happens to sit. A cleared list is a transcript about to load (every
-// open/switch path empties the feed first), so it re-arms the intent too:
-// the sessionId watch only lands after `session/load` resolves, too late
-// to follow the replay itself.
-watch(messages, async () => {
-  if (messages.value.length === 0) followBottom.value = true;
+// open/switch path empties the feed first), so it re-arms the intent there.
+// The re-arm only counts when the SESSION actually switched: `resumeSession`
+// now records `currentSession` BEFORE clearing (so F5 restores the clicked
+// chat even when the load is refused), which fires this watcher a second
+// time for the same session — and a mid-replay wheel-up (user intent: "let
+// me read") must survive that. Without the id check the re-arm would undo
+// the user's scroll-up and the rest of the replay would drag them down.
+watch(messages, async (list) => {
+  const cleared = list.length === 0;
+  const switched = currentSession.value?.sessionId !== lastSeenSessionId;
+  if (cleared && switched) {
+    followBottom.value = true;
+    lastSeenSessionId = currentSession.value?.sessionId ?? null;
+  }
   await nextTick();
   if (followBottom.value) pinFeedToBottom();
 }, { deep: true });

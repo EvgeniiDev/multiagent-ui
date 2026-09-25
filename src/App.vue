@@ -23,6 +23,7 @@ import { useActivityStore } from './stores/activity';
 import { useClaimsStore } from './stores/claims';
 import { useProjectsStore } from './features/scope/registry';
 import type { SavedSession } from './lib/types';
+import { setSessionInUrl, sessionFromUrl } from './lib/sessionUrl';
 
 const configStore = useConfigStore();
 const sessionStore = useSessionStore();
@@ -176,8 +177,18 @@ onMounted(async () => {
   // user lands back in the chat, not on the welcome screen. A stored
   // session the agent no longer holds (or can't load) falls back to the
   // welcome screen with the error on the banner, like a manual resume.
-  const restored = sessionStore.currentSession;
+  // The URL is the newest intent: `?s=<agent>::<sessionId>` is written at click
+  // time, while the stored pointer can lag (a failed resume, a sync overwrite).
+  const fromUrl = sessionFromUrl();
+  let restored = sessionStore.currentSession;
+  if (fromUrl && (!restored || restored.sessionId !== fromUrl.sessionId)) {
+    const match = sessionStore.savedSessions.find(
+      (s) => s.agentName === fromUrl.agentName && s.sessionId === fromUrl.sessionId
+    );
+    if (match) restored = match;
+  }
   if (restored) {
+    setSessionInUrl(restored.agentName, restored.sessionId);
     selectedAgent.value = restored.agentName;
     selectedCwd.value = restored.cwd || selectedCwd.value;
     try {
@@ -263,6 +274,9 @@ async function handleNewSession() {
 
 async function handleResumeSession(session: SavedSession) {
   selectedAgent.value = session.agentName;
+  // The URL carries the user's intent at click time — F5 restores exactly this
+  // chat even when the resume fails or a background sync rewrites the store.
+  setSessionInUrl(session.agentName, session.sessionId);
   try {
     await sessionStore.resumeSession(session);
   } catch (e) {
