@@ -171,6 +171,36 @@ onMounted(async () => {
     selectedCwd.value = savedCwd;
   }
 
+  // F5 restores the open session: initStore brought back the
+  // currentSession pointer, but the live bridge is gone — resume it so the
+  // user lands back in the chat, not on the welcome screen. A stored
+  // session the agent no longer holds (or can't load) falls back to the
+  // welcome screen with the error on the banner, like a manual resume.
+  const restored = sessionStore.currentSession;
+  if (restored) {
+    selectedAgent.value = restored.agentName;
+    selectedCwd.value = restored.cwd || selectedCwd.value;
+    try {
+      await sessionStore.resumeSession(restored);
+    } catch (e) {
+      console.warn('Failed to restore session after reload:', e);
+    }
+  } else {
+    // No open session — pre-select the last used agent + cwd so a reload
+    // with no session (or after Disconnect) keeps the new-session form
+    // filled instead of dropping to blanks. The sidebar scope follows the
+    // agent the same way a manual pick would.
+    const lastAgent = sessionStore.lastAgentName;
+    if (lastAgent && configStore.getAgent(lastAgent)) {
+      selectedAgent.value = lastAgent;
+      try {
+        await sessionStore.setActiveAgent(lastAgent);
+      } catch (e) {
+        console.warn('Failed to scope sidebar to last agent:', e);
+      }
+    }
+  }
+
   // Hook foreground-reconnect listeners. `pageshow` fires both on initial
   // navigation and when iOS restores a frozen WebView from the back/forward
   // cache, so it complements `visibilitychange` on Safari/iOS.

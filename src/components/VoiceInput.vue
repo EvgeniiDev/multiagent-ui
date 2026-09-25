@@ -337,6 +337,11 @@ const buttonTitle = computed(() => {
   }
 });
 
+/** Live transcript for the take: committed + still-moving hypothesis.
+ *  Empty while the first partial is in flight — the caller shows the
+ *  `listeningHint` instead of guessing.
+ *  // ponytail: derived accessor, no tests of its own — covered by e2e_voice overlay asserts. */
+
 function onClick(): void {
   if (phase.value === 'listening') {
     stopListening();
@@ -446,7 +451,7 @@ defineExpose({ stop: stopListening });
   align-items: center;
   justify-content: center;
   padding: 0;
-  border: 1px solid transparent;
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
   border-radius: var(--radius-md, 6px);
   background: transparent;
   color: var(--text-secondary, #6b6259);

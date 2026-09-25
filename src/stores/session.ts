@@ -415,6 +415,14 @@ export const useSessionStore = defineStore('session', () => {
     // Sidebar rows the user removed while the agent still holds them.
     dismissedSessions = (await store.get<string[]>('dismissedSessions')) ?? [];
     lastAgentName.value = (await store.get<string>('lastAgent')) ?? '';
+    // Restore the open-session pointer (written by saveSessionsToStore on
+    // every connect/resume/send). The live bridge is gone after a reload —
+    // App.vue re-establishes it via resumeSession once the stores boot.
+    const lastOpenId = await store.get<string>('currentSessionId');
+    if (lastOpenId) {
+      const found = savedSessions.value.find((s) => s.id === lastOpenId);
+      if (found) currentSession.value = found;
+    }
     // The panel's own attachment record (which files rode on which user turn,
     // and their bytes or a cache ref) — needed before any `session/load`
     // replay so image turns can be restored when the agent echoes no bytes.
@@ -431,6 +439,11 @@ export const useSessionStore = defineStore('session', () => {
   async function saveSessionsToStore() {
     if (store) {
       await store.set('sessions', savedSessions.value);
+      // The live connection dies on reload, but the *pointer* to the open
+      // session must survive it — otherwise F5 drops the user to the
+      // welcome screen even though the session list (and the agent holding
+      // the history) still has the session.
+      await store.set('currentSessionId', currentSession.value?.id ?? null);
       await store.save();
     }
   }
@@ -1477,6 +1490,9 @@ export const useSessionStore = defineStore('session', () => {
     
     currentSession.value = null;
     isConnected.value = false;
+    // The open-session pointer must die with the disconnect — otherwise the
+    // next boot would auto-resume a session the user explicitly closed.
+    void saveSessionsToStore();
     messages.value = [];
     toolCalls.value.clear();
     clearPermissionTimer();

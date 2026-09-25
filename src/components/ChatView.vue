@@ -133,12 +133,16 @@ const commandFilter = computed(() => {
   return inputText.value.slice(1); // Remove the leading "/"
 });
 
-// Auto-scroll to bottom when new messages arrive
+// Auto-scroll to bottom when new messages arrive — but only while the
+// feed is pinned there. A resumed session replays history top-down: without
+// the pin check every chunk would yank the scrollbar down and the user could
+// never read the top. Once they scroll up, new chunks stop pulling them back.
 watch(messages, async () => {
   await nextTick();
-  if (messagesContainer.value) {
-    messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
-  }
+  const feed = messagesContainer.value;
+  if (!feed) return;
+  const pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
+  if (pinned) feed.scrollTop = feed.scrollHeight;
 }, { deep: true });
 
 // Composer autosize: the field rests at one line — the same height as the
@@ -156,9 +160,18 @@ function autosizeComposer() {
   const pinned = !!feed && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 4;
   const min = parseFloat(getComputedStyle(el).minHeight) || 0;
   el.style.height = 'auto';
-  const capped = el.scrollHeight > COMPOSER_MAX_PX;
-  el.style.height = `${Math.max(min, Math.min(el.scrollHeight, COMPOSER_MAX_PX))}px`;
+  // While dictating, the voice text lives in the overlay, not the field's
+  // value — measure it too, or long takes overflow invisibly under it.
+  const ov = voiceOverlayEl.value;
+  const need =
+    ov && voiceActive.value
+      ? Math.max(el.scrollHeight, ov.scrollHeight)
+      : el.scrollHeight;
+  const capped = need > COMPOSER_MAX_PX;
+  el.style.height = `${Math.max(min, Math.min(need, COMPOSER_MAX_PX))}px`;
   el.style.overflowY = capped ? 'auto' : 'hidden';
+  // Pin the overlay to the bottom so the newest words stay visible.
+  if (voiceActive.value && ov) ov.scrollTop = ov.scrollHeight;
   if (pinned && feed) feed.scrollTop = feed.scrollHeight;
 }
 
@@ -238,7 +251,9 @@ function onVoiceState(s: { phase: VoicePhase; elapsedS: number }) {
 function onVoicePartial(p: SttPartial) {
   voiceCommitted.value = p.committed;
   voiceVolatile.value = p.volatile;
-  syncVoiceOverlayScroll();
+  // The overlay paints a tick later — grow the composer once the text
+  // lands so a long take pushes the field down instead of clipping.
+  void nextTick(() => autosizeComposer());
 }
 
 function onVoiceFinal(text: string) {
@@ -263,7 +278,10 @@ function syncVoiceOverlayScroll() {
   const ta = composerEl.value;
   const ov = voiceOverlayEl.value;
   if (ta && ov) {
-    ov.scrollTop = ta.scrollTop;
+    // The overlay holds more than the field (voice text is not in the
+    // value), so copying the field's scroll hides the newest words —
+    // pin to the bottom instead.
+    ov.scrollTop = ov.scrollHeight;
     ov.scrollLeft = ta.scrollLeft;
   }
 }
@@ -275,6 +293,13 @@ let composerRo: ResizeObserver | null = null;
 let composerBoxWidth = 0;
 onMounted(() => {
   autosizeComposer();
+  // Land on the newest messages: a fresh replay streams top-down while
+  // the watch above only pins an already-pinned feed — an explicit
+  // bottom-pin on mount covers both first paint and resume.
+  void nextTick(() => {
+    const feed = messagesContainer.value;
+    if (feed) feed.scrollTop = feed.scrollHeight;
+  });
   // Test seam for the autonomous e2e (same shape as window.__projects):
   // exposes the session + activity stores so the test can flip autonomous
   // mode, shorten the permission timeout through the same code path the
@@ -1345,6 +1370,13 @@ function getToolKind(kind: string): string {
 .composer-box textarea.voice-ghost {
   color: transparent;
   caret-color: var(--text-primary, #2b2723);
+}
+
+/* An empty field still matches :placeholder-shown while dictating (the
+ * voice text lives in the overlay, not the value), so the hint would print
+ * under the first dictated words — hide it for the take. */
+.composer-box textarea.voice-ghost::placeholder {
+  color: transparent;
 }
 
 .voice-overlay {
