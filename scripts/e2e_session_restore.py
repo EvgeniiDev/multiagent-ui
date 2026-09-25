@@ -1,19 +1,42 @@
 #!/usr/bin/env python3
-"""E2E for session restore across a page reload (F5).
+"""E2E for session restore across a page reload (F5) + scroll-to-bottom.
 
-The bug: F5 dropped the user to the welcome screen — `sessions.json` kept
-the session list, but the *pointer* to the open session (`currentSession`)
-lived only in memory, so after reload nothing reconnected.
+Two bugs are covered here:
 
-Serves dist-web on http://127.0.0.1:25987/ and stubs the ACP websocket: the
-mock answers `initialize` (with `loadSession: True`), `session/new`, and
-`session/load` for a known session id by replaying one user + one assistant
-turn, so the test can prove the transcript comes back too.
+1) F5 dropped the user to the welcome screen — `sessions.json` kept
+   the session list, but the *pointer* to the open session (`currentSession`)
+   lived only in memory, so after reload nothing reconnected.
+
+2) Opening a session from the sidebar while the chat view was mounted
+   landed on the FIRST message instead of the newest. `resumeSession`
+   clears the feed, the container clamps to scrollTop 0, and the old
+   auto-follow watch only re-pinned an already-pinned feed — the first
+   replayed chunk taller than 40px killed the pin for good. The fix is a
+   `followBottom` INTENT in ChatView: true on mount/session-switch/send,
+   false only on a user scroll away from the bottom.
+
+Serves dist-web on http://127.0.0.1:25987/ and stubs the ACP websocket.
+The mock answers `initialize` (loadSession + session/list), `session/new`,
+`session/list` (three sessions), `session/load` (a LONG replayed history,
+>=25 turn pairs, dripped over time for B and C), and `session/prompt`.
+Drip sends run on a daemon thread — a blocking sleep inside the on_message
+handler starves the playwright dispatcher itself (verified: ws.send from a
+thread delivers fine).
 
 Asserts:
   * connect to a session, reload -> the chat view is back (`.input-row`),
     not the welcome screen; the agent selector still shows the agent;
   * the replayed transcript is visible (the assistant's text);
+  * after F5 the feed is pinned to the bottom (fromBottom <= 2) and the
+    LAST replayed message is inside the feed's viewport;
+  * opening ANOTHER session from the sidebar (chat stays mounted) ends
+    with the same two facts — this is the case that used to sit at the
+    top with fromBottom ~= the whole feed height;
+  * scrolling UP mid-replay is respected: more chunks arrive and the
+    feed is not yanked back down;
+  * when the replay finishes the newest message is in the viewport;
+  * sending a message from a scrolled-up position returns the feed to
+    the bottom;
   * explicit Disconnect, reload -> the welcome screen stays (no zombie
     auto-resume of a session the user closed);
   * zero pageerror events.
@@ -28,6 +51,8 @@ Prints PASS/FAIL per assertion and exits non-zero on any failure.
 import json
 import re
 import sys
+import threading
+import time
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -39,8 +64,25 @@ DIST = ROOT / "dist-web"
 PORT = 25987
 BASE = f"http://127.0.0.1:{PORT}/"
 
-SID = "e2e-restore-session"
 AGENT_NAME = "E2E Mock"
+
+# Three sessions the mock agent knows about. A is created through the UI
+# (`session/new` returns SID_A); B and C exist only in the agent's own
+# inventory and surface in the sidebar via `session/list`.
+SID_A = "e2e-restore-session"
+SID_B = "e2e-scroll-session-b"
+SID_C = "e2e-scroll-session-c"
+
+PAIRS_A = 28
+PAIRS_B = 30
+PAIRS_C = 26
+DRIP_B = 0.060   # seconds between replayed turns while loading B
+DRIP_C = 0.080   # seconds between replayed turns while loading C
+
+A_LAST = "RESTORED-HISTORY-MARKER"
+B_LAST = "B-LAST-MARKER"
+C_LAST = "C-LAST-MARKER"
+C_REPLY = "C-REPLY-MARKER"
 
 results = []
 page_errors = []
@@ -59,8 +101,41 @@ def chunk(session_id, kind, content):
     })
 
 
+def history(sid, pairs, tag, last_text):
+    """`pairs` user+assistant turns; the last assistant message is `last_text`."""
+    out = []
+    for i in range(1, pairs + 1):
+        out.append(chunk(sid, "user_message_chunk",
+                         {"type": "text", "text": f"remember me ({tag} turn {i})"}))
+        body = (last_text if i == pairs else
+                f"{tag} history chunk {i} — sed do eiusmod tempor incididunt "
+                f"ut labore et dolore magna aliqua enim ad minim")
+        out.append(chunk(sid, "agent_message_chunk",
+                         {"type": "text", "text": body}))
+    return out
+
+
+def drip_load(ws, sid, rid, pairs, tag, last_text, interval):
+    """Stream a long replay, then the session/load response — a real agent
+    keeps `session/load` open while history streams. Runs on a thread: the
+    playwright dispatcher must never sleep inside on_message."""
+    def run():
+        for note in history(sid, pairs, tag, last_text):
+            try:
+                ws.send(note)
+            except Exception as e:  # noqa: BLE001 — page closed mid-drip
+                print(f"NOTE  drip {sid} stopped early: {e}")
+                return
+            time.sleep(interval)
+        try:
+            ws.send(json.dumps({"jsonrpc": "2.0", "id": rid, "result": {}}))
+        except Exception as e:  # noqa: BLE001
+            print(f"NOTE  drip {sid} result not sent: {e}")
+    threading.Thread(target=run, daemon=True).start()
+
+
 def acp_ws(ws):
-    """Mock agent: handshake + new/load + one replayed history."""
+    """Mock agent: handshake + new/list + long replayed histories + prompt."""
     def on_message(message):
         for line in str(message).split("\n"):
             line = line.strip()
@@ -76,23 +151,45 @@ def acp_ws(ws):
             if method == "initialize":
                 result = {
                     "protocolVersion": 1,
-                    "agentCapabilities": {"loadSession": True},
+                    "agentCapabilities": {
+                        "loadSession": True,
+                        "sessionCapabilities": {"list": {}},
+                    },
                     "authMethods": [],
                     "agentInfo": {"name": "e2e-mock", "version": "0"},
                 }
             elif method == "session/new":
-                result = {"sessionId": SID}
-            elif method in ("session/list",):
-                result = {"sessions": []}
+                result = {"sessionId": SID_A}
+            elif method == "session/list":
+                stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                result = {"sessions": [
+                    {"sessionId": SID_A, "title": "HistA",
+                     "cwd": "/home/hermes/projects", "updatedAt": stamp},
+                    {"sessionId": SID_B, "title": "HistB",
+                     "cwd": "/home/hermes/projects", "updatedAt": stamp},
+                    {"sessionId": SID_C, "title": "HistC",
+                     "cwd": "/home/hermes/projects", "updatedAt": stamp},
+                ]}
             elif method == "session/load":
-                for n in (
-                    chunk(SID, "user_message_chunk",
-                          {"type": "text", "text": "remember me"}),
-                    chunk(SID, "agent_message_chunk",
-                          {"type": "text", "text": "RESTORED-HISTORY-MARKER"}),
-                ):
-                    ws.send(n)
-                result = {}
+                sid = (req.get("params") or {}).get("sessionId")
+                if sid == SID_A:
+                    for note in history(SID_A, PAIRS_A, "A", A_LAST):
+                        ws.send(note)
+                    result = {}
+                elif sid == SID_B:
+                    # Response rides the end of the drip thread.
+                    drip_load(ws, SID_B, req["id"], PAIRS_B, "B", B_LAST, DRIP_B)
+                    continue
+                elif sid == SID_C:
+                    drip_load(ws, SID_C, req["id"], PAIRS_C, "C", C_LAST, DRIP_C)
+                    continue
+                else:
+                    result = {}
+            elif method == "session/prompt":
+                sid = (req.get("params") or {}).get("sessionId") or SID_C
+                ws.send(chunk(sid, "agent_message_chunk",
+                              {"type": "text", "text": C_REPLY}))
+                result = {"stopReason": "end_turn"}
             else:
                 result = {}
             ws.send(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": result}))
@@ -132,6 +229,69 @@ def wire(page, tag):
     page.on("pageerror", lambda exc: page_errors.append(f"{tag}: {exc}"))
 
 
+# Distance in px between the feed's scroll position and its newest message.
+FROM_BOTTOM = """() => {
+  const f = document.querySelector('.messages-container');
+  return f ? f.scrollHeight - f.scrollTop - f.clientHeight : -1;
+}"""
+
+# Is the last `.message` element fully inside the feed's viewport?
+LAST_IN_VIEW = """() => {
+  const f = document.querySelector('.messages-container');
+  if (!f) return 'no-feed';
+  const msgs = f.querySelectorAll('.messages .message');
+  if (!msgs.length) return 'no-messages';
+  const last = msgs[msgs.length - 1].getBoundingClientRect();
+  const fr = f.getBoundingClientRect();
+  return last.top >= fr.top - 1 && last.bottom <= fr.bottom + 1;
+}"""
+
+MESSAGE_COUNT = "document.querySelectorAll('.messages .message').length"
+
+
+def from_bottom(page):
+    return page.evaluate(FROM_BOTTOM)
+
+
+def wheel_up(page, px):
+    """A real user scroll-up over the feed (cursor stays parked on it)."""
+    box = page.locator(".messages-container").bounding_box()
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.mouse.wheel(0, -px)
+
+
+def click_session(page, title):
+    page.locator(".session-row", has_text=title).first.click()
+
+
+def poll_eval(page, expr, timeout=30.0, interval=0.15):
+    """Evaluate `expr` until truthy. Polls via page.wait_for_timeout +
+    page.evaluate, never wait_for_function: the app's replay re-renders
+    saturate the main thread (markdown per message per chunk), and
+    wait_for_function's rAF-driven polling can starve for seconds while
+    the DOM is already where it needs to be. Driver-side polling always
+    gets a slot between renders."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if page.evaluate(expr):
+            return True
+        page.wait_for_timeout(int(interval * 1000))
+    return page.evaluate(expr)
+
+
+def wait_replay_done(page, marker, timeout=30.0):
+    """Last chunk is in the DOM and `session/load` has resolved (the
+    `Working…` indicator detaches when isLoading drops)."""
+    ok = poll_eval(
+        page,
+        f"document.body.textContent.includes({json.dumps(marker)})"
+        " && !document.querySelector('.loading-indicator')",
+        timeout=timeout,
+    )
+    page.wait_for_timeout(250)  # let the final pin + indicator removal settle
+    return ok
+
+
 def run_checks():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -152,6 +312,13 @@ def run_checks():
         page.wait_for_selector(".input-row", timeout=15000)
         check("session connects before reload", True)
 
+        # The agent's own inventory surfaces in the sidebar (session/list).
+        page.wait_for_selector(".session-row", timeout=10000)
+        titles = page.eval_on_selector_all(
+            ".session-row .row-title", "els => els.map(e => e.textContent.trim())")
+        check("sidebar lists the agent's sessions",
+              all(t in titles for t in ("HistA", "HistB", "HistC")), repr(titles))
+
         # F5: the chat must come back by itself, with the replayed history.
         page.reload(wait_until="load")
         page.wait_for_selector(".input-row", timeout=15000)
@@ -160,16 +327,87 @@ def run_checks():
         agent = page.eval_on_selector("#agent-select", "el => el.value")
         check("agent selection survives the reload",
               agent == AGENT_NAME, repr(agent))
-        page.wait_for_function(
-            "() => document.body.textContent.includes('RESTORED-HISTORY-MARKER')",
-            timeout=10000,
-        )
+        wait_replay_done(page, A_LAST)
         check("replayed transcript visible after reload", True)
         stored = page.evaluate(
             "() => JSON.parse(localStorage.getItem('acp-ui:sessions.json') || '{}')")
         check("open-session pointer persisted",
               stored.get("currentSessionId") is not None,
               repr(stored.get("currentSessionId")))
+
+        # --- F5 landing: pinned to the bottom, newest message visible ------
+        n_msgs = page.evaluate(MESSAGE_COUNT)
+        fb_a = from_bottom(page)
+        check("F5: replayed a long history", n_msgs >= PAIRS_A * 2,
+              f"{n_msgs} messages")
+        check("F5: feed pinned to the bottom", fb_a >= 0 and fb_a <= 2,
+              f"fromBottom={fb_a}px")
+        last_ok = page.evaluate(LAST_IN_VIEW)
+        check("F5: last replayed message inside the viewport",
+              last_ok is True, repr(last_ok))
+
+        # --- Sidebar open of ANOTHER session (chat stays mounted) ----------
+        # The failing case: the clear collapses the feed, the old heuristic
+        # died on the first >40px chunk, and the user watched the top.
+        click_session(page, "HistB")
+        wait_replay_done(page, B_LAST)
+        n_b = page.evaluate(MESSAGE_COUNT)
+        fb_b = from_bottom(page)
+        check("sidebar open: replayed a long history", n_b >= PAIRS_B * 2,
+              f"{n_b} messages")
+        check("sidebar open: feed lands on the bottom", fb_b >= 0 and fb_b <= 2,
+              f"fromBottom={fb_b}px")
+        last_b = page.evaluate(LAST_IN_VIEW)
+        check("sidebar open: last replayed message inside the viewport",
+              last_b is True, repr(last_b))
+
+        # --- User scroll UP during a replay must be respected --------------
+        click_session(page, "HistC")
+        # Wait until C's OWN history has real scroll room. A raw message
+        # count races the clear: session B's rows still sit in the DOM until
+        # `messages = []` re-renders, so counting `.message` can pass before
+        # a single replayed chunk has landed — the wheel then hits a feed
+        # with nothing to scroll. 'C turn 12' only exists once C's replay
+        # is ~24 messages deep (~1.5 viewports), guaranteed scrollable.
+        enough = poll_eval(
+            page, "document.body.textContent.includes('C turn 12')",
+            timeout=15.0)
+        check("replay streams in (enough messages to scroll)", enough)
+        wheel_up(page, 700)
+        page.wait_for_timeout(80)
+        fb_up1 = from_bottom(page)
+        # More replay chunks keep arriving below; the feed must stay put.
+        page.wait_for_timeout(550)
+        fb_up2 = from_bottom(page)
+        check("scroll up mid-replay leaves the bottom",
+              fb_up1 > 200, f"fromBottom={fb_up1}px right after the wheel")
+        check("scroll up mid-replay is not yanked back",
+              fb_up2 > 200 and fb_up2 >= fb_up1,
+              f"fromBottom {fb_up1}px -> {fb_up2}px while chunks arrived")
+
+        # The replay still lands on the newest once it finishes.
+        wait_replay_done(page, C_LAST)
+        fb_c = from_bottom(page)
+        check("replay end lands on the newest message",
+              fb_c >= 0 and fb_c <= 2, f"fromBottom={fb_c}px")
+        last_c = page.evaluate(LAST_IN_VIEW)
+        check("replay end: last message inside the viewport",
+              last_c is True, repr(last_c))
+
+        # --- Sending from a scrolled-up position returns to the bottom -----
+        wheel_up(page, 700)
+        page.wait_for_timeout(80)
+        fb_pre = from_bottom(page)
+        check("scrolled up before sending", fb_pre > 200,
+              f"fromBottom={fb_pre}px")
+        page.fill(".composer-box textarea", "ping")
+        page.click(".send-btn")
+        poll_eval(page, f"document.body.textContent.includes({json.dumps(C_REPLY)})",
+                  timeout=10.0)
+        page.wait_for_timeout(200)
+        fb_send = from_bottom(page)
+        check("sending a message returns the feed to the bottom",
+              fb_send >= 0 and fb_send <= 2, f"fromBottom={fb_send}px")
 
         # Explicit Disconnect must NOT auto-resume on the next reload.
         page.click(".disconnect-btn")

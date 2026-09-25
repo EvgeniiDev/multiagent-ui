@@ -133,17 +133,71 @@ const commandFilter = computed(() => {
   return inputText.value.slice(1); // Remove the leading "/"
 });
 
-// Auto-scroll to bottom when new messages arrive — but only while the
-// feed is pinned there. A resumed session replays history top-down: without
-// the pin check every chunk would yank the scrollbar down and the user could
-// never read the top. Once they scroll up, new chunks stop pulling them back.
-watch(messages, async () => {
-  await nextTick();
+// FOLLOW INTENT — "the user wants the newest message kept in view".
+// Replaces the old is-it-pinned heuristic: that one read the feed's CURRENT
+// position, so when `resumeSession` cleared the list (the container clamps
+// to scrollTop 0) the first replayed chunk taller than the threshold killed
+// the pin for good — the view sat at the top while history streamed in
+// below. The intent survives the clear: it is set by actions, never
+// re-measured off the feed's position.
+const followBottom = ref(true);
+const FEED_BOTTOM_PX = 40;
+// The scrollTop our own pin just wrote. The scroll handler skips events at
+// exactly that position — they are the pin landing, not the user taking the
+// wheel. Position matching (not a timed flag) so render-saturated replays
+// can't stretch the guard window into a real user scroll.
+let programmaticScrollTop: number | null = null;
+
+function distanceFromBottom(feed: HTMLElement): number {
+  return feed.scrollHeight - feed.scrollTop - feed.clientHeight;
+}
+
+function pinFeedToBottom(): void {
   const feed = messagesContainer.value;
   if (!feed) return;
-  const pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
-  if (pinned) feed.scrollTop = feed.scrollHeight;
+  feed.scrollTop = feed.scrollHeight;
+  programmaticScrollTop = feed.scrollTop;
+}
+
+function onFeedScroll(): void {
+  const feed = messagesContainer.value;
+  if (!feed) return;
+  if (programmaticScrollTop !== null && feed.scrollTop === programmaticScrollTop) {
+    // Landed exactly where a pin put it — an at-bottom position is "follow"
+    // whoever caused it, but it is not the user scrolling somewhere new.
+    followBottom.value = true;
+    return;
+  }
+  programmaticScrollTop = null;
+  followBottom.value = distanceFromBottom(feed) <= FEED_BOTTOM_PX;
+}
+
+// The wheel is the one gesture that races the stream: its scroll event
+// lands a frame late, so a chunk arriving in between would read a stale
+// "at bottom" and yank the feed back under the cursor. Up-wheel means
+// "let me read" — flip the flag at the gesture, not at the event.
+function onFeedWheel(event: WheelEvent): void {
+  if (event.deltaY < 0) followBottom.value = false;
+}
+
+// New messages follow the intent — no threshold check on where the feed
+// happens to sit. A cleared list is a transcript about to load (every
+// open/switch path empties the feed first), so it re-arms the intent too:
+// the sessionId watch only lands after `session/load` resolves, too late
+// to follow the replay itself.
+watch(messages, async () => {
+  if (messages.value.length === 0) followBottom.value = true;
+  await nextTick();
+  if (followBottom.value) pinFeedToBottom();
 }, { deep: true });
+
+// A session opened or switched while the view was mounted: landing on the
+// newest is the point of opening a transcript.
+watch(() => currentSession.value?.sessionId, (id, prev) => {
+  if (!id || id === prev) return;
+  followBottom.value = true;
+  void nextTick(pinFeedToBottom);
+});
 
 // Composer autosize: the field rests at one line — the same height as the
 // row's icon buttons (34px desktop, 44px touch) — and grows with content up
@@ -293,13 +347,10 @@ let composerRo: ResizeObserver | null = null;
 let composerBoxWidth = 0;
 onMounted(() => {
   autosizeComposer();
-  // Land on the newest messages: a fresh replay streams top-down while
-  // the watch above only pins an already-pinned feed — an explicit
-  // bottom-pin on mount covers both first paint and resume.
-  void nextTick(() => {
-    const feed = messagesContainer.value;
-    if (feed) feed.scrollTop = feed.scrollHeight;
-  });
+  // Land on the newest messages: mount starts in follow mode and the pin
+  // covers both first paint and a replay already streaming in.
+  followBottom.value = true;
+  void nextTick(pinFeedToBottom);
   // Test seam for the autonomous e2e (same shape as window.__projects):
   // exposes the session + activity stores so the test can flip autonomous
   // mode, shorten the permission timeout through the same code path the
@@ -329,6 +380,10 @@ async function handleSend() {
   // A take in flight would land its final text into the cleared field —
   // stop it first so the send and the dictation don't interleave.
   voiceInputRef.value?.stop();
+
+  // Sending is an explicit "show me the newest" — re-arm the follow even
+  // while the user has the feed scrolled up.
+  followBottom.value = true;
 
   const files = attachments.value;
   inputText.value = '';
@@ -500,7 +555,12 @@ function getToolKind(kind: string): string {
       </div>
     </div>
     
-    <div ref="messagesContainer" class="messages-container">
+    <div
+      ref="messagesContainer"
+      class="messages-container"
+      @scroll="onFeedScroll"
+      @wheel.passive="onFeedWheel"
+    >
       <div class="messages">
       <div
         v-for="(message, idx) in renderedMessages"
