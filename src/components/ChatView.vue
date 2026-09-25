@@ -108,7 +108,11 @@ function toggleAttachment(messageId: string, index: number): void {
   else expandedAttachments.value.add(key);
 }
 const isLoading = computed(() => sessionStore.isLoading);
+const isConnected = computed(() => sessionStore.isConnected);
 const isReconnecting = computed(() => sessionStore.isReconnecting);
+// Non-null while the feed shows the localStorage tail instead of a settled
+// transcript: 'loading' during the parallel replay, 'stale' when it died.
+const historyCacheNote = computed(() => sessionStore.historyCacheNote);
 const currentSession = computed(() => sessionStore.currentSession);
 const availableModes = computed(() => sessionStore.availableModes);
 const currentModeId = computed(() => sessionStore.currentModeId);
@@ -575,6 +579,13 @@ function getToolKind(kind: string): string {
       @wheel.passive="onFeedWheel"
     >
       <div class="messages">
+      <!-- Cached-tail marker: the messages below came from localStorage and
+           the live replay hasn't confirmed them yet (or never will). -->
+      <div v-if="historyCacheNote" class="history-note" :data-state="historyCacheNote">
+        {{ historyCacheNote === 'stale'
+          ? 'Couldn’t reach the agent — showing the cached copy'
+          : 'Loading history…' }}
+      </div>
       <div
         v-for="(message, idx) in renderedMessages"
         :key="message.id"
@@ -720,7 +731,7 @@ function getToolKind(kind: string): string {
           <button
             class="icon-btn attach-btn"
             :class="{ active: attachments.length > 0 }"
-            :disabled="isLoading || isReconnecting"
+            :disabled="isLoading || isReconnecting || !isConnected"
             @click="openFilePicker"
             :title="imageHint"
             aria-label="Attach files"
@@ -753,13 +764,15 @@ function getToolKind(kind: string): string {
               v-model="inputText"
               :class="{ 'voice-ghost': voiceActive }"
               :placeholder="
-                isReconnecting
-                  ? 'Reconnecting…'
-                  : (availableCommands.length > 0
-                      ? 'Type your message... (/ for commands)'
-                      : 'Type your message...')
+                !isConnected
+                  ? 'Offline — cached copy'
+                  : isReconnecting
+                    ? 'Reconnecting…'
+                    : (availableCommands.length > 0
+                        ? 'Type your message... (/ for commands)'
+                        : 'Type your message...')
               "
-              :disabled="isLoading || isReconnecting"
+              :disabled="isLoading || isReconnecting || !isConnected"
               @keydown="handleKeyDown"
               @scroll="syncVoiceOverlayScroll"
               rows="1"
@@ -777,7 +790,7 @@ function getToolKind(kind: string): string {
         </div>
         <VoiceInput
           ref="voiceInputRef"
-          :disabled="isLoading || isReconnecting"
+          :disabled="isLoading || isReconnecting || !isConnected"
           @state="onVoiceState"
           @partial="onVoicePartial"
           @final="onVoiceFinal"
@@ -785,7 +798,7 @@ function getToolKind(kind: string): string {
         />
         <button
           class="icon-btn send-btn"
-          :disabled="(!inputText.trim() && attachments.length === 0) || isLoading || isReconnecting"
+          :disabled="(!inputText.trim() && attachments.length === 0) || isLoading || isReconnecting || !isConnected"
           @click="handleSend"
           title="Send"
           aria-label="Send"
@@ -922,6 +935,23 @@ function getToolKind(kind: string): string {
 /* Assistant turns carry no chrome at all — the text is the interface. */
 .message-assistant {
   padding: 0;
+}
+
+/* Cached-tail marker: quiet, centered, reads as provenance not chrome. */
+.history-note {
+  align-self: center;
+  padding: 0.1875rem 0.625rem;
+  border-radius: var(--radius-lg, 10px);
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  font-family: var(--font-mono, monospace);
+  font-size: 0.625rem;
+  letter-spacing: 0.04em;
+  color: var(--text-muted, #a39a8e);
+}
+
+.history-note[data-state='stale'] {
+  color: var(--text-secondary, #6b6259);
+  background: var(--tint-active, rgba(194, 83, 47, 0.10));
 }
 
 .message-head {

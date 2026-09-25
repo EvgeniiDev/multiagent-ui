@@ -9,6 +9,7 @@ import type { SavedSession, ChatMessage, ToolCallInfo, PermissionRequest, Sessio
 import { getTransportKind } from '../lib/types';
 import { attachmentFromContentBlock } from '../lib/attachments';
 import { loadAttachmentHistory, recordTurnAttachments, turnAttachments, forgetSessionAttachments, resolveCachedBytes } from '../lib/attachmentHistory';
+import { readHistoryCache, writeHistoryCache, dropHistoryCache, evictHistoryCaches } from '../lib/historyCache';
 import { AcpClientBridge, createAcpClient } from '../lib/acp-bridge';
 import { onAgentStderr, spawnAgent, killAgent } from '../lib/host';
 import { isDesktop } from '../lib/platform';
@@ -119,6 +120,38 @@ export const useSessionStore = defineStore('session', () => {
   // Current ACP client
   let acpClient: AcpClientBridge | null = null;
   let store: KVStore | null = null;
+
+  // ---- History tail cache (localStorage, write-through) -------------------
+  // `session/load` can only replay the WHOLE transcript top-down (no tail
+  // parameter, no sequence numbers), so "show the newest instantly" needs a
+  // client-side copy. `acp-ui:history:<agent>::<sessionId>` keeps the last
+  // ~100 rendered messages; the store rewrites it on every settled turn and
+  // (throttled) while a replay streams, and reconciles against the fresh
+  // replay at `session/load` resolve.
+  /**
+   * Drives the marker above the feed: 'loading' while a cached tail is on
+   * screen and the replay is in flight, 'stale' when the replay died and the
+   * tail is all there is, null for a live (or empty) transcript.
+   */
+  const historyCacheNote = ref<'loading' | 'stale' | null>(null);
+  /** Session the cache writes belong to while `currentSession` isn't set. */
+  let cacheScope: { agent: string; sessionId: string } | null = null;
+  /**
+   * While a cached tail is on screen, the `session/load` replay streams into
+   * this side buffer instead of the rendered list — chunks appending below
+   * the cache would duplicate it and drag the newest message out of view.
+   * `settleReplayMerge` swaps the buffer in wholesale at load-resolve.
+   */
+  let replayMerge: {
+    sessionId: string;
+    cached: ChatMessage[];
+    anchorIdx: number;
+    buffer: ChatMessage[];
+  } | null = null;
+
+  const HISTORY_FLUSH_MS = 2000;
+  let historyFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastHistoryFlushAt = 0;
 
   // ---- Agent-side session inventory (`session/list`) -----------------------
   // The agent owns its history; this client mirrors the metadata into the
@@ -429,6 +462,17 @@ export const useSessionStore = defineStore('session', () => {
     // replay so image turns can be restored when the agent echoes no bytes.
     await loadAttachmentHistory();
 
+    // Tail-cache hygiene: entries not opened in >7 days go, then the whole
+    // cache is capped (~2 MiB, oldest sessions first). Synchronous — it is
+    // localStorage, and it must finish before the first hydrate below.
+    const evicted = evictHistoryCaches();
+    if (evicted.removed > 0) {
+      console.info(
+        `history cache: evicted ${evicted.removed} entries, ` +
+          `${evicted.entries} remain (${evicted.chars} chars)`
+      );
+    }
+
     // Load app version (Tauri API on desktop/mobile, build-time inject on web)
     try {
       appVersion = await getAppVersion();
@@ -468,6 +512,8 @@ export const useSessionStore = defineStore('session', () => {
     acpClient = null;
     isConnected.value = false;
     isLoading.value = false;
+    // A transport drop mid-replay keeps the cached tail on screen (stale).
+    abortReplayMerge();
     clearPermissionTimer();
     pendingPermission.value = null;
     error.value = `Connection lost: ${reason ?? 'transport closed'}`;
@@ -616,15 +662,14 @@ export const useSessionStore = defineStore('session', () => {
 
   /**
    * Merge the panel's own attachment record into a replayed user message.
-   * `userTurnIndex` is the message's ordinal among user turns — the same
-   * numbering `sendPrompt` used when recording, so position correlates them
-   * regardless of which device sent the turn.
+   * `userTurnIndex` is the message's ordinal among user turns in the FULL
+   * transcript — the same numbering `sendPrompt` used when recording, so
+   * position correlates them regardless of which device sent the turn.
+   * Callers count user messages in whatever array `msg` was just pushed to
+   * (the merge buffer counts from the top like a live transcript; a hydrated
+   * tail adds the entry's `userTurnBase` offset).
    */
-  function mergeRecordedAttachments(sessionId: string, msg: ChatMessage): void {
-    const userTurnIndex = messages.value.reduce(
-      (n, m) => n + (m.role === 'user' ? 1 : 0),
-      0
-    );
+  function mergeRecordedAttachments(sessionId: string, msg: ChatMessage, userTurnIndex: number): void {
     const recorded = turnAttachments(attachmentScope(sessionId), userTurnIndex);
     if (!recorded.length) return;
     msg.attachments = msg.attachments ?? [];
@@ -647,6 +692,165 @@ export const useSessionStore = defineStore('session', () => {
       }
       msg.attachments.push(meta);
     }
+  }
+
+  // ---- Tail-cache plumbing ------------------------------------------------
+  // Three moments: hydrate (paint the cached tail before the replay starts),
+  // settle (the replay resolved — it is the truth, swap it in), abort (the
+  // replay died — keep the tail, marked stale). Writes are fire-and-forget:
+  // a localStorage failure must never break the chat.
+
+  /** Persist the rendered tail under `cacheScope`. Never throws. */
+  function flushHistoryNow(): void {
+    if (historyFlushTimer) {
+      clearTimeout(historyFlushTimer);
+      historyFlushTimer = null;
+    }
+    lastHistoryFlushAt = Date.now();
+    if (!cacheScope || messages.value.length === 0) return;
+    writeHistoryCache(cacheScope.agent, cacheScope.sessionId, messages.value);
+  }
+
+  /** At most one write per HISTORY_FLUSH_MS while chunks stream in. */
+  function throttledHistoryFlush(): void {
+    if (!cacheScope) return;
+    const wait = lastHistoryFlushAt + HISTORY_FLUSH_MS - Date.now();
+    if (wait <= 0) {
+      flushHistoryNow();
+    } else if (!historyFlushTimer) {
+      historyFlushTimer = setTimeout(flushHistoryNow, wait);
+    }
+  }
+
+  // A turn settling / a replay finishing is the natural flush point.
+  watch(isLoading, (loading) => {
+    if (!loading) flushHistoryNow();
+  });
+
+  /** Same transcript entry? Roles, text, thought, tool calls, attachments. */
+  function sameMessage(a: ChatMessage, b: ChatMessage): boolean {
+    if (a.role !== b.role || a.content !== b.content) return false;
+    if ((a.thought ?? '') !== (b.thought ?? '')) return false;
+    const tc = (m: ChatMessage) => (m.toolCalls ?? []).map((t) => t.toolCallId).join(' ');
+    if (tc(a) !== tc(b)) return false;
+    const at = (m: ChatMessage) =>
+      (m.attachments ?? []).map((x) => `${x.kind}:${x.name}`).join(' ');
+    return at(a) === at(b);
+  }
+
+  /**
+   * Render the cached tail synchronously, BEFORE the connect/replay work of
+   * `resumeSession`. Arms `replayMerge` so `handleSessionUpdate` routes the
+   * coming replay into the side buffer. Returns false when nothing usable
+   * is cached (the caller then takes the old clear-and-stream path).
+   */
+  function hydrateHistoryCache(agent: string, sessionId: string): boolean {
+    const entry = readHistoryCache(agent, sessionId);
+    if (!entry || entry.messages.length === 0) return false;
+    // Clone: chunk appends and tool-call updates mutate message objects in
+    // place — that must never write back into the stored copy.
+    messages.value = [];
+    toolCalls.value.clear();
+    let anchorIdx = -1;
+    const cached: ChatMessage[] = [];
+    for (const stored of entry.messages) {
+      const msg: ChatMessage = {
+        ...stored,
+        toolCalls: stored.toolCalls?.map((t) => ({
+          ...t,
+          locations: t.locations?.map((l) => ({ ...l })),
+        })),
+        attachments: stored.attachments?.map((a) => ({ ...a })),
+      };
+      cached.push(msg);
+      messages.value.push(msg);
+      if (msg.role === 'user') {
+        anchorIdx = cached.length - 1;
+        // Same restore the replay path does: the panel's own record carries
+        // the files that rode on this user turn (agents echo no bytes). The
+        // tail starts mid-transcript, so ordinals need `userTurnBase`.
+        mergeRecordedAttachments(
+          sessionId,
+          msg,
+          entry.userTurnBase + messages.value.reduce((n, m) => n + (m.role === 'user' ? 1 : 0), 0)
+        );
+      }
+      // Byte refs (`local:`/`cache:`) resolve lazily, exactly like replay.
+      for (const a of msg.attachments ?? []) {
+        if (a.cachePath && !a.previewUrl && !a.body) void resolveCachedBytes(a);
+      }
+      for (const t of msg.toolCalls ?? []) {
+        toolCalls.value.set(t.toolCallId, { ...t });
+      }
+    }
+    if (anchorIdx < 0) anchorIdx = cached.length - 1;
+    replayMerge = { sessionId, cached, anchorIdx, buffer: [] };
+    historyCacheNote.value = 'loading';
+    return true;
+  }
+
+  /**
+   * The replay resolved — it is the truth. The cached tail must appear in it
+   * as one contiguous slice (aligned on the last cached user message): when
+   * it does, the replay is the same history, possibly extended with turns
+   * written elsewhere — render it, reusing the cached ids so identical rows
+   * keep their DOM nodes. No alignment means the agent's history diverged
+   * (compressed, rewound): drop the stale entry and still render the replay
+   * — a fresh transcript must never pose as the cached one.
+   */
+  function settleReplayMerge(): void {
+    const merge = replayMerge;
+    replayMerge = null;
+    if (!merge) return;
+    const replayed = merge.buffer;
+    const cached = merge.cached;
+    const anchor = cached[merge.anchorIdx];
+    let base = -1;
+    for (let ai = replayed.length - 1; ai >= 0; ai--) {
+      const cand = replayed[ai];
+      if (cand.role !== anchor.role || cand.content !== anchor.content) continue;
+      const b = ai - merge.anchorIdx;
+      if (b < 0 || b + cached.length > replayed.length) continue;
+      let ok = true;
+      for (let i = 0; i < cached.length; i++) {
+        if (!sameMessage(cached[i], replayed[b + i])) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        base = b;
+        break;
+      }
+    }
+    if (base < 0) {
+      if (cacheScope) dropHistoryCache(cacheScope.agent, cacheScope.sessionId);
+    } else {
+      for (let i = 0; i < cached.length; i++) {
+        replayed[base + i].id = cached[i].id;
+      }
+    }
+    messages.value = replayed;
+    toolCalls.value.clear();
+    for (const m of replayed) {
+      for (const t of m.toolCalls ?? []) {
+        toolCalls.value.set(t.toolCallId, { ...t });
+      }
+    }
+    historyCacheNote.value = null;
+    flushHistoryNow();
+  }
+
+  /**
+   * The replay died before `session/load` resolved (transport drop, agent
+   * error). The partial buffer is a PREFIX of the truth — never a tail — so
+   * it is discarded; `messages` still holds the cached tail, now honestly
+   * marked as the stale copy it is.
+   */
+  function abortReplayMerge(): void {
+    if (!replayMerge) return;
+    replayMerge = null;
+    if (historyCacheNote.value === 'loading') historyCacheNote.value = 'stale';
   }
 
   // Session update handler
@@ -675,10 +879,18 @@ export const useSessionStore = defineStore('session', () => {
       return;
     }
 
+    // While a cached tail is on screen, the replay lands in the merge buffer
+    // — appending it to `messages` would duplicate the cache and push the
+    // newest (cached) message out of the pinned view.
+    const sink =
+      replayMerge && notification.sessionId === replayMerge.sessionId
+        ? replayMerge.buffer
+        : messages.value;
+
     switch (update.sessionUpdate) {
       case 'user_message_chunk': {
         // Append to last user message or create new (for replay)
-        let target = messages.value[messages.value.length - 1];
+        let target = sink[sink.length - 1];
         if (!target || target.role !== 'user') {
           target = {
             id: uuid(),
@@ -686,10 +898,16 @@ export const useSessionStore = defineStore('session', () => {
             content: '',
             timestamp: Date.now(),
           };
-          messages.value.push(target);
+          sink.push(target);
           // A brand-new replayed user turn: restore the files the panel
-          // recorded for this ordinal (agents don't echo image bytes).
-          mergeRecordedAttachments(notification.sessionId, target);
+          // recorded for this ordinal (agents don't echo image bytes). The
+          // sink counts from the top of the transcript, matching the
+          // numbering `recordTurnAttachments` used in `sendPrompt`.
+          mergeRecordedAttachments(
+            notification.sessionId,
+            target,
+            sink.reduce((n, m) => n + (m.role === 'user' ? 1 : 0), 0)
+          );
         }
         if (update.content.type === 'text') {
           target.content += update.content.text;
@@ -701,7 +919,7 @@ export const useSessionStore = defineStore('session', () => {
 
       case 'agent_message_chunk': {
         // Append to last assistant message or create new
-        let target = messages.value[messages.value.length - 1];
+        let target = sink[sink.length - 1];
         if (!target || target.role !== 'assistant') {
           target = {
             id: uuid(),
@@ -710,7 +928,7 @@ export const useSessionStore = defineStore('session', () => {
             timestamp: Date.now(),
             toolCalls: [],
           };
-          messages.value.push(target);
+          sink.push(target);
         }
         if (update.content.type === 'text') {
           target.content += update.content.text;
@@ -722,13 +940,13 @@ export const useSessionStore = defineStore('session', () => {
 
       case 'agent_thought_chunk':
         // Append to last assistant message's thought field or create new
-        const lastAssistantMsg = messages.value[messages.value.length - 1];
+        const lastAssistantMsg = sink[sink.length - 1];
         if (lastAssistantMsg && lastAssistantMsg.role === 'assistant') {
           if (update.content.type === 'text') {
             lastAssistantMsg.thought = (lastAssistantMsg.thought || '') + update.content.text;
           }
         } else {
-          messages.value.push({
+          sink.push({
             id: uuid(),
             role: 'assistant',
             content: '',
@@ -745,7 +963,7 @@ export const useSessionStore = defineStore('session', () => {
         // tool first) has to open that message itself. Otherwise every
         // intermediate step is dropped and a running turn looks silent until
         // the final text lands.
-        let targetMsg = messages.value[messages.value.length - 1];
+        let targetMsg = sink[sink.length - 1];
         if (!targetMsg || targetMsg.role !== 'assistant') {
           targetMsg = {
             id: uuid(),
@@ -754,7 +972,7 @@ export const useSessionStore = defineStore('session', () => {
             timestamp: Date.now(),
             toolCalls: [],
           };
-          messages.value.push(targetMsg);
+          sink.push(targetMsg);
         }
         if (!targetMsg.toolCalls) {
           targetMsg.toolCalls = [];
@@ -791,7 +1009,7 @@ export const useSessionStore = defineStore('session', () => {
           if (update.status) existing.status = update.status;
           if (update.title) existing.title = update.title;
           // Also update in the message's toolCalls array
-          for (const msg of messages.value) {
+          for (const msg of sink) {
             if (msg.toolCalls) {
               const tc = msg.toolCalls.find(t => t.toolCallId === update.toolCallId);
               if (tc) {
@@ -838,6 +1056,10 @@ export const useSessionStore = defineStore('session', () => {
       default:
         console.log('Unhandled session update:', update);
     }
+
+    // Write-through: the tail cache follows the stream (throttled), so a
+    // reload mid-replay still lands on the newest chunk seen so far.
+    throttledHistoryFlush();
   }
 
   // Prompt user to select auth method
@@ -886,6 +1108,10 @@ export const useSessionStore = defineStore('session', () => {
     // id exists, so the replay merge can look them up while currentSession
     // is still null.
     replayAgentName = agentName;
+    // No session id yet — cache writes wait until `session/new` returns it.
+    cacheScope = null;
+    historyCacheNote.value = null;
+    replayMerge = null;
 
     // Look up the agent's transport kind so we know whether to do the
     // stdio-only startup choreography (spawn → stderr progress) or the
@@ -1071,6 +1297,12 @@ export const useSessionStore = defineStore('session', () => {
         supportsLoadSession,
       };
 
+      // A fresh session has no replay to validate a tail against — if the
+      // agent recycled a sessionId, the old tail must not resurrect as if
+      // it were this session's history.
+      dropHistoryCache(agentName, sessionResponse.sessionId);
+      cacheScope = { agent: agentName, sessionId: sessionResponse.sessionId };
+
       currentSession.value = session;
       savedSessions.value.push(session);
       await saveSessionsToStore();
@@ -1178,6 +1410,13 @@ export const useSessionStore = defineStore('session', () => {
     error.value = null;
     autonomous.value = options?.autonomous ?? false;
     replayAgentName = savedSession.agentName;
+    // The tail cache is keyed by agent+session — known before any network
+    // work. Hydrate synchronously so the newest known message paints while
+    // the connect + replay run; the replay streams into the merge buffer.
+    cacheScope = { agent: savedSession.agentName, sessionId: savedSession.sessionId };
+    historyCacheNote.value = null;
+    replayMerge = null;
+    hydrateHistoryCache(savedSession.agentName, savedSession.sessionId);
 
     try {
       const configStore = useConfigStore();
@@ -1214,9 +1453,13 @@ export const useSessionStore = defineStore('session', () => {
       // Store available auth methods for potential retry
       const availableAuthMethods = initResponse.authMethods || [];
 
-      // Clear messages BEFORE loadSession - the agent will stream replay via notifications
-      messages.value = [];
-      toolCalls.value.clear();
+      // Clear messages BEFORE loadSession - the agent will stream replay via
+      // notifications. A hydrated tail stays on screen instead: its replay
+      // accumulates in the merge buffer and swaps in at resolve.
+      if (!replayMerge) {
+        messages.value = [];
+        toolCalls.value.clear();
+      }
 
       // Try to load existing session - may fail with auth_required
       try {
@@ -1259,6 +1502,10 @@ export const useSessionStore = defineStore('session', () => {
         }
       }
 
+      // `session/load` resolved — the replay is the truth. Swap the buffered
+      // transcript in (or drop a diverged cache) before going "connected".
+      settleReplayMerge();
+
       currentSession.value = savedSession;
       isConnected.value = true;
       // Messages already populated by session/update notifications during loadSession
@@ -1284,6 +1531,9 @@ export const useSessionStore = defineStore('session', () => {
       await saveSessionsToStore();
 
     } catch (e) {
+      // A replay that died mid-flight leaves the cached tail rendered —
+      // marked stale rather than silently dropped.
+      abortReplayMerge();
       error.value = e instanceof Error ? e.message : String(e);
       const message = error.value;
       const activity = useActivityStore();
@@ -1452,6 +1702,8 @@ export const useSessionStore = defineStore('session', () => {
     isLoading.value = false;
     isConnecting.value = false;
     error.value = null;
+    replayMerge = null;
+    historyCacheNote.value = null;
   }
 
   // Handle permission response
@@ -1497,6 +1749,11 @@ export const useSessionStore = defineStore('session', () => {
     // The URL pointer dies with it: `?s=...` names the OPEN chat, and after a
     // disconnect there is none (a stale ?s would resurrect the chat on F5).
     setSessionInUrl('', null);
+    // Last chance to keep the tail: the transcript is dropped below.
+    flushHistoryNow();
+    replayMerge = null;
+    historyCacheNote.value = null;
+    cacheScope = null;
     messages.value = [];
     toolCalls.value.clear();
     clearPermissionTimer();
@@ -1652,6 +1909,7 @@ export const useSessionStore = defineStore('session', () => {
     activeAgentName,
     sidebarLoading,
     lastSync,
+    historyCacheNote,
 
     // Computed
     hasActiveSession,
