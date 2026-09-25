@@ -456,7 +456,19 @@ async function main() {
   );
 
   const model = stepModel(role);
-  const args = [...substArgs(role.args, model), '--prompt-file', briefPath];
+  // The prompt goes to the CLI as a FILE reference, not as a quoted
+  // positional argument (long multi-line text on a command line is fragile).
+  // Default is the devin/codex convention `--prompt-file <brief>`; a role
+  // may override it with `promptFlag` (pi reads @file positionals, so its
+  // entry carries promptFlag:"@" and the brief is appended as @<brief>).
+  // NOTE: a literal '@'-only flag means "append @<brief>"; any other value
+  // is used as the flag name: [...args, promptFlag, briefPath].
+  const promptFlag =
+    typeof role.promptFlag === 'string' ? role.promptFlag : '--prompt-file';
+  const args =
+    promptFlag === '@'
+      ? [...substArgs(role.args, model), `@${briefPath}`]
+      : [...substArgs(role.args, model), promptFlag, briefPath];
   const timeoutMin = Number(role.timeoutMin) > 0 ? Number(role.timeoutMin) : 45;
   const cmdText = [role.cli, ...args].join(' ');
 
