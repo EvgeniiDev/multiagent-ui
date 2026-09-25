@@ -98,11 +98,14 @@ const lastByRole = computed(() => {
 });
 
 /** The ledger's failure vocabulary, as the runner writes it: a non-zero
- * `exit=`, a timeout kill, a maxRetries exhaustion, a lease-expiry sweep.
- * Operator releases/cancels are deliberate, not errors. */
+ * `exit=`, a timeout kill, a watchdog idle kill, a maxRetries exhaustion,
+ * a lease-expiry sweep. Operator releases/cancels are deliberate, not
+ * errors. */
 function isFailureEntry(e: ActivityEntry): boolean {
   const d = e.detail || '';
-  if (/maxRetries \d+ exhausted|lease expired/.test(d)) return true;
+  if (/maxRetries \d+ exhausted|lease expired|idle [\d.]+m — terminated/.test(d)) {
+    return true;
+  }
   const m = /exit=(\d+)/.exec(d);
   if (m) return Number(m[1]) !== 0 || /\btimeout\b/.test(d);
   return false;
