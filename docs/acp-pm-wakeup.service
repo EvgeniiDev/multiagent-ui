@@ -1,0 +1,16 @@
+[Unit]
+Description=ACP UI pm wakeup — one guarded pm-graph review run
+After=acp-state.service
+Requires=acp-state.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/node %h/projects/acp-ui/server/acp-pm-wakeup.mjs
+Environment=STATE_URL=http://127.0.0.1:25900
+# The spawned role CLI (devin/pi/…) must be resolvable — extend if your
+# agent CLIs live elsewhere.
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin
+# Optional knobs (defaults shown):
+# Environment=PM_QUIET_MIN=10       # board must be this quiet before a run
+# Environment=PM_SCOPE=acp-ui       # pin the review scope; default --all
+# Environment=PM_ROLE_ID=pm         # which roles.json entry to spawn

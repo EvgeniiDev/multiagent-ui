@@ -1,0 +1,12 @@
+[Unit]
+Description=ACP UI pm wakeup — periodic board-graph review trigger
+
+[Timer]
+# First chance 10 min after boot, then every 30 min after the last run
+# finished. Skipped ticks are free (a hash compare, no model calls).
+OnBootSec=10min
+OnUnitInactiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
