@@ -9,6 +9,8 @@
 // This module deliberately mirrors that logic instead of sharing it —
 // `src/lib/**` is owned by another workstream (off-limits for W1).
 
+import { toSecureUrl } from '../../lib/host/secure';
+
 export interface FsDirEntry {
   name: string;
   path: string;
@@ -48,7 +50,10 @@ export function bridgeBaseUrlForAgentUrl(url: string | undefined): string {
 export function defaultBridgeBaseUrl(): string {
   if (typeof location === 'undefined') return '';
   const hostname = location.hostname || '127.0.0.1';
-  return `http://${hostname}:25901`;
+  // Untouched over http; on an https page the ws-twin of the seeded wss://
+  // bridge URL is the TLS front on port + 10, so the fallback must not emit
+  // a mixed-content http:// base.
+  return toSecureUrl(`http://${hostname}:25901`);
 }
 
 async function readError(resp: Response): Promise<string> {

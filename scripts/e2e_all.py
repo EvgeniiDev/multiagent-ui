@@ -40,6 +40,7 @@ SCRIPTS = [
     ("dashboard math", REPO / "scripts/e2e_dash_math.py"),
     ("voice", REPO / "scripts/e2e_voice.py"),
     ("bridge timeout", REPO / "scripts/e2e_bridge_timeout.py"),
+    ("https panel", REPO / "scripts/e2e_https_panel.py"),
 ]
 
 
