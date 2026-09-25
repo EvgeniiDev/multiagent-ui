@@ -29,6 +29,7 @@ SCRIPTS = [
     ("card pipeline", REPO / "scripts/e2e_card_pipeline.py"),
     ("auto approve", REPO / "scripts/e2e_auto_approve.py"),
     ("runner", REPO / "scripts/e2e_runner.py"),
+    ("plan queue", REPO / "scripts/e2e_planqueue.py"),
     ("dispatch", REPO / "scripts/e2e_dispatch.py"),
     ("agents tab", REPO / "scripts/e2e_agents_tab.py"),
     ("pm", REPO / "scripts/e2e_pm.py"),
