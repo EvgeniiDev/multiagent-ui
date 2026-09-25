@@ -6,7 +6,12 @@
   `05_review_r1.md`, …) плюс структурированное состояние цикла ревью —
   `review_findings.json` (`{version, round, findings: [{id, round, severity, text, where,
   status, closedInRound}]}`). Его пишет ревьюер (см. `roles/reviewer.md`), читают панель
-  (счётчик на карточке, гейт `agent_tested`) и `boardctl review`. Локальные прогоны, в git не едут.
+  (счётчик на карточке, гейт `agent_tested`) и `boardctl review`. Рядом — вердикты чекера
+  `review_verdict.json` (`{version, verdicts: [{findingId, verdict: confirmed|rejected|disputed,
+  reason, checker, at}]}`, append-only, действует последний по находке): пишет чекер через
+  `boardctl review-check` (см. `roles/review-checker.md`), `rejected` снимает блокировку гейта,
+  `disputed` блокирует и уходит человеку в список `proposed:` во вкладке Links.
+  Локальные прогоны, в git не едут.
 
 Роль описывается данными (в `roles.json` на хосте), а не кодом панели:
 

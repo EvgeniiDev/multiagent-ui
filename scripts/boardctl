@@ -17,6 +17,7 @@ device, and a card claimed here is not taken twice.
     boardctl review 3f2a                 # findings, round, the agent_tested gate
     boardctl review 3f2a --sync          # minor/nit -> backlog cards, round-limit flag
     boardctl review 3f2a --round 2 --close f-crit
+    boardctl review-check 3f2a f-crit confirmed --reason "verified at auth.ts:88"
     boardctl events --limit 20 --card 3f2a
     boardctl delegate --session sess-1 --subagent explore --goal "map auth flow"
     boardctl delegate --session sess-1 --subagent explore --end --outcome done \
@@ -164,13 +165,21 @@ def empty_activity() -> dict:
 #     reviewtest role's `review` field in roles.json (defaults below when
 #     the role carries none);
 #   * `move`/`set` into `agent_tested` refuses while a blocking-severity
-#     finding is open, naming severity + count;
+#     finding is open, naming severity + count — a finding the
+#     review-checker REJECTED no longer counts (`.acp/cards/<id>/
+#     review_verdict.json`, latest verdict per finding wins); confirmed,
+#     disputed and not-yet-checked findings all still gate, and a verdict
+#     file that cannot be parsed fails the gate closed (rejections cannot
+#     be verified);
 #   * `review --sync` materialises open backlog-severity findings as
 #     backlog cards (links + dependsOn/blocks, deduped by finding id) and
 #     maintains the round-limit `blocked` flag. Read/analyse first, write
 #     only at the end — a failed run changes nothing.
 
 REVIEW_FILE = "review_findings.json"
+VERDICT_FILE = "review_verdict.json"
+VERDICTS = ["confirmed", "rejected", "disputed"]
+REVIEW_CHECKER_ROLE = "review-checker"
 REVIEW_REASON_PREFIX = "review:"
 DEFAULT_REVIEW_RULES = {
     "severities": ["critical", "major", "minor", "nit"],
@@ -218,23 +227,25 @@ def _card_dir_candidates(card: dict, project_path: str = "") -> "list[str]":
     return out
 
 
-def _findings_file(card: dict, project_path: str = "") -> "str | None":
+def _findings_file(card: dict, project_path: str = "",
+                   name: str = REVIEW_FILE) -> "str | None":
     for base in _card_dir_candidates(card, project_path):
-        f = os.path.join(base, ".acp", "cards", card["id"], REVIEW_FILE)
+        f = os.path.join(base, ".acp", "cards", card["id"], name)
         if os.path.isfile(f):
             return f
     return None
 
 
-def _findings_file_for_write(card: dict, project_path: str = "") -> str:
+def _findings_file_for_write(card: dict, project_path: str = "",
+                             name: str = REVIEW_FILE) -> str:
     """Where a new findings doc goes: the existing card dir, else the first
     candidate's .acp/cards/<id> (created on write)."""
     for base in _card_dir_candidates(card, project_path):
         d = os.path.join(base, ".acp", "cards", card["id"])
         if os.path.isdir(d):
-            return os.path.join(d, REVIEW_FILE)
+            return os.path.join(d, name)
     base = _card_dir_candidates(card, project_path)[0]
-    return os.path.join(base, ".acp", "cards", card["id"], REVIEW_FILE)
+    return os.path.join(base, ".acp", "cards", card["id"], name)
 
 
 def _load_review_doc(card: dict, project_path: str = "") -> "tuple[dict | None, str | None]":
@@ -255,6 +266,51 @@ def _load_review_doc(card: dict, project_path: str = "") -> "tuple[dict | None, 
     return doc, f
 
 
+def _load_verdict_doc(card: dict, project_path: str = "") -> "tuple[dict | None, str | None]":
+    """(doc, path) or (None, None) when no verdicts file exists — the
+    checker simply has not run. A file that exists but cannot be parsed is
+    a CliError, never silently replaced (a malformed verdict doc must not
+    be appended to nor trusted)."""
+    f = _findings_file(card, project_path, VERDICT_FILE)
+    if f is None:
+        return None, None
+    try:
+        with open(f, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise CliError(f"review verdicts {f}: unreadable ({exc})", 1)
+    if not isinstance(doc, dict) or not isinstance(doc.get("verdicts", []), list):
+        raise CliError(f"review verdicts {f}: malformed doc", 1)
+    doc.setdefault("verdicts", [])
+    return doc, f
+
+
+def _verdict_map(card: dict, project_path: str = "") -> "tuple[dict | None, str | None]":
+    """findingId -> latest verdict record, for the GATE's fail-closed read:
+    (None, None) when no verdicts file exists; ({}, error-text) when the
+    file cannot be parsed — no rejection is trusted then, so every open
+    blocker keeps gating. Verdict words outside VERDICTS are skipped: an
+    unrecognized verdict must never clear a blocker."""
+    f = _findings_file(card, project_path, VERDICT_FILE)
+    if f is None:
+        return None, None
+    try:
+        with open(f, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return {}, f"verdicts unreadable ({exc})"
+    if not isinstance(doc, dict) or not isinstance(doc.get("verdicts", []), list):
+        return {}, "verdicts malformed doc"
+    out: "dict[str, dict]" = {}
+    for v in doc.get("verdicts") or []:
+        if not isinstance(v, dict):
+            continue
+        fid = v.get("findingId")
+        if isinstance(fid, str) and fid and v.get("verdict") in VERDICTS:
+            out[fid] = v  # append order — the last verdict per finding wins
+    return out, None
+
+
 def _review_rules() -> dict:
     """Severity vocabulary + limits — the reviewtest role's `review` data,
     DEFAULT_REVIEW_RULES when the role carries none."""
@@ -272,7 +328,11 @@ def _review_rules() -> dict:
     return rules
 
 
-def _open_counts(doc: dict, severities: "list[str] | None" = None) -> "dict[str, int]":
+def _open_counts(doc: dict, severities: "list[str] | None" = None,
+                 verdicts: "dict | None" = None) -> "dict[str, int]":
+    """Open findings per severity. When `verdicts` (the `_verdict_map`
+    result) is given, findings the checker rejected are skipped — they stay
+    in history but stop gating."""
     counts: "dict[str, int]" = {}
     for f in doc.get("findings") or []:
         if not isinstance(f, dict) or f.get("status", "open") != "open":
@@ -280,19 +340,25 @@ def _open_counts(doc: dict, severities: "list[str] | None" = None) -> "dict[str,
         sev = str(f.get("severity") or "")
         if severities is not None and sev not in severities:
             continue
+        if verdicts is not None:
+            v = verdicts.get(str(f.get("id") or ""))
+            if v and v.get("verdict") == "rejected":
+                continue
         counts[sev] = counts.get(sev, 0) + 1
     return counts
 
 
-def _blocking_text(doc: dict, rules: dict) -> str:
-    counts = _open_counts(doc, rules["blocking"])
+def _blocking_text(doc: dict, rules: dict, verdicts: "dict | None" = None) -> str:
+    counts = _open_counts(doc, rules["blocking"], verdicts)
     return ", ".join(f"{counts[s]} {s}" for s in rules["blocking"] if counts.get(s))
 
 
 def _gate_agent_tested(prev_status: "str | None", card: dict) -> None:
     """Refuse a transition INTO `agent_tested` while blocking findings are
     open — same rule as the panel store's reviewGateRefusal, read straight
-    from the findings file so the CLI is bound by the same gate."""
+    from the findings file so the CLI is bound by the same gate. A finding
+    the checker rejected no longer counts; a verdicts file that cannot be
+    parsed trusts no rejection, so every open blocker still gates."""
     if card.get("stage") != "reviewtest" or card.get("status") != "agent_tested":
         return
     if prev_status == "agent_tested":
@@ -300,11 +366,13 @@ def _gate_agent_tested(prev_status: "str | None", card: dict) -> None:
     doc, f = _load_review_doc(card)
     if doc is None:
         return  # no findings file: nothing is known to be open
-    text = _blocking_text(doc, _review_rules())
+    verdicts, verr = _verdict_map(card)
+    text = _blocking_text(doc, _review_rules(), verdicts or {})
     if text:
         raise CliError(
             f"agent_tested refused: open review findings — {text} "
-            f"({os.path.basename(f)})",
+            f"({os.path.basename(f)})"
+            + (f"; {verr}" if verr else ""),
             1,
         )
 
@@ -400,12 +468,13 @@ def live_claims(claims: dict) -> "dict[str, dict]":
 
 
 def add_entry(entries: "list[dict]", *, agent: str, title: str, detail: str,
-              cwd: str | None = None) -> "list[dict]":
+              cwd: str | None = None, role: str | None = None) -> "list[dict]":
     entries.append({
         "id": str(uuid.uuid4()),
         "at": int(time.time() * 1000),
         "kind": "card",
         "agentName": agent,
+        "role": role or "",
         "cwd": cwd or os.getcwd(),
         "title": title,
         "detail": detail,
@@ -413,13 +482,14 @@ def add_entry(entries: "list[dict]", *, agent: str, title: str, detail: str,
     return entries[-MAX_ENTRIES:]
 
 
-def log(*, title: str, detail: str, agent: str | None = None) -> None:
+def log(*, title: str, detail: str, agent: str | None = None,
+        role: str | None = None) -> None:
     """Append a card event to the shared activity ledger (best effort)."""
     def fn(data):
         data.setdefault("entries", [])
         data.setdefault("usage", [])
         data["entries"] = add_entry(data["entries"], agent=agent or ACTOR,
-                                    title=title, detail=detail)
+                                    title=title, detail=detail, role=role)
         return data, True
 
     try:
@@ -914,11 +984,13 @@ def _review_show(card: dict, args) -> int:
     rules = _review_rules()
     counts = _open_counts(doc)
     findings = [x for x in doc.get("findings") or [] if isinstance(x, dict)]
-    gate = _blocking_text(doc, rules)
+    verdicts, verr = _verdict_map(card, args.project_path)
+    gate = _blocking_text(doc, rules, verdicts or {})
     payload = {
         "card": card["id"], "file": f, "round": doc.get("round"),
         "maxRounds": rules["maxRounds"], "open": counts,
         "gate": f"agent_tested refused: {gate}" if gate else "clear",
+        "verdictsUnreadable": verr,
         "findings": findings,
     }
 
@@ -929,12 +1001,21 @@ def _review_show(card: dict, args) -> int:
         rows = [head]
         for x in findings:
             st = x.get("status") or "open"
+            v = (verdicts or {}).get(str(x.get("id") or ""))
+            mark = ""
+            if v:
+                mark = (f" [{v.get('verdict')}"
+                        + (f" by {v.get('checker')}" if v.get("checker") else "")
+                        + (f": {v.get('reason')}" if v.get("reason") else "")
+                        + "]")
             rows.append(
                 f"  {str(x.get('id')):<10} {str(x.get('severity')):<9} {st:<7}"
                 f" r{x.get('round', '-')}"
                 + (f"→r{x['closedInRound']}" if st == "closed" and x.get("closedInRound") else "")
-                + f"  {str(x.get('where') or '-'):<24} {str(x.get('text') or '')}"
+                + f"  {str(x.get('where') or '-'):<24} {str(x.get('text') or '')}{mark}"
             )
+        if verr:
+            rows.append(f"  ! {verr} — no rejection trusted")
         return "\n".join(rows)
 
     emit(payload, args, render)
@@ -977,6 +1058,70 @@ def _review_write(card: dict, args) -> int:
     return 0
 
 
+def cmd_review_check(args) -> int:
+    """`boardctl review-check <card> <fid> confirmed|rejected|disputed` —
+    the review-checker's write path: appends the verdict to the card's
+    `review_verdict.json` (the findings doc itself is the reviewer's — the
+    checker never edits it) and records the same fact in the activity
+    ledger under `role=review-checker`, so the panel shows who checked
+    what. Bound by the same rules as the file contract: unknown finding id
+    is an error; `rejected` findings stop blocking but stay in history."""
+    cards = load_cards()
+    card = resolve(cards, args.card)
+    doc, _f = _load_review_doc(card, args.project_path)
+    if doc is None:
+        raise CliError(
+            f"no review findings for {card['id'][:8]} — the reviewer writes "
+            f"{REVIEW_FILE} first", 2)
+    hit = next(
+        (x for x in doc["findings"]
+         if isinstance(x, dict) and x.get("id") == args.finding),
+        None,
+    )
+    if hit is None:
+        raise CliError(f"no finding {args.finding!r} on {card['id'][:8]}", 2)
+    vdoc, vf = _load_verdict_doc(card, args.project_path)
+    if vdoc is None:
+        vf = _findings_file_for_write(card, args.project_path, VERDICT_FILE)
+        vdoc = {"version": 1, "verdicts": []}
+    actor = args.agent or ACTOR
+    entry = {
+        "findingId": args.finding,
+        "verdict": args.verdict,
+        "reason": " ".join((args.reason or "").split()),
+        "checker": actor,
+        "at": int(time.time() * 1000),
+    }
+    vdoc["verdicts"].append(entry)
+    vdoc["version"] = 1
+    _write_doc_file(vf, vdoc)
+    # The same fact lands in the activity ledger so the panel shows who
+    # checked what. A `disputed` verdict additionally carries the
+    # `proposed:` prefix — the Links tab's for-human proposals list renders
+    # every row marked that way (pm established the convention).
+    sev = str(hit.get("severity") or "")
+    why = f" — {entry['reason']}" if entry["reason"] else ""
+    if args.verdict == "disputed":
+        detail = f"proposed: disputed review finding {args.finding} ({sev}){why}"
+    else:
+        detail = f"review-check {args.finding}: {args.verdict}{why}"
+    log(title=card["title"], detail=detail, agent=actor,
+        role=REVIEW_CHECKER_ROLE)
+    verdicts, _verr = _verdict_map(card, args.project_path)
+    gate = _blocking_text(doc, _review_rules(), verdicts or {})
+
+    def render() -> str:
+        return (f"{card['id'][:8]}: {args.finding} → {args.verdict}"
+                + (f" ({entry['reason']})" if entry["reason"] else "")
+                + (f"; gate: refuse agent_tested ({gate})" if gate
+                   else "; gate: clear"))
+
+    emit({"card": card["id"], "file": vf, "verdict": entry,
+          "gate": f"agent_tested refused: {gate}" if gate else "clear"},
+         args, render)
+    return 0
+
+
 class _SyncNoChange(Exception):
     """Internal: the sync pass computed no board changes — raised inside the
     mutate fn so the write never happens (idempotent second passes must not
@@ -1005,7 +1150,8 @@ def _review_sync(card: dict, args) -> int:
             f"findings {', '.join(bad)} carry severity outside the role "
             f"vocabulary ({', '.join(rules['severities'])})", 1)
     src_id = card["id"]
-    blocking_text = _blocking_text(doc, rules)
+    verdicts, _verr = _verdict_map(card, args.project_path)
+    blocking_text = _blocking_text(doc, rules, verdicts or {})
     round_no = doc.get("round")
     over_limit = (isinstance(round_no, (int, float)) and round_no >= rules["maxRounds"]
                   and bool(blocking_text))
@@ -1265,6 +1411,20 @@ def build_parser() -> argparse.ArgumentParser:
                    help="dir holding .acp/cards/<id> "
                         "(default: registry lookup / $ACP_PROJECT_PATH / cwd)")
     s.set_defaults(func=cmd_review)
+
+    s = sub.add_parser("review-check", parents=[common],
+                       help="record the review-checker's verdict on a finding")
+    s.add_argument("card")
+    s.add_argument("finding", metavar="FID")
+    s.add_argument("verdict", choices=VERDICTS)
+    s.add_argument("--reason", default="",
+                   help="one-line reason (lands in the verdict file + ledger)")
+    s.add_argument("--agent", default="",
+                   help="checker name (default $BOARD_AGENT or 'boardctl')")
+    s.add_argument("--project-path", default="",
+                   help="dir holding .acp/cards/<id> "
+                        "(default: registry lookup / $ACP_PROJECT_PATH / cwd)")
+    s.set_defaults(func=cmd_review_check)
     return p
 
 

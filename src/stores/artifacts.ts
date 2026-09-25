@@ -27,9 +27,12 @@ import { stageLabel } from '../features/board/columns';
 import { useConfigStore } from './config';
 import {
   REVIEW_FILE,
+  VERDICT_FILE,
   emptyReview,
   parseReviewDoc,
+  parseVerdictDoc,
   useReviewStore,
+  type CardReviewState,
 } from './review';
 import {
   bridgeBaseUrlForAgentUrl,
@@ -422,10 +425,12 @@ export const useArtifactsStore = defineStore('artifacts', () => {
       const out: CardArtifact[] = [];
       if (meta.size) {
         // Newer bridge: the listing itself names the files — read them all.
-        // The findings doc is loaded separately below; it is state, not a
-        // prose artifact, and does not appear in the artifacts list.
+        // The findings/verdicts docs are loaded separately below; they are
+        // state, not prose artifacts, and do not appear in the list.
         for (const name of meta.keys()) {
-          if (name !== REVIEW_FILE) await readInto(base, dir, name, meta, out);
+          if (name !== REVIEW_FILE && name !== VERDICT_FILE) {
+            await readInto(base, dir, name, meta, out);
+          }
         }
       } else {
         // Today's bridge lists directories only — probe the fixed pipeline
@@ -442,18 +447,56 @@ export const useArtifactsStore = defineStore('artifacts', () => {
       st.phase = 'ready';
       st.loadedAt = Date.now();
       // The review cycle's structured findings ride alongside the prose
-      // artifacts. A malformed file surfaces as the review state's own
+      // artifacts, and the checker's verdicts ride alongside the findings.
+      // A malformed findings file surfaces as the review state's own
       // `unreadable` error (the agent_tested gate fails closed on it); a
-      // bridge read failure is an honest `error` only.
+      // malformed verdicts file is `verdictsUnreadable` — same closed gate,
+      // since rejections cannot be verified. A bridge read failure is an
+      // honest `error`/`verdictsError` only.
+      let verdictsState: Pick<
+        CardReviewState,
+        'verdicts' | 'verdictsError' | 'verdictsUnreadable'
+      >;
+      try {
+        const vr = await bridgeRead(base, `${dir}/${VERDICT_FILE}`);
+        if (!vr) {
+          verdictsState = { verdicts: [], verdictsError: '', verdictsUnreadable: false };
+        } else {
+          try {
+            verdictsState = {
+              ...parseVerdictDoc(vr.content),
+              verdictsError: '',
+              verdictsUnreadable: false,
+            };
+          } catch (ve) {
+            verdictsState = {
+              verdicts: [],
+              verdictsError: ve instanceof Error ? ve.message : String(ve),
+              verdictsUnreadable: true,
+            };
+          }
+        }
+      } catch (ve) {
+        verdictsState = {
+          verdicts: [],
+          verdictsError: ve instanceof Error ? ve.message : String(ve),
+          verdictsUnreadable: false,
+        };
+      }
       try {
         const r = await bridgeRead(base, `${dir}/${REVIEW_FILE}`);
         if (!r) {
-          useReviewStore().set(cardId, { ...emptyReview(), loadedAt: Date.now() });
+          useReviewStore().set(cardId, {
+            ...emptyReview(),
+            ...verdictsState,
+            loadedAt: Date.now(),
+          });
         } else {
           try {
             const parsed = parseReviewDoc(r.content);
             useReviewStore().set(cardId, {
               ...parsed,
+              ...verdictsState,
               error: '',
               unreadable: false,
               loadedAt: Date.now(),
@@ -461,6 +504,7 @@ export const useArtifactsStore = defineStore('artifacts', () => {
           } catch (pe) {
             useReviewStore().set(cardId, {
               ...emptyReview(),
+              ...verdictsState,
               error: pe instanceof Error ? pe.message : String(pe),
               unreadable: true,
               loadedAt: Date.now(),
@@ -470,6 +514,7 @@ export const useArtifactsStore = defineStore('artifacts', () => {
       } catch (re) {
         useReviewStore().set(cardId, {
           ...emptyReview(),
+          ...verdictsState,
           error: re instanceof Error ? re.message : String(re),
           unreadable: false,
           loadedAt: Date.now(),

@@ -306,6 +306,11 @@ const reviewRound = computed(() => reviewRoundOf(artState.value.artifacts));
 const reviewState = computed(() => reviewStore.stateFor(props.cardId));
 const reviewRules = computed(() => rolesStore.reviewRulesForStage('reviewtest'));
 const reviewCounts = computed(() => reviewStore.openCounts(props.cardId));
+/** The checker's effective verdict on a finding (latest row wins; null =
+ * unvetted). Rejected findings stop gating but stay in history — the row
+ * shows the verdict and the reason, never silently dropped. */
+const verdictFor = (findingId: string) =>
+  reviewStore.verdictFor(props.cardId, findingId);
 const reviewCountsLine = computed(() => {
   const c = reviewCounts.value;
   const open = Object.values(c).reduce((a, b) => a + b, 0);
@@ -580,15 +585,26 @@ onBeforeUnmount(() => {
         <template v-else>
           <p class="art-note" data-testid="review-counts">{{ reviewCountsLine }}</p>
           <p v-if="reviewGateHint" class="art-note gate-note" data-testid="review-gate">{{ reviewGateHint }}</p>
+          <p v-if="reviewState.verdictsError" class="art-error" data-testid="verdict-error">{{ reviewState.verdictsError }}</p>
           <ul v-if="reviewState.findings.length" class="art-list" data-testid="review-list">
             <li
               v-for="f in reviewState.findings"
               :key="f.id"
               class="find-row mono"
-              :class="{ 'find-closed': f.status === 'closed' }"
+              :class="{
+                'find-closed': f.status === 'closed',
+                'find-rejected': verdictFor(f.id)?.verdict === 'rejected',
+              }"
             >
               <span class="find-sev" :class="`sev-${f.severity}`">{{ f.severity }}</span>
               <span class="find-text" :title="f.where">{{ f.text || f.id }}</span>
+              <span
+                v-if="verdictFor(f.id)"
+                class="find-verd"
+                :class="`verd-${verdictFor(f.id)!.verdict}`"
+                :data-verdict="verdictFor(f.id)!.verdict"
+                :title="`${verdictFor(f.id)!.checker || 'review-checker'}: ${verdictFor(f.id)!.reason || 'no reason'}`"
+              >{{ verdictFor(f.id)!.verdict }}</span>
               <span class="find-st">{{
                 f.status === 'closed' ? `closed r${f.closedInRound ?? f.round}` : `open · r${f.round}`
               }}</span>
@@ -1091,7 +1107,8 @@ textarea.f-input {
   color: var(--text-primary, #2b2723);
 }
 
-.find-row.find-closed {
+.find-row.find-closed,
+.find-row.find-rejected {
   color: var(--text-muted, #a39a8e);
 }
 
@@ -1120,6 +1137,30 @@ textarea.f-input {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.find-verd {
+  flex: 0 0 auto;
+  padding: 0 0.25rem;
+  border: 1px solid var(--border-color, #e3dbcf);
+  border-radius: var(--radius-sm, 4px);
+  font-size: 0.625rem;
+  white-space: nowrap;
+}
+
+.find-verd.verd-rejected {
+  color: var(--bg-success, #5a7d4f);
+  border-color: var(--bg-success, #5a7d4f);
+}
+
+.find-verd.verd-confirmed {
+  color: var(--bg-danger, #b3402e);
+  border-color: var(--bg-danger, #b3402e);
+}
+
+.find-verd.verd-disputed {
+  color: var(--text-accent, #c2532f);
+  border-color: var(--text-accent, #c2532f);
 }
 
 .find-st {
