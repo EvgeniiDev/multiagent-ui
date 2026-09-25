@@ -33,6 +33,7 @@ SCRIPTS = [
     ("agents tab", REPO / "scripts/e2e_agents_tab.py"),
     ("pm", REPO / "scripts/e2e_pm.py"),
     ("review", REPO / "scripts/e2e_review.py"),
+    ("review checker", REPO / "scripts/e2e_review_checker.py"),
     ("dashboard math", REPO / "scripts/e2e_dash_math.py"),
     ("voice", REPO / "scripts/e2e_voice.py"),
     ("bridge timeout", REPO / "scripts/e2e_bridge_timeout.py"),

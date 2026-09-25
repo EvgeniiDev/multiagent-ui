@@ -104,12 +104,29 @@ def main():
             check("summary counts per-session deltas, not every sample",
                   digits == HONEST, f"shown {tokens!r} (honest {HONEST}, naive {NAIVE})")
 
-            # "All time" spans more than 120 days, so the series is bucketed by WEEK:
-            # both fixture days land in one bucket, and empty buckets are dropped
-            # instead of printing a year of zero rows.
+            # "All time" spans more than 120 days, so the series is bucketed by WEEK and
+            # empty buckets are dropped instead of printing a year of zero rows. How many
+            # buckets the two seeded days share depends on the weekday the suite runs on
+            # (week buckets start at the range's `from`), so the stable properties are:
+            # every listed bucket has data, the list is far shorter than the full range,
+            # and the listed values sum to the honest total.
             rows = page.locator('[data-testid="by-day-row"]').count()
+            day_cells = page.evaluate(
+                """() => [...document.querySelectorAll('[data-testid="by-day-row"]')].map(tr =>
+                     [...tr.querySelectorAll('td')].map(td => td.textContent.trim()))""")
+            bucket_tokens = []
+            for cells in day_cells:
+                for cell in cells:
+                    if re.fullmatch(r"[\d\s,]+", cell) and re.search(r"\d", cell):
+                        bucket_tokens.append(int(re.sub(r"[^\d]", "", cell)))
+                        break
             check("day table lists only buckets with data",
-                  rows == 1, f"{rows} rows (before the fix: every bucket in the range)")
+                  rows >= 1 and rows <= 4 and all(v > 0 for v in bucket_tokens),
+                  f"{rows} rows, tokens {bucket_tokens} (the old bug printed the whole "
+                  f"year's empty buckets)")
+            check("day table sums to the honest total",
+                  sum(bucket_tokens) == HONEST,
+                  f"sum {sum(bucket_tokens)} (honest {HONEST})")
 
             values = [int(re.sub(r"[^\d]", "", page.locator('[data-testid="by-day-row"]').nth(i)
                                  .get_attribute("data-day") or "0") or 0) for i in range(0)]

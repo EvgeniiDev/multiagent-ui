@@ -88,10 +88,16 @@ const reviewInfo = computed(() => {
   for (const s of Object.keys(counts)) {
     if (!rules.severities.includes(s)) parts.push(`${s.slice(0, 4)} ${counts[s]}`);
   }
-  const blockers = rules.blocking.reduce((n, s) => n + (counts[s] ?? 0), 0);
+  // The blocker tint follows what still gates — a rejected finding is open
+  // in the file but no longer a blocker; it counts under `rej` instead.
+  const gating = reviewStore.blockingCounts(props.card.id);
+  const blockers = rules.blocking.reduce((n, s) => n + (gating[s] ?? 0), 0);
+  const rejected = st.findings.filter(
+    (f) => f.status === 'open' && reviewStore.verdictFor(props.card.id, f.id)?.verdict === 'rejected'
+  ).length;
   const round = st.round !== null ? `r${st.round}/${rules.maxRounds}` : null;
-  const text = `${round ? `${round} ` : ''}${parts.join(' · ')}`;
-  const title = `Open review findings — round ${st.round ?? '—'} of ${rules.maxRounds}: ${parts.join(', ')}`;
+  const text = `${round ? `${round} ` : ''}${parts.join(' · ')}${rejected ? ` · rej ${rejected}` : ''}`;
+  const title = `Open review findings — round ${st.round ?? '—'} of ${rules.maxRounds}: ${parts.join(', ')}${rejected ? ` (${rejected} rejected by review-checker)` : ''}`;
   return { text, title, blockers };
 });
 

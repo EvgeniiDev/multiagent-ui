@@ -58,8 +58,15 @@ const appliedEntries = computed(() =>
   pmEntries.value.filter((e) => (e.detail || '').startsWith('applied:')).slice().reverse()
 );
 
+// `proposed:` is the for-a-human marker, not a pm-private one — any role
+// that must hand a decision to a human writes it (pm substance changes,
+// the review-checker's `disputed` verdicts on review findings). The list
+// is fed by the prefix, whatever kind of entry carries it.
 const proposedEntries = computed(() =>
-  pmEntries.value.filter((e) => (e.detail || '').startsWith('proposed:')).slice().reverse()
+  activity.entries
+    .filter((e) => (e.detail || '').startsWith('proposed:'))
+    .slice()
+    .reverse()
 );
 
 const keptReason = computed(() => (e: ActivityEntry) => e.detail || '');
