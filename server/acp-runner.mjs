@@ -27,14 +27,17 @@
 //
 // Guards: timeoutMin -> SIGTERM, SIGKILL after 10 s; maxConcurrent per role
 // is strict; maxRetries (default 1 = no retry) caps attempts per card and the
-// exhausted card is flagged `blocked`; cards in done/backlog or flagged
-// blocked/cancelled are never taken; a sweep on every pass drops claims
-// whose lease expired while their pid is dead and returns those cards to
-// the stage they were claimed from, flagged `blocked`; an unreachable state
-// server is reported on stderr without exiting (in --serve); cards are
-// never moved. stop-all/cancel only ever signal pids that are still
-// children of the runner pid recorded in the claim (or spawned by this
-// process) — a foreign runner's process is never touched.
+// exhausted card is flagged `blocked`; idleTimeoutMin (default 15, 0 =
+// watchdog off) -> a child silent for that long takes the same SIGTERM
+// path as the lease timeout, audited as `idle Nm — terminated` and counted
+// as a failed attempt; cards in done/backlog or flagged blocked/cancelled
+// are never taken; a sweep on every pass drops claims whose lease expired
+// while their pid is dead and returns those cards to the stage they were
+// claimed from, flagged `blocked`; an unreachable state server is reported
+// on stderr without exiting (in --serve); cards are never moved.
+// stop-all/cancel only ever signal pids that are still children of the
+// runner pid recorded in the claim (or spawned by this process) — a
+// foreign runner's process is never touched.
 //
 // Node only, zero dependencies.
 
@@ -387,6 +390,7 @@ async function claimCard(card, role, timeoutMin, pid) {
       sessionId: prev.sessionId || '',
       leaseUntil: now + timeoutMin * 60_000,
       startedAt: prev.startedAt || now,
+      lastOutputAt: now,
       claimedAt: now,
       pid: pid ?? null,
       roleId: role.id,
@@ -403,15 +407,18 @@ async function claimCard(card, role, timeoutMin, pid) {
   return cur && cur.agentName === agentName ? cur : null;
 }
 
-// Heartbeat: extend leaseUntil while our child runs. Debug-level only —
-// renewals are not a transition and never hit the ledger.
-async function renewLease(cardId, agentName, timeoutMin) {
+// Heartbeat: extend leaseUntil while our child runs, and stamp the
+// child's freshness (`lastOutputAt` — the watchdog's input) into the
+// claim. Debug-level only — renewals are not a transition and never hit
+// the ledger.
+async function renewLease(cardId, agentName, timeoutMin, lastOutputAt) {
   try {
     await mutate('claims.json', emptyClaims(), (doc) => {
       const cur = (doc.claims || {})[cardId];
       if (cur && cur.agentName === agentName) {
         cur.leaseUntil = Date.now() + timeoutMin * 60_000;
         cur.hbAt = Date.now();
+        if (lastOutputAt) cur.lastOutputAt = lastOutputAt;
       }
       doc.version = 1;
       return doc;
@@ -494,6 +501,14 @@ function maxAttemptsFor(role) {
   return Number.isFinite(n) && n >= 1 ? n : 1;
 }
 
+// Minutes of child silence the watchdog tolerates. 0 disables it (long
+// non-streaming commands are legitimate); absent/malformed -> the 15 min
+// default. Fractional values are honoured (e2e uses absurdly low ones).
+function idleTimeoutFor(role) {
+  const n = Number(role?.idleTimeoutMin);
+  return Number.isFinite(n) && n >= 0 ? n : 15;
+}
+
 async function runCard(card, project, role, attemptsSoFar) {
   const agentName = `${RUNNER_ID}:${role.id}`;
   const timeoutMin = Number(role.timeoutMin) > 0 ? Number(role.timeoutMin) : 45;
@@ -532,15 +547,52 @@ async function runCard(card, project, role, attemptsSoFar) {
     detail: `claimed ${card.id} lease=${timeoutMin}m role=${role.id}`,
   });
 
-  // Heartbeat: pollIntervalSec as the tick, never below 5 s.
+  // Heartbeat + idle watchdog, one tick: pollIntervalSec as the cadence,
+  // never below 5 s. Each tick renews the lease (stamping the child's
+  // last-output time into the claim) and then decides: child alive and
+  // fresh -> nothing; alive but silent past `idleTimeoutMin` -> the same
+  // SIGTERM path the lease timeout takes, audited as a watchdog kill. A
+  // dead child's claim is released by the finally below — the existing
+  // exit path already covers it.
   const hbMs = Math.max(
     MIN_HEARTBEAT_MS,
     Math.floor((Number(role.pollIntervalSec) || 15) * 1000),
   );
+  const idleMin = idleTimeoutFor(role);
+  // The live attempt's watchdog state; null before the first spawn.
+  let active = null;
   const hb = setInterval(() => {
-    void renewLease(card.id, agentName, timeoutMin);
+    void renewLease(card.id, agentName, timeoutMin, active?.lastOutputAt);
+    void idleTick();
   }, hbMs);
   hb.unref?.();
+
+  // The kill decision. The claim stays ours on purpose: a watchdog kill
+  // is a failed attempt to the retry/blocked machinery below — same as a
+  // non-zero exit (the gate rule).
+  async function idleTick() {
+    const cur = active;
+    if (!cur || !cur.terminate || idleMin <= 0 || cur.killReason) return;
+    if (cur.child.killed || cur.child.exitCode !== null) return;
+    const idleMs = Date.now() - cur.lastOutputAt;
+    if (idleMs < idleMin * 60_000) return;
+    cur.killReason = 'idle';
+    try {
+      await appendActivity({
+        agentName,
+        cwd,
+        title,
+        role: role.id,
+        sessionId,
+        detail:
+          `idle ${(idleMs / 60_000).toFixed(1)}m — terminated ${card.id}, ` +
+          `attempt ${cur.attempt}/${maxAttempts} (idleTimeoutMin=${idleMin})`,
+      });
+    } catch (e) {
+      console.error(`watchdog ${card.id}: ${e.message}`);
+    }
+    cur.terminate();
+  }
 
   try {
     for (let attempt = attemptsSoFar + 1; attempt <= maxAttempts; attempt++) {
@@ -561,8 +613,19 @@ async function runCard(card, project, role, attemptsSoFar) {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       let scanTail = '';
+      // Watchdog state for this attempt: lastOutputAt is stamped on ANY
+      // child output — a byte of any kind counts as life.
+      const run = {
+        child,
+        attempt,
+        lastOutputAt: Date.now(),
+        killReason: null,
+        terminate: null,
+      };
+      active = run;
       child.stdout.on('data', (c) => {
         outChunks.push(c);
+        run.lastOutputAt = Date.now();
         if (!sessionId) {
           scanTail = (scanTail + c.toString('utf8')).slice(-65536);
           const m = SESSION_RE.exec(scanTail);
@@ -586,7 +649,10 @@ async function runCard(card, project, role, attemptsSoFar) {
           }
         }
       });
-      child.stderr.on('data', (c) => errChunks.push(c));
+      child.stderr.on('data', (c) => {
+        errChunks.push(c);
+        run.lastOutputAt = Date.now();
+      });
       // Attach the exit wait SYNCHRONOUSLY at spawn: a fast child can 'close'
       // before any later await yields, and a late .on('close') never fires.
       const exitPromise = new Promise((resolveDone) => {
@@ -598,7 +664,10 @@ async function runCard(card, project, role, attemptsSoFar) {
       try {
         await mutate('claims.json', emptyClaims(), (doc) => {
           const cur = (doc.claims || {})[card.id];
-          if (cur && cur.agentName === agentName) cur.pid = child.pid;
+          if (cur && cur.agentName === agentName) {
+            cur.pid = child.pid;
+            cur.lastOutputAt = run.lastOutputAt;
+          }
           doc.version = 1;
           return doc;
         });
@@ -619,8 +688,9 @@ async function runCard(card, project, role, attemptsSoFar) {
       });
 
       let timedOut = false;
-      const timeout = setTimeout(() => {
-        timedOut = true;
+      // The one termination path — lease timeout and the idle watchdog
+      // share it: SIGTERM, SIGKILL after the grace window.
+      const terminate = () => {
         try {
           child.kill('SIGTERM');
         } catch {
@@ -634,10 +704,17 @@ async function runCard(card, project, role, attemptsSoFar) {
           }
         }, KILL_GRACE_MS);
         finisher.unref?.();
+      };
+      run.terminate = terminate;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        run.killReason = run.killReason || 'timeout';
+        terminate();
       }, timeoutMin * 60_000);
       timeout.unref?.();
 
       const exitCode = await exitPromise;
+      active = null;
       clearTimeout(timeout);
       liveProcs.delete(child.pid);
       await fs.writeFile(
@@ -661,7 +738,11 @@ async function runCard(card, project, role, attemptsSoFar) {
           `exit=${exitCode}`,
           `dur=${secs}s`,
           `attempt=${attempt}/${maxAttempts}`,
-          timedOut ? 'timeout' : 'finished',
+          run.killReason === 'idle'
+            ? 'idle-terminated'
+            : timedOut
+              ? 'timeout'
+              : 'finished',
           verdict ? `verdict: ${verdict}` : 'verdict: none',
           `log: run-${runN}.log`,
           `role=${role.id}`,

@@ -30,6 +30,7 @@ SCRIPTS = [
     ("auto approve", REPO / "scripts/e2e_auto_approve.py"),
     ("runner", REPO / "scripts/e2e_runner.py"),
     ("dispatch", REPO / "scripts/e2e_dispatch.py"),
+    ("watchdog", REPO / "scripts/e2e_watchdog.py"),
     ("agents tab", REPO / "scripts/e2e_agents_tab.py"),
     ("pm", REPO / "scripts/e2e_pm.py"),
     ("review", REPO / "scripts/e2e_review.py"),

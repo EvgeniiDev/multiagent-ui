@@ -52,6 +52,7 @@ const formMaxConcurrent = ref(1);
 const formPollIntervalSec = ref(15);
 const formTimeoutMin = ref(45);
 const formMaxRetries = ref(1);
+const formIdleTimeoutMin = ref(15);
 // Review-cycle rules (the severity vocabulary, the gate/backlog severities
 // and the round limit) are role DATA — text fields here, `role.review` in
 // roles.json. All empty = the role carries no review data and defaults
@@ -76,6 +77,7 @@ function resetForm(): void {
   formPollIntervalSec.value = 15;
   formTimeoutMin.value = 45;
   formMaxRetries.value = 1;
+  formIdleTimeoutMin.value = 15;
   formReviewSev.value = '';
   formReviewBlocking.value = '';
   formReviewBacklog.value = '';
@@ -101,6 +103,7 @@ function startEdit(r: Role): void {
   formPollIntervalSec.value = r.pollIntervalSec;
   formTimeoutMin.value = r.timeoutMin;
   formMaxRetries.value = r.maxRetries;
+  formIdleTimeoutMin.value = r.idleTimeoutMin;
   formReviewSev.value = r.review?.severities.join(' ') ?? '';
   formReviewBlocking.value = r.review?.blocking.join(' ') ?? '';
   formReviewBacklog.value = r.review?.backlog.join(' ') ?? '';
@@ -165,6 +168,7 @@ function formToRole(id: string): Role {
     pollIntervalSec: Number(formPollIntervalSec.value),
     timeoutMin: Number(formTimeoutMin.value),
     maxRetries: Number(formMaxRetries.value),
+    idleTimeoutMin: Number(formIdleTimeoutMin.value),
     review,
   };
 }
@@ -360,6 +364,11 @@ onMounted(async () => {
           <small>Attempts per card; 1 = no retry, then the card is flagged blocked.</small>
         </div>
         <div class="form-group">
+          <label>Idle timeout (min)</label>
+          <input v-model.number="formIdleTimeoutMin" type="number" min="0" step="1" data-testid="role-idle" />
+          <small>A child silent this long is killed as a failed attempt; 0 disables the watchdog.</small>
+        </div>
+        <div class="form-group">
           <label>Review severities</label>
           <input v-model="formReviewSev" type="text" placeholder="critical major minor nit" data-testid="role-review-sev" />
           <small>Space-separated vocabulary; empty = no review data on the role.</small>
@@ -415,6 +424,7 @@ onMounted(async () => {
           <div class="role-limits">
             id <code>{{ r.id }}</code> · args <code>{{ r.args.join(' ') || '—' }}</code>
             · max {{ r.maxConcurrent }} · poll {{ r.pollIntervalSec }}s · timeout {{ r.timeoutMin }}m · retries {{ r.maxRetries }}
+            · idle {{ r.idleTimeoutMin > 0 ? `${r.idleTimeoutMin}m` : 'off' }}
             <template v-if="r.review">
               · review <code data-testid="role-review-{{ r.id }}">{{ r.review.severities.join(' ') }}</code>
               · gate {{ r.review.blocking.join(',') || '—' }} · backlog {{ r.review.backlog.join(',') || '—' }}
