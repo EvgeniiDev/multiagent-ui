@@ -49,7 +49,13 @@ async function appendUsage(sample) {
     const last = [...doc.usage]
       .reverse()
       .find((u) => u && u.sessionId === sample.sessionId && (u.source ?? 'agent') === 'agent');
-    if (last && last.used === sample.used && (last.cost ?? 0) === (sample.cost ?? 0)) {
+    if (
+      last &&
+      last.used === sample.used &&
+      (last.cost ?? 0) === (sample.cost ?? 0) &&
+      (last.model ?? 'unknown') === (sample.model ?? 'unknown') &&
+      (last.provider ?? 'unknown') === (sample.provider ?? 'unknown')
+    ) {
       return true; // already recorded
     }
     doc.usage = [...doc.usage.slice(-(MAX_USAGE - 1)), sample];
@@ -116,7 +122,14 @@ export const AcpTokenMeter = async ({ client }) => {
     const prev = lastReported.get(sessionID);
     // Compaction drops older messages — the running total must not shrink.
     if (prev && used < prev.used) used = prev.used;
-    if (prev && prev.used === used && prev.cost === cost) return;
+    if (
+      prev &&
+      prev.used === used &&
+      prev.cost === cost &&
+      prev.model === modelID &&
+      prev.provider === providerID
+    )
+      return;
 
     let cwd;
     try {
@@ -137,8 +150,13 @@ export const AcpTokenMeter = async ({ client }) => {
       cost,
       currency: 'USD',
       source: 'agent',
+      // Straight from the assistant message — the real provider/model pair,
+      // not a guess (this plugin is the only writer that actually knows the
+      // provider).
+      model: modelID ?? 'unknown',
+      provider: providerID ?? 'unknown',
     });
-    if (wrote) lastReported.set(sessionID, { used, cost });
+    if (wrote) lastReported.set(sessionID, { used, cost, model: modelID, provider: providerID });
   }
 
   return {

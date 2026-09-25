@@ -876,6 +876,10 @@ export const useSessionStore = defineStore('session', () => {
         cost: typeof untyped.cost?.amount === 'number' ? untyped.cost.amount : undefined,
         currency: untyped.cost?.currency,
         source: 'agent',
+        // The panel knows the session's announced model (models.currentModelId
+        // from session/new, or the picker's last setModel) but never a provider.
+        model: currentModelId.value || 'unknown',
+        provider: 'unknown',
       });
       return;
     }

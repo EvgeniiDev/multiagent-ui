@@ -1,20 +1,30 @@
 """E2E: the token meter — opencode plugin (exact) + ws-bridge estimator
 (approximate) + the dashboard's two-layer rendering.
 
-Four acts, each with its own fixture:
+Five acts, each with its own fixture:
 
   a) plugin: drive deploy/opencode/plugins/acp-token-meter.js in a bare node
      process with a canned SDK client (two assistant messages with known
      token counts), fire `session.idle` twice -> exactly one usage row lands
-     in the test state server, tagged source:"agent", with the summed totals.
+     in the test state server, tagged source:"agent", with the summed totals
+     and the message's providerID/modelID pair.
   b) bridge: spawn the repo's acp-ws-bridge.mjs over a fake NDJSON ACP agent
      and push session/prompt + agent_message_chunk traffic through a real
      WebSocket -> usage rows tagged source:"estimate" appear, `used` grows
-     monotonically, agentName is the --agent-name label.
+     monotonically, agentName is the --agent-name label, and `model` is
+     whatever the agent announced on session/new (three shapes are driven:
+     a configOptions model select, a models.currentModelId block plus a
+     mid-session session/set_model switch, and no announcement at all ->
+     honest 'unknown').
   c) dedup: identical plugin idle and an unchanged bridge session add no rows.
-  d) dashboard: seed localStorage with one agent row + one estimate row ->
-     the summary and by-agent table mark the estimate ("~"), the legend is
-     present, and the day chart draws a stacked estimate segment.
+  d) dashboard: seed localStorage with agent + estimate rows (some with
+     model/provider, one legacy row without) -> the summary and by-agent
+     table mark the estimate ("~"), the by-model table groups per announced
+     model with 'unknown' for legacy rows, and the day chart draws a stacked
+     estimate segment.
+  e) panel writer: a WS mock agent announces models.currentModelId on
+     session/new and emits usage_update on the prompt -> the usage row the
+     panel itself writes carries the announced model + provider 'unknown'.
 
 Usage: npm run build:web && ~/.hermes/tools-venv/bin/python scripts/e2e_token_meter.py
 """
@@ -150,6 +160,8 @@ def run_plugin(state_port: int, tmp: Path):
         check("plugin sample carries size/cost/cwd", u.get("size") == 128000 and
               abs(u.get("cost", 0) - 0.03) < 1e-9 and u.get("cwd") == "/tmp/oc-project",
               f"row={u}")
+        check("plugin sample carries provider/model from the message",
+              u.get("provider") == "prov" and u.get("model") == "mod", f"row={u}")
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +171,10 @@ def run_plugin(state_port: int, tmp: Path):
 FAKE_AGENT = r"""
 // Minimal NDJSON ACP agent: answers session/new and session/prompt, emitting
 // agent_message_chunk notifications between the request and its response.
+// session/new echoes the model announcement style the client asked for via
+// params.modelMode: 'config' -> a configOptions model select (OpenCode/Devin
+// shape), 'models' -> a models.currentModelId block (Hermes/Pi shape),
+// anything else -> no model announcement at all.
 let sessionCounter = 0;
 const rl = require('node:readline').createInterface({ input: process.stdin });
 rl.on('line', (line) => {
@@ -166,7 +182,21 @@ rl.on('line', (line) => {
   try { msg = JSON.parse(line); } catch { return; }
   const send = (o) => process.stdout.write(JSON.stringify(o) + '\n');
   if (msg.method === 'session/new') {
-    send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: `fake-${++sessionCounter}` } });
+    const result = { sessionId: `fake-${++sessionCounter}` };
+    const mode = msg.params?.modelMode;
+    if (mode === 'config') {
+      result.configOptions = [
+        { id: 'model', name: 'Model', category: 'model', type: 'select',
+          currentValue: 'cfg/fake-model-2',
+          options: [{ value: 'cfg/fake-model-2', name: 'Fake 2' }] },
+      ];
+    } else if (mode === 'models') {
+      result.models = {
+        currentModelId: 'wire/fake-model-1',
+        availableModels: [{ modelId: 'wire/fake-model-1', name: 'Fake 1' }],
+      };
+    }
+    send({ jsonrpc: '2.0', id: msg.id, result });
   } else if (msg.method === 'session/prompt') {
     const sid = msg.params.sessionId;
     const chunks = (msg.params.chunks || 2);
@@ -193,14 +223,24 @@ rl.on('line', (line) => {
 WS_CLIENT = r"""
 // Drive the bridge like a panel would: session/new, then two session/prompt
 // turns on the SAME session — the running total must grow monotonically.
+//   argv[2] ws url · argv[3] modelMode echoed in session/new params
+//   argv[4] optional modelId -> a session/set_model request between the turns
 const { WebSocket } = require('ws');
 const url = process.argv[2];
+const modelMode = process.argv[3] || 'none';
+const switchTo = process.argv[4] || '';
 const ws = new WebSocket(url);
 let id = 0;
 let sessionId = null;
 const send = (method, params) =>
   ws.send(JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }));
-ws.on('open', () => send('session/new', { cwd: '/tmp/fake-proj', mcpServers: [] }));
+const prompt2 = () => send('session/prompt', {  // +40 in + 60 out = +100 chars
+  sessionId,
+  prompt: [{ type: 'text', text: 'q'.repeat(40) }],
+  chunkLen: 60, chunks: 1,
+});
+ws.on('open', () =>
+  send('session/new', { cwd: '/tmp/fake-proj', mcpServers: [], modelMode }));
 ws.on('message', (d) => {
   const msg = JSON.parse(d.toString());
   if (msg.result?.sessionId) {
@@ -211,14 +251,15 @@ ws.on('message', (d) => {
       chunkLen: 60, chunks: 3,
     });
   }
-  if (msg.id === 2 && msg.result) {    // turn 1 done -> turn 2
-    send('session/prompt', {           // id=3: +40 in + 60 out = +100 chars
-      sessionId,
-      prompt: [{ type: 'text', text: 'q'.repeat(40) }],
-      chunkLen: 60, chunks: 1,
-    });
+  if (msg.id === 2 && msg.result) {    // turn 1 done
+    if (switchTo) send('session/set_model', { sessionId, modelId: switchTo });
+    else prompt2();                    // id=3
   }
   if (msg.id === 3 && msg.result) {
+    if (switchTo) prompt2();           // id=4 after the set_model ack
+    else { console.log('done sessionId=' + sessionId); ws.close(); process.exit(0); }
+  }
+  if (msg.id === 4 && msg.result) {
     console.log('done sessionId=' + sessionId);
     ws.close();
     process.exit(0);
@@ -227,6 +268,20 @@ ws.on('message', (d) => {
 ws.on('error', (e) => { console.error('ws error:', e.message); process.exit(1); });
 setTimeout(() => { console.error('timeout'); process.exit(1); }, 15000);
 """
+
+
+def run_client(client_file: Path, bridge_port: int, env: dict,
+               model_mode: str, switch_to: str = ""):
+    return subprocess.run(
+        ["node", str(client_file), f"ws://127.0.0.1:{bridge_port}",
+         model_mode, switch_to],
+        capture_output=True, text=True, timeout=20, env=env,
+    )
+
+
+def est_rows(state_port: int, session_id: str) -> list[dict]:
+    return [u for u in usage_rows(state_port)
+            if u.get("sessionId") == session_id and u.get("source") == "estimate"]
 
 
 def run_bridge(state_port: int, tmp: Path):
@@ -253,10 +308,9 @@ def run_bridge(state_port: int, tmp: Path):
         if not wait_port(bridge_port, 10):
             check("bridge listening", False, "port never came up")
             return
-        proc = subprocess.run(
-            ["node", str(client_file), f"ws://127.0.0.1:{bridge_port}"],
-            capture_output=True, text=True, timeout=20, env=env,
-        )
+
+        # fake-1: model announced as a configOptions select (OpenCode/Devin).
+        proc = run_client(client_file, bridge_port, env, "config")
         check("ws client drove two prompt turns", proc.returncode == 0,
               f"rc={proc.returncode} out={proc.stdout.strip()} err={proc.stderr.strip()[:200]}")
 
@@ -280,13 +334,51 @@ def run_bridge(state_port: int, tmp: Path):
                   u.get("source") == "estimate" and u.get("size") == 0
                   and u.get("agentName") == "Devin" and u.get("cwd") == "/tmp/fake-proj",
                   f"row={u}")
+            check("estimate picked up the configOptions model, provider unknown",
+                  u.get("model") == "cfg/fake-model-2" and u.get("provider") == "unknown",
+                  f"row={u}")
 
         # (c) dedup: no new traffic -> no new rows after settling.
         n0 = len(est)
         time.sleep(0.8)
-        n1 = len([u for u in usage_rows(state_port)
-                  if u.get("sessionId") == "fake-1" and u.get("source") == "estimate"])
+        n1 = len(est_rows(state_port, "fake-1"))
         check("idle session writes nothing new", n1 == n0, f"{n0} -> {n1}")
+
+        # fake-2: models.currentModelId announced, then switched mid-session
+        # via session/set_model — the later rows must carry the new id.
+        proc = run_client(client_file, bridge_port, env, "models",
+                          "switched/fake-model-9")
+        check("ws client drove the models+set_model session", proc.returncode == 0,
+              f"rc={proc.returncode} out={proc.stdout.strip()} err={proc.stderr.strip()[:200]}")
+        rows = wait_rows(
+            state_port,
+            lambda r: any(u.get("sessionId") == "fake-2" and u.get("source") == "estimate"
+                          and u.get("used") == 90 for u in r),
+            what="fake-2 estimates",
+        )
+        est2 = [u for u in rows if u.get("sessionId") == "fake-2" and u.get("source") == "estimate"]
+        check("models.currentModelId lands on estimate rows",
+              bool(est2) and est2[0].get("model") == "wire/fake-model-1",
+              f"first={est2[0] if est2 else None}")
+        check("set_model mid-session rewrites the estimate model",
+              bool(est2) and est2[-1].get("model") == "switched/fake-model-9",
+              f"last={est2[-1] if est2 else None}")
+
+        # fake-3: no model announcement at all -> honest 'unknown'.
+        proc = run_client(client_file, bridge_port, env, "none")
+        check("ws client drove the unannounced session", proc.returncode == 0,
+              f"rc={proc.returncode} err={proc.stderr.strip()[:200]}")
+        rows = wait_rows(
+            state_port,
+            lambda r: any(u.get("sessionId") == "fake-3" and u.get("source") == "estimate"
+                          and u.get("used") == 90 for u in r),
+            what="fake-3 estimates",
+        )
+        est3 = [u for u in rows if u.get("sessionId") == "fake-3" and u.get("source") == "estimate"]
+        check("no announcement -> model/provider 'unknown'",
+              bool(est3) and est3[-1].get("model") == "unknown"
+              and est3[-1].get("provider") == "unknown",
+              f"last={est3[-1] if est3 else None}")
     finally:
         stop(bridge)
 
@@ -303,16 +395,24 @@ def run_dashboard():
     usage = [
         {"at": ms(now - timedelta(hours=2)), "agentName": "Hermes Agent",
          "sessionId": "s-fact", "cwd": "/p/one", "used": 10000, "size": 200000,
-         "cost": 0.10, "currency": "USD"},
+         "cost": 0.10, "currency": "USD",
+         "model": "openrouter:anthropic/claude-fable-5.1", "provider": "unknown"},
         {"at": ms(now - timedelta(hours=1)), "agentName": "Devin",
          "sessionId": "s-est", "cwd": "/p/two", "used": 4000, "size": 0,
-         "source": "estimate"},
+         "source": "estimate", "model": "swe-2-high", "provider": "unknown"},
+        # Legacy row, written before model/provider existed: must read as
+        # 'unknown', not vanish or break the grouping.
+        {"at": ms(now - timedelta(minutes=30)), "agentName": "OpenCode",
+         "sessionId": "s-legacy", "cwd": "/p/three", "used": 1500, "size": 0,
+         "cost": 0.02, "currency": "USD"},
     ]
     entries = [
         {"id": "e1", "at": usage[0]["at"], "kind": "turn-end",
          "agentName": "Hermes Agent", "sessionId": "s-fact", "cwd": "/p/one"},
         {"id": "e2", "at": usage[1]["at"], "kind": "turn-end",
          "agentName": "Devin", "sessionId": "s-est", "cwd": "/p/two"},
+        {"id": "e3", "at": usage[2]["at"], "kind": "turn-end",
+         "agentName": "OpenCode", "sessionId": "s-legacy", "cwd": "/p/three"},
     ]
     fixture = json.dumps({"entries": entries, "usage": usage})
     agents = {"agents": {"Hermes Agent": {"transport": "websocket", "url": "ws://127.0.0.1:1/"},
@@ -338,9 +438,9 @@ def run_dashboard():
             page.wait_for_selector('[data-testid="dashboard"]', timeout=8000)
             page.wait_for_timeout(500)
 
-            # Summary mixes the layers: 10,000 exact + ~4,000 estimated.
+            # Summary mixes the layers: 10,000 + 1,500 exact + ~4,000 estimated.
             tokens = page.locator('[data-testid="sum-tokens"]').inner_text().strip()
-            check("summary marks the estimated part", "10,000" in tokens
+            check("summary marks the estimated part", "11,500" in tokens
                   and "~4,000" in tokens, f"sum-tokens={tokens!r}")
             check("legend explains the layers",
                   page.locator('[data-testid="usage-legend"]').count() == 1
@@ -363,7 +463,132 @@ def run_dashboard():
             check("day chart draws the estimate segment", est_bars.count() >= 1,
                   f"est bars={est_bars.count()}")
 
+            # By-model grouping: one row per announced model + 'unknown' for
+            # the legacy sample; the estimate row keeps its ~ mark.
+            model_rows = page.locator('[data-testid="by-model-row"]')
+            check("by-model table renders one row per model",
+                  model_rows.count() == 3,
+                  f"rows={model_rows.count()}")
+            m_hermes = page.locator('[data-testid="by-model-row"][data-model="openrouter:anthropic/claude-fable-5.1"]')
+            check("agent row groups under its announced model",
+                  m_hermes.count() == 1
+                  and "10,000" in m_hermes.locator('td[data-label="Tokens"]').inner_text()
+                  and "unknown" in m_hermes.locator('td[data-label="Provider"]').inner_text(),
+                  f"row={m_hermes.inner_text() if m_hermes.count() else 'missing'}")
+            m_est = page.locator('[data-testid="by-model-row"][data-model="swe-2-high"]')
+            check("estimate model row keeps the ~ mark",
+                  m_est.count() == 1 and m_est.get_attribute("data-est") == "true"
+                  and "~" in m_est.locator('td[data-label="Tokens"]').inner_text(),
+                  f"row={m_est.inner_text() if m_est.count() else 'missing'}")
+            m_unk = page.locator('[data-testid="by-model-row"][data-model="unknown"]')
+            check("legacy sample without fields groups as unknown",
+                  m_unk.count() == 1
+                  and "1,500" in m_unk.locator('td[data-label="Tokens"]').inner_text(),
+                  f"row={m_unk.inner_text() if m_unk.count() else 'missing'}")
+
             check("zero pageerrors", page_errors == [], repr(page_errors[:2]))
+            browser.close()
+    finally:
+        stop(proc)
+
+
+# ---------------------------------------------------------------------------
+# (e) panel writer: usage_update recorded with the announced session model
+# ---------------------------------------------------------------------------
+
+def run_panel_writer():
+    """The panel itself is the third writer: handleSessionUpdate must stamp
+    the session's announced model onto the usage row it records. A mocked
+    WS agent (playwright route_web_socket, like e2e_live_stream) announces
+    models.currentModelId on session/new and emits a usage_update during the
+    first prompt; the persisted localStorage ledger must carry the pair."""
+    from playwright.sync_api import sync_playwright
+
+    def acp_ws(ws):
+        def on_message(message):
+            for line in str(message).split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    req = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(req, dict) or "method" not in req:
+                    continue
+                method, rid = req["method"], req.get("id")
+                sid = "panel-sess-1"
+                if method == "initialize":
+                    ws.send(json.dumps({"jsonrpc": "2.0", "id": rid, "result": {
+                        "protocolVersion": 1, "agentCapabilities": {},
+                        "authMethods": [],
+                        "agentInfo": {"name": "e2e-mock", "version": "0"}}}))
+                elif method == "session/new":
+                    ws.send(json.dumps({"jsonrpc": "2.0", "id": rid, "result": {
+                        "sessionId": sid,
+                        "models": {
+                            "currentModelId": "panel/fake-model-7",
+                            "availableModels": [
+                                {"modelId": "panel/fake-model-7", "name": "Fake 7"}],
+                        }}}))
+                elif method == "session/prompt":
+                    ws.send(json.dumps({"jsonrpc": "2.0", "method": "session/update",
+                        "params": {"sessionId": sid, "update": {
+                            "sessionUpdate": "usage_update",
+                            "used": 777, "size": 131072,
+                            "cost": {"amount": 0.005, "currency": "USD"}}}}))
+                    ws.send(json.dumps({"jsonrpc": "2.0", "id": rid,
+                                        "result": {"stopReason": "end_turn"}}))
+                elif rid is not None:
+                    ws.send(json.dumps({"jsonrpc": "2.0", "id": rid, "result": {}}))
+        ws.on_message(on_message)
+
+    def fs_api(route):
+        body = ({"root": "/home/hermes"} if "/api/fs/root" in route.request.url else
+                {"path": "/home/hermes", "parent": "/home", "root": "/home/hermes",
+                 "dirs": [{"name": "projects", "path": "/home/hermes/projects"}]})
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    proc, base = serve_web(25998, DIST)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+            agents = {"agents": {"E2E Mock": {"transport": "websocket",
+                                              "url": "ws://127.0.0.1:25990/"}}}
+            prefs = {"telemetryEnabled": False, "lastCwd": "/home/hermes/projects"}
+            for key, val in (("acp-ui:agents", agents),
+                             ("acp-ui:preferences.json", prefs)):
+                ctx.add_init_script(
+                    f"localStorage.setItem({json.dumps(key)}, {json.dumps(json.dumps(val))});")
+            page = ctx.new_page()
+            page.route(re.compile(r"/api/fs/"), fs_api)
+            page.route(re.compile(r":25900/"), lambda r: r.abort())
+            page.route_web_socket(re.compile(r"^wss?://"), acp_ws)
+            page.on("pageerror", lambda e: page_errors.append(str(e)))
+            page.goto(base, wait_until="load")
+            page.wait_for_selector(".new-session-btn:not([disabled])", timeout=15000)
+            page.click(".new-session-btn")
+            page.wait_for_selector(".composer-box textarea", timeout=15000)
+            page.fill(".composer-box textarea", "hi")
+            page.click(".send-btn")
+            page.wait_for_function(
+                "() => JSON.parse(localStorage.getItem('acp-ui:activity.json') || '{}')"
+                ".usage?.length > 0",
+                timeout=10000)
+            doc = json.loads(page.evaluate(
+                "localStorage.getItem('acp-ui:activity.json')") or "{}")
+            rows = doc.get("usage") or []
+            u = next((r for r in rows if r.get("sessionId") == "panel-sess-1"), None)
+            check("panel recorded the usage_update", u is not None,
+                  f"usage={rows!r}")
+            if u:
+                check("panel row carries the announced model + provider unknown",
+                      u.get("model") == "panel/fake-model-7"
+                      and u.get("provider") == "unknown"
+                      and u.get("source") == "agent" and u.get("used") == 777,
+                      f"row={u}")
+            check("panel leg: zero pageerrors", page_errors == [], repr(page_errors[:2]))
             browser.close()
     finally:
         stop(proc)
@@ -383,6 +608,7 @@ def main() -> int:
         finally:
             stop(state_proc)
     run_dashboard()
+    run_panel_writer()
 
     passed = sum(1 for ok, _, _ in checks if ok)
     print(f"\n{passed}/{len(checks)} assertions passed")
