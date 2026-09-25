@@ -57,6 +57,7 @@ const formMaxRetries = ref(1);
 // then (the simple single-model case is not bothered by them).
 const formModelPlan = ref('');
 const formModelExecute = ref('');
+const formIdleTimeoutMin = ref(15);
 // Review-cycle rules (the severity vocabulary, the gate/backlog severities
 // and the round limit) are role DATA — text fields here, `role.review` in
 // roles.json. All empty = the role carries no review data and defaults
@@ -83,6 +84,7 @@ function resetForm(): void {
   formMaxRetries.value = 1;
   formModelPlan.value = '';
   formModelExecute.value = '';
+  formIdleTimeoutMin.value = 15;
   formReviewSev.value = '';
   formReviewBlocking.value = '';
   formReviewBacklog.value = '';
@@ -110,6 +112,7 @@ function startEdit(r: Role): void {
   formMaxRetries.value = r.maxRetries;
   formModelPlan.value = r.models?.plan ?? '';
   formModelExecute.value = r.models?.execute ?? '';
+  formIdleTimeoutMin.value = r.idleTimeoutMin;
   formReviewSev.value = r.review?.severities.join(' ') ?? '';
   formReviewBlocking.value = r.review?.blocking.join(' ') ?? '';
   formReviewBacklog.value = r.review?.backlog.join(' ') ?? '';
@@ -190,6 +193,7 @@ function formToRole(id: string): Role {
     timeoutMin: Number(formTimeoutMin.value),
     maxRetries: Number(formMaxRetries.value),
     models,
+    idleTimeoutMin: Number(formIdleTimeoutMin.value),
     review,
   };
 }
@@ -397,6 +401,11 @@ onMounted(async () => {
           <small>Attempts per card; 1 = no retry, then the card is flagged blocked.</small>
         </div>
         <div class="form-group">
+          <label>Idle timeout (min)</label>
+          <input v-model.number="formIdleTimeoutMin" type="number" min="0" step="1" data-testid="role-idle" />
+          <small>A child silent this long is killed as a failed attempt; 0 disables the watchdog.</small>
+        </div>
+        <div class="form-group">
           <label>Review severities</label>
           <input v-model="formReviewSev" type="text" placeholder="critical major minor nit" data-testid="role-review-sev" />
           <small>Space-separated vocabulary; empty = no review data on the role.</small>
@@ -455,6 +464,7 @@ onMounted(async () => {
             <template v-if="r.models">
               · models <code :data-testid="`role-models-${r.id}`">plan→{{ r.models.plan }} execute→{{ r.models.execute }}</code>
             </template>
+            · idle {{ r.idleTimeoutMin > 0 ? `${r.idleTimeoutMin}m` : 'off' }}
             <template v-if="r.review">
               · review <code data-testid="role-review-{{ r.id }}">{{ r.review.severities.join(' ') }}</code>
               · gate {{ r.review.blocking.join(',') || '—' }} · backlog {{ r.review.backlog.join(',') || '—' }}

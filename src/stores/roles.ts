@@ -14,8 +14,8 @@
 //
 // Guarantees:
 //  - `id` is unique; `cli` is one of KNOWN_CLIS; `maxConcurrent >= 1`,
-//    `pollIntervalSec >= 5`, `timeoutMin >= 1` — enforced on every write,
-//    with thrown Errors the UI surfaces verbatim.
+//    `pollIntervalSec >= 5`, `timeoutMin >= 1`, `idleTimeoutMin >= 0` —
+//    enforced on every write, with thrown Errors the UI surfaces verbatim.
 //  - a role assigned to a stage cannot be removed without `force`; without
 //    it removeRole throws a visible error instead of silently orphaning the
 //    stage pointer.
@@ -55,6 +55,10 @@ export interface Role {
    * anything else -> `execute`). Free strings — the panel knows no model
    * names. Absent = one model baked into the args, exactly as before. */
   models?: RoleModels;
+  /** Minutes of child silence before the runner's watchdog SIGTERMs the
+   * run (a kill counts as a failed attempt). 0 disables the watchdog —
+   * long non-streaming commands are legitimate. */
+  idleTimeoutMin: number;
   /** Review-cycle rules (convention: carried by the reviewtest role). The
    * severity vocabulary, the severities that gate `agent_tested`, the ones
    * that spawn backlog cards, and the round limit are DATA — the panel
@@ -96,6 +100,7 @@ const MIN_CONCURRENT = 1;
 const MIN_POLL_SEC = 5;
 const MIN_TIMEOUT_MIN = 1;
 const MIN_RETRIES = 1;
+const MIN_IDLE_MIN = 0; // 0 = watchdog disabled for the role
 
 function strList(raw: unknown): string[] {
   return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === 'string') : [];
@@ -127,6 +132,7 @@ function sanitizeRole(raw: unknown): Role | null {
     timeoutMin: intAtLeast(r.timeoutMin, MIN_TIMEOUT_MIN, 45),
     maxRetries: intAtLeast(r.maxRetries, MIN_RETRIES, 1),
     models: sanitizeModels(r.models),
+    idleTimeoutMin: intAtLeast(r.idleTimeoutMin, MIN_IDLE_MIN, 15),
     review: sanitizeReview(r.review),
   };
 }
@@ -304,6 +310,10 @@ export const useRolesStore = defineStore('roles', () => {
     if (!Number.isFinite(maxRetries) || maxRetries < MIN_RETRIES) {
       throw new Error(`maxRetries must be >= ${MIN_RETRIES}`);
     }
+    const idleTimeoutMin = Math.floor(Number(input.idleTimeoutMin ?? 15));
+    if (!Number.isFinite(idleTimeoutMin) || idleTimeoutMin < MIN_IDLE_MIN) {
+      throw new Error(`idleTimeoutMin must be >= ${MIN_IDLE_MIN}`);
+    }
     const label = (input.label ?? '').trim() || id;
     return {
       id,
@@ -316,6 +326,7 @@ export const useRolesStore = defineStore('roles', () => {
       timeoutMin,
       maxRetries,
       models: validateModels(input.models),
+      idleTimeoutMin,
       review: validateReview(input.review),
     };
   }

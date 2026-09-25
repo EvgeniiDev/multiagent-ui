@@ -20,6 +20,9 @@ export interface CardClaim {
   stage?: string;
   /** Last heartbeat the runner wrote while renewing the lease. */
   hbAt?: number;
+  /** Last time the claimed child emitted any output — the watchdog's
+   * freshness stamp, persisted on the heartbeat tick. */
+  lastOutputAt?: number;
 }
 
 const STORE_PATH = 'claims.json';

@@ -2,7 +2,8 @@
 //
 // A card's run lives on the host filesystem at
 //   <projectPath>/.acp/cards/<cardId>/
-// with fixed names: 00_brief.md, 01_spec.md, 02_plan.md, 03_plan_review.md,
+// with fixed names: 00_brief.md, 01_spec.md, 02_plan.md, 03_checklist.md
+// (derived progress queue), 03_plan_review.md,
 // 04_impl_log.md, 05_review_r<N>.md rounds, 06_handoff.md, plus run-<N>.log
 // runner logs. The last non-empty line of a pipeline artifact may be a
 // status token: `STATUS: APPROVE | CHANGES_REQUIRED | DONE | BLOCKED`
@@ -90,6 +91,25 @@ export function parseStatusToken(
 const REVIEW_RE = /^05_review_r(\d+)\.md$/;
 const RUN_RE = /^run-(\d+)\.log$/;
 const PIPELINE_DOC_RE = /^\d{2}_.*\.md$/;
+
+export const CHECKLIST_FILE = '03_checklist.md';
+
+export interface ChecklistItem {
+  done: boolean;
+  text: string;
+}
+
+/** Checkbox rows of `03_checklist.md` (`- [ ]` / `- [x]`, `* ` bullets too).
+ * Every other line is prose and ignored — the file may carry a header or
+ * hand-written notes around its items. */
+export function parseChecklist(content: string): ChecklistItem[] {
+  const out: ChecklistItem[] = [];
+  for (const raw of content.split(/\r?\n/)) {
+    const m = /^\s*[-*]\s+\[([ xX])\]\s*(.*)$/.exec(raw);
+    if (m) out.push({ done: m[1].toLowerCase() === 'x', text: m[2] });
+  }
+  return out;
+}
 
 export function reviewRoundOf(artifacts: CardArtifact[]): number | null {
   let max = 0;
@@ -306,6 +326,7 @@ const FIXED_FILES = [
   '00_brief.md',
   '01_spec.md',
   '02_plan.md',
+  '03_checklist.md',
   '03_plan_review.md',
   '04_impl_log.md',
   '06_handoff.md',
