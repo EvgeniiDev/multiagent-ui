@@ -236,14 +236,18 @@ const server = createServer(async (req, res) => {
           data: body.data,
         };
         const payload = JSON.stringify(next);
-        // Atomic write: unique temp file in a scratch dir + rename.
-        const scratch = await fs.mkdtemp(join(tmpdir(), 'acp-state-'));
+        // Atomic write: temp file NEXT TO the destination (same device, so
+        // the rename is legal) + rename. A scratch dir under /tmp breaks
+        // with EXDEV once the state dir is a bind mount — different
+        // filesystem, rename refuses.
+        const dest = docPath(name);
+        const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
         try {
-          const tmp = join(scratch, 'doc.json');
           await fs.writeFile(tmp, payload, 'utf-8');
-          await fs.rename(tmp, docPath(name));
-        } finally {
-          await fs.rm(scratch, { recursive: true, force: true });
+          await fs.rename(tmp, dest);
+        } catch (e) {
+          await fs.unlink(tmp).catch(() => {});
+          throw e;
         }
         send(res, 200, { name, rev: next.rev, updatedAt: next.updatedAt });
         return;

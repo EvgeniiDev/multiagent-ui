@@ -1,0 +1,114 @@
+x-node: &node
+  build:
+    context: .
+    dockerfile: Dockerfile.node
+  network_mode: host
+  working_dir: /repo
+  environment:
+    HOME: /home/hermes
+    PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    NODE_PATH: /home/hermes/.local/lib/node_modules
+  volumes:
+    - .:/repo:ro
+    - /home/hermes/projects:/home/hermes/projects:rw
+    - /home/hermes/.local:/home/hermes/.local:rw
+    - /home/hermes/.pi:/home/hermes/.pi:rw
+    - /home/hermes/.hermes:/home/hermes/.hermes:rw
+    - /home/hermes/.local/share/devin:/home/hermes/.local/share/devin:rw
+  restart: unless-stopped
+
+services:
+  # host network: ports identical to systemd units, STATE_URL/CORS unchanged.
+  bridge-hermes:
+    <<: *node
+    command: ["node", "/repo/server/acp-ws-bridge.mjs", "--port", "25901", "--cmd", "hermes acp"]
+    environment:
+      HOME: /home/hermes
+      PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      NODE_PATH: /home/hermes/.local/lib/node_modules
+      ACP_STATE_URL: http://127.0.0.1:25900
+  bridge-opencode:
+    <<: *node
+    command: ["node", "/repo/server/acp-ws-bridge.mjs", "--port", "25902", "--cmd", "opencode acp"]
+    environment:
+      HOME: /home/hermes
+      PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      NODE_PATH: /home/hermes/.local/lib/node_modules
+      ACP_STATE_URL: http://127.0.0.1:25900
+  bridge-devin:
+    <<: *node
+    command: ["node", "/repo/server/acp-ws-bridge.mjs", "--port", "25903", "--cmd", "devin acp"]
+    environment:
+      HOME: /home/hermes
+      PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      NODE_PATH: /home/hermes/.local/lib/node_modules
+      ACP_STATE_URL: http://127.0.0.1:25900
+  bridge-pi:
+    <<: *node
+    command: ["node", "/repo/server/acp-ws-bridge.mjs", "--port", "25904", "--cmd", "/usr/local/bin/pi-acp"]
+    environment:
+      HOME: /home/hermes
+      PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      NODE_PATH: /home/hermes/.local/lib/node_modules
+      ACP_STATE_URL: http://127.0.0.1:25900
+
+  state:
+    <<: *node
+    command: ["node", "/repo/server/acp-state-server.mjs"]
+    environment:
+      STATE_DIR: /home/hermes/.hermes/acp-ui-state
+      PORT: "25900"
+
+  runner:
+    <<: *node
+    command: ["node", "/repo/server/acp-runner.mjs", "--serve"]
+    environment:
+      HOME: /home/hermes
+      PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      STATE_URL: http://127.0.0.1:25900
+      ROOT_DIR: /home/hermes/projects
+      RUNNER_ID: host-runner
+
+  https-front:
+    <<: *node
+    command: ["node", "/repo/server/https-front.mjs"]
+    environment:
+      ACP_TLS_DIR: /home/hermes/.hermes/acp-tls
+
+  web:
+    image: python:3.12-slim
+    network_mode: host
+    working_dir: /repo/dist-web
+    command: ["python3", "-m", "http.server", "25808", "--bind", "127.0.0.1"]
+    volumes:
+      - ./dist-web:/repo/dist-web:ro
+    restart: unless-stopped
+
+  stt:
+    build:
+      context: .
+      dockerfile: Dockerfile.stt
+    network_mode: host
+    working_dir: /repo/server
+    # Готовый хост-venv монтируется; torch/gigaam в образ НЕ ставятся.
+    # /home/hermes/.local нужен тоже: venv-python это симлинк в uv-каталог.
+    command: ["/home/hermes/.hermes/gigaam-venv/bin/python", "/repo/server/stt-server.py"]
+    environment:
+      PORT: "25905"
+      STT_WINDOW_S: "6"
+      STT_HOP_S: "1"
+    volumes:
+      - .:/repo:ro
+      - /home/hermes/.hermes/gigaam-venv:/home/hermes/.hermes/gigaam-venv:ro
+      - /home/hermes/.hermes/GigaAM-src:/home/hermes/.hermes/GigaAM-src:ro
+      - /home/hermes/.local:/home/hermes/.local:ro
+    restart: unless-stopped
+
+  cron:
+    <<: *node
+    # Заменяет acp-pm-wakeup.timer (каждые 30 мин). Nix-cron нет — простой sleep-цикл.
+    command: ["sh", "-c", "while true; do node /repo/server/acp-pm-wakeup.mjs || true; sleep 1800; done"]
+    environment:
+      HOME: /home/hermes
+      PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      STATE_URL: http://127.0.0.1:25900

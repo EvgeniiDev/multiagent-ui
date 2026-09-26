@@ -116,8 +116,34 @@ def transcribe_wav(path: str) -> str:
     seconds = wav_seconds(path)
     with _INFER_LOCK:
         if seconds > LONGFORM_THRESHOLD_S:
-            return _text_of(model.transcribe_longform(path))
+            try:
+                return _text_of(model.transcribe_longform(path))
+            except RuntimeError:
+                # Offline host: no local pyannote segmentation model and no
+                # HF_TOKEN to fetch it — decode in plain <=20 s pieces instead
+                # of failing the whole take with {"type": "error"}.
+                log.warning("longform VAD unavailable, falling back to chunked decode")
+                return _transcribe_chunked(model, path)
         return _text_of(model.transcribe(path))
+
+
+def _transcribe_chunked(model: Any, path: str, chunk_s: float = 20.0) -> str:
+    """Plain decode in <=chunk_s pieces (fallback when longform VAD is missing)."""
+    with wave.open(path, "rb") as fh:
+        channels, width, rate = fh.getnchannels(), fh.getsampwidth(), fh.getframerate()
+        frames = fh.readframes(fh.getnframes())
+    stride = int(chunk_s * rate) * width * channels
+    parts: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="stt-chunks-") as tmp:
+        for i, off in enumerate(range(0, max(len(frames), 1), stride)):
+            cp = os.path.join(tmp, f"c{i}.wav")
+            with wave.open(cp, "wb") as fh:
+                fh.setnchannels(channels)
+                fh.setsampwidth(width)
+                fh.setframerate(rate)
+                fh.writeframes(frames[off:off + stride])
+            parts.append(_text_of(model.transcribe(cp)))
+    return " ".join(p for p in parts if p).strip()
 
 
 def wav_seconds(path: str) -> float:

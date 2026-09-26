@@ -1,0 +1,60 @@
+# acp-ui — agent rules
+
+## Runtime: docker compose only
+
+The stack lives in `compose.yaml` (repo root). Control it with
+`docker compose up -d` / `docker compose down` from this directory.
+The old systemd user units (`acp-bridge-*`, `acp-ui-web`, `acp-state`,
+`acp-runner`, `acp-https`, `acp-stt`, `acp-pm-wakeup.*`) are disabled —
+do not re-enable them, do not start services by hand (`python -m
+http.server`, `nohup`, bare `node server/...`). Before starting
+anything: `docker compose ps` + `ss -tlnp`.
+
+## One port — one owner
+
+| Port | Service |
+|---|---|
+| 25808 | web (`dist-web/`) |
+| 25809, 25906, 25910–25914 | https-front |
+| 25900 | state server |
+| 25901–25904 | bridges: hermes / opencode / devin / pi |
+| 25905 | stt |
+
+A stray process on an occupied port is killed, not worked around.
+Never "fix it nearby" with a second server on another port.
+
+## Bridge: single source of truth
+
+The live bridge source is `deploy/acp-ws-bridge.mjs`; the copy at
+`~/.hermes/acp-ws-bridge.mjs` is an `install.sh` artifact. Edit the
+source. Sacred invariants: per-session routing (a `session/load`
+replay must reach only its own tab) and per-socket request-id
+namespacing on the shared child. Do not break either.
+
+## Frontend builds on the host
+
+`npm run build:web` → `dist-web/` is bind-mounted into the `web`
+container. Never build the frontend inside docker.
+
+## Tauri: hands off
+
+All `@tauri-apps/*` usage sits behind the `isTauriHost()` runtime
+switch (`src/lib/platform.ts`, `src/lib/host/`); in the browser it is
+dead code (lazy `import` inside the Tauri branch only). Do not fix web
+behavior through Tauri branches or vice versa. Removing Tauri is a
+bundle-size optimization, not a bugfix — don't sneak it into other work.
+
+## A sleeping agent is not a working agent
+
+If the session jsonl stops growing for >2–3 min while the `pi` process
+sits in `ep_poll` with zero IO/CPU delta, the model call is stuck, not
+working. Recover with a fresh `session/prompt` (stop button + new
+message) or by killing the `pi` child (the bridge reports "agent CLI
+exited"). `nohup ... &` with "read the log next step" is banned —
+results must come back through the tool result.
+
+## Endless tools in the feed = replay
+
+Opening an old session replays its whole transcript via `session/load`;
+hundreds of toolCall cards rendering at once is history, not live
+calls. Do not "fix" it by killing processes.

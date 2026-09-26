@@ -1,0 +1,8 @@
+FROM python:3.12-slim
+# gigaam/torch НЕ ставятся в образ (долго, ~GB, CPU-сборка).
+# stt-контейнер монтирует готовый хост-venv /home/hermes/.hermes/gigaam-venv
+# и запускает его python. В образе нужен только ffmpeg (для POST /transcribe).
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+  && rm -rf /var/lib/apt/lists/*
+WORKDIR /repo
+CMD ["python3", "--version"]
