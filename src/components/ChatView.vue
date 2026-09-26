@@ -3,7 +3,6 @@ import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue'
 import { marked } from 'marked';
 import { useSessionStore } from '../stores/session';
 import { useActivityStore } from '../stores/activity';
-import { useUiStore } from '../stores/ui';
 import { isMobile } from '../lib/platform';
 import { loadKvStore, type KVStore } from '../lib/host';
 import { readAttachments, formatBytes, extractReplayedAttachments, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from '../lib/attachments';
@@ -11,7 +10,6 @@ import ModePicker from './ModePicker.vue';
 import ModelPicker from './ModelPicker.vue';
 import CommandPalette from './CommandPalette.vue';
 import VoiceInput from './VoiceInput.vue';
-import NewSessionDialog from '../features/projects/NewSessionDialog.vue';
 import type { Attachment, AttachmentMeta, SlashCommand } from '../lib/types';
 import type { SessionTab } from '../lib/sessionRuntime';
 import type { SttPartial } from '../lib/stt';
@@ -28,21 +26,9 @@ const props = defineProps<{
 }>();
 
 const sessionStore = useSessionStore();
-const uiStore = useUiStore();
 const inputText = ref('');
 const messagesContainer = ref<HTMLElement | null>(null);
 const commandPaletteRef = ref<InstanceType<typeof CommandPalette> | null>(null);
-
-// Header "New session": unlike the sidebar button (hidden while
-// connected), this one stays put for as long as the chat view is mounted.
-const showNewSession = ref(false);
-
-/** Working directory the header's "New session" dialog opens with — the
- *  path picked in the sidebar, or the scoped project's path when the
- *  sidebar field is empty (mirrors the welcome-screen dialog). */
-const newSessionCwd = computed(
-  () => props.sidebarCwd || uiStore.activeProject?.path || ''
-);
 
 // Files staged for the next turn, and the last attach error (limits, wrong type).
 const attachments = ref<Attachment[]>([]);
@@ -790,20 +776,8 @@ function getToolKind(kind: string): string {
     <div class="chat-header">
       <h2>{{ currentSession?.title || 'Chat' }}</h2>
       <div class="header-right">
-        <!-- New-session entry points live in the sidebar + welcome screen;
-             the header button only shows with no session yet (welcome
-             state), never crowding the mode/model pickers of an open chat. -->
-        <button
-          v-if="!isConnected && !currentSession"
-          class="chat-new-session"
-          type="button"
-          :disabled="isLoading || isReconnecting"
-          @click="showNewSession = true"
-        >
-          New session
-        </button>
-        <!-- Model/mode pickers live in the composer's bottom menu now; the
-             header keeps only the session title + agent name. -->
+        <!-- Session creation lives in the sidebar (+) and the welcome
+             screen; the header keeps only the session title + agent name. -->
         <span class="agent-name">{{ currentSession?.agentName }}<span v-if="isAutonomous" class="auto-badge">auto</span></span>
       </div>
     </div>
@@ -1104,12 +1078,6 @@ function getToolKind(kind: string): string {
           </div>
         </div>
       </div>    </div>
-
-    <NewSessionDialog
-      v-if="showNewSession"
-      :initial-cwd="newSessionCwd"
-      @close="showNewSession = false"
-    />
   </div>
 </template>
 
@@ -1148,30 +1116,6 @@ function getToolKind(kind: string): string {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-}
-
-.chat-new-session {
-  flex: 0 0 auto;
-  height: 28px;
-  padding: 0 0.75rem;
-  border: 1px solid var(--bg-primary, #c2532f);
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-accent, #c2532f);
-  font-family: inherit;
-  font-size: 0.75rem;
-  font-weight: 600;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.chat-new-session:hover:not(:disabled) {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-}
-
-.chat-new-session:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .agent-name {
@@ -2011,10 +1955,6 @@ function getToolKind(kind: string): string {
     line-height: 22px;
     padding-top: 11px;
     padding-bottom: 11px;
-  }
-
-  .chat-new-session {
-    min-height: 44px;
   }
 
   /* Touch targets: same square geometry, bumped to 44px. The composer
