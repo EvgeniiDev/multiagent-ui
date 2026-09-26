@@ -150,6 +150,13 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
   flex-shrink: 0;
 }
 
+/* The chip sits in the composer's bottom menu — an upward dropdown is the
+ * only one that fits inside the viewport (downward ran off-screen). */
+.model-picker.compact .dropdown-menu {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
 .model-button {
   display: flex;
   align-items: center;

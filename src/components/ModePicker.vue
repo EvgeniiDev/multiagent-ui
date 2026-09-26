@@ -117,6 +117,13 @@ if (typeof window !== 'undefined') {
   flex-shrink: 0;
 }
 
+/* The chip sits in the composer's bottom menu — an upward dropdown is the
+ * only one that fits inside the viewport (downward ran off-screen). */
+.mode-picker.compact .dropdown-menu {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
 .mode-picker.compact .mode-name {
   font-weight: 500;
   text-transform: capitalize;
