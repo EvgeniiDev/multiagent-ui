@@ -432,7 +432,7 @@ export const useSessionStore = defineStore('session', () => {
    * persisted in sessions.json next to `dismissedSessions`. Matched on the
    * title the agent reported (session_info.name, else the first message).
    */
-  const hiddenSessionPrefixes = ref<string[]>(['porch-delegate#']);
+  const hiddenSessionPrefixes = ref<string[]>(['porch-delegate#', 'general-purpose#']);
   function isHiddenSession(s: SavedSession): boolean {
     return hiddenSessionPrefixes.value.some(
       (p) => p.length > 0 && s.title.startsWith(p)
@@ -474,7 +474,7 @@ export const useSessionStore = defineStore('session', () => {
     // Sidebar rows the user removed while the agent still holds them.
     dismissedSessions = (await store.get<string[]>('dismissedSessions')) ?? [];
     hiddenSessionPrefixes.value =
-      (await store.get<string[]>('hiddenSessionPrefixes')) ?? ['porch-delegate#'];
+      (await store.get<string[]>('hiddenSessionPrefixes')) ?? ['porch-delegate#', 'general-purpose#'];
     lastAgentName.value = (await store.get<string>('lastAgent')) ?? '';
     // Restore the open-session pointer (written by saveSessionsToStore on
     // every connect/resume/send). The live bridge is gone after a reload —
