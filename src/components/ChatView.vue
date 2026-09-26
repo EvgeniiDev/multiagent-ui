@@ -606,8 +606,15 @@ function toggleToolCall(toolCallId: string): void {
   }
 }
 
-// Pretty-printed call arguments, truncated to ~4KB with an ellipsis note.
+// Pretty-printed call arguments / outputs, truncated to ~4KB with an ellipsis note.
 const TOOL_ARGS_MAX_CHARS = 4096;
+
+function truncateToolText(text: string): string {
+  if (text.length > TOOL_ARGS_MAX_CHARS) {
+    return text.slice(0, TOOL_ARGS_MAX_CHARS) + '\n… (truncated, showing first 4KB)';
+  }
+  return text;
+}
 
 function formatToolArgs(rawInput: unknown): string {
   let text: string;
@@ -616,10 +623,15 @@ function formatToolArgs(rawInput: unknown): string {
   } catch {
     text = String(rawInput);
   }
-  if (text.length > TOOL_ARGS_MAX_CHARS) {
-    return text.slice(0, TOOL_ARGS_MAX_CHARS) + '\n… (truncated, showing first 4KB)';
-  }
-  return text;
+  return truncateToolText(text);
+}
+
+/** Expanded body: args section first, then output; absent sections skipped. */
+function formatToolBody(rawInput: unknown, rawOutput: string | undefined): string {
+  const parts: string[] = [];
+  if (rawInput != null) parts.push('args:\n' + formatToolArgs(rawInput));
+  if (rawOutput) parts.push('output:\n' + truncateToolText(rawOutput));
+  return parts.join('\n\n');
 }
 
 function renderMarkdown(content: string): string {
@@ -760,7 +772,7 @@ function getToolKind(kind: string): string {
         <div v-if="message.toolCalls?.length" class="tool-calls-section">
           <div class="tool-call-wrap" v-for="tc in message.toolCalls" :key="tc.toolCallId">
             <button
-              v-if="tc.rawInput !== undefined"
+              v-if="tc.rawInput != null || tc.rawOutput"
               :class="['tool-call-inline', 'is-expandable', `tool-${tc.status}`]"
               :aria-expanded="isToolCallExpanded(tc.toolCallId)"
               @click="toggleToolCall(tc.toolCallId)"
@@ -782,9 +794,9 @@ function getToolKind(kind: string): string {
               </span>
             </div>
             <pre
-              v-if="tc.rawInput !== undefined && isToolCallExpanded(tc.toolCallId)"
+              v-if="(tc.rawInput != null || tc.rawOutput) && isToolCallExpanded(tc.toolCallId)"
               class="tool-args"
-            >{{ formatToolArgs(tc.rawInput) }}</pre>
+            >{{ formatToolBody(tc.rawInput, tc.rawOutput) }}</pre>
           </div>
         </div>
 

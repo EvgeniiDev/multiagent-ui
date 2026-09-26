@@ -880,8 +880,43 @@ export const useSessionStore = defineStore('session', () => {
     if (historyCacheNote.value === 'loading') historyCacheNote.value = 'stale';
   }
 
-  // Session update handler
-  function handleSessionUpdate(notification: SessionNotification) {
+  /** Session update handler: routes agent_message_chunk / tool_call /
+   * tool_call_update frames into messages + the toolCalls map. */
+  /**
+   * Result text is not in the SDK's typed union — pi-acp forwards it on
+   * tool frames as `rawOutput`, ACP `content` text blocks, or (bash)
+   * `_meta.terminal_output` deltas. All three are plain strings here;
+   * anything else is ignored. Deltas append, full snapshots replace.
+   * ponytail: no cap here, ChatView truncates at render; unbounded growth
+   * only matters for pathological multi-MB outputs.
+   */
+function toolOutputText(frame: Record<string, unknown>): { text: string; append: boolean } | null {
+  const meta = frame._meta as Record<string, unknown> | undefined;
+  const termOut = (meta?.terminal_output ?? meta?.terminalOutput) as
+    | { data?: unknown }
+    | undefined;
+  if (typeof termOut?.data === 'string' && termOut.data) {
+    return { text: termOut.data, append: true };
+  }
+  const raw = frame.rawOutput;
+  if (typeof raw === 'string' && raw) return { text: raw, append: false };
+  const content = frame.content as Array<{ type?: string; content?: { type?: string; text?: unknown } }> | undefined;
+  if (Array.isArray(content)) {
+    const texts = content
+      .map((b) => (b?.content?.type === 'text' && typeof b.content.text === 'string' ? b.content.text : ''))
+      .filter(Boolean);
+    if (texts.length) return { text: texts.join(''), append: false };
+  }
+  return null;
+}
+
+function mergeToolOutput(tc: ToolCallInfo, frame: Record<string, unknown>): void {
+  const out = toolOutputText(frame);
+  if (!out) return;
+  tc.rawOutput = out.append ? (tc.rawOutput ?? '') + out.text : out.text;
+}
+
+function handleSessionUpdate(notification: SessionNotification) {
     const update = notification.update;
 
     // One bridge process feeds every connected tab, so a `session/update`
@@ -1029,6 +1064,8 @@ export const useSessionStore = defineStore('session', () => {
         // `rawInput` (parsed call args) is not in the SDK's typed union yet —
         // forwarded verbatim by the ws bridge, read via safe cast.
         const callRawInput = (update as { rawInput?: unknown }).rawInput;
+        const callFrame = update as unknown as Record<string, unknown>;
+        const callOutput = toolOutputText(callFrame)?.text;
         targetMsg.toolCalls.push({
           toolCallId: update.toolCallId,
           title: update.title,
@@ -1036,6 +1073,7 @@ export const useSessionStore = defineStore('session', () => {
           status: update.status || 'pending',
           locations: update.locations,
           rawInput: callRawInput,
+          rawOutput: callOutput,
         });
         // Also keep in global map for updates
         toolCalls.value.set(update.toolCallId, {
@@ -1045,6 +1083,7 @@ export const useSessionStore = defineStore('session', () => {
           status: update.status || 'pending',
           locations: update.locations,
           rawInput: callRawInput,
+          rawOutput: callOutput,
         });
         useActivityStore().recordEntry({
           kind: 'tool-call',
@@ -1067,6 +1106,8 @@ export const useSessionStore = defineStore('session', () => {
           // update without rawInput must not clear what tool_call set.
           const updateRawInput = (update as { rawInput?: unknown }).rawInput;
           if (updateRawInput !== undefined) existing.rawInput = updateRawInput;
+          const updateFrame = update as unknown as Record<string, unknown>;
+          mergeToolOutput(existing, updateFrame);
           // Also update in the message's toolCalls array
           for (const msg of sink) {
             if (msg.toolCalls) {
@@ -1075,6 +1116,7 @@ export const useSessionStore = defineStore('session', () => {
                 if (update.status) tc.status = update.status;
                 if (update.title) tc.title = update.title;
                 if (updateRawInput !== undefined) tc.rawInput = updateRawInput;
+                mergeToolOutput(tc, updateFrame);
               }
             }
           }

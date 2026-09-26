@@ -151,6 +151,8 @@ export interface ToolCallInfo {
   locations?: { path: string }[];
   /** Parsed call arguments forwarded verbatim by the ws bridge (tool_call / tool_call_update frames). */
   rawInput?: unknown;
+  /** Result/output text accumulated from tool_call_update frames (rawOutput, content text blocks, _meta.terminal_output deltas). */
+  rawOutput?: string;
 }
 
 export interface PermissionRequest {
