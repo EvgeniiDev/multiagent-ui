@@ -76,9 +76,28 @@ function mergeAttachments(
  * REPLAYED (`session/load`) does not: agents echo the file into the message
  * text as markup, so those markers are pulled back out and turned into the same
  * attachment blocks instead of leaking into the prose.
+ *
+ * Only the tail window is mapped: `session/load` replays the WHOLE transcript
+ * top-down with no pagination, so mapping every message (and parsing its
+ * markdown at render time) on each streamed chunk saturates the main thread
+ * on long histories. The store keeps the full array — historyCache
+ * write-through and the replay merge need it — only the view slices it.
+ * Hidden rows cost nothing until scrolling near the top grows the window.
  */
+const FEED_WINDOW_INIT = 30;
+const FEED_WINDOW_STEP = 50;
+// The window auto-extends once the scroll is within this many viewports of
+// the top — firing early means a fast flick never hits an empty edge.
+const FEED_TOP_VIEWPORTS = 1.5;
+const feedWindow = ref(FEED_WINDOW_INIT);
+
+// Messages parked above the rendered window.
+const hiddenCount = computed(() =>
+  Math.max(0, messages.value.length - feedWindow.value)
+);
+
 const renderedMessages = computed(() =>
-  messages.value.map((message) => {
+  messages.value.slice(-feedWindow.value).map((message) => {
     if (message.role !== 'user' || !message.content) {
       return { ...message, attachments: message.attachments ?? [] };
     }
@@ -89,6 +108,14 @@ const renderedMessages = computed(() =>
       attachments: mergeAttachments(message.attachments ?? [], replayed),
     };
   })
+);
+
+// renderedMessages is a TAIL slice — this is the index of its first element
+// inside the full transcript. The streaming caret derives "last" from the
+// FULL list (`windowOffset + idx === messages.length - 1`), so collapsing
+// the window can't leave the caret blinking on a merely-last-visible row.
+const windowOffset = computed(() =>
+  messages.value.length - renderedMessages.value.length
 );
 
 // Per-attachment disclosure for the replayed file body (keyed message:index).
@@ -167,6 +194,27 @@ function pinFeedToBottom(): void {
   programmaticScrollTop = feed.scrollTop;
 }
 
+// One window-growth step, driven by the near-top scroll trigger only.
+// The new rows land ABOVE the viewport: a raw prepend would leave scrollTop
+// pointing at newer messages than the one under the cursor, so the offset is
+// restored by the height just added (which also keeps a bottom-pinned feed
+// pinned: scrollTop lands back on scrollHeight - clientHeight).
+function growFeedWindow(): void {
+  const feed = messagesContainer.value;
+  const top = feed?.scrollTop ?? 0;
+  const height = feed?.scrollHeight ?? 0;
+  feedWindow.value = Math.min(feedWindow.value + FEED_WINDOW_STEP, messages.value.length);
+  if (!feed) return;
+  void nextTick(() => {
+    feed.scrollTop = top + (feed.scrollHeight - height);
+    // A window too short to overflow the feed produces no scroll at all —
+    // no event, no trigger, unreachable history. Grow until it can scroll.
+    if (feed.scrollHeight <= feed.clientHeight && hiddenCount.value > 0) {
+      growFeedWindow();
+    }
+  });
+}
+
 function onFeedScroll(): void {
   const feed = messagesContainer.value;
   if (!feed) return;
@@ -178,6 +226,17 @@ function onFeedScroll(): void {
   }
   programmaticScrollTop = null;
   followBottom.value = distanceFromBottom(feed) <= FEED_BOTTOM_PX;
+  // Approaching the hidden-history zone: pull the next chunk into the
+  // window. The trigger is ~1.5 viewports from the top (not the edge) so a
+  // fast scroll-up never sees empty space. Gated on !followBottom so sitting
+  // at the bottom of a barely overflowing feed doesn't grow it unprompted.
+  if (
+    !followBottom.value &&
+    feed.scrollTop < feed.clientHeight * FEED_TOP_VIEWPORTS &&
+    hiddenCount.value > 0
+  ) {
+    growFeedWindow();
+  }
 }
 
 // The wheel is the one gesture that races the stream: its scroll event
@@ -203,16 +262,26 @@ watch(messages, async (list) => {
   if (cleared && switched) {
     followBottom.value = true;
     lastSeenSessionId = currentSession.value?.sessionId ?? null;
+    feedWindow.value = FEED_WINDOW_INIT;
   }
   await nextTick();
   if (followBottom.value) pinFeedToBottom();
+  // Same dead end as growFeedWindow's tail: hidden rows but a feed that
+  // cannot scroll (tail window fits the viewport) means history is
+  // unreachable — kick the growth chain started.
+  const feed = messagesContainer.value;
+  if (feed && feed.scrollHeight <= feed.clientHeight && hiddenCount.value > 0) {
+    growFeedWindow();
+  }
 }, { deep: true });
 
 // A session opened or switched while the view was mounted: landing on the
-// newest is the point of opening a transcript.
+// newest is the point of opening a transcript. The window resets with it —
+// an expanded view of the previous session must not carry over.
 watch(() => currentSession.value?.sessionId, (id, prev) => {
   if (!id || id === prev) return;
   followBottom.value = true;
+  feedWindow.value = FEED_WINDOW_INIT;
   void nextTick(pinFeedToBottom);
 });
 
@@ -586,13 +655,15 @@ function getToolKind(kind: string): string {
           ? 'Couldn’t reach the agent — showing the cached copy'
           : 'Loading history…' }}
       </div>
+      <!-- Older messages sit outside the render window — scrolling toward
+           the top auto-extends it. -->
       <div
         v-for="(message, idx) in renderedMessages"
         :key="message.id"
         :class="[
           'message',
           `message-${message.role}`,
-          { streaming: isLoading && idx === renderedMessages.length - 1 && message.role === 'assistant' },
+          { streaming: isLoading && windowOffset + idx === messages.length - 1 && message.role === 'assistant' },
         ]"
       >
         <div class="message-head">

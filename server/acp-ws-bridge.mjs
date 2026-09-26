@@ -41,6 +41,23 @@
 // packs denser. All of it is best-effort: metering never throws into the
 // data path and never blocks a frame.
 //
+// Per-session routing: one child process serves every WebSocket client, so
+// without it a `session/load` replay in one tab is delivered to ALL tabs —
+// the other tab renders foreign chunks into its open chat and drowns under
+// the traffic. Each socket claims the sessionId it last drove through
+// `session/load`/`session/prompt`, or `session/new` (that id only exists in
+// the response, so the claim lands when it resolves). Inbound frames that
+// name a claimed `params.sessionId` go to the owning socket only; everything
+// sessionless or unclaimed is broadcast to all clients exactly as before.
+//
+// Request ids are namespaced per socket: every client starts numbering at
+// 0, so two tabs' `id:2` requests on the shared child are indistinguishable
+// — a broadcast response would resolve BOTH pending calls (verified: one
+// tab's session/new resolved the other's in-flight session/load). Outbound
+// request ids are rewritten to a bridge-unique number on the way to the
+// child and restored on the way back, and the response is delivered only to
+// the socket that asked.
+//
 // Usage: node acp-ws-bridge.mjs --port 25901 --cmd "hermes acp" [--root /home/x]
 //        [--idle-timeout-ms 180000] [--agent-name "Hermes Agent"]
 // Env:   ACP_TOKEN_METER=0 disables metering (default on),
@@ -582,6 +599,15 @@ const clients = new Set();
 let child = null;
 let buffer = '';
 
+/** sessionId -> ws that owns it: the socket that last sent session/load or
+ * session/prompt for it, or whose session/new response named it. Inbound
+ * frames carrying a claimed sessionId are routed to the owner only. */
+const sessionOwner = new Map();
+/** Bridge-unique request ids — see the routing note above. Every outbound
+ * client request gets one on the way to the child; the response carries it
+ * back to the owning socket, with the caller's original id restored. */
+let nextBridgeId = 1;
+
 // ---------------------------------------------------------------------------
 // Progress-aware request watchdog
 // ---------------------------------------------------------------------------
@@ -597,7 +623,9 @@ const IDLE_TIMEOUT_MS = Number(
   argValue('--idle-timeout-ms', process.env.ACP_IDLE_TIMEOUT_MS || 180_000)
 );
 const WATCHDOG_TICK_MS = Math.min(30_000, Math.max(500, Math.floor(IDLE_TIMEOUT_MS / 4)));
-/** client -> agent requests awaiting a response: id -> method. */
+/** client -> agent requests awaiting a response: BRIDGED id ->
+ * { method, ws, origId }. The bridged id is what the child sees; origId is
+ * what the requesting socket sent and gets restored into the response. */
 const pendingClientReqs = new Map();
 /** agent -> client requests awaiting our response (agent is blocked on us). */
 const pendingAgentReqs = new Set();
@@ -608,11 +636,16 @@ function noteTraffic() {
   lastTrafficAt = Date.now();
 }
 
-/** Track a client -> agent frame: a new pending request, or the answer to an
- * agent -> client request that was holding the watchdog off. A WS message can
- * carry several NDJSON lines, so each is parsed on its own. */
-function noteOutbound(payload) {
+/** Track a client -> agent frame and return the payload to write to the
+ * child. A WS message can carry several NDJSON lines, so each is parsed on
+ * its own; requests get their id rewritten to a bridge-unique number (the
+ * only way two sockets' `id:2` stay distinguishable on the shared child)
+ * and are recorded for the watchdog + response routing. Session-driving
+ * requests also claim their sessionId for per-session routing (see
+ * sessionOwner). Unparseable lines pass through verbatim. */
+function noteOutbound(payload, ws) {
   noteTraffic();
+  const out = [];
   for (const line of payload.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -620,45 +653,93 @@ function noteOutbound(payload) {
     try {
       msg = JSON.parse(trimmed);
     } catch {
+      out.push(trimmed);
       continue;
+    }
+    if (msg && msg.id !== undefined && msg.id !== null && typeof msg.method === 'string') {
+      const bridged = nextBridgeId++;
+      pendingClientReqs.set(bridged, { method: msg.method, ws, origId: msg.id });
+      msg.id = bridged;
+      const sid = msg.params?.sessionId;
+      if (typeof sid === 'string' &&
+          (msg.method === 'session/load' || msg.method === 'session/prompt')) {
+        sessionOwner.set(sid, ws);
+      }
+      try {
+        meterOutbound(msg);
+      } catch {
+        /* metering must never break the pipe */
+      }
+      out.push(JSON.stringify(msg));
+      continue;
+    }
+    if (msg && msg.id !== undefined && msg.id !== null) {
+      // A response to an agent -> client request (e.g. a permission answer)
+      // — the agent's own id, passed through untouched.
+      pendingAgentReqs.delete(msg.id);
     }
     try {
       meterOutbound(msg);
     } catch {
       /* metering must never break the pipe */
     }
-    if (!msg || msg.id === undefined || msg.id === null) continue;
-    if (typeof msg.method === 'string') pendingClientReqs.set(msg.id, msg.method);
-    else pendingAgentReqs.delete(msg.id);
+    out.push(trimmed);
   }
+  return out.length ? out.join('\n') + '\n' : '';
 }
 
 /** Track an agent -> client frame: clears a pending request when the response
- * lands, and registers agent-originated requests while they await our answer. */
+ * lands (restoring the caller's original id and naming the socket to answer),
+ * and registers agent-originated requests while they await our answer.
+ * Returns { msg, dest } so the caller can route the frame. */
 function noteInbound(line) {
   noteTraffic();
   let msg = null;
   try {
     msg = JSON.parse(line);
   } catch {
-    return;
+    return { msg: null, dest: null };
   }
   try {
     meterInbound(msg);
   } catch {
     /* metering must never break the pipe */
   }
-  if (!msg || msg.id === undefined || msg.id === null) return;
-  if (typeof msg.method === 'string') pendingAgentReqs.add(msg.id);
-  else pendingClientReqs.delete(msg.id);
+  if (!msg || msg.id === undefined || msg.id === null) return { msg, dest: null };
+  if (typeof msg.method === 'string') {
+    pendingAgentReqs.add(msg.id);
+    return { msg, dest: null };
+  }
+  const req = pendingClientReqs.get(msg.id) ?? null;
+  pendingClientReqs.delete(msg.id);
+  if (req) {
+    msg.id = req.origId;
+    // A `session/new` response names the fresh sessionId — claim it for the
+    // socket that asked.
+    if (req.method === 'session/new') {
+      const sid = msg.result?.sessionId;
+      if (typeof sid === 'string') sessionOwner.set(sid, req.ws);
+    }
+  }
+  return { msg, dest: req ? req.ws : null, rewritten: !!req };
 }
 
 /** Answer every pending client request with a JSON-RPC error so the failure
- * is attributable per-request, not just a bare socket close. */
+ * is attributable per-request, not just a bare socket close. Each error goes
+ * to the socket that asked, carrying its original request id. */
 function failPending(message) {
-  for (const id of [...pendingClientReqs.keys()]) {
-    broadcast(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32000, message } }));
-    pendingClientReqs.delete(id);
+  for (const [bridged, req] of [...pendingClientReqs]) {
+    pendingClientReqs.delete(bridged);
+    const ws = req.ws;
+    if (!ws || !clients.has(ws) || ws.readyState !== 1) continue;
+    try {
+      ws.send(JSON.stringify({
+        jsonrpc: '2.0', id: req.origId,
+        error: { code: -32000, message },
+      }));
+    } catch (e) {
+      log('send failed:', e.message);
+    }
   }
 }
 
@@ -683,8 +764,17 @@ const watchdog = setInterval(() => {
 }, WATCHDOG_TICK_MS);
 watchdog.unref?.();
 
-function broadcast(line) {
-  for (const ws of clients) {
+/** Deliver one agent frame. A frame that names a claimed sessionId goes to
+ * the owning socket only; a response (dest — the socket whose request it
+ * answers, known by its bridged id) goes to that socket only; everything
+ * else (sessionless frames, sessions nobody claimed, stray responses)
+ * keeps the old broadcast-to-everyone behavior. */
+function broadcast(line, msg, dest) {
+  const sid = msg?.params?.sessionId;
+  const owner =
+    (typeof sid === 'string' ? sessionOwner.get(sid) : undefined) ?? dest ?? undefined;
+  const targets = owner && clients.has(owner) ? [owner] : clients;
+  for (const ws of targets) {
     if (ws.readyState === 1) {
       try {
         ws.send(line);
@@ -711,8 +801,11 @@ function spawnChild() {
       const line = buffer.slice(0, idx).trim();
       buffer = buffer.slice(idx + 1);
       if (line) {
-        noteInbound(line);
-        broadcast(line);
+        const inb = noteInbound(line);
+        // A routed response carries the caller's original id — re-serialize
+        // so the socket sees its own numbering, not the bridged one.
+        broadcast(inb?.rewritten ? JSON.stringify(inb.msg) : line,
+          inb?.msg ?? null, inb?.dest ?? null);
       }
     }
   });
@@ -786,8 +879,10 @@ wss.on('connection', (ws) => {
         line = JSON.stringify(msg) + '\n';
         log(`resolved relative cwd -> ${msg.params.cwd}`);
       }
-      noteOutbound(line);
-      child.stdin.write(line);
+      // noteOutbound rewrites request ids to bridge-unique ones; what goes
+      // to the child is its returned payload, not the raw frame.
+      const out = noteOutbound(line, ws);
+      child.stdin.write(out || line);
     } catch (e) {
       log('stdin write failed:', e.message);
     }
@@ -795,6 +890,14 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     clients.delete(ws);
+    // Drop the socket's session claims and pending requests so its sessions
+    // fall back to broadcast instead of routing frames into a dead socket.
+    for (const [sid, owner] of sessionOwner) {
+      if (owner === ws) sessionOwner.delete(sid);
+    }
+    for (const [bid, req] of pendingClientReqs) {
+      if (req.ws === ws) pendingClientReqs.delete(bid);
+    }
     log(`client closed (${clients.size} active)`);
   });
 });

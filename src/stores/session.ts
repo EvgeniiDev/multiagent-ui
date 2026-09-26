@@ -857,6 +857,21 @@ export const useSessionStore = defineStore('session', () => {
   function handleSessionUpdate(notification: SessionNotification) {
     const update = notification.update;
 
+    // One bridge process feeds every connected tab, so a `session/update`
+    // can belong to a session this client never opened (another tab's
+    // `session/load` replay, another window's turn). Expected here: the
+    // session whose replay is mid-flight (merge buffer, or `cacheScope` when
+    // there is no cached tail — `currentSession` still names the previous
+    // chat until `session/load` resolves), else the open session. Anything
+    // else is cross-talk and must not touch the transcript, the tool-call
+    // map, or per-session UI state. `usage_update` is ledger data rather
+    // than transcript, so it is kept — attributed to the sessionId the
+    // frame actually names.
+    const expectedSessionId =
+      replayMerge?.sessionId ?? cacheScope?.sessionId ?? currentSession.value?.sessionId;
+    const foreign =
+      !!notification.sessionId && notification.sessionId !== expectedSessionId;
+
     // `usage_update` is sent on the wire (tokens used against a window, with an
     // optional cost) but is not in the SDK's typed union yet, so it is handled
     // before the switch that relies on that union for narrowing.
@@ -868,9 +883,9 @@ export const useSessionStore = defineStore('session', () => {
     };
     if (untyped.sessionUpdate === 'usage_update') {
       useActivityStore().recordUsage({
-        agentName: currentSession.value?.agentName ?? 'unknown',
-        sessionId: currentSession.value?.sessionId ?? 'unknown',
-        cwd: currentSession.value?.cwd,
+        agentName: replayAgentName || currentSession.value?.agentName || 'unknown',
+        sessionId: notification.sessionId || currentSession.value?.sessionId || 'unknown',
+        cwd: foreign ? undefined : currentSession.value?.cwd,
         used: Number(untyped.used ?? 0),
         size: Number(untyped.size ?? 0),
         cost: typeof untyped.cost?.amount === 'number' ? untyped.cost.amount : undefined,
@@ -878,11 +893,13 @@ export const useSessionStore = defineStore('session', () => {
         source: 'agent',
         // The panel knows the session's announced model (models.currentModelId
         // from session/new, or the picker's last setModel) but never a provider.
-        model: currentModelId.value || 'unknown',
+        model: foreign ? 'unknown' : currentModelId.value || 'unknown',
         provider: 'unknown',
       });
       return;
     }
+
+    if (foreign) return;
 
     // While a cached tail is on screen, the replay lands in the merge buffer
     // — appending it to `messages` would duplicate the cache and push the
@@ -999,8 +1016,8 @@ export const useSessionStore = defineStore('session', () => {
         });
         useActivityStore().recordEntry({
           kind: 'tool-call',
-          agentName: currentSession.value?.agentName ?? 'unknown',
-          sessionId: currentSession.value?.sessionId,
+          agentName: replayAgentName || currentSession.value?.agentName || 'unknown',
+          sessionId: notification.sessionId,
           cwd: currentSession.value?.cwd,
           title: update.title,
           detail: update.kind || 'other',
@@ -1049,8 +1066,8 @@ export const useSessionStore = defineStore('session', () => {
         const info = update as { title?: string | null; updatedAt?: string | null };
         useActivityStore().recordEntry({
           kind: 'sync',
-          agentName: currentSession.value?.agentName ?? 'unknown',
-          sessionId: currentSession.value?.sessionId,
+          agentName: replayAgentName || currentSession.value?.agentName || 'unknown',
+          sessionId: notification.sessionId,
           cwd: currentSession.value?.cwd,
           title: info.title ?? currentSession.value?.title,
           detail: 'session info updated',

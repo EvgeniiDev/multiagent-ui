@@ -56,6 +56,8 @@ SID = "e2e-cache-session"
 PAIRS = 62                 # 124 messages -> exceeds the 100-entry cache cap
 KILL_AFTER_PAIRS = 10
 DRIP_S = 0.022             # ~2.7s of replay — a real window to assert inside
+TAIL_WINDOW = 30           # FEED_WINDOW_INIT in ChatView.vue — only the tail
+                           # mounts until scrolling to the top grows the window
 
 LAST = "HC-LAST-MARKER"
 NEWEST = "HC-NEWEST-MARKER"
@@ -340,6 +342,36 @@ def occurrences(page, text):
         ".filter(m => m.textContent.includes(t)).length", text)
 
 
+def expand_feed(page, timeout=15.0):
+    """Grow the render window until the whole transcript is in the DOM by
+    scrolling the feed to the top — the window auto-extends once the scroll
+    enters the trigger zone near the hidden history. A synthetic scrollTop
+    write (not a wheel): it lands exactly where the trigger reads without
+    parking a cursor over the feed."""
+    deadline = time.time() + timeout
+    prev = -1
+    while time.time() < deadline:
+        page.evaluate(
+            "(() => { const f = document.querySelector('.messages-container');"
+            "  if (f) f.scrollTop = 0; })()")
+        page.wait_for_timeout(150)
+        n = page.evaluate(MESSAGE_COUNT)
+        at_top = page.evaluate(
+            "(() => { const f = document.querySelector('.messages-container');"
+            "  return !!f && f.scrollTop === 0; })()")
+        # Converged: truly at the top and no new rows mounted.
+        if at_top and n == prev:
+            # Return the feed to where the pin-asserts expect it: the
+            # newest message (same as a user scrolling back down).
+            page.evaluate(
+                "(() => { const f = document.querySelector('.messages-container');"
+                "  if (f) f.scrollTop = f.scrollHeight; })()")
+            page.wait_for_timeout(150)
+            return True
+        prev = n
+    return False
+
+
 def run_checks():
     timings = {}
     with sync_playwright() as p:
@@ -361,6 +393,11 @@ def run_checks():
             timeout=30.0)
         timings["cold_open_s"] = round(time.time() - t_nav, 3)
         check("cold open: full replay renders", ok)
+        n = page.evaluate(MESSAGE_COUNT)
+        check("cold open: long history mounts as a tail window",
+              n == TAIL_WINDOW, f"{n} messages")
+        check("cold open: scroll-to-top grows the window",
+              expand_feed(page))
         n = page.evaluate(MESSAGE_COUNT)
         check("cold open: all 62 pairs in the feed", n == PAIRS * 2, f"{n} messages")
         check("cold open: feed pinned to bottom",
@@ -416,6 +453,8 @@ def run_checks():
               f"fromBottom={page.evaluate(FROM_BOTTOM)}")
 
         check("replayed replay settles (marker clears)", wait_settled(page))
+        check("settled: scroll-to-top expands the tail window",
+              expand_feed(page))
         n = page.evaluate(MESSAGE_COUNT)
         check("settled: full history rendered once", n == PAIRS * 2,
               f"{n} messages")
@@ -438,6 +477,8 @@ def run_checks():
             timeout=20.0)
         check("killed replay: tail stays, marked 'stale'", got_stale,
               f"note={page.evaluate(NOTE_STATE)}")
+        check("killed replay: scroll-to-top expands the tail window",
+              expand_feed(page))
         n = page.evaluate(MESSAGE_COUNT)
         check("killed replay: cached 100 messages render", n == 100,
               f"{n} messages")
@@ -462,6 +503,8 @@ def run_checks():
                         "  return n && n.dataset.state === 'loading'; })()",
                         timeout=15.0))
         check("second device: replay settles", wait_settled(page))
+        check("second device: scroll-to-top expands the tail window",
+              expand_feed(page))
         n = page.evaluate(MESSAGE_COUNT)
         # +4 rows: user, assistant, user, assistant-carrying-the-tool-call.
         check("second device: tail grew below the cache",
@@ -518,6 +561,7 @@ def run_checks():
             " && !document.querySelector('.loading-indicator')",
             timeout=30.0)
         check("quota-full setItem: chat still opens and replays", ok)
+        expand_feed(page2)
         n = page2.evaluate(MESSAGE_COUNT)
         check("quota-full: full replay rendered", n == PAIRS * 2, f"{n} messages")
         check("quota-full: no history entry written, no crash",

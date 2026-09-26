@@ -72,17 +72,24 @@ AGENT_NAME = "E2E Mock"
 SID_A = "e2e-restore-session"
 SID_B = "e2e-scroll-session-b"
 SID_C = "e2e-scroll-session-c"
+# The shared ws bridge feeds one agent process to every open tab, so a
+# session/update can name a session this client never opened — the store
+# must drop those frames instead of rendering them into the open chat.
+SID_FOREIGN = "e2e-foreign-session"
 
 PAIRS_A = 28
 PAIRS_B = 30
 PAIRS_C = 26
 DRIP_B = 0.060   # seconds between replayed turns while loading B
 DRIP_C = 0.080   # seconds between replayed turns while loading C
+TAIL_WINDOW = 30  # FEED_WINDOW_INIT in ChatView.vue — long histories mount
+                  # only the tail until scrolling to the top grows the window
 
 A_LAST = "RESTORED-HISTORY-MARKER"
 B_LAST = "B-LAST-MARKER"
 C_LAST = "C-LAST-MARKER"
 C_REPLY = "C-REPLY-MARKER"
+FOREIGN_TEXT = "FOREIGN-LEAK-MARKER"
 
 results = []
 page_errors = []
@@ -115,14 +122,19 @@ def history(sid, pairs, tag, last_text):
     return out
 
 
-def drip_load(ws, sid, rid, pairs, tag, last_text, interval):
+def drip_load(ws, sid, rid, pairs, tag, last_text, interval, foreign_every=0):
     """Stream a long replay, then the session/load response — a real agent
     keeps `session/load` open while history streams. Runs on a thread: the
-    playwright dispatcher must never sleep inside on_message."""
+    playwright dispatcher must never sleep inside on_message.
+    `foreign_every`>0 interleaves session/update frames for SID_FOREIGN —
+    cross-talk the shared bridge would deliver to this socket."""
     def run():
-        for note in history(sid, pairs, tag, last_text):
+        for idx, note in enumerate(history(sid, pairs, tag, last_text)):
             try:
                 ws.send(note)
+                if foreign_every and idx % foreign_every == foreign_every - 1:
+                    ws.send(chunk(SID_FOREIGN, "agent_message_chunk",
+                                  {"type": "text", "text": FOREIGN_TEXT}))
             except Exception as e:  # noqa: BLE001 — page closed mid-drip
                 print(f"NOTE  drip {sid} stopped early: {e}")
                 return
@@ -181,7 +193,8 @@ def acp_ws(ws):
                     drip_load(ws, SID_B, req["id"], PAIRS_B, "B", B_LAST, DRIP_B)
                     continue
                 elif sid == SID_C:
-                    drip_load(ws, SID_C, req["id"], PAIRS_C, "C", C_LAST, DRIP_C)
+                    drip_load(ws, SID_C, req["id"], PAIRS_C, "C", C_LAST,
+                              DRIP_C, foreign_every=7)
                     continue
                 else:
                     result = {}
@@ -292,6 +305,36 @@ def wait_replay_done(page, marker, timeout=30.0):
     return ok
 
 
+def expand_feed(page, timeout=15.0):
+    """Grow the render window until the whole transcript is in the DOM by
+    scrolling the feed to the top — the window auto-extends once the scroll
+    enters the trigger zone near the hidden history. A synthetic scrollTop
+    write (not a wheel): it lands exactly where the trigger reads without
+    parking a cursor over the feed."""
+    deadline = time.time() + timeout
+    prev = -1
+    while time.time() < deadline:
+        page.evaluate(
+            "(() => { const f = document.querySelector('.messages-container');"
+            "  if (f) f.scrollTop = 0; })()")
+        page.wait_for_timeout(150)
+        n = page.evaluate(MESSAGE_COUNT)
+        at_top = page.evaluate(
+            "(() => { const f = document.querySelector('.messages-container');"
+            "  return !!f && f.scrollTop === 0; })()")
+        # Converged: truly at the top and no new rows mounted.
+        if at_top and n == prev:
+            # Return the feed to where the pin-asserts expect it: the
+            # newest message (same as a user scrolling back down).
+            page.evaluate(
+                "(() => { const f = document.querySelector('.messages-container');"
+                "  if (f) f.scrollTop = f.scrollHeight; })()")
+            page.wait_for_timeout(150)
+            return True
+        prev = n
+    return False
+
+
 def run_checks():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -337,6 +380,10 @@ def run_checks():
 
         # --- F5 landing: pinned to the bottom, newest message visible ------
         n_msgs = page.evaluate(MESSAGE_COUNT)
+        check("F5: long history mounts as a tail window",
+              n_msgs == TAIL_WINDOW, f"{n_msgs} messages")
+        expand_feed(page)
+        n_msgs = page.evaluate(MESSAGE_COUNT)
         fb_a = from_bottom(page)
         check("F5: replayed a long history", n_msgs >= PAIRS_A * 2,
               f"{n_msgs} messages")
@@ -351,6 +398,10 @@ def run_checks():
         # died on the first >40px chunk, and the user watched the top.
         click_session(page, "HistB")
         wait_replay_done(page, B_LAST)
+        n_b = page.evaluate(MESSAGE_COUNT)
+        check("sidebar open: window resets to the tail on switch",
+              n_b == TAIL_WINDOW, f"{n_b} messages")
+        expand_feed(page)
         n_b = page.evaluate(MESSAGE_COUNT)
         fb_b = from_bottom(page)
         check("sidebar open: replayed a long history", n_b >= PAIRS_B * 2,
@@ -393,6 +444,16 @@ def run_checks():
         last_c = page.evaluate(LAST_IN_VIEW)
         check("replay end: last message inside the viewport",
               last_c is True, repr(last_c))
+
+        # Cross-talk that rode the same socket: foreign session/update
+        # frames (another tab's traffic on the shared bridge) must never
+        # render into the open chat or its history cache.
+        check("foreign session/update frames never render",
+              not page.evaluate(
+                  f"document.body.textContent.includes({json.dumps(FOREIGN_TEXT)})"))
+        check("foreign frames did not grow the transcript",
+              expand_feed(page) and page.evaluate(MESSAGE_COUNT) == PAIRS_C * 2,
+              f"{page.evaluate(MESSAGE_COUNT)} messages")
 
         # --- Sending from a scrolled-up position returns to the bottom -----
         wheel_up(page, 700)
