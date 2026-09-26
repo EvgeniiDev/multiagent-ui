@@ -9,6 +9,9 @@ defineProps<{
 const emit = defineEmits<{
   (e: 'select', methodId: string): void;
   (e: 'cancel'): void;
+  /** Start over instead: abandon this connect and open the New session
+   *  dialog, so a wrong agent/cwd isn't a dead end. */
+  (e: 'newSession'): void;
 }>();
 
 function handleSelect(methodId: string) {
@@ -46,9 +49,16 @@ function handleSelect(methodId: string) {
             <span class="arrow">→</span>
           </button>
         </div>
+
+        <p class="auth-escape">
+          Wrong agent or folder? Start over with a new session.
+        </p>
       </div>
-      
+
       <div class="dialog-footer">
+        <button class="new-session-btn" @click="emit('newSession')">
+          New session
+        </button>
         <button class="cancel-btn" @click="emit('cancel')">
           Cancel
         </button>
@@ -120,6 +130,14 @@ function handleSelect(methodId: string) {
   gap: 0.5rem;
 }
 
+/* Escape hatch hint: the auth prompt is a dead end unless you know a fresh
+ * session is one click away. */
+.auth-escape {
+  margin: 0.875rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
 .auth-method-btn {
   display: flex;
   align-items: center;
@@ -167,7 +185,27 @@ function handleSelect(methodId: string) {
   padding: 0.75rem 1.25rem;
   border-top: 1px solid var(--border-color);
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+/* Accent CTA, same language as the welcome screen's .welcome-new-session —
+ * the button reads as the primary way out of this prompt. */
+.new-session-btn {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-on-accent, #fbf8f3);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.new-session-btn:hover {
+  background: var(--bg-primary-hover);
 }
 
 .cancel-btn {

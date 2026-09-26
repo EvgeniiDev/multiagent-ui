@@ -6,6 +6,7 @@ import { useSessionStore } from './stores/session';
 import { initTelemetry } from './lib/telemetry';
 import AgentSelector from './components/AgentSelector.vue';
 import SessionList from './components/SessionList.vue';
+import SessionTabs from './components/SessionTabs.vue';
 import ChatView from './components/ChatView.vue';
 import PermissionDialog from './components/PermissionDialog.vue';
 import SettingsView from './components/SettingsView.vue';
@@ -24,6 +25,7 @@ import { useClaimsStore } from './stores/claims';
 import { useProjectsStore } from './features/scope/registry';
 import type { SavedSession } from './lib/types';
 import { setSessionInUrl, sessionFromUrl } from './lib/sessionUrl';
+import type { ViewId } from './stores/ui';
 
 const configStore = useConfigStore();
 const sessionStore = useSessionStore();
@@ -127,7 +129,7 @@ const canManuallyReconnect = computed(
 
 // A cached tail keeps the chat up while the replay is in flight — and when
 // the replay died, the tail is all there is (marked stale by the store).
-const hasCachedHistory = computed(() => sessionStore.historyCacheNote !== null);
+// Per-tab now: the per-runtime ChatView v-show reads it off the runtime.
 
 async function handleManualReconnect() {
   await sessionStore.tryReconnect();
@@ -176,31 +178,35 @@ onMounted(async () => {
     selectedCwd.value = savedCwd;
   }
 
-  // F5 restores the open session: initStore brought back the
-  // currentSession pointer, but the live bridge is gone — resume it so the
-  // user lands back in the chat, not on the welcome screen. A stored
-  // session the agent no longer holds (or can't load) falls back to the
-  // welcome screen with the error on the banner, like a manual resume.
-  // The URL is the newest intent: `?s=<agent>::<sessionId>` is written at click
-  // time, while the stored pointer can lag (a failed resume, a sync overwrite).
+  // F5 restores the open TABS: initStore read the persisted openTabs set,
+  // but the live bridges are gone — restoreTabs reconnects each tab (the
+  // URL's `?s=<agent>::<sessionId>` wins as the focused one, since it's the
+  // newest intent). Tabs whose session the agent no longer holds fall back
+  // to an error banner inside the tab; with no tabs at all we land on the
+  // welcome screen like before.
   const fromUrl = sessionFromUrl();
-  let restored = sessionStore.currentSession;
-  if (fromUrl && (!restored || restored.sessionId !== fromUrl.sessionId)) {
-    const match = sessionStore.savedSessions.find(
-      (s) => s.agentName === fromUrl.agentName && s.sessionId === fromUrl.sessionId
-    );
-    if (match) restored = match;
-  }
-  if (restored) {
-    setSessionInUrl(restored.agentName, restored.sessionId);
-    selectedAgent.value = restored.agentName;
-    selectedCwd.value = restored.cwd || selectedCwd.value;
-    try {
-      await sessionStore.resumeSession(restored);
-    } catch (e) {
-      console.warn('Failed to restore session after reload:', e);
+  if (sessionStore.hasStoredTabs || fromUrl) {
+    const focus = fromUrl ? { agentName: fromUrl.agentName, sessionId: fromUrl.sessionId } : null;
+    const focusSaved = focus
+      ? sessionStore.savedSessions.find(
+          (s) => s.agentName === focus.agentName && s.sessionId === focus.sessionId
+        )
+      : null;
+    if (focusSaved) {
+      selectedAgent.value = focusSaved.agentName;
+      selectedCwd.value = focusSaved.cwd || selectedCwd.value;
+      // Scope the sidebar to the URL's agent as well — without this the
+      // dropdown shows the URL agent while the header list still shows whatever
+      // the last sync scoped to (the previous agent).
+      try {
+        await sessionStore.setActiveAgent(focusSaved.agentName);
+      } catch (e) {
+        console.warn('Failed to scope sidebar to URL agent:', e);
+      }
     }
-  } else {
+    await sessionStore.restoreTabs(focus);
+  }
+  if (sessionStore.openTabs.length === 0) {
     // No open session — pre-select the last used agent + cwd so a reload
     // with no session (or after Disconnect) keeps the new-session form
     // filled instead of dropping to blanks. The sidebar scope follows the
@@ -256,6 +262,8 @@ async function handleTreeSelect(value: string) {
   }
 }
 
+/** Start another session from the session list's header. Each session gets
+ *  its own tab and its own connection — nothing to tear down first. */
 async function handleNewSession() {
   if (!selectedAgent.value) return;
 
@@ -303,10 +311,6 @@ async function handleRefreshSessions() {
   );
 }
 
-async function handleDisconnect() {
-  await sessionStore.disconnect();
-}
-
 async function handleCancelConnection() {
   await sessionStore.cancelConnection();
 }
@@ -327,12 +331,41 @@ function handleAuthMethodCancel() {
   sessionStore.cancelAuthSelection();
 }
 
+/** "New session" from the auth prompt: drop the half-open connect and open
+ *  the same dialog the welcome screen uses, so a wrong agent/cwd is not a
+ *  dead end. The cancelled auth rejects into createSession, whose catch
+ *  paints a red "Authentication cancelled by user" banner a tick or two
+ *  later — wait the teardown out, then wipe it. The user is starting over,
+ *  not failing. */
+async function handleAuthNewSession() {
+  sessionStore.cancelAuthSelection();
+  showWelcomeNewSession.value = true;
+
+  // Bounded: if the bridge hangs, never leave a waiter spinning.
+  for (let i = 0; i < 60 && (isLoading.value || isConnecting.value); i++) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  sessionStore.clearError();
+}
+
 function toggleSidebar() {
   showSidebar.value = !showSidebar.value;
 }
 
 /** Close the drawer when the user taps the backdrop on a narrow viewport. */
 function handleBackdropClick() {
+  if (isNarrowLayout.value) showSidebar.value = false;
+}
+
+/** Current view name for the drawer's view-switcher label (narrow only). */
+const drawerViewLabel = computed(
+  () => VIEWS.find((v) => v.id === uiStore.activeView)?.label ?? 'Chat'
+);
+
+/** Pick a view from the drawer's view row (narrow only): switch, then close
+ *  the drawer so the chosen view fills the screen. */
+function handleDrawerViewClick(view: ViewId) {
+  void uiStore.setView(view);
   if (isNarrowLayout.value) showSidebar.value = false;
 }
 
@@ -397,20 +430,84 @@ function clearError() {
       </button>
     </nav>
 
-    <!-- Sidebar (slides in as a drawer on narrow viewports) -->
+    <!-- Sidebar (slides in as a drawer on narrow viewports). Global on
+         narrow: the drawer is reachable from every view there, not just
+         chat — the hamburger in the scope-bar is the opener on all of them.
+         On desktop unchanged: only the chat view shows the sidebar. -->
     <aside
-      v-show="showSidebar && uiStore.activeView === 'chat'"
+      v-show="showSidebar && (isNarrowLayout || uiStore.activeView === 'chat')"
       class="sidebar"
       :class="{ 'is-drawer': isNarrowLayout }"
     >
       <div class="sidebar-header">
         <h1>ACP UI</h1>
         <div class="header-actions">
+          <button
+            class="scope-icon-btn"
+            :class="{ active: showTrafficMonitor }"
+            type="button"
+            title="ACP Traffic Monitor"
+            aria-label="ACP Traffic Monitor"
+            @click="showTrafficMonitor = !showTrafficMonitor"
+          ><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.9 19.1a10 10 0 0 1 0-14.2M7.8 16.2a5.5 5.5 0 0 1 0-8.4M12 12h.01M16.7 10.3a3 3 0 0 1 0 4.4M19.6 7.4a7 7 0 0 1 0 10.2"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg></button>
+          <button
+            class="scope-icon-btn"
+            type="button"
+            title="Settings"
+            aria-label="Settings"
+            @click="showSettings = true"
+          ><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1a1.7 1.7 0 0 0 1.9.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1a1.7 1.7 0 0 0-.3 1.9v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.4 1z"/></svg></button>
           <button class="toggle-btn" aria-label="Collapse sidebar" @click="toggleSidebar"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 6l-6 6 6 6"/></svg></button>
         </div>
       </div>
       
       <div class="sidebar-content">
+        <!-- Narrow layout only: view switching. Since the narrow layout hides
+             the view rail, its four buttons are mirrored here as the drawer's
+             first row — same labels, icons, aria/title; picking a view closes
+             the drawer. -->
+        <nav v-if="isNarrowLayout" class="drawer-view-nav" aria-label="Main views">
+          <button
+            v-for="view in VIEWS"
+            :key="view.id"
+            class="rail-btn"
+            :class="{ active: uiStore.activeView === view.id }"
+            :title="`${view.label} (${view.key})`"
+            :aria-label="view.label"
+            :aria-current="uiStore.activeView === view.id ? 'page' : undefined"
+            @click="handleDrawerViewClick(view.id)"
+          >
+            <svg
+              v-if="view.id === 'chat'"
+              viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+              stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+            ><path d="M21 11.5a8.4 8.4 0 01-9 8.4 8.9 8.9 0 01-3.8-.9L3 20l1.1-3.3A8.4 8.4 0 013 11.5 8.4 8.4 0 0112 3a8.4 8.4 0 019 8.5z" /></svg>
+            <svg
+              v-else-if="view.id === 'projects'"
+              viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+              stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+            ><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg>
+            <svg
+              v-else-if="view.id === 'board'"
+              viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+              stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+            ><path d="M4 4h4v16H4zM10 4h4v10h-4zM16 4h4v6h-4z" /></svg>
+            <svg
+              v-else
+              viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+              stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+            ><path d="M12 20a8 8 0 110-16 8 8 0 010 16zM12 15.5l3-4.5M12 8.5v4" /></svg>
+          </button>
+          <span class="drawer-view-label">{{ drawerViewLabel }}</span>
+        </nav>
+        <!-- Project scope next to the session list it filters. Was the
+              scope-bar's global selector; the sidebar is chat-only on
+              desktop, so the board keeps its own filter row instead of this
+              hidden global one. One instance for both layouts. -->
+        <div class="section drawer-project-scope">
+          <label>Project:</label>
+          <ProjectScopeSelector />
+        </div>
         <!-- Agent Selection -->
         <div class="section">
           <AgentSelector 
@@ -446,15 +543,8 @@ function clearError() {
               @select="handleTreeSelect"
             />
           </div>
-          
-          <button 
-            v-if="hasAgents && !isConnected && !isConnecting"
-            class="new-session-btn"
-            :disabled="!selectedAgent || isLoading"
-            @click="handleNewSession"
-          >
-            {{ isLoading ? 'Connecting...' : 'New Session' }}
-          </button>
+          <!-- New session lives in the session list's header; there is no
+               Disconnect — the connection re-establishes on its own. -->
           
           <!-- Startup Progress -->
           <StartupProgress 
@@ -468,30 +558,26 @@ function clearError() {
             @toggle-details="showStartupDetails = !showStartupDetails"
           />
           
-          <button 
-            v-if="isConnected"
-            class="disconnect-btn"
-            @click="handleDisconnect"
-          >
-            Disconnect
-          </button>
         </div>
         
         <!-- Session List -->
         <div class="section">
           <SessionList 
+            :can-start="hasAgents && !!selectedAgent"
             @resume="handleResumeSession"
             @delete="handleDeleteSession"
             @refresh="handleRefreshSessions"
+            @new-session="handleNewSession"
           />
         </div>
       </div>
     </aside>
     
     <!-- Backdrop behind the drawer on narrow viewports. Only intercepts
-         taps when the layout is narrow; on desktop it's display:none. -->
+         taps when the layout is narrow; on desktop it's display:none. Like
+         the drawer itself it is view-independent. -->
     <div
-      v-show="isNarrowLayout && showSidebar && uiStore.activeView === 'chat'"
+      v-show="isNarrowLayout && showSidebar"
       class="drawer-backdrop"
       @click="handleBackdropClick"
     />
@@ -508,35 +594,13 @@ function clearError() {
     
     <!-- Main Content Area -->
     <div class="main-area">
-      <!-- Global project scope — one selector for every view (§B). The
-           mobile hamburger lives here as the bar's trailing control: fixed
-           positioning used to leave it under the top rail (z 95 > 50) so the
-           drawer was unreachable on narrow viewports. -->
-      <header class="scope-bar">
-        <ProjectScopeSelector />
-        <!-- Global actions: Settings opens the Settings overlay, Traffic
-             toggles the traffic panel. They live here (not in any view's own
-             header) so every view — Chat, Projects, Board, Dashboard — can
-             reach them. -->
-        <div class="scope-actions">
-          <button
-            class="scope-icon-btn"
-            :class="{ active: showTrafficMonitor }"
-            type="button"
-            title="ACP Traffic Monitor"
-            aria-label="ACP Traffic Monitor"
-            @click="showTrafficMonitor = !showTrafficMonitor"
-          ><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.9 19.1a10 10 0 0 1 0-14.2M7.8 16.2a5.5 5.5 0 0 1 0-8.4M12 12h.01M16.7 10.3a3 3 0 0 1 0 4.4M19.6 7.4a7 7 0 0 1 0 10.2"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg></button>
-          <button
-            class="scope-icon-btn"
-            type="button"
-            title="Settings"
-            aria-label="Settings"
-            @click="showSettings = true"
-          ><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1a1.7 1.7 0 0 0 1.9.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1a1.7 1.7 0 0 0-.3 1.9v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.4 1z"/></svg></button>
-        </div>
+      <!-- Narrow-only hamburger bar: the drawer opener. The old scope-bar
+           (project selector + traffic + settings) is gone from the desktop —
+           the selector filters sessions from the sidebar, the two actions
+           moved into the sidebar header. -->
+      <header v-if="isNarrowLayout" class="scope-bar">
         <button
-          v-show="isNarrowLayout && !showSidebar"
+          v-show="!showSidebar"
           class="mobile-hamburger"
           @click="showSidebar = true"
           aria-label="Open menu"
@@ -566,15 +630,36 @@ function clearError() {
           <button class="error-close" @click="clearError" title="Dismiss">×</button>
         </div>
         
-        <!-- Chat View when connected — or while a cached tail stands in for
-             the transcript (replaying, or the replay died and it's all we
-             have). The composer disables itself when !isConnected. -->
-        <ChatView v-if="uiStore.activeView === 'chat' && (isConnected || hasCachedHistory)" />
+        <!-- IDE-style tab strip: one tab per open session, each with its own
+             live connection — background tabs keep streaming and flag unread
+             output, pending permissions and dropped transports. On narrow
+             viewports a single tab doesn't earn a strip — the drawer's
+             SESSIONS list highlights the open session — so the strip only
+             appears with 2+ tabs. -->
+        <SessionTabs
+          v-if="uiStore.activeView === 'chat' && sessionStore.openTabs.length > (isNarrowLayout ? 1 : 0)"
+        />
 
-        <!-- Welcome screen when the chat view has no session yet. The New
-             session dialog is reachable here too — a session start must not
-             depend on an existing connection. -->
-        <div v-else-if="uiStore.activeView === 'chat'" class="welcome-screen">
+        <!-- Chat View per open tab. v-show (not v-if) keeps every mounted
+             instance alive across switches: scroll position, expanded tool
+             calls and the composer draft survive. The pane shows whenever its
+             tab is active — a replay streams live under isLoading before
+             isConnected lands, and a failed connect keeps the tab's error
+             visible. The composer disables itself when !isConnected. -->
+        <template v-if="uiStore.activeView === 'chat'">
+          <ChatView
+            v-for="rt in sessionStore.openTabs"
+            v-show="rt.id === sessionStore.activeTabId"
+            :key="rt.id"
+            :runtime="rt"
+            :sidebar-cwd="selectedCwd"
+          />
+        </template>
+
+        <!-- Welcome screen when no tabs are open at all. The New session
+             dialog is reachable here too — a session start must not depend
+             on an existing connection. -->
+        <div v-if="uiStore.activeView === 'chat' && sessionStore.openTabs.length === 0" class="welcome-screen">
           <h2>Welcome to ACP UI</h2>
           <p>Select an agent and create a new session to get started.</p>
           <button
@@ -589,9 +674,9 @@ function clearError() {
           </p>
         </div>
 
-        <ProjectsView v-else-if="uiStore.activeView === 'projects'" />
-        <BoardView v-else-if="uiStore.activeView === 'board'" />
-        <DashboardView v-else />
+        <ProjectsView v-if="uiStore.activeView === 'projects'" />
+        <BoardView v-if="uiStore.activeView === 'board'" />
+        <DashboardView v-if="uiStore.activeView === 'dashboard'" />
       </main>
       
       <!-- Traffic Monitor Panel -->
@@ -615,6 +700,7 @@ function clearError() {
       :agent-name="pendingAuthAgentName"
       @select="handleAuthMethodSelect"
       @cancel="handleAuthMethodCancel"
+      @new-session="handleAuthNewSession"
     />
 
     <!-- Settings -->
@@ -623,10 +709,12 @@ function clearError() {
       @close="showSettings = false"
     />
 
-    <!-- New session from the welcome screen (no connection required). -->
+    <!-- New session from the welcome screen (no connection required).
+         Prefills with the path shown in the sidebar's Working Directory
+         field; the project scope fills in only when that field is empty. -->
     <NewSessionDialog
       v-if="showWelcomeNewSession"
-      :initial-cwd="scopeCwd"
+      :initial-cwd="selectedCwd || scopeCwd"
       @close="showWelcomeNewSession = false"
     />
   </div>
@@ -815,35 +903,6 @@ html, body, #app {
   border-bottom: 1px solid var(--border-faint);
 }
 
-.new-session-btn,
-.disconnect-btn {
-  width: 100%;
-  margin-top: 0.625rem;
-  height: 30px;
-  padding: 0 0.75rem;
-  border: none;
-  border-radius: var(--radius-md);
-  font-family: inherit;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  letter-spacing: -0.005em;
-  cursor: pointer;
-}
-
-.new-session-btn {
-  background: var(--bg-primary);
-  color: var(--text-on-accent, #fbf8f3);
-}
-
-.new-session-btn:hover:not(:disabled) {
-  background: var(--bg-primary-hover);
-}
-
-.new-session-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 .cwd-picker {
   margin-top: 0.75rem;
 }
@@ -856,6 +915,24 @@ html, body, #app {
   text-transform: uppercase;
   color: var(--text-muted);
   margin-bottom: 0.25rem;
+}
+
+/* Project scope in the sidebar, above the session list it filters (all
+   layouts — on narrow it's the same drawer block). Shares the AGENT /
+   WORKING DIRECTORY label language, and the selector's internal narrow
+   media query already stretches its select, so just force full width. */
+.drawer-project-scope label {
+  display: block;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.drawer-project-scope .scope-selector {
+  width: 100%;
 }
 
 .cwd-row {
@@ -915,26 +992,26 @@ html, body, #app {
   opacity: 0.5;
 }
 
-.disconnect-btn {
-  background: var(--bg-danger);
-  color: var(--text-on-accent, #fbf8f3);
-}
-
-.disconnect-btn:hover {
-  background: var(--bg-danger-hover);
-}
-
 .sidebar-toggle-collapsed {
   position: fixed;
   left: 0;
   top: 50%;
   transform: translateY(-50%);
-  padding: 0.5rem;
+  /* Above the view rail (z 95) that covers the whole left edge — without
+   * this the expand handle is unreachable and the sidebar can never come
+   * back once collapsed. */
+  z-index: 96;
+  padding: 0.75rem 0.375rem;
   border: 1px solid var(--border-color);
   border-left: none;
   border-radius: 0 4px 4px 0;
   background: var(--bg-sidebar);
   cursor: pointer;
+}
+
+.sidebar-toggle-collapsed:hover {
+  color: var(--text-primary);
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
 }
 
 .main-area {
@@ -946,9 +1023,8 @@ html, body, #app {
 
 /* Global scope strip: the project selector from §B. Slim chrome row pinned
  * above every view (chat, projects, board, dashboard). Positioned + z-indexed
- * above the mobile drawer backdrop (z 90) — like the view rail (z 95) — so
- * the global Settings/Traffic buttons stay clickable while the drawer is
- * open on narrow viewports. */
+ * above the mobile drawer backdrop (z 90) so the global Settings/Traffic
+ * buttons stay clickable while the drawer is open on narrow viewports. */
 .scope-bar {
   position: relative;
   z-index: 95;
@@ -962,17 +1038,9 @@ html, body, #app {
   background: var(--bg-main);
 }
 
-/* Global actions in the scope bar: Settings + Traffic. Same icon-button
- * geometry as the view rail (34×34, radius-md, hairline/ghost) so the bar
- * reads as one chrome row. */
-.scope-actions {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 0.25rem;
-  margin-left: auto;
-}
-
+/* Sidebar-header icon buttons (Traffic + Settings). Same geometry as the
+ * view rail (34×34, radius-md, hairline/ghost) so the header reads as one
+ * chrome row. */
 .scope-icon-btn {
   width: 34px;
   height: 34px;
@@ -1188,8 +1256,6 @@ html, body, #app {
 
 .view-rail {
   position: relative;
-  /* Above the mobile drawer backdrop (z-index 90), or the rail is unclickable
-     on a narrow viewport with the session drawer open. */
   z-index: 95;
   flex: 0 0 auto;
   width: 46px;
@@ -1200,9 +1266,7 @@ html, body, #app {
   padding: 0.5rem 0;
   background: var(--bg-sidebar, #f6f2ec);
   border-right: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-}
-
-.rail-btn {
+}.rail-btn {
   width: 32px;
   height: 32px;
   display: flex;
@@ -1232,27 +1296,15 @@ html, body, #app {
 }
 
 @media (max-width: 800px) {
-  /* On phones the app stacks: the rail becomes a top bar above the content, so
-     it never steals width from the reading column. */
+  /* On phones the downward rail becomes a hamburger: it's hidden entirely and
+     view switching lives in the drawer's top row instead — content starts one
+     chrome strip higher. */
   .app-container.narrow-layout {
     flex-direction: column;
   }
 
   .view-rail {
-    flex: 0 0 auto;
-    flex-direction: row;
-    width: 100%;
-    height: auto;
-    justify-content: flex-start;
-    gap: 0.375rem;
-    padding: 0.375rem 0.5rem;
-    border-right: none;
-    border-bottom: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  }
-
-  .rail-btn {
-    width: 44px;
-    height: 44px;
+    display: none;
   }
 }
 
@@ -1292,12 +1344,6 @@ html, body, #app {
     z-index: 90;
   }
 
-  /* The rail sits above the scrim and keeps working while the drawer is open. */
-  .view-rail {
-    position: relative;
-    z-index: 95;
-  }
-
   /* Hide the desktop chevron when the mobile hamburger is in play. */
   .sidebar-toggle-collapsed {
     display: none;
@@ -1307,6 +1353,34 @@ html, body, #app {
     display: flex;
   }
 
+  /* Drawer's first row: the view switcher that replaced the hidden rail.
+     Same icon buttons as the rail (44px tap targets), current view accented,
+     followed by the view's name. */
+  .drawer-view-nav {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    flex: 0 0 auto;
+    padding: 0.375rem 0.5rem;
+    border-bottom: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+    background: var(--bg-sidebar, #f6f2ec);
+  }
+
+  .drawer-view-nav .rail-btn {
+    width: 44px;
+    height: 44px;
+    border-radius: var(--radius-md, 6px);
+  }
+
+  .drawer-view-label {
+    margin-left: auto;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text-secondary, #6b6259);
+    white-space: nowrap;
+  }
+
   /* Tap-target sizing for the icon buttons inside the sidebar header. */
   .toggle-btn {
     min-width: 40px;
@@ -1314,15 +1388,25 @@ html, body, #app {
     font-size: 1rem;
   }
 
-  /* Scope bar on phones: no wrap, no horizontal scroll — the selector
-   * shrinks (min-width drops) while Settings/Traffic stay ≥44px. */
+  /* Hamburger bar on phones — the drawer opener, nothing else. Single flex
+   * row, ~56px: children are flex items, never overlapping (regression:
+   * absolutely-positioned descendants). */
   .scope-bar {
+    position: relative;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
     flex-wrap: nowrap;
     overflow: hidden;
+    padding: 0.375rem 0.5rem;
+    min-height: 56px;
+    justify-content: flex-end;
   }
 
-  .scope-actions {
-    margin-left: auto;
+  .scope-bar > * {
+    position: static;
+    flex: 0 0 auto;
+    min-width: 0;
   }
 
   .scope-icon-btn {

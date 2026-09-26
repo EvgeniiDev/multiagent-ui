@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """E2E for the `color: white` -> var(--text-on-accent, #fbf8f3) pass (cc/tokens).
 
-For each of the six elements whose rule switched to the accent-ink token —
-`.new-session-btn`, `.disconnect-btn` (App.vue), `.send-btn` (ChatView.vue),
-`.add-btn` :hover, `.save-btn`, `.delete-btn` :hover (SettingsView.vue) — the
+For each of the four elements whose rule switched to the accent-ink token —
+`.send-btn` (ChatView.vue), `.add-btn` :hover, `.save-btn`, `.delete-btn`
+:hover (SettingsView.vue) — the
 script measures the computed `color` against the composited background (walk
 ancestors, collect every backgroundColor with alpha > 0, stop at the first
 opaque layer, composite bottom-up `out = top*top.a + out*(1-top.a)`) and
@@ -11,8 +11,8 @@ asserts WCAG >= 4.5:1. Runs under BOTH `color_scheme="dark"` and `"light"`
 at 1440x900, then clicks each of the four `.rail-btn` views and requires zero
 `pageerror` events.
 
-`.send-btn` / `.disconnect-btn` only render while a session is connected, so
-the script answers the ACP JSON-RPC handshake itself via
+`.send-btn` only renders while a session is connected, so the script answers
+the ACP JSON-RPC handshake itself via
 `page.route_web_socket` (initialize + session/new on a ws:// URL seeded into
 the web agents config). The DirectoryPicker's `/api/fs/*` calls are stubbed,
 and telemetry is disabled via the seeded preferences store.
@@ -231,17 +231,14 @@ def run_scheme(browser, scheme):
     page.goto(BASE, wait_until="load")
     page.wait_for_selector(".view-rail", timeout=10000)
 
-    # Sidebar: .new-session-btn renders once the agents config has loaded and
-    # AgentSelector's auto-select has enabled it.
-    page.wait_for_selector(".new-session-btn:not([disabled])", timeout=10000)
-    measure(page, scheme, ".new-session-btn", "App.vue:709")
+    # The session list's "+" is muted-on-transparent, not accent ink — it is
+    # only the way into a connected state, not a subject of this suite.
+    page.wait_for_selector(".list-new-session", timeout=10000)
 
-    # Connect through the mocked ACP handshake so .disconnect-btn and the
-    # ChatView (.send-btn) mount.
-    page.click(".new-session-btn")
-    page.wait_for_selector(".disconnect-btn", timeout=15000)
-    page.wait_for_selector(".send-btn", timeout=10000)
-    measure(page, scheme, ".disconnect-btn", "App.vue:794")
+    # Connect through the mocked ACP handshake so the ChatView (.send-btn)
+    # mounts.
+    page.click(".list-new-session")
+    page.wait_for_selector(".send-btn", timeout=15000)
     page.fill(".chat-view textarea", "e2e probe")  # enable the send button
     measure(page, scheme, ".send-btn", "ChatView.vue:980")
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref, onMounted, onBeforeUnmount } from 'vue';
 import { useBoardStore } from '../../stores/board';
 import { useUiStore } from '../../stores/ui';
 import { useConfigStore } from '../../stores/config';
@@ -12,10 +12,36 @@ const configStore = useConfigStore();
 const projects = computed(() => board.projectOptions);
 const agents = computed(() => configStore.allAgentNames);
 
+// Same 800px breakpoint as the App.vue sidebar drawer: on phones the
+// filter controls collapse behind a disclosure button (collapsed by
+// default) to keep the kanban cards above the fold.
+const isNarrow = ref(false);
+let narrowMql: MediaQueryList | null = null;
+function syncNarrow() {
+  if (narrowMql) isNarrow.value = narrowMql.matches;
+}
+
 // The board obeys the global project scope (ui.ts → activeProjectId); the
 // All button on the board is the one-click path back to the full board.
 const scopedName = computed(() => uiStore.activeProject?.name ?? '');
 const isAll = computed(() => uiStore.activeProjectId === 'all');
+
+// Disclosure state for the narrow layout; collapsed by default.
+const filtersOpen = ref(false);
+
+onMounted(() => {
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    narrowMql = window.matchMedia('(max-width: 800px)');
+    syncNarrow();
+    narrowMql.addEventListener('change', syncNarrow);
+  }
+});
+onBeforeUnmount(() => {
+  if (narrowMql) {
+    narrowMql.removeEventListener('change', syncNarrow);
+    narrowMql = null;
+  }
+});
 
 function showAll() {
   void uiStore.setActiveProject('all');
@@ -33,25 +59,33 @@ function showAll() {
       >All</button>
       <span v-if="scopedName" class="f-scope-name" :title="`Scoped to ${scopedName}`">{{ scopedName }}</span>
     </span>
-    <input
-      v-model="board.filters.search"
-      class="f-search"
-      type="search"
-      placeholder="Filter cards…"
-      aria-label="Filter cards by text"
-    />
-    <select v-model="board.filters.project" class="f-select" aria-label="Filter by project">
-      <option value="">All projects</option>
-      <option v-for="p in projects" :key="p" :value="p">{{ p }}</option>
-    </select>
-    <select v-model="board.filters.agent" class="f-select" aria-label="Filter by agent">
-      <option value="">All agents</option>
-      <option v-for="a in agents" :key="a" :value="a">{{ a }}</option>
-    </select>
-    <select v-model="board.filters.priority" class="f-select" aria-label="Filter by priority">
-      <option value="">Any priority</option>
-      <option v-for="p in PRIORITIES" :key="p.id" :value="p.id">{{ p.label }}</option>
-    </select>
+    <button
+      v-if="isNarrow"
+      class="f-toggle"
+      :aria-expanded="filtersOpen"
+      @click="filtersOpen = !filtersOpen"
+    >Filters</button>
+    <template v-if="!isNarrow || filtersOpen">
+      <input
+        v-model="board.filters.search"
+        class="f-search"
+        type="search"
+        placeholder="Filter cards…"
+        aria-label="Filter cards by text"
+      />
+      <select v-model="board.filters.project" class="f-select" aria-label="Filter by project">
+        <option value="">All projects</option>
+        <option v-for="p in projects" :key="p" :value="p">{{ p }}</option>
+      </select>
+      <select v-model="board.filters.agent" class="f-select" aria-label="Filter by agent">
+        <option value="">All agents</option>
+        <option v-for="a in agents" :key="a" :value="a">{{ a }}</option>
+      </select>
+      <select v-model="board.filters.priority" class="f-select" aria-label="Filter by priority">
+        <option value="">Any priority</option>
+        <option v-for="p in PRIORITIES" :key="p.id" :value="p.id">{{ p.label }}</option>
+      </select>
+    </template>
     <button
       v-if="board.isFiltering"
       class="f-clear"
@@ -147,6 +181,33 @@ function showAll() {
   border-color: var(--text-accent, #c2532f);
 }
 
+.f-toggle {
+  height: 28px;
+  padding: 0 0.625rem;
+  border: 1px solid var(--border-color, #e3dbcf);
+  border-radius: var(--radius-md, 6px);
+  background: transparent;
+  color: var(--text-secondary, #6b6259);
+  font-family: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.f-toggle:hover {
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  color: var(--text-primary, #2b2723);
+}
+
+.f-toggle[aria-expanded='true'] {
+  border-color: var(--text-accent, #c2532f);
+  color: var(--text-accent, #c2532f);
+}
+
+.f-toggle:focus-visible {
+  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
+  outline-offset: 1px;
+}
+
 .f-clear {
   height: 28px;
   padding: 0 0.625rem;
@@ -168,8 +229,14 @@ function showAll() {
   .f-search,
   .f-select,
   .f-clear,
-  .f-scope-all {
+  .f-scope-all,
+  .f-toggle {
     height: 44px;
+  }
+
+  /* Collapsed row is a single tap target line. */
+  .f-toggle {
+    flex: 1 1 100%;
   }
 }
 </style>

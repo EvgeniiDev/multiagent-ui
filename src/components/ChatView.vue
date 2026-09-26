@@ -3,7 +3,9 @@ import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue'
 import { marked } from 'marked';
 import { useSessionStore } from '../stores/session';
 import { useActivityStore } from '../stores/activity';
+import { useUiStore } from '../stores/ui';
 import { isMobile } from '../lib/platform';
+import { loadKvStore, type KVStore } from '../lib/host';
 import { readAttachments, formatBytes, extractReplayedAttachments, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from '../lib/attachments';
 import ModePicker from './ModePicker.vue';
 import ModelPicker from './ModelPicker.vue';
@@ -11,9 +13,22 @@ import CommandPalette from './CommandPalette.vue';
 import VoiceInput from './VoiceInput.vue';
 import NewSessionDialog from '../features/projects/NewSessionDialog.vue';
 import type { Attachment, AttachmentMeta, SlashCommand } from '../lib/types';
+import type { SessionTab } from '../lib/sessionRuntime';
 import type { SttPartial } from '../lib/stt';
 
+const props = defineProps<{
+  /** Working directory shown in the chat sidebar — the New session dialog
+   *  opens with it so the modal matches the path the user picked there. */
+  sidebarCwd?: string;
+  /** The tab's session runtime — one ChatView instance per open tab, kept
+   *  alive (v-show) so scroll position and composer draft survive a switch.
+   *  Reached through the reactive tabs array, so its ref fields surface
+   *  unwrapped (rt.isLoading is a plain boolean). */
+  runtime: SessionTab;
+}>();
+
 const sessionStore = useSessionStore();
+const uiStore = useUiStore();
 const inputText = ref('');
 const messagesContainer = ref<HTMLElement | null>(null);
 const commandPaletteRef = ref<InstanceType<typeof CommandPalette> | null>(null);
@@ -21,6 +36,13 @@ const commandPaletteRef = ref<InstanceType<typeof CommandPalette> | null>(null);
 // Header "New session": unlike the sidebar button (hidden while
 // connected), this one stays put for as long as the chat view is mounted.
 const showNewSession = ref(false);
+
+/** Working directory the header's "New session" dialog opens with — the
+ *  path picked in the sidebar, or the scoped project's path when the
+ *  sidebar field is empty (mirrors the welcome-screen dialog). */
+const newSessionCwd = computed(
+  () => props.sidebarCwd || uiStore.activeProject?.path || ''
+);
 
 // Files staged for the next turn, and the last attach error (limits, wrong type).
 const attachments = ref<Attachment[]>([]);
@@ -30,7 +52,8 @@ const composerEl = ref<HTMLTextAreaElement | null>(null);
 const composerBox = ref<HTMLElement | null>(null);
 const voiceInputRef = ref<InstanceType<typeof VoiceInput> | null>(null);
 const voiceOverlayEl = ref<HTMLElement | null>(null);
-const supportsImages = computed(() => sessionStore.supportsImages);
+const rt = props.runtime;
+const supportsImages = computed(() => rt.supportsImages);
 const imageHint = computed(
   () => `Images and text files (max ${formatBytes(MAX_IMAGE_ATTACHMENT_BYTES)} / ${formatBytes(MAX_TEXT_ATTACHMENT_BYTES)})`
 );
@@ -40,10 +63,72 @@ const imageHint = computed(
 // Send button. On desktop, Enter still submits and Shift+Enter newlines.
 const submitOnEnter = !isMobile();
 
+// Narrow-viewport signal for the composer — same query as App.vue's
+// sidebar-drawer breakpoint. Placeholder text and the desktop-only update
+// nag can't be swapped by CSS, so the flag lives here.
+const isNarrowLayout = ref(false);
+let narrowMql: MediaQueryList | null = null;
+function syncNarrowLayout() {
+  if (narrowMql) isNarrowLayout.value = narrowMql.matches;
+}
+
+// ---------------- Update nag ----------------
+//
+// Agent CLIs announce their own updates on stderr ("New version available:
+// vX (installed vY). Run: npm i -g …") — those lines land in the runtime's
+// startup log. Dismissal persists the offered version in preferences.json
+// (same KV store the App shell keeps lastCwd in): the same version stays
+// hidden, a newer one re-arms the strip.
+const NAG_PATTERN = /new version available:\s*v?(\S+)\s*\(installed\s+v?(\S+?)\)/i;
+
+const updateNag = computed(() => {
+  for (const line of rt.startupLogs) {
+    const m = NAG_PATTERN.exec(line);
+    // offered = vX (the version the agent advertises); kept for the
+    // dismissal comparison. The strip shows the agent's line verbatim.
+    if (m) return { text: line.trim(), offered: m[1] };
+  }
+  return null;
+});
+
+const updateNagDismissed = ref<string | null>(null);
+
+const showUpdateNag = computed(
+  () =>
+    updateNag.value !== null &&
+    !isNarrowLayout.value &&
+    updateNagDismissed.value !== updateNag.value.offered
+);
+
+let prefsStore: KVStore | null = null;
+
+async function loadUpdateNagDismissal() {
+  try {
+    prefsStore = await loadKvStore('preferences.json');
+    updateNagDismissed.value =
+      (await prefsStore.get<string>('updateNagDismissed')) ?? null;
+  } catch (e) {
+    console.warn('Failed to load update-nag dismissal:', e);
+  }
+}
+
+async function dismissUpdateNag() {
+  const offered = updateNag.value?.offered;
+  if (!offered) return;
+  updateNagDismissed.value = offered;
+  try {
+    if (!prefsStore) prefsStore = await loadKvStore('preferences.json');
+    await prefsStore.set('updateNagDismissed', offered);
+    await prefsStore.save();
+  } catch (e) {
+    console.warn('Failed to persist update-nag dismissal:', e);
+  }
+}
+
 // Track expanded thought sections by message id
 const expandedThoughts = ref<Set<string>>(new Set());
 
-const messages = computed(() => sessionStore.messageList);
+const messages = computed(() => rt.messageList);
 
 /**
  * One file can reach a message twice: as a real content block (or the panel's
@@ -134,19 +219,44 @@ function toggleAttachment(messageId: string, index: number): void {
   if (expandedAttachments.value.has(key)) expandedAttachments.value.delete(key);
   else expandedAttachments.value.add(key);
 }
-const isLoading = computed(() => sessionStore.isLoading);
-const isConnected = computed(() => sessionStore.isConnected);
-const isReconnecting = computed(() => sessionStore.isReconnecting);
+const isLoading = computed(() => rt.isLoading);
+const isConnected = computed(() => rt.isConnected);
+const isReconnecting = computed(() => rt.isReconnecting);
 // Non-null while the feed shows the localStorage tail instead of a settled
 // transcript: 'loading' during the parallel replay, 'stale' when it died.
-const historyCacheNote = computed(() => sessionStore.historyCacheNote);
-const currentSession = computed(() => sessionStore.currentSession);
-const availableModes = computed(() => sessionStore.availableModes);
-const currentModeId = computed(() => sessionStore.currentModeId);
-const availableModels = computed(() => sessionStore.availableModels);
-const currentModelId = computed(() => sessionStore.currentModelId);
-const availableCommands = computed(() => sessionStore.availableCommands);
-const isAutonomous = computed(() => sessionStore.autonomous);
+const historyCacheNote = computed(() => rt.historyCacheNote);
+const currentSession = computed(() => rt.session);
+const availableModes = computed(() => rt.availableModes);
+const currentModeId = computed(() => rt.currentModeId);
+const availableModels = computed(() => rt.availableModels);
+const currentModelId = computed(() => rt.currentModelId);
+
+// Context meter ("45k/200k") from the agent's usage_update frames; hidden
+// until the agent reports one.
+const contextLabel = computed(() => {
+  const used = rt.contextUsed;
+  if (used == null) return '';
+  const f = (n: number) =>
+    n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`;
+  return rt.contextSize != null ? `${f(used)}/${f(rt.contextSize)}` : f(used);
+});
+const contextTitle = computed(() => {
+  const pct = rt.contextUsed != null && rt.contextSize ? Math.round((rt.contextUsed / rt.contextSize) * 100) : null;
+  return pct != null ? `Context: ${pct}% of the window used` : 'Context used';
+});
+const availableCommands = computed(() => rt.availableCommands);
+const isAutonomous = computed(() => rt.autonomous);
+
+// The long desktop placeholder wraps to a second line and clips vertically
+// on a phone; CSS can't swap placeholder text, so pick the short form here.
+const composerPlaceholder = computed(() => {
+  if (!isConnected.value) return 'Offline — cached copy';
+  if (isReconnecting.value) return 'Reconnecting…';
+  if (isNarrowLayout.value) return 'Message…';
+  return availableCommands.value.length > 0
+    ? 'Type your message... (/ for commands)'
+    : 'Type your message...';
+});
 
 // Slash command state
 const showCommandPalette = computed(() => {
@@ -283,6 +393,14 @@ watch(() => currentSession.value?.sessionId, (id, prev) => {
   followBottom.value = true;
   feedWindow.value = FEED_WINDOW_INIT;
   void nextTick(pinFeedToBottom);
+});
+
+// A background tab mounts hidden (v-show): pin writes to a display:none
+// feed are no-ops, so a transcript that streamed in while unfocused would
+// open at the top. Re-pin when the tab becomes visible — only while the
+// feed is still in follow mode; a user who scrolled up keeps their place.
+watch(() => sessionStore.activeTabId === rt.id, (isActive) => {
+  if (isActive && followBottom.value) void nextTick(pinFeedToBottom);
 });
 
 // Composer autosize: the field rests at one line — the same height as the
@@ -432,6 +550,15 @@ function syncVoiceOverlayScroll() {
 let composerRo: ResizeObserver | null = null;
 let composerBoxWidth = 0;
 onMounted(() => {
+  // Same MediaQueryList pattern as App.vue's sidebar breakpoint: correct
+  // across orientation changes, no resize-throttling.
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    narrowMql = window.matchMedia('(max-width: 800px)');
+    syncNarrowLayout();
+    narrowMql.addEventListener('change', syncNarrowLayout);
+  }
+  // Dismissed update-nag version, persisted in preferences.json.
+  void loadUpdateNagDismissal();
   autosizeComposer();
   // Land on the newest messages: mount starts in follow mode and the pin
   // covers both first paint and a replay already streaming in.
@@ -457,6 +584,10 @@ onMounted(() => {
 onBeforeUnmount(() => {
   composerRo?.disconnect();
   composerRo = null;
+  if (narrowMql) {
+    narrowMql.removeEventListener('change', syncNarrowLayout);
+    narrowMql = null;
+  }
 });
 
 async function handleSend() {
@@ -476,12 +607,12 @@ async function handleSend() {
   attachments.value = [];
   attachError.value = null;
   try {
-    await sessionStore.sendPrompt(text, files);
+    await rt.sendPrompt(text, files);
   } catch (e) {
     // A rejected prompt used to die in the console: the composer cleared, the
     // turn produced nothing, and the user saw no reason. Surface it.
     console.error('Failed to send prompt:', e);
-    sessionStore.error = `Send failed: ${e instanceof Error ? e.message : String(e)}`;
+    rt.error = `Send failed: ${e instanceof Error ? e.message : String(e)}`;
     // Hand the files back so the turn can be retried without re-picking them.
     attachments.value = files;
     inputText.value = text;
@@ -509,7 +640,7 @@ async function handleFilesPicked(event: Event) {
   const notes = [
     ...errors,
     ...(unsupportedImages.length
-      ? [`${sessionStore.lastAgentName || 'This agent'} does not accept images`]
+      ? [`${rt.agentName || 'This agent'} does not accept images`]
       : []),
   ];
   attachError.value = notes.length ? notes.join(' · ') : null;
@@ -559,12 +690,12 @@ function handleCommandClose() {
 }
 
 function handleCancel() {
-  sessionStore.cancelOperation();
+  rt.cancelOperation();
 }
 
 async function handleModeChange(modeId: string) {
   try {
-    await sessionStore.setMode(modeId);
+    await rt.setMode(modeId);
   } catch (e) {
     console.error('Failed to change mode:', e);
   }
@@ -572,7 +703,7 @@ async function handleModeChange(modeId: string) {
 
 async function handleModelChange(modelId: string) {
   try {
-    await sessionStore.setModel(modelId);
+    await rt.setModel(modelId);
   } catch (e) {
     console.error('Failed to change model:', e);
   }
@@ -659,7 +790,11 @@ function getToolKind(kind: string): string {
     <div class="chat-header">
       <h2>{{ currentSession?.title || 'Chat' }}</h2>
       <div class="header-right">
+        <!-- New-session entry points live in the sidebar + welcome screen;
+             the header button only shows with no session yet (welcome
+             state), never crowding the mode/model pickers of an open chat. -->
         <button
+          v-if="!isConnected && !currentSession"
           class="chat-new-session"
           type="button"
           :disabled="isLoading || isReconnecting"
@@ -667,20 +802,8 @@ function getToolKind(kind: string): string {
         >
           New session
         </button>
-        <ModelPicker 
-          v-if="availableModels.length > 0"
-          :models="availableModels"
-          :current-model-id="currentModelId"
-          :disabled="isLoading"
-          @change="handleModelChange"
-        />
-        <ModePicker 
-          v-if="availableModes.length > 0"
-          :modes="availableModes"
-          :current-mode-id="currentModeId"
-          :disabled="isLoading"
-          @change="handleModeChange"
-        />
+        <!-- Model/mode pickers live in the composer's bottom menu now; the
+             header keeps only the session title + agent name. -->
         <span class="agent-name">{{ currentSession?.agentName }}<span v-if="isAutonomous" class="auto-badge">auto</span></span>
       </div>
     </div>
@@ -817,6 +940,19 @@ function getToolKind(kind: string): string {
     </div>
     
     <div class="input-container">
+      <!-- Update nag: the agent's own npm update notice from stderr. Desktop
+           only; the × persists the offered version, so this exact nag stays
+           dismissed while a newer one re-arms the strip. -->
+      <div v-if="showUpdateNag && updateNag" class="update-nag" role="status">
+        <span class="update-nag-text" :title="updateNag.text">{{ updateNag.text }}</span>
+        <button
+          class="update-nag-close"
+          @click="dismissUpdateNag"
+          title="Dismiss"
+          aria-label="Dismiss update notice"
+        >×</button>
+      </div>
+
       <CommandPalette
         ref="commandPaletteRef"
         :commands="availableCommands"
@@ -857,53 +993,16 @@ function getToolKind(kind: string): string {
       >{{ voiceStatusText }}</div>
 
       <div class="input-row">
-        <!-- Field + attach read as one control: the hairline frame is the
-             box, the ghost attach button sits inside it on the last line. -->
+        <!-- One framed card, Claude-Code style: the field on top, the bottom
+             menu row under it — attach + mic, model and thinking pickers,
+             then the context meter and send on the right. -->
         <div ref="composerBox" class="composer-box">
-          <button
-            class="icon-btn attach-btn"
-            :class="{ active: attachments.length > 0 }"
-            :disabled="isLoading || isReconnecting || !isConnected"
-            @click="openFilePicker"
-            :title="imageHint"
-            aria-label="Attach files"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              width="16"
-              height="16"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M21.44 11.05l-8.49 8.49a5.5 5.5 0 01-7.78-7.78l8.49-8.49a3.5 3.5 0 014.95 4.95l-8.49 8.49a1.5 1.5 0 01-2.12-2.12l7.78-7.78" />
-            </svg>
-          </button>
-          <input
-            ref="fileInput"
-            class="file-input"
-            type="file"
-            multiple
-            accept="image/*,.txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.xml,.html,.css,.js,.mjs,.ts,.tsx,.vue,.py,.sh,.sql,.toml,.ini,.cfg,.conf,.diff,.patch"
-            @change="handleFilesPicked"
-          />
           <div class="composer-field">
             <textarea
               ref="composerEl"
               v-model="inputText"
               :class="{ 'voice-ghost': voiceActive }"
-              :placeholder="
-                !isConnected
-                  ? 'Offline — cached copy'
-                  : isReconnecting
-                    ? 'Reconnecting…'
-                    : (availableCommands.length > 0
-                        ? 'Type your message... (/ for commands)'
-                        : 'Type your message...')
-              "
+              :placeholder="composerPlaceholder"
               :disabled="isLoading || isReconnecting || !isConnected"
               @keydown="handleKeyDown"
               @scroll="syncVoiceOverlayScroll"
@@ -919,40 +1018,98 @@ function getToolKind(kind: string): string {
               aria-hidden="true"
             ><span>{{ voicePre }}</span><span>{{ voiceSep }}</span><span class="voice-commit">{{ voiceCommitted }}</span><span class="voice-volatile">{{ voiceVolatile }}</span><span>{{ voicePost }}</span></div>
           </div>
+          <div class="composer-menu">
+            <button
+              class="icon-btn attach-btn"
+              :class="{ active: attachments.length > 0 }"
+              :disabled="isLoading || isReconnecting || !isConnected"
+              @click="openFilePicker"
+              :title="imageHint"
+              aria-label="Attach files"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="16"
+                height="16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M21.44 11.05l-8.49 8.49a5.5 5.5 0 01-7.78-7.78l8.49-8.49a3.5 3.5 0 014.95 4.95l-8.49 8.49a1.5 1.5 0 01-2.12-2.12l7.78-7.78" />
+              </svg>
+            </button>
+            <input
+              ref="fileInput"
+              class="file-input"
+              type="file"
+              multiple
+              accept="image/*,.txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.xml,.html,.css,.js,.mjs,.ts,.tsx,.vue,.py,.sh,.sql,.toml,.ini,.cfg,.conf,.diff,.patch"
+              @change="handleFilesPicked"
+            />
+            <VoiceInput
+              ref="voiceInputRef"
+              :disabled="isLoading || isReconnecting || !isConnected"
+              @state="onVoiceState"
+              @partial="onVoicePartial"
+              @final="onVoiceFinal"
+              @error="onVoiceError"
+            />
+            <ModelPicker
+              v-if="availableModels.length > 0"
+              :models="availableModels"
+              :current-model-id="currentModelId"
+              :disabled="isLoading"
+              compact
+              @change="handleModelChange"
+            />
+            <ModePicker
+              v-if="availableModes.length > 0"
+              :modes="availableModes"
+              :current-mode-id="currentModeId"
+              :disabled="isLoading"
+              compact
+              @change="handleModeChange"
+            />
+            <span class="composer-spacer" aria-hidden="true"></span>
+            <span
+              v-if="contextLabel"
+              class="context-meter"
+              :title="contextTitle"
+            >{{ contextLabel }}</span>
+            <button
+              class="icon-btn send-btn"
+              :disabled="(!inputText.trim() && attachments.length === 0) || isLoading || isReconnecting || !isConnected"
+              @click="handleSend"
+              title="Send"
+              aria-label="Send"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="16"
+                height="16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M22 2 11 13" />
+                <path d="M22 2 15 22l-4-9-9-4 20-7z" />
+              </svg>
+            </button>
+          </div>
         </div>
-        <VoiceInput
-          ref="voiceInputRef"
-          :disabled="isLoading || isReconnecting || !isConnected"
-          @state="onVoiceState"
-          @partial="onVoicePartial"
-          @final="onVoiceFinal"
-          @error="onVoiceError"
-        />
-        <button
-          class="icon-btn send-btn"
-          :disabled="(!inputText.trim() && attachments.length === 0) || isLoading || isReconnecting || !isConnected"
-          @click="handleSend"
-          title="Send"
-          aria-label="Send"
-        >
-          <svg
-            viewBox="0 0 24 24"
-            width="16"
-            height="16"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.5"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <path d="M22 2 11 13" />
-            <path d="M22 2 15 22l-4-9-9-4 20-7z" />
-          </svg>
-        </button>
       </div>    </div>
 
-    <NewSessionDialog v-if="showNewSession" @close="showNewSession = false" />
+    <NewSessionDialog
+      v-if="showNewSession"
+      :initial-cwd="newSessionCwd"
+      @close="showNewSession = false"
+    />
   </div>
 </template>
 
@@ -960,7 +1117,12 @@ function getToolKind(kind: string): string {
 .chat-view {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  /* Flex sibling of the tab strip in .main-content: take the remaining
+   * height and allow shrinking below min-content — height:100% here made
+   * the composer overflow past the viewport by exactly the tab strip's
+   * height whenever 2+ tabs were open. */
+  flex: 1;
+  min-height: 0;
 }
 
 .chat-header {
@@ -1291,6 +1453,26 @@ function getToolKind(kind: string): string {
   background: var(--tint-hover, rgba(43, 39, 35, 0.045));
   padding: 0.0625rem 0.25rem;
   border-radius: 3px;
+  /* Code chips are tokens: never split mid-token (`131k/1.0М` used to
+   * break between glyphs on a narrow screen). They still wrap at spaces;
+   * prose keeps `overflow-wrap: anywhere` from .message-content. */
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+/* Markdown tables on a narrow screen: the table scrolls horizontally inside
+ * the message instead of crushing its columns into mid-word wraps. Cells
+ * drop the prose-wide `overflow-wrap: anywhere` and wrap whole words. */
+.message-content :deep(table) {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.message-content :deep(td),
+.message-content :deep(th) {
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .message-content :deep(pre code) {
@@ -1350,20 +1532,40 @@ function getToolKind(kind: string): string {
   gap: 0.5rem;
 }
 
-/* The composer is one control: a single hairline frame wraps the field and
- * the attach button. Everything inside is flex-end so the buttons keep
- * sitting on the last line while the textarea grows. */
+/* One framed card: the field on top, the bottom menu row beneath it —
+ * attach + mic on the left, model/thinking pickers next, context meter and
+ * send on the right. */
 .composer-box {
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: flex-end;
-  gap: 0.375rem;
-  padding: 0 0.375rem;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.25rem 0.5rem;
   border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
   border-radius: var(--radius-lg, 10px);
   background: var(--bg-main, #fbf8f3);
   transition: border-color 0.15s;
+}
+
+.composer-menu {
+  display: flex;
+  align-items: center;
+  gap: 0.125rem;
+  flex-wrap: wrap;
+}
+
+.composer-spacer {
+  flex: 1;
+}
+
+.context-meter {
+  flex: 0 0 auto;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.7rem;
+  color: var(--text-muted, #a39a8e);
+  white-space: nowrap;
+  padding: 0 0.375rem;
 }
 
 .composer-box:focus-within {
@@ -1493,6 +1695,50 @@ function getToolKind(kind: string): string {
   padding: 0 0.125rem;
   font-size: 0.6875rem;
   color: var(--bg-danger, #b3402e);
+}
+
+/* Update nag: one quiet warning-tinted strip above the composer. The long
+ * npm command ellipsizes — the full line is on the title tooltip. */
+.update-nag {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.375rem 0.25rem 0.625rem;
+  border-radius: var(--radius-md, 6px);
+  background: var(--bg-warning, #f5e9cf);
+}
+
+.update-nag-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6875rem;
+  color: var(--text-primary, #2b2723);
+}
+
+.update-nag-close {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-secondary, #6b6259);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.update-nag-close:hover {
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  color: var(--text-primary, #2b2723);
 }
 
 /* Sent attachments in the transcript: one bordered block per file, stacked,
@@ -1712,13 +1958,22 @@ function getToolKind(kind: string): string {
 /* ---------- Mobile / narrow-viewport tweaks ---------- */
 
 @media (max-width: 800px) {
-  /* Reserve space for the floating mobile hamburger (44px wide, fixed in
-     App.vue) so the mode/model pickers don't sit underneath it. Also push
-     the header below the camera notch / status bar so picker buttons aren't
-     clipped on phones with a hole-punch or notch. */
+  /* The mobile hamburger lives in the scope bar (in flow, right edge) —
+     the header needs no reserved gutter. Push the header below the camera
+     notch / status bar so picker buttons aren't clipped on phones with a
+     hole-punch or notch. */
   .chat-header {
-    padding-top: calc(1rem + env(safe-area-inset-top, 0px));
-    padding-left: calc(44px + 1rem);
+    display: flex;
+    flex-wrap: wrap;
+    padding-top: calc(0.625rem + env(safe-area-inset-top, 0px));
+  }
+
+  /* Mode/model pickers share one wrapping row — never crushed under
+     each other or the header edge on 390px viewports. */
+  .header-right {
+    display: flex;
+    flex-wrap: wrap;
+    min-width: 0;
   }
 
   /* Agent identity is already shown in the sidebar drawer; on a phone the
@@ -1762,10 +2017,27 @@ function getToolKind(kind: string): string {
     min-height: 44px;
   }
 
-  /* Touch targets: same square geometry, bumped to 44px. */
+  /* Touch targets: same square geometry, bumped to 44px. The composer
+     row stays one line — the field flexes, buttons never shrink or
+     wrap, and nothing may overflow the 390px viewport. */
+  .input-row {
+    flex-wrap: nowrap;
+    overflow: hidden;
+  }
+
+  .composer-box {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
   .icon-btn {
+    flex: 0 0 auto;
     width: 44px;
     height: 44px;
+  }
+
+  .voice-btn {
+    flex: 0 0 auto;
   }
 
   /* Narrow screens: give the reading column the full width back. */

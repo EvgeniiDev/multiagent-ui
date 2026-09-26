@@ -37,8 +37,10 @@ Asserts:
   * when the replay finishes the newest message is in the viewport;
   * sending a message from a scrolled-up position returns the feed to
     the bottom;
-  * explicit Disconnect, reload -> the welcome screen stays (no zombie
-    auto-resume of a session the user closed);
+  * starting a NEW session from the list's "+" and reloading -> the chat is
+    connected again and the persisted pointer follows the new session, not
+    the one it replaced (the Disconnect button no longer exists — that is the
+    only manual close left, so a zombie auto-resume would be its failure);
   * zero pageerror events.
 
 Usage:
@@ -242,24 +244,33 @@ def wire(page, tag):
     page.on("pageerror", lambda exc: page_errors.append(f"{tag}: {exc}"))
 
 
+# Tabs keep every open session's ChatView mounted (v-show), so DOM queries
+# must pick the VISIBLE feed — hidden tab containers still match a plain
+# selector. `offsetParent !== null` is the cheapest display:none test.
+VISIBLE_FEED = """[...document.querySelectorAll('.messages-container')]
+  .find(e => e.offsetParent !== null)"""
+
 # Distance in px between the feed's scroll position and its newest message.
 FROM_BOTTOM = """() => {
-  const f = document.querySelector('.messages-container');
+  const f = %s;
   return f ? f.scrollHeight - f.scrollTop - f.clientHeight : -1;
-}"""
+}""" % VISIBLE_FEED
 
 # Is the last `.message` element fully inside the feed's viewport?
 LAST_IN_VIEW = """() => {
-  const f = document.querySelector('.messages-container');
+  const f = %s;
   if (!f) return 'no-feed';
   const msgs = f.querySelectorAll('.messages .message');
   if (!msgs.length) return 'no-messages';
   const last = msgs[msgs.length - 1].getBoundingClientRect();
   const fr = f.getBoundingClientRect();
   return last.top >= fr.top - 1 && last.bottom <= fr.bottom + 1;
-}"""
+}""" % VISIBLE_FEED
 
-MESSAGE_COUNT = "document.querySelectorAll('.messages .message').length"
+MESSAGE_COUNT = (
+    "(() => { const f = " + VISIBLE_FEED + ";"
+    "  return f ? f.querySelectorAll('.messages .message').length : 0; })()"
+)
 
 
 def from_bottom(page):
@@ -268,7 +279,7 @@ def from_bottom(page):
 
 def wheel_up(page, px):
     """A real user scroll-up over the feed (cursor stays parked on it)."""
-    box = page.locator(".messages-container").bounding_box()
+    box = page.locator(".messages-container:visible").bounding_box()
     page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
     page.mouse.wheel(0, -px)
 
@@ -298,7 +309,8 @@ def wait_replay_done(page, marker, timeout=30.0):
     ok = poll_eval(
         page,
         f"document.body.textContent.includes({json.dumps(marker)})"
-        " && !document.querySelector('.loading-indicator')",
+        " && ![...document.querySelectorAll('.loading-indicator')]"
+        "    .find(e => e.offsetParent !== null)",
         timeout=timeout,
     )
     page.wait_for_timeout(250)  # let the final pin + indicator removal settle
@@ -315,19 +327,19 @@ def expand_feed(page, timeout=15.0):
     prev = -1
     while time.time() < deadline:
         page.evaluate(
-            "(() => { const f = document.querySelector('.messages-container');"
+            "(() => { const f = " + VISIBLE_FEED + ";"
             "  if (f) f.scrollTop = 0; })()")
         page.wait_for_timeout(150)
         n = page.evaluate(MESSAGE_COUNT)
         at_top = page.evaluate(
-            "(() => { const f = document.querySelector('.messages-container');"
+            "(() => { const f = " + VISIBLE_FEED + ";"
             "  return !!f && f.scrollTop === 0; })()")
         # Converged: truly at the top and no new rows mounted.
         if at_top and n == prev:
             # Return the feed to where the pin-asserts expect it: the
             # newest message (same as a user scrolling back down).
             page.evaluate(
-                "(() => { const f = document.querySelector('.messages-container');"
+                "(() => { const f = " + VISIBLE_FEED + ";"
                 "  if (f) f.scrollTop = f.scrollHeight; })()")
             page.wait_for_timeout(150)
             return True
@@ -350,9 +362,9 @@ def run_checks():
         check("fresh boot shows the welcome screen", True)
 
         # Connect a session like a user would.
-        page.wait_for_selector(".new-session-btn:not([disabled])", timeout=10000)
-        page.click(".new-session-btn")
-        page.wait_for_selector(".input-row", timeout=15000)
+        page.wait_for_selector(".list-new-session:not([disabled])", timeout=10000)
+        page.click(".list-new-session")
+        page.wait_for_selector(".input-row:visible", timeout=15000)
         check("session connects before reload", True)
 
         # The agent's own inventory surfaces in the sidebar (session/list).
@@ -364,7 +376,7 @@ def run_checks():
 
         # F5: the chat must come back by itself, with the replayed history.
         page.reload(wait_until="load")
-        page.wait_for_selector(".input-row", timeout=15000)
+        page.wait_for_selector(".input-row:visible", timeout=15000)
         check("reload restores the chat view, not the welcome screen",
               page.locator(".welcome-screen").count() == 0)
         agent = page.eval_on_selector("#agent-select", "el => el.value")
@@ -461,8 +473,8 @@ def run_checks():
         fb_pre = from_bottom(page)
         check("scrolled up before sending", fb_pre > 200,
               f"fromBottom={fb_pre}px")
-        page.fill(".composer-box textarea", "ping")
-        page.click(".send-btn")
+        page.fill(".composer-box textarea:visible", "ping")
+        page.click(".send-btn:visible")
         poll_eval(page, f"document.body.textContent.includes({json.dumps(C_REPLY)})",
                   timeout=10.0)
         page.wait_for_timeout(200)
@@ -470,18 +482,23 @@ def run_checks():
         check("sending a message returns the feed to the bottom",
               fb_send >= 0 and fb_send <= 2, f"fromBottom={fb_send}px")
 
-        # Explicit Disconnect must NOT auto-resume on the next reload.
-        page.click(".disconnect-btn")
-        page.wait_for_selector(".welcome-screen", timeout=10000)
+        # Closing the open session from the list's "+" (New session). There is
+        # no Disconnect button any more — this is the only manual close left,
+        # and it must not leave the reload pointing at the session it replaced.
+        pointer_before = page.evaluate(
+            "() => JSON.parse(localStorage.getItem('acp-ui:sessions.json') || '{}')"
+        ).get("currentSessionId")
+        page.click(".list-new-session")
+        page.wait_for_selector(".input-row:visible", timeout=15000)
         page.reload(wait_until="load")
-        page.wait_for_selector(".welcome-screen", timeout=10000)
-        check("disconnect + reload stays on the welcome screen",
-              page.locator(".input-row").count() == 0)
+        page.wait_for_selector(".input-row:visible", timeout=15000)
+        check("new session + reload comes back connected, not the welcome screen",
+              page.locator(".input-row:visible").count() == 1)
         stored = page.evaluate(
             "() => JSON.parse(localStorage.getItem('acp-ui:sessions.json') || '{}')")
-        check("disconnect clears the persisted pointer",
-              stored.get("currentSessionId") in (None, ""),
-              repr(stored.get("currentSessionId")))
+        check("the persisted pointer follows the new session",
+              stored.get("currentSessionId") not in (None, "", pointer_before),
+              f"{pointer_before!r} -> {stored.get('currentSessionId')!r}")
 
         ctx.close()
         browser.close()

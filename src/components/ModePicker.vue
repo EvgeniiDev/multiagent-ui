@@ -6,6 +6,9 @@ const props = defineProps<{
   modes: SessionMode[];
   currentModeId: string;
   disabled?: boolean;
+  /** Borderless inline chip for the composer's bottom menu — strips a
+   * "Thinking: "-style prefix and reads as plain text with a caret. */
+  compact?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -17,6 +20,14 @@ const isOpen = ref(false);
 const currentMode = computed(() => 
   props.modes.find(m => m.id === props.currentModeId)
 );
+
+// Compact chip label: agents name modes like "Thinking: high" — the prefix
+// is context the composer menu already provides, show just the value.
+const compactLabel = computed(() => {
+  const name = currentMode.value?.name || props.currentModeId;
+  const i = name.lastIndexOf(':');
+  return i >= 0 ? name.slice(i + 1).trim() : name;
+});
 
 function toggleDropdown() {
   if (!props.disabled) {
@@ -45,13 +56,14 @@ if (typeof window !== 'undefined') {
 </script>
 
 <template>
-  <div class="mode-picker" :class="{ disabled }">
+  <div class="mode-picker" :class="{ disabled, compact }">
     <button 
       class="mode-button"
       :disabled="disabled"
       @click.stop="toggleDropdown"
     >
-      <span class="mode-name">{{ currentMode?.name || currentModeId }}</span>
+      <svg v-if="compact" class="effort-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 20v-6M12 20V10M19 20V4"/></svg>
+      <span class="mode-name">{{ compact ? compactLabel : (currentMode?.name || currentModeId) }}</span>
       <span class="dropdown-arrow">{{ isOpen ? '▲' : '▼' }}</span>
     </button>
     
@@ -85,6 +97,29 @@ if (typeof window !== 'undefined') {
 .mode-picker.disabled {
   opacity: 0.6;
   pointer-events: none;
+}
+
+/* Composer chip: text-like dropdown, no frame until hovered. */
+.mode-picker.compact .mode-button {
+  border: none;
+  background: transparent;
+  padding: 0.25rem 0.375rem;
+  color: var(--text-secondary, #6b6259);
+  font-size: 0.78rem;
+}
+
+.mode-picker.compact .mode-button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border: none;
+}
+
+.effort-icon {
+  flex-shrink: 0;
+}
+
+.mode-picker.compact .mode-name {
+  font-weight: 500;
+  text-transform: capitalize;
 }
 
 .mode-button {

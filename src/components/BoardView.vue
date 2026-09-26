@@ -231,6 +231,15 @@ async function onOpenSession(session: { agentName: string; sessionId: string }) 
   min-height: 0;
 }
 
+/* Same 800px breakpoint as the App.vue sidebar drawer: on the narrow
+   layout the summary line duplicates the column switcher counts, so it
+   only shows on the desktop layout. */
+@media (max-width: 800px) {
+  .pane-note {
+    display: none;
+  }
+}
+
 @media (max-width: 800px) {
   .tab-btn {
     min-height: 44px;

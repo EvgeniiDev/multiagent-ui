@@ -11,6 +11,7 @@ import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import { loadKvStore, type KVStore } from '../lib/host/storage';
 import { useProjectsStore } from '../features/scope/registry';
+import { useSessionStore } from './session';
 
 export type ViewId = 'chat' | 'projects' | 'board' | 'dashboard';
 
@@ -72,6 +73,13 @@ export const useUiStore = defineStore('ui', () => {
       if (event.key === 'Escape') {
         showSettings.value = false;
         showTraffic.value = false;
+        return;
+      }
+      // Ctrl+Tab / Ctrl+Shift+Tab cycle session tabs like an IDE's open
+      // files — chorded, so they're allowed even while typing.
+      if (event.ctrlKey && !event.metaKey && !event.altKey && event.key === 'Tab') {
+        event.preventDefault();
+        useSessionStore().cycleTab(event.shiftKey ? -1 : 1);
         return;
       }
       if (typing || event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;

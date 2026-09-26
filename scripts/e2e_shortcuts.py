@@ -354,9 +354,9 @@ def main():
             expect_view(page, "1", "Chat", focus_sel=".scope-icon-btn")
 
             # ---- composer (needs a connected session) ---------------------
-            page.wait_for_selector(".new-session-btn:not([disabled])",
+            page.wait_for_selector(".list-new-session:not([disabled])",
                                    timeout=10000)
-            page.click(".new-session-btn")
+            page.click(".list-new-session")
             page.wait_for_selector(".input-row", timeout=15000)
             page.wait_for_timeout(400)
             expect_guarded(page, "the composer", "3", "Chat",
@@ -380,7 +380,10 @@ def main():
                            value_sel='[data-testid="role-id"]')
             overlay = page.locator(".settings-overlay")
             if overlay.count() and overlay.first.is_visible():
-                page.get_by_role("button", name="Close").first.click()
+                # name="Close" is a substring match — the tab strip's
+                # "Close tab" buttons would win .first; exact keeps it the
+                # dialog's own Close.
+                page.get_by_role("button", name="Close", exact=True).first.click()
                 page.wait_for_timeout(300)
             check("settings overlay closed",
                   page.locator(".settings-overlay").count() == 0

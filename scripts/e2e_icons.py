@@ -142,9 +142,9 @@ def main() -> int:
             if page.query_selector(".settings-panel"):
                 page.click(".settings-panel .close-btn")
                 page.wait_for_timeout(300)
-            new_session = page.query_selector(".new-session-btn")
+            new_session = page.query_selector(".list-new-session")
             if new_session:
-                page.click(".new-session-btn")
+                page.click(".list-new-session")
                 page.wait_for_timeout(500)
             banner = page.query_selector(".error-banner")
             banner_svg = page.query_selector(".error-banner .error-icon svg")

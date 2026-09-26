@@ -10,7 +10,7 @@ Asserts on the real bundle + mock agent:
     already-open error), the URL STILL carries the clicked session;
   * reloading with `?s=...` in the address bar restores THAT chat (the mock
     replays a per-session marker), regardless of the stored pointer;
-  * disconnect clears `?s` from the URL;
+  * closing the open session (the session list's "+") clears `?s` from the URL;
   * zero pageerror events.
 """
 import json
@@ -125,8 +125,8 @@ def main():
             page.route_web_socket(re.compile(r"^wss?://"), acp_ws)
             page.on("pageerror", lambda e: page_errors.append(str(e)))
             page.goto(base, wait_until="load")
-            page.wait_for_selector(".new-session-btn:not([disabled])", timeout=10000)
-            page.click(".new-session-btn")
+            page.wait_for_selector(".list-new-session:not([disabled])", timeout=10000)
+            page.click(".list-new-session")
             page.wait_for_selector(".input-row", timeout=15000)
             page.wait_for_selector(".session-row", timeout=10000)
 
@@ -149,12 +149,13 @@ def main():
 
             # 3. Reload with ?s=<locked> -> the URL keeps the user's choice even
             #    though the load is refused; the chat cannot come back (the agent
-            #    holds it), so the honest outcome is the welcome screen + the
-            #    error banner — with ?s STILL naming the clicked session.
+            #    holds it). With tabs, the failed tab stays open (its error is
+            #    the retry surface — click the tab to reconnect) instead of
+            #    dropping to the welcome screen — ?s STILL names the session.
             page.reload(wait_until="load")
-            page.wait_for_selector(".welcome-screen", timeout=15000)
-            check("locked reload: lands on the welcome screen (agent holds the session)",
-                  page.locator(".input-row").count() == 0)
+            page.wait_for_selector(".error-banner", timeout=15000)
+            check("locked reload: tab stays open with the lock error",
+                  page.locator(".error-banner").count() == 1)
             check("locked reload: ?s still names the clicked session",
                   url_key(page) == f"{AGENT_NAME}::{SID_LOCKED}", url_key(page))
 
@@ -166,10 +167,22 @@ def main():
                 "() => document.body.textContent.includes('MARKER-e2e-url-A')", timeout=15000)
             check("reload with ?s=<good> replays THAT session's transcript", True)
 
-            # 5. Disconnect clears ?s.
-            page.click(".disconnect-btn")
+            # 5. Closing every tab clears ?s. The Disconnect button is gone —
+            #    under tabs the manual close is the strip's "×"; each close
+            #    focuses a neighbour (the URL follows it), and the last tab
+            #    clears the param entirely.
+            for _ in range(10):
+                if page.locator(".tab").count() == 0:
+                    break
+                page.locator(".tab").first.hover()
+                page.locator(".tab .tab-close").first.click()
+                page.wait_for_timeout(200)
+            page.wait_for_function(
+                "() => !new URL(location.href).searchParams.get('s')", timeout=15000)
+            check("closing every tab clears ?s from the URL",
+                  url_key(page) is None, repr(url_key(page)))
             page.wait_for_selector(".welcome-screen", timeout=10000)
-            check("disconnect clears ?s from the URL", url_key(page) is None, repr(url_key(page)))
+            check("all tabs closed lands on the welcome screen", True)
 
             check("zero pageerror events", len(page_errors) == 0,
                   "; ".join(page_errors[:2]))

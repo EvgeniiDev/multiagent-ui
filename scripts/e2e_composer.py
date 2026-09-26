@@ -121,9 +121,9 @@ def open_chat(page, tag):
     if page.viewport_size and page.viewport_size["width"] < 800:
         page.wait_for_selector(".mobile-hamburger", timeout=10000)
         page.click(".mobile-hamburger")
-        page.wait_for_selector(".sidebar .new-session-btn", timeout=5000)
-    page.wait_for_selector(".new-session-btn:not([disabled])", timeout=10000)
-    page.click(".new-session-btn")
+        page.wait_for_selector(".sidebar .list-new-session", timeout=5000)
+    page.wait_for_selector(".list-new-session:not([disabled])", timeout=10000)
+    page.click(".list-new-session")
     page.wait_for_selector(".input-row", timeout=15000)
     page.wait_for_timeout(400)  # autosize + first paint
 

@@ -27,7 +27,6 @@ import { computed, ref } from 'vue';
 import { loadKvStore, type KVStore } from '../lib/host/storage';
 import { uuid } from '../lib/uuid';
 import { useActivityStore } from './activity';
-import { useUiStore } from './ui';
 import { useProjectsStore } from '../features/scope/registry';
 import { useReviewStore } from './review';
 
@@ -363,13 +362,10 @@ export const useBoardStore = defineStore('board', () => {
     return byBase?.id ?? null;
   }
 
-  /** Cards visible under the global project scope (`ui.ts` is the single
-   * source — 'all' shows everything, a project id shows its own cards). */
-  const scopedCards = computed(() => {
-    const scope = useUiStore().activeProjectId;
-    if (scope === 'all') return cards.value;
-    return cards.value.filter((c) => projectIdForCard(c) === scope);
-  });
+  /** All cards — the board is scoped by its own filter row (f.project), not
+   * by the sidebar's project-scope selector, which is a session-list filter
+   * and is not reachable from the board view. */
+  const scopedCards = computed(() => cards.value);
 
   function matchesFilters(card: BoardCard): boolean {
     const f = filters.value;
@@ -445,11 +441,10 @@ export const useBoardStore = defineStore('board', () => {
   }
 
   /** New cards always land in `backlog` (triage stage), per the board spec.
-   * Under a scoped project the card takes that project's label so it stays
-   * inside the scope it was created in. */
+   * Unnamed cards take the board's own project filter so they stay visible
+   * under the filter the user is looking at. */
   function addCard(partial: Partial<BoardCard> = {}): BoardCard {
-    const scopeProject = useUiStore().activeProject;
-    const project = partial.project?.trim() || (scopeProject?.name ?? '');
+    const project = partial.project?.trim() || filters.value.project || '';
     const card = makeCard({ ...partial, project, stage: 'backlog', status: null });
     cards.value.push(card);
     scheduleSave();

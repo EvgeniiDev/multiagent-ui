@@ -5,10 +5,16 @@ import { useUiStore } from '../stores/ui';
 import { useProjectsStore } from '../features/scope/registry';
 import type { SavedSession } from '../lib/types';
 
+const props = defineProps<{
+  /** An agent is picked and configured — otherwise "+" has nothing to start. */
+  canStart: boolean;
+}>();
+
 const emit = defineEmits<{
   resume: [session: SavedSession];
   delete: [sessionId: string];
   refresh: [];
+  newSession: [];
 }>();
 
 const sessionStore = useSessionStore();
@@ -32,6 +38,11 @@ function isUnassigned(session: SavedSession): boolean {
 
 const scope = computed(() => sessionStore.activeAgentName);
 const activeSessionId = computed(() => sessionStore.currentSession?.id ?? '');
+/** Ids of sessions already open in a tab — they get a marker and a click
+ *  just focuses the tab instead of re-resuming. */
+const openSessionIds = computed(
+  () => new Set(sessionStore.openTabs.map((t) => t.session?.id))
+);
 const isLoading = computed(() => sessionStore.sidebarLoading);
 
 /** One dense line: which agent this list belongs to + what the last fetch did. */
@@ -51,6 +62,13 @@ const syncError = computed(() => sessionStore.syncError);
 // Hidden only once the agent itself said it has no `session/list` — before the
 // first attempt the capability is unknown, and clicking is how we find out.
 const canListAgentSessions = computed(() => !sessionStore.sessionListUnsupported);
+
+// The button goes dead while ANY tab is mid-connect — a double click would
+// spawn two agents for one intent.
+const startingSession = computed(() => sessionStore.anySessionBusy);
+const newSessionTitle = computed(() =>
+  props.canStart ? 'New session' : 'Select an agent first'
+);
 
 /** Compact stamp: today -> HH:MM, this year -> "12 сен", else ISO date. */
 function formatStamp(timestamp: number): string {
@@ -96,6 +114,17 @@ function handleDelete(sessionId: string, event: Event) {
     <div class="list-head">
       <span class="list-label">Sessions</span>
       <span class="list-count">{{ isLoading ? '' : (sessions.length || '') }}</span>
+      <!-- New session lives with the list, not in the agent block: the list is
+           where the user goes to switch runs. There is no Disconnect — a
+           connection re-establishes on its own, so the only manual action
+           left in the sidebar is starting another one. -->
+      <button
+        class="list-new-session"
+        :disabled="startingSession || !canStart"
+        @click="emit('newSession')"
+        :title="newSessionTitle"
+        aria-label="New session"
+      >+</button>
       <button
         v-if="canListAgentSessions"
         class="list-refresh"
@@ -136,6 +165,12 @@ function handleDelete(sessionId: string, event: Event) {
         :title="`${session.title}\n${session.agentName} · ${session.cwd || '—'}`"
         @click="handleResume(session)"
       >
+        <span
+          v-if="openSessionIds.has(session.id)"
+          class="row-open"
+          title="Open in a tab"
+          aria-hidden="true"
+        ></span>
         <span class="row-title">{{ session.title }}</span>
         <span
           v-if="showUnassigned && isUnassigned(session)"
@@ -175,6 +210,35 @@ function handleDelete(sessionId: string, event: Event) {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-muted, #a39a8e);
+}
+
+/* Start another session. Shares the refresh button's footprint so the head
+   row stays one dense line on a 390px phone. */
+.list-new-session {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted, #a39a8e);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.list-new-session:hover:not(:disabled) {
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  color: var(--text-primary, #2b2723);
+}
+
+.list-new-session:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 /* Pull the agent's session inventory (`session/list`) into this list. */
@@ -301,6 +365,15 @@ ul {
 
 .session-row.active {
   background: var(--tint-active, rgba(194, 83, 47, 0.10));
+}
+
+/* Small accent tick marking sessions already open in a tab. */
+.row-open {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-accent, #b04a28);
 }
 
 .row-title {
