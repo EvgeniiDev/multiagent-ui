@@ -590,6 +590,38 @@ function toggleThought(messageId: string): void {
   }
 }
 
+// Expanded tool-call argument disclosures, keyed by toolCallId (not index)
+// so the state survives the windowed render (FEED_WINDOW_*) above.
+const expandedToolCalls = ref<Set<string>>(new Set());
+
+function isToolCallExpanded(toolCallId: string): boolean {
+  return expandedToolCalls.value.has(toolCallId);
+}
+
+function toggleToolCall(toolCallId: string): void {
+  if (expandedToolCalls.value.has(toolCallId)) {
+    expandedToolCalls.value.delete(toolCallId);
+  } else {
+    expandedToolCalls.value.add(toolCallId);
+  }
+}
+
+// Pretty-printed call arguments, truncated to ~4KB with an ellipsis note.
+const TOOL_ARGS_MAX_CHARS = 4096;
+
+function formatToolArgs(rawInput: unknown): string {
+  let text: string;
+  try {
+    text = JSON.stringify(rawInput, null, 2) ?? 'undefined';
+  } catch {
+    text = String(rawInput);
+  }
+  if (text.length > TOOL_ARGS_MAX_CHARS) {
+    return text.slice(0, TOOL_ARGS_MAX_CHARS) + '\n… (truncated, showing first 4KB)';
+  }
+  return text;
+}
+
 function renderMarkdown(content: string): string {
   return marked.parse(content, { async: false }) as string;
 }
@@ -723,19 +755,36 @@ function getToolKind(kind: string): string {
           </div>
         </div>
 
-        <!-- Tool calls: one dense chip per call, status carried by a dot. -->
+        <!-- Tool calls: one dense chip per call, status carried by a dot.
+             Chips with call arguments expand behind a quiet disclosure. -->
         <div v-if="message.toolCalls?.length" class="tool-calls-section">
-          <div
-            v-for="tc in message.toolCalls"
-            :key="tc.toolCallId"
-            :class="['tool-call-inline', `tool-${tc.status}`]"
-          >
-            <span class="tool-dot" aria-hidden="true"></span>
-            <span class="tool-kind">{{ getToolKind(tc.kind) }}</span>
-            <span class="tool-name">{{ tc.title }}</span>
-            <span v-if="tc.locations?.length" class="tool-location">
-              {{ tc.locations[0].path }}
-            </span>
+          <div class="tool-call-wrap" v-for="tc in message.toolCalls" :key="tc.toolCallId">
+            <button
+              v-if="tc.rawInput !== undefined"
+              :class="['tool-call-inline', 'is-expandable', `tool-${tc.status}`]"
+              :aria-expanded="isToolCallExpanded(tc.toolCallId)"
+              @click="toggleToolCall(tc.toolCallId)"
+            >
+              <span class="tool-dot" aria-hidden="true"></span>
+              <span class="tool-kind">{{ getToolKind(tc.kind) }}</span>
+              <span class="tool-name">{{ tc.title }}</span>
+              <span v-if="tc.locations?.length" class="tool-location">
+                {{ tc.locations[0].path }}
+              </span>
+              <span class="tool-chevron">{{ isToolCallExpanded(tc.toolCallId) ? '▾' : '▸' }}</span>
+            </button>
+            <div v-else :class="['tool-call-inline', `tool-${tc.status}`]">
+              <span class="tool-dot" aria-hidden="true"></span>
+              <span class="tool-kind">{{ getToolKind(tc.kind) }}</span>
+              <span class="tool-name">{{ tc.title }}</span>
+              <span v-if="tc.locations?.length" class="tool-location">
+                {{ tc.locations[0].path }}
+              </span>
+            </div>
+            <pre
+              v-if="tc.rawInput !== undefined && isToolCallExpanded(tc.toolCallId)"
+              class="tool-args"
+            >{{ formatToolArgs(tc.rawInput) }}</pre>
           </div>
         </div>
 
@@ -1078,6 +1127,43 @@ function getToolKind(kind: string): string {
   background: var(--tint-hover, rgba(43, 39, 35, 0.045));
   font-family: var(--font-mono, monospace);
   font-size: 0.6875rem;
+}
+
+/* Expandable chips are buttons: same quiet pill, with a pointer affordance. */
+.tool-call-inline.is-expandable {
+  width: 100%;
+  border: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tool-call-inline.is-expandable:hover {
+  background: var(--tint-active, rgba(194, 83, 47, 0.10));
+}
+
+.tool-chevron {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 0.625rem;
+  color: var(--text-muted, #a39a8e);
+}
+
+/* Call arguments: quiet pre behind the chip, same register as thought body. */
+.tool-args {
+  margin: 2px 0 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 0.5rem 0.625rem;
+  border-radius: var(--radius-md, 6px);
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  font-family: var(--font-mono, monospace);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--text-secondary, #6b6259);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .tool-in_progress {

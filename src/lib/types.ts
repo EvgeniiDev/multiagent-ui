@@ -149,6 +149,8 @@ export interface ToolCallInfo {
   kind: string;
   status: 'pending' | 'in_progress' | 'completed' | 'failed';
   locations?: { path: string }[];
+  /** Parsed call arguments forwarded verbatim by the ws bridge (tool_call / tool_call_update frames). */
+  rawInput?: unknown;
 }
 
 export interface PermissionRequest {

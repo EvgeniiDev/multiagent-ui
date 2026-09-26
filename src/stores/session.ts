@@ -1026,12 +1026,16 @@ export const useSessionStore = defineStore('session', () => {
         if (!targetMsg.toolCalls) {
           targetMsg.toolCalls = [];
         }
+        // `rawInput` (parsed call args) is not in the SDK's typed union yet —
+        // forwarded verbatim by the ws bridge, read via safe cast.
+        const callRawInput = (update as { rawInput?: unknown }).rawInput;
         targetMsg.toolCalls.push({
           toolCallId: update.toolCallId,
           title: update.title,
           kind: update.kind || 'other',
           status: update.status || 'pending',
           locations: update.locations,
+          rawInput: callRawInput,
         });
         // Also keep in global map for updates
         toolCalls.value.set(update.toolCallId, {
@@ -1040,6 +1044,7 @@ export const useSessionStore = defineStore('session', () => {
           kind: update.kind || 'other',
           status: update.status || 'pending',
           locations: update.locations,
+          rawInput: callRawInput,
         });
         useActivityStore().recordEntry({
           kind: 'tool-call',
@@ -1057,6 +1062,11 @@ export const useSessionStore = defineStore('session', () => {
         if (existing) {
           if (update.status) existing.status = update.status;
           if (update.title) existing.title = update.title;
+          // Late-arriving call args ride the same frame (safe cast — not in
+          // the SDK's typed union yet). Merge, don't overwrite blindly: an
+          // update without rawInput must not clear what tool_call set.
+          const updateRawInput = (update as { rawInput?: unknown }).rawInput;
+          if (updateRawInput !== undefined) existing.rawInput = updateRawInput;
           // Also update in the message's toolCalls array
           for (const msg of sink) {
             if (msg.toolCalls) {
@@ -1064,6 +1074,7 @@ export const useSessionStore = defineStore('session', () => {
               if (tc) {
                 if (update.status) tc.status = update.status;
                 if (update.title) tc.title = update.title;
+                if (updateRawInput !== undefined) tc.rawInput = updateRawInput;
               }
             }
           }
