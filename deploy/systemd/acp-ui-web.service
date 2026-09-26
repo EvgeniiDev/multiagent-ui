@@ -7,7 +7,7 @@ After=network-online.target
 Type=simple
 # Serve the web build produced by `npm run build:web` (dist-web/).
 WorkingDirectory=%h/projects/acp-ui/dist-web
-ExecStart=/usr/bin/python3 -m http.server 25808 --bind 0.0.0.0
+ExecStart=/usr/bin/python3 -m http.server 25808 --bind 127.0.0.1
 Restart=always
 RestartSec=5
 

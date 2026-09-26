@@ -71,4 +71,4 @@ echo "Active units:"
 systemctl --user is-active acp-ui-web.service \
   acp-bridge-hermes.service acp-bridge-opencode.service \
   acp-bridge-devin.service acp-bridge-pi.service | paste -sd' '
-echo "Web UI: http://$(hostname -I | awk '{print $1}'):25808"
+echo "Web UI: https://$(hostname -I | awk '{print $1}'):25809"
