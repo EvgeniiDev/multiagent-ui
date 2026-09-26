@@ -427,14 +427,27 @@ export const useSessionStore = defineStore('session', () => {
   );
 
   /**
+   * Subagent runs (`porch delegate`) name their sessions `porch-delegate#…`
+   * and flood the inventory — the sidebar hides them. Matched on the title
+   * the agent reported (session_info.name, else the first user message).
+   */
+  const SUBAGENT_TITLE_PREFIX = 'porch-delegate#';
+  function isSubagentSession(s: SavedSession): boolean {
+    return s.title.startsWith(SUBAGENT_TITLE_PREFIX);
+  }
+
+  /**
    * Sessions the sidebar shows: the agent-scoped view of the inventory the
    * agent itself reported. Scoping per agent keeps a 170-row mixed list
-   * legible — switching agents is the filter.
+   * legible — switching agents is the filter. The open session always shows,
+   * even when it is a subagent run (otherwise the list would deny what the
+   * chat view is displaying).
    */
   const visibleSessions = computed(() =>
     activeAgentName.value
       ? savedSessions.value
           .filter(s => s.agentName === activeAgentName.value && s.supportsLoadSession === true)
+          .filter(s => s.id === currentSession.value?.id || !isSubagentSession(s))
           .sort((a, b) => b.lastUpdated - a.lastUpdated)
       : []
   );
