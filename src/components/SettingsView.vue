@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { useConfigStore } from '../stores/config';
+import { useSessionStore } from '../stores/session';
 import ProjectsSection from '../features/settings/ProjectsSection.vue';
 import RolesSection from '../features/roles/RolesSection.vue';
 import { addAgent, removeAgent, updateAgent } from '../lib/host';
@@ -13,6 +14,20 @@ const emit = defineEmits<{
 }>();
 
 const configStore = useConfigStore();
+const sessionStore = useSessionStore();
+
+// Sidebar filter: title prefixes hidden from the session list
+// (subagent runs like `porch-delegate#…`). One per line in the box.
+const hiddenPrefixesText = ref(sessionStore.hiddenSessionPrefixes.join('\n'));
+watch(
+  () => sessionStore.hiddenSessionPrefixes,
+  (prefixes) => {
+    hiddenPrefixesText.value = prefixes.join('\n');
+  }
+);
+async function saveHiddenPrefixes() {
+  await sessionStore.setHiddenSessionPrefixes(hiddenPrefixesText.value.split('\n'));
+}
 
 interface AgentRow {
   name: string;
@@ -347,6 +362,20 @@ async function handleDelete(name: string) {
           </div>
         </section>
 
+        <section class="config-section">
+          <h3>Sessions</h3>
+          <div class="form-group">
+            <label>Hidden title prefixes</label>
+            <textarea
+              v-model="hiddenPrefixesText"
+              rows="3"
+              placeholder="porch-delegate#"
+              @change="saveHiddenPrefixes"
+            />
+            <small>Sessions whose title starts with one of these (one per line) are hidden from the sidebar.</small>
+          </div>
+        </section>
+
         <ProjectsSection />
 
         <RolesSection />
@@ -491,17 +520,21 @@ async function handleDelete(name: string) {
   margin-bottom: 0.25rem;
 }
 
-.form-group input {
+.form-group input,
+.form-group textarea {
   width: 100%;
   padding: 0.5rem;
   border: 1px solid var(--border-color);
   border-radius: 4px;
   font-size: 0.9rem;
+  font-family: var(--font-mono, monospace);
   background: var(--bg-main);
   color: var(--text-primary);
+  resize: vertical;
 }
 
-.form-group input:focus {
+.form-group input:focus,
+.form-group textarea:focus {
   outline: none;
   border-color: var(--bg-primary);
 }

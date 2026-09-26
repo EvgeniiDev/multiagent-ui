@@ -427,27 +427,39 @@ export const useSessionStore = defineStore('session', () => {
   );
 
   /**
-   * Subagent runs (`porch delegate`) name their sessions `porch-delegate#…`
-   * and flood the inventory — the sidebar hides them. Matched on the title
-   * the agent reported (session_info.name, else the first user message).
+   * Title prefixes hidden from the sidebar (subagent runs like
+   * `porch-delegate#…` flood the inventory). User-edited in Settings,
+   * persisted in sessions.json next to `dismissedSessions`. Matched on the
+   * title the agent reported (session_info.name, else the first message).
    */
-  const SUBAGENT_TITLE_PREFIX = 'porch-delegate#';
-  function isSubagentSession(s: SavedSession): boolean {
-    return s.title.startsWith(SUBAGENT_TITLE_PREFIX);
+  const hiddenSessionPrefixes = ref<string[]>(['porch-delegate#']);
+  function isHiddenSession(s: SavedSession): boolean {
+    return hiddenSessionPrefixes.value.some(
+      (p) => p.length > 0 && s.title.startsWith(p)
+    );
+  }
+  async function setHiddenSessionPrefixes(prefixes: string[]): Promise<void> {
+    hiddenSessionPrefixes.value = prefixes
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    if (store) {
+      await store.set('hiddenSessionPrefixes', hiddenSessionPrefixes.value);
+      await store.save();
+    }
   }
 
   /**
    * Sessions the sidebar shows: the agent-scoped view of the inventory the
    * agent itself reported. Scoping per agent keeps a 170-row mixed list
    * legible — switching agents is the filter. The open session always shows,
-   * even when it is a subagent run (otherwise the list would deny what the
+   * even when hidden by a prefix (otherwise the list would deny what the
    * chat view is displaying).
    */
   const visibleSessions = computed(() =>
     activeAgentName.value
       ? savedSessions.value
           .filter(s => s.agentName === activeAgentName.value && s.supportsLoadSession === true)
-          .filter(s => s.id === currentSession.value?.id || !isSubagentSession(s))
+          .filter(s => s.id === currentSession.value?.id || !isHiddenSession(s))
           .sort((a, b) => b.lastUpdated - a.lastUpdated)
       : []
   );
@@ -461,6 +473,8 @@ export const useSessionStore = defineStore('session', () => {
     }
     // Sidebar rows the user removed while the agent still holds them.
     dismissedSessions = (await store.get<string[]>('dismissedSessions')) ?? [];
+    hiddenSessionPrefixes.value =
+      (await store.get<string[]>('hiddenSessionPrefixes')) ?? ['porch-delegate#'];
     lastAgentName.value = (await store.get<string>('lastAgent')) ?? '';
     // Restore the open-session pointer (written by saveSessionsToStore on
     // every connect/resume/send). The live bridge is gone after a reload —
@@ -1945,6 +1959,7 @@ export const useSessionStore = defineStore('session', () => {
     sidebarLoading,
     lastSync,
     historyCacheNote,
+    hiddenSessionPrefixes,
 
     // Computed
     hasActiveSession,
@@ -1975,6 +1990,7 @@ export const useSessionStore = defineStore('session', () => {
     syncAgentSessions,
     refreshAgentSessions,
     setActiveAgent,
+    setHiddenSessionPrefixes,
 
     // Expose client for permission handling
     get acpClient() { return acpClient; },
