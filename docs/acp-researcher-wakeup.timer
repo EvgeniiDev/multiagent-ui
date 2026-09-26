@@ -1,0 +1,13 @@
+[Unit]
+Description=ACP UI researcher wakeup — periodic source-harvest trigger
+
+[Timer]
+# First chance 15 min after boot, then 3x/day. A quiet tick is free:
+# collect.py is a pure fetch (no model) and a no-news harvest skips the
+# researcher spawn entirely.
+OnBootSec=15min
+OnUnitInactiveSec=8h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

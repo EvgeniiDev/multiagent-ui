@@ -71,3 +71,5 @@ CONTINUE.md
 
 # pm-wakeup run artefacts (briefs, logs, reports — runtime, not source)
 .acp/pm/
+# researcher runs + collector state (digests, seen-sets — runtime, not source)
+.acp/research/

@@ -35,21 +35,32 @@
 // PM_SCOPE (project label; empty -> the brief asks for --all),
 // PM_QUIET_MIN (default 10 — also the min gap after any pm activity),
 // PM_WAKEUP_DIR (default <repo>/.acp/pm/wakeup), PM_WAKEUP_DOC (state doc
-// name, default 'pm-wakeup.json'), DRY_RUN=1 (print the command, spawn
-// nothing — gates still apply). Exit: 0 ran / nothing to do; 2 the pm
-// role is not configured; 3 the state server is unreachable.
+// name, default 'pm-wakeup.json'), PM_KIND/PM_SESSION_PREFIX/PM_REPORT_NAME
+// (per-role overrides — default to the role id), PM_BRIEF_FILE (brief
+// template path; {{session}} {{runDir}} {{reportPath}} {{promptFile}}
+// {{scope}} {{digest}} placeholders, the last one from PM_DIGEST_PATH),
+// DRY_RUN=1 (print the command, spawn nothing — gates still apply).
+// Exit: 0 ran / nothing to do; 2 the role is not configured; 3 the state
+// server is unreachable.
 //
 // Node only, zero dependencies.
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { promises as fs, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const STATE_URL = (process.env.STATE_URL || 'http://127.0.0.1:25900').replace(/\/+$/, '');
 const ROLE_ID = process.env.PM_ROLE_ID || 'pm';
+// The script is generic over the role: pm defaults keep the original
+// behaviour, another roles.json id (e.g. researcher) reuses the same
+// guarded-spawn machinery via these envs.
+const KIND = process.env.PM_KIND || ROLE_ID;          // activity.json kind
+const SESSION_PREFIX = process.env.PM_SESSION_PREFIX || `${ROLE_ID}wake`;
+const REPORT_NAME = process.env.PM_REPORT_NAME || `${ROLE_ID}-report.md`;
+const BRIEF_FILE = (process.env.PM_BRIEF_FILE || '').trim();
 const SCOPE = (process.env.PM_SCOPE || '').trim();
 const QUIET_MIN =
   (process.env.PM_QUIET_MIN ?? '') !== '' &&
@@ -176,8 +187,8 @@ async function appendActivity({ title, detail, sessionId, model }) {
     doc.entries.push({
       id: `${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffffffff).toString(36)}`,
       at: Date.now(),
-      kind: 'pm',
-      agentName: 'pm-wakeup',
+      kind: KIND,
+      agentName: `${KIND}-wakeup`,
       cwd: REPO_ROOT,
       title,
       detail,
@@ -286,7 +297,7 @@ async function verdictOf(reportPath) {
   try {
     const lines = (await fs.readFile(reportPath, 'utf-8')).split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
-      const m = /STATUS:\s*(DONE|BLOCKED|CHANGES_REQUIRED)\s*$/.exec(lines[i].trim());
+      const m = /STATUS:\s*(DONE|BLOCKED|CHANGES_REQUIRED|OK|SKIP)\s*$/.exec(lines[i].trim());
       if (m) return m[1];
     }
   } catch {
@@ -311,6 +322,20 @@ async function pruneRuns() {
 }
 
 function briefText({ session, runDir, reportPath, promptFile }) {
+  // Non-pm roles can bring their own template (PM_BRIEF_FILE) with
+  // {{session}} {{runDir}} {{reportPath}} {{promptFile}} {{scope}}
+  // placeholders — the pm default below keeps the original wording.
+  if (BRIEF_FILE) {
+    // sync read is fine here: small file, once per run
+    const tpl = readFileSync(BRIEF_FILE, 'utf-8');
+    return tpl
+      .replaceAll('{{session}}', session)
+      .replaceAll('{{runDir}}', runDir)
+      .replaceAll('{{reportPath}}', reportPath)
+      .replaceAll('{{promptFile}}', promptFile)
+      .replaceAll('{{scope}}', SCOPE || '--all')
+      .replaceAll('{{digest}}', process.env.PM_DIGEST_PATH || '');
+  }
   const scopeLine = SCOPE
     ? `скоуп: проект \`${SCOPE}\` — \`pmgraph scan --project '${SCOPE}'\`, ` +
       `\`apply --project '${SCOPE}'\``
@@ -348,7 +373,7 @@ function livePmClaim(claimsDoc, now) {
 function lastPmActivityAt(activityDoc) {
   let at = 0;
   for (const e of activityDoc.entries || []) {
-    if ((e?.role === ROLE_ID || e?.kind === 'pm') && Number(e?.at) > at) {
+    if ((e?.role === ROLE_ID || e?.kind === KIND) && Number(e?.at) > at) {
       at = Number(e.at);
     }
   }
@@ -405,13 +430,15 @@ async function main() {
     }
     const claimCid = livePmClaim(claims.data, now);
     if (claimCid) {
-      console.log(JSON.stringify({ skipped: 'pm-claim-live', card: claimCid }));
+      console.log(
+        JSON.stringify({ skipped: `${ROLE_ID}-claim-live`, card: claimCid }),
+      );
       return 0;
     }
     const pmAt = lastPmActivityAt(activity.data);
     if (quietMs > 0 && pmAt && now - pmAt < quietMs) {
       console.log(
-        JSON.stringify({ skipped: 'pm-active', ageSec: Math.round((now - pmAt) / 1000) }),
+        JSON.stringify({ skipped: `${KIND}-active`, ageSec: Math.round((now - pmAt) / 1000) }),
       );
       return 0;
     }
@@ -437,15 +464,15 @@ async function main() {
     return 2;
   }
 
-  const session = `pmwake-${now.toString(36)}`;
+  const session = `${SESSION_PREFIX}-${now.toString(36)}`;
   if (!(await takeSlot(session))) {
     console.log(JSON.stringify({ skipped: 'slot-lost' }));
     return 0;
   }
 
   const runDir = join(WAKE_DIR, session);
-  const reportPath = join(runDir, 'pm-report.md');
-  const promptFile = role.promptFile || join(REPO_ROOT, '.acp', 'roles', 'pm.md');
+  const reportPath = join(runDir, REPORT_NAME);
+  const promptFile = role.promptFile || join(REPO_ROOT, '.acp', 'roles', `${ROLE_ID}.md`);
   await fs.mkdir(runDir, { recursive: true });
   await pruneRuns();
   const briefPath = join(runDir, 'brief.md');
@@ -484,7 +511,7 @@ async function main() {
     return 0;
   }
 
-  const title = `pm wakeup ${session}`;
+  const title = `${ROLE_ID} wakeup ${session}`;
   try {
     await appendActivity({
       title,

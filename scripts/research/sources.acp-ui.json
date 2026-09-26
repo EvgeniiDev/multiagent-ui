@@ -1,0 +1,86 @@
+{
+  "project": "acp-ui",
+  "comment": "Тематика проекта: AI-кодинг-агенты, оркестрация (доска/роли/claim), провайдеры и цены. Подсайты сверены со скиллом reddit-rss-digest (verified live 2026-08-23); ClaudeCode/VibeCodeDevs/ChatGPTCoding добавлены под оркестрацию — коллектор сам пометит дохлые.",
+  "subreddits": [
+    "PiCodingAgent", "hermesagent", "opencode", "opencodeCLI",
+    "OpenaiCodex", "codex", "ClaudeCode", "ClaudeAI",
+    "ChatGPTCoding", "VibeCodeDevs",
+    "LocalLLaMA", "DeepSeek", "Qwen_AI", "OpenAi", "openrouter",
+    "Vllm", "mcp", "agenticAI", "better_claw"
+  ],
+  "telegram": [
+    {"id": "-1004498098455", "name": "anymodel-chat"},
+    {"id": "-1004323742714", "name": "anymodel-channel"},
+    {"id": "-1002125076323", "name": "ai-driven-chat"},
+    {"id": "-1002040323909", "name": "mostovoy"},
+    {"id": "-1001741956568", "name": "ai-i-grabli"},
+    {"id": "-1002237848435", "name": "usa-automation"},
+    {"id": "-1001943579488", "name": "llm-pod-kapotom"}
+  ],
+  "interests": {
+    "orchestration": {
+      "weight": 3.0,
+      "patterns": ["orchestrat", "kanban", "task board", "multi.?agent",
+                   "subagent", "sub-agent", "control center", "dashboard",
+                   "dispatch", "worktree", "handoff", "claim", "lease",
+                   "agent role", "planner", "reviewer", "оркестр", "доска",
+                   "канбан", "рол"]
+    },
+    "coding_agents": {
+      "weight": 3.0,
+      "patterns": ["coding agent", "claude code", "codex", "opencode",
+                   "aider", "cline", "devin", "cursor", "windsurf",
+                   "vibe.?cod", "agentic", "cli agent", "swe-",
+                   "кодинг.?агент", "вайбкод"]
+    },
+    "new_models": {
+      "weight": 2.5,
+      "patterns": ["release", "launched", "new model", "announc",
+                   "gpt-?\\d", "claude", "sonnet", "opus", "qwen\\d",
+                   "deepseek", "kimi", "glm-?\\d", "llama ?\\d", "mistral",
+                   "weights", "open weights", "релиз", "модель"]
+    },
+    "free_tier": {
+      "weight": 2.5,
+      "patterns": ["\\bfree\\b", "free.?tier", "open.?source", "self.?host",
+                   "\\$0", "no subscription", "бесплатн", "локальн"]
+    },
+    "providers_pricing": {
+      "weight": 2.5,
+      "patterns": ["pricing", "\\$\\d+", "subscription", "provider",
+                   "openrouter", "groq", "bedrock", "vertex", "rate.?limit",
+                   "quota", "token cost", "cheaper", "цен", "подписк",
+                   "тариф"]
+    },
+    "benchmarks": {
+      "weight": 2.0,
+      "patterns": ["benchmark", "swe-?bench", "pass@", "eval", "leaderboard",
+                   "harness", "terminal-?bench", "бенчмарк"]
+    },
+    "agent_infra": {
+      "weight": 1.5,
+      "patterns": ["\\bmcp\\b", "plugin", "hook", "sdk", "sandbox",
+                   "permission", "context.?engineer", "memory",
+                   "session", "checkpoint", "resume"]
+    }
+  },
+  "penalties": {
+    "weight": -1.5,
+    "patterns": ["nsfw", "meme", "shitpost", "giveaway", "airdrop",
+                 "crypto", "nft", "onlyfans", "karma", "hiring", "job post",
+                 "fanfic", "roleplay", "мем"]
+  },
+  "limits": {
+    "hours_lookback": 30,
+    "rss_limit": 50,
+    "tg_limit": 60,
+    "top_comments": 6,
+    "max_comments": 15,
+    "comments": "auto",
+    "pause_sec": 20,
+    "retries": 5,
+    "retry_base": 30,
+    "retry_cap": 240,
+    "digest_items": 30
+  }
+}
