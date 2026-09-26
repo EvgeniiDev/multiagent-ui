@@ -53,6 +53,7 @@ const DEFAULT_TARGETS = {
   25912: 25902,   // ACP bridge: OpenCode
   25913: 25903,   // ACP bridge: Devin
   25914: 25904,   // ACP bridge: Pi
+  25915: 6080,    // noVNC — live Camoufox screen (ephemeral, for interactive logins)
 };
 
 const TARGETS = process.env.ACP_FRONT_TARGETS
