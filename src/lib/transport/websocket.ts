@@ -33,8 +33,29 @@ const DEFAULT_HEARTBEAT_MS = 25_000;
 /** Method name for the heartbeat ping. The `$/`-prefixed namespace follows
  * the LSP/JSON-RPC convention for implementation-defined notifications: a
  * conforming server that doesn't recognise the method MUST silently ignore
- * it (JSON-RPC 2.0 §4.1, "The Server MUST NOT reply to a Notification"). */
+ * it (JSON-RPC 2.0 §4.1, "The Server MUST NOT reply to a Notification").
+ * Bridges that implement the heartbeat answer it themselves with `$/pong`. */
 const HEARTBEAT_METHOD = '$/ping';
+
+/** Method name of the bridge's heartbeat reply — consumed below the bridge
+ * layer so it never reaches the Traffic Monitor or the RPC idle timer. */
+const HEARTBEAT_PONG_METHOD = '$/pong';
+
+/**
+ * Consecutive silent heartbeat intervals that convict a PONG-CAPABLE peer of
+ * being half-open. At the 25 s default this detects in ~50 s; the bridge's
+ * own protocol-ping sweep covers the same bound server-side.
+ */
+const MAX_MISSED_PONGS = 2;
+
+/**
+ * Pings sent without ANY inbound frame before we conclude the peer simply
+ * never answers `$/ping` (native ACP-over-WS agent, or an old bridge) and
+ * stop enforcing liveness — the ping stays keepalive-only, exactly as
+ * before. Without this grace window the new accounting would tear down
+ * healthy connections to agents that speak ACP natively.
+ */
+const PONG_GRACE_PINGS = 4;
 
 /** Options accepted by `WebSocketTransport.connect`. */
 export interface WebSocketTransportOptions {
@@ -72,6 +93,25 @@ export class WebSocketTransport implements AcpTransport {
   private closed = false;
   /** Periodic heartbeat timer (see {@link DEFAULT_HEARTBEAT_MS}). */
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Whether the peer provably answers `$/ping` with `$/pong`.
+   * `null` until the first pong arrives or {@link PONG_GRACE_PINGS} pings go
+   * unanswered → `false` and liveness enforcement stops entirely (the peer
+   * is a native ACP-over-WS agent or an old bridge — keepalive only).
+   */
+  private pongCapable: boolean | null = null;
+  /**
+   * A ping went out and NO inbound frame has arrived since. Any inbound
+   * line — not just `$/pong` — clears it: anything arriving proves the TCP
+   * is alive, which is all the liveness accounting needs.
+   */
+  private awaitingPong = false;
+  /** Consecutive heartbeat intervals with zero inbound frames. */
+  private missedPongs = 0;
+  /** Dedupes concurrent probe() callers onto one in-flight ping. */
+  private probePromise: Promise<boolean> | null = null;
+  /** Resolver for the in-flight probe, called by any inbound frame. */
+  private probeResolve: ((alive: boolean) => void) | null = null;
 
   private constructor(ws: WebSocket, heartbeatMs: number) {
     this.ws = ws;
@@ -157,14 +197,11 @@ export class WebSocketTransport implements AcpTransport {
       // a single WS message. Split here so each consumer sees exactly one
       // JSON-RPC frame, matching the stdio transport's behaviour.
       const data = ev.data;
-      if (data.indexOf('\n') === -1) {
-        const trimmed = data.trim();
-        if (trimmed.length > 0) this.messageListeners.emit(trimmed);
-        return;
-      }
-      for (const line of data.split('\n')) {
+      for (const line of data.indexOf('\n') === -1 ? [data] : data.split('\n')) {
         const trimmed = line.trim();
-        if (trimmed.length > 0) this.messageListeners.emit(trimmed);
+        if (trimmed.length > 0 && this.noteInboundLine(trimmed)) {
+          this.messageListeners.emit(trimmed);
+        }
       }
     } else {
       // Binary frames are not part of ACP. Surface a clear error rather than
@@ -173,10 +210,48 @@ export class WebSocketTransport implements AcpTransport {
     }
   }
 
+  /**
+   * Liveness bookkeeping for one inbound NDJSON line. Any arriving line
+   * proves the socket is alive: it clears the unanswered-ping flag and
+   * resolves a pending `probe()` — it does not have to be a `$/pong`.
+   *
+   * A `$/pong` notification additionally marks the peer pong-capable and is
+   * swallowed (returns false): heartbeats stay below the bridge layer, so
+   * they must not appear in the Traffic Monitor nor feed `AcpClientBridge`'s
+   * RPC idle timer.
+   */
+  private noteInboundLine(line: string): boolean {
+    this.awaitingPong = false;
+    this.missedPongs = 0;
+    this.resolveProbe(true);
+    if (!line.includes(HEARTBEAT_PONG_METHOD)) return true;
+    try {
+      const msg = JSON.parse(line);
+      if (msg && typeof msg.method === 'string' && msg.method === HEARTBEAT_PONG_METHOD) {
+        this.pongCapable = true;
+        return false;
+      }
+    } catch {
+      /* not JSON — pass through like any other line */
+    }
+    return true;
+  }
+
+  private resolveProbe(alive: boolean): void {
+    const r = this.probeResolve;
+    this.probeResolve = null;
+    try {
+      r?.(alive);
+    } catch {
+      /* resolver never throws, but a listener bug must not break receive */
+    }
+  }
+
   private handleClose(reason: string): void {
     if (this.closed) return;
     this.closed = true;
     this.stopHeartbeat();
+    this.resolveProbe(false);
     this.closeListeners.emit(reason);
     this.messageListeners.clear();
     this.closeListeners.clear();
@@ -192,6 +267,12 @@ export class WebSocketTransport implements AcpTransport {
    * replies; agents that don't recognise `$/ping` MUST silently ignore it
    * per JSON-RPC 2.0. We tolerate a transient send error (e.g. a race with
    * the server's own close) by stopping the timer rather than surfacing it.
+   *
+   * The same tick doubles as the client-side liveness check (browsers can't
+   * send protocol pings): once the peer has proven it pongs, two
+   * consecutive intervals with zero inbound frames mean a half-open socket
+   * and we abort it ourselves — the OS may take minutes to report a dead
+   * TCP on its own.
    */
   private startHeartbeat(intervalMs: number): void {
     const frame = `{"jsonrpc":"2.0","method":"${HEARTBEAT_METHOD}"}\n`;
@@ -200,8 +281,24 @@ export class WebSocketTransport implements AcpTransport {
         this.stopHeartbeat();
         return;
       }
+      if (this.awaitingPong) {
+        this.missedPongs += 1;
+        if (this.pongCapable === null && this.missedPongs >= PONG_GRACE_PINGS) {
+          // The peer has never answered a ping — almost certainly a native
+          // ACP-over-WS agent or an old bridge where `$/ping` is keepalive
+          // only. Mark it so liveness is never enforced against silence.
+          this.pongCapable = false;
+        }
+        if (this.pongCapable === true && this.missedPongs >= MAX_MISSED_PONGS) {
+          this.abortSocket(
+            `no inbound frames for ${this.missedPongs} heartbeat intervals — socket is half-open`
+          );
+          return;
+        }
+      }
       try {
         this.ws.send(frame);
+        this.awaitingPong = true;
       } catch (e) {
         console.warn('WebSocketTransport heartbeat send failed:', e);
         this.stopHeartbeat();
@@ -214,6 +311,75 @@ export class WebSocketTransport implements AcpTransport {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+  }
+
+  /**
+   * The socket is half-open: the peer stopped answering but the TCP never
+   * closed. `ws.close()` on such a socket can sit in CLOSING forever, so the
+   * close event is synthesized immediately — that is what frees the session
+   * runtime (a real `close` event, if it ever lands, hits the `closed`
+   * guard in {@link handleClose}).
+   */
+  private abortSocket(reason: string): void {
+    if (this.closed) return;
+    this.stopHeartbeat();
+    try {
+      this.ws?.close();
+    } catch {
+      /* ignore */
+    }
+    this.handleClose(reason);
+  }
+
+  /**
+   * Prove the socket is alive within `timeoutMs`. Rides the heartbeat wire
+   * format: sends a `$/ping` and resolves true on ANY inbound frame — a
+   * `$/pong` or ordinary traffic either way proves the peer. On timeout:
+   * a pong-capable peer is convicted (the socket is aborted, which drives
+   * the normal close path); a never-ponged peer resolves with its socket
+   * state — silence proves nothing there. Concurrent probes share one ping.
+   */
+  probe(timeoutMs: number): Promise<boolean> {
+    if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return Promise.resolve(false);
+    }
+    if (this.pongCapable === false) {
+      // Best possible answer against a peer that cannot pong.
+      return Promise.resolve(true);
+    }
+    if (this.probePromise) return this.probePromise;
+    const ws = this.ws;
+    this.probePromise = new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        this.probeResolve = null;
+        if (this.pongCapable === true) {
+          this.abortSocket(`liveness probe timed out after ${timeoutMs}ms`);
+          resolve(false);
+        } else {
+          resolve(ws.readyState === WebSocket.OPEN);
+        }
+      }, timeoutMs);
+      this.probeResolve = (alive) => {
+        clearTimeout(timer);
+        resolve(alive);
+      };
+      try {
+        const nonce = Math.random().toString(36).slice(2);
+        ws.send(
+          `{"jsonrpc":"2.0","method":"${HEARTBEAT_METHOD}","params":{"nonce":${JSON.stringify(nonce)}}}\n`
+        );
+        this.awaitingPong = true;
+      } catch {
+        this.probeResolve = null;
+        clearTimeout(timer);
+        this.abortSocket('liveness probe send failed');
+        resolve(false);
+      }
+    }).finally(() => {
+      this.probePromise = null;
+      this.probeResolve = null;
+    });
+    return this.probePromise;
   }
 
   async send(json: string): Promise<void> {

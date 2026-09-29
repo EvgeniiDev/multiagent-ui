@@ -123,6 +123,15 @@ export class AcpClientBridge implements Client {
     // No-op: transport is already connected when handed to the bridge.
   }
 
+  /**
+   * Liveness check for verify-on-foreground: delegates to the transport's
+   * probe when it has one (WebSocket ping/pong). Transports without a probe
+   * — stdio pipes cannot half-open — report alive.
+   */
+  probe(timeoutMs: number): Promise<boolean> {
+    return this.transport.probe?.(timeoutMs) ?? Promise.resolve(true);
+  }
+
   async disconnect(): Promise<void> {
     // Unlisten first so the transport's close handler (which would re-reject
     // pending requests and fire `onTransportClose`) doesn't run for a

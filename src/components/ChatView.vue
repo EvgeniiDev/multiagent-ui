@@ -578,7 +578,7 @@ onBeforeUnmount(() => {
 
 async function handleSend() {
   const text = inputText.value.trim();
-  if ((!text && attachments.value.length === 0) || isLoading.value) return;
+  if (!text && attachments.value.length === 0) return;
 
   // A take in flight would land its final text into the cleared field —
   // stop it first so the send and the dictation don't interleave.
@@ -593,7 +593,10 @@ async function handleSend() {
   attachments.value = [];
   attachError.value = null;
   try {
-    await rt.sendPrompt(text, files);
+    // A send while a turn is running is a steer: cancel it, then this text
+    // goes out as the next turn. Stop remains the pure-cancel path.
+    if (isLoading.value) await rt.steer(text, files);
+    else await rt.sendPrompt(text, files);
   } catch (e) {
     // A rejected prompt used to die in the console: the composer cleared, the
     // turn produced nothing, and the user saw no reason. Surface it.
@@ -977,7 +980,7 @@ function getToolKind(kind: string): string {
               v-model="inputText"
               :class="{ 'voice-ghost': voiceActive }"
               :placeholder="composerPlaceholder"
-              :disabled="isLoading || isReconnecting || !isConnected"
+              :disabled="isReconnecting || !isConnected"
               @keydown="handleKeyDown"
               @scroll="syncVoiceOverlayScroll"
               rows="1"
@@ -1055,7 +1058,7 @@ function getToolKind(kind: string): string {
             >{{ contextLabel }}</span>
             <button
               class="icon-btn send-btn"
-              :disabled="(!inputText.trim() && attachments.length === 0) || isLoading || isReconnecting || !isConnected"
+              :disabled="(!inputText.trim() && attachments.length === 0) || isReconnecting || !isConnected"
               @click="handleSend"
               title="Send"
               aria-label="Send"

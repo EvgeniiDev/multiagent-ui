@@ -801,6 +801,8 @@ export const useSessionStore = defineStore('session', () => {
     resumeSession,
     sendPrompt: (text: string, attachments?: import('../lib/types').Attachment[]) =>
       requireActive().sendPrompt(text, attachments),
+    steer: (text: string, attachments?: import('../lib/types').Attachment[]) =>
+      requireActive().steer(text, attachments),
     cancelOperation: () => activeRuntime.value?.cancelOperation(),
     cancelConnection: () => activeRuntime.value?.cancelConnection(),
     resolvePermission: (optionId: string) => activeRuntime.value?.resolvePermission(optionId),
