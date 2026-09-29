@@ -131,16 +131,18 @@ const nodeCounts = computed<Record<string, number>>(() => {
           @select="wf.selectRun"
           @follow="wf.resumeFollow"
         />
-        <WorkflowStepper
-          :nodes="wf.nodes"
-          :active-index="wf.activeNodeIndex"
-          :terminal="wf.terminal"
-          :expanded-node-id="wf.expandedNodeId"
-          :expanded-blocks="wf.expandedBlocks"
-          :counts="nodeCounts"
-          @toggle="wf.toggleNode"
-        />
-        <div v-if="wf.auditTruncated" class="wf-tail-note">showing last 512 KiB of audit.jsonl</div>
+        <div class="wf-stepper-wrap">
+          <WorkflowStepper
+            :nodes="wf.nodes"
+            :active-index="wf.activeNodeIndex"
+            :terminal="wf.terminal"
+            :expanded-node-id="wf.expandedNodeId"
+            :expanded-blocks="wf.expandedBlocks"
+            :counts="nodeCounts"
+            @toggle="wf.toggleNode"
+          />
+          <div v-if="wf.auditTruncated" class="wf-tail-note">showing last 512 KiB of audit.jsonl</div>
+        </div>
       </template>
     </div>
   </div>
@@ -233,6 +235,12 @@ const nodeCounts = computed<Record<string, number>>(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+}
+
+.wf-stepper-wrap {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
 
