@@ -1292,6 +1292,11 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   ): Promise<void> {
     isLoading.value = true;
     error.value = null;
+    // A fresh resume supersedes any earlier cancel — without the reset, a
+    // tab resumed after cancelConnection would carry the aborted flag
+    // forever and the auto-reconnect loop would never arm for it.
+    connectionAborted = false;
+    disarmAutoReconnect();
     autonomous.value = options?.autonomous ?? false;
     agentName.value = savedSession.agentName;
     descriptor.value = savedSession;
