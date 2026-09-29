@@ -214,3 +214,101 @@ None — no forbidden file needed edits. `src/App.vue` deliberately untouched
   sitting on the error banner.
 
 DEV COMPLETE
+
+## Review-round fixes
+
+Review verdict APPROVE_WITH_NITS — the three fixes the reviewer flagged as
+worth taking, applied in `src/lib/sessionRuntime.ts` (no bridge edits; all
+three copies stay byte-identical):
+
+- **`isReconnecting` can no longer stick `true`** (:1771): the `tryReconnect`
+  disarm site now pairs `disarmAutoReconnect()` with
+  `isReconnecting.value = false`, matching the `cancelConnection`/`close`
+  sites (:1623-24, :1672-73) and the auto-reconnect loop's own exits
+  (:360/:366/:369). A failed probe followed by the `isConnecting`/`isLoading`
+  early-return no longer leaves the "Reconnecting…" banner up with nothing
+  armed.
+- **`isLoading` owned in one place** (:1276, :1484): `create()`/`resume()`
+  `finally` blocks now do `if (inFlightPrompts === 0) isLoading.value = false;`
+  — the same rule `sendPrompt` uses (:1576) — so a resume/create completing
+  while a prompt is in flight cannot hide Stop mid-turn.
+- **`steer()` fallback guarded** (:1593-1599): throws `Not connected` when
+  `isConnected` is false, before either prompt path. `isConnected` only flips
+  after `session/new`/`session/load` resolves, so a programmatic steer during
+  a resume can't fire `session/prompt` mid-load. (Runtime-API guard — the
+  composer is already disabled while `!isConnected`.)
+
+Skipped per the brief: `capLogged` reset, test-harness import note,
+`pongCapable` one-way door — reviewer marked acceptable-as-is.
+
+### Evidence
+
+`npm run build:web` (tail — vue-tsc clean, exit 0):
+
+```
+✓ 293 modules transformed.
+dist-web/assets/index-CuMr89Jo.js   600.15 kB │ gzip: 206.34 kB
+✓ built in 3.84s
+```
+
+`node scripts/e2e_bridge_heartbeat.mjs` — 21/21 (watchdog fired at ~3.7 s
+while `$/pong`s flowed; sweep terminated the paused socket):
+
+```
+PASS  4: paused socket terminated by the sweep
+PASS  4: sweep logged the termination
+PASS  4: dropped claim -> sess-x frame falls back to broadcast
+PASS  5: re-load on a fresh socket resolves
+PASS  5: replay routed to the NEW socket  (4 frames)
+PASS  5: zero sess-a frames leaked to bystanders  (0 leaked)
+PASS  6: cancelled prompt resolves stopReason=cancelled  ({"stopReason":"cancelled"})
+PASS  6: second prompt resolves stopReason=end_turn
+PASS  2: hung prompt fails "no traffic for Ns" DESPITE flowing $/pings  (elapsed=3707ms)
+PASS  2: $/pongs were flowing the whole window  (7 pongs)
+
+21/21 assertions passed
+```
+
+`node scripts/test_ws_transport.mjs` — 10/10:
+
+```
+PASS  probe() resolves true on $/pong
+PASS  $/pong swallowed below the listener layer (sent=4 received=0)
+PASS  probe() resolves on any inbound frame
+PASS  2 missed intervals on a pong-capable peer -> half-open close
+PASS  transport is closed after the conviction
+PASS  probe() timeout on pong-capable peer resolves false
+PASS  probe() timeout aborts the socket (liveness probe timed out after 200ms)
+PASS  probe() on never-ponged peer answers by socket state
+PASS  non-ponging peer is never aborted (graceful degradation) (closes=0 sent=11)
+PASS  probe() on marked-non-capable peer resolves true fast
+
+10/10 assertions passed
+```
+
+`node scripts/e2e_bridge_routing.mjs` — 10/10 regression (per-session
+routing, zero cross-tab leaks):
+
+```
+PASS  A: session/load resolves
+PASS  A: full replay received on its own socket  (60/60)
+PASS  B: zero foreign session/update frames (sess-a)  (0 leaked)
+PASS  A: zero foreign session/update frames (B session)  (0 leaked)
+
+10/10 assertions passed
+```
+
+`~/.hermes/tools-venv/bin/python scripts/e2e_bridge_timeout.py` — 14/14
+(lively 66 s run, silent-kill and exit wording intact, all three bridge
+copies confirmed byte-identical):
+
+```
+PASS  repo bridge copy matches the deployed file  (server/acp-ws-bridge.mjs vs ~/.hermes/acp-ws-bridge.mjs)
+PASS  lively: request succeeds past the old 60 s budget  (elapsed=66.0s)
+PASS  silent: request failed with 'no traffic for Ns' wording  (elapsed=18.7s)
+PASS  exit: request failed with 'exited' wording  (msg='agent CLI exited (code=3 signal=null)')
+
+14/14 assertions passed
+```
+
+FIX COMPLETE

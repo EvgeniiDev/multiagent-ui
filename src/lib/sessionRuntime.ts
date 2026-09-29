@@ -1271,7 +1271,9 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       trackError(e instanceof Error ? e : new Error(String(e)));
       throw e;
     } finally {
-      isLoading.value = false;
+      // `isLoading` is owned by `inFlightPrompts` (sendPrompt :1576) — a
+      // create finishing while a prompt is in flight must not hide Stop.
+      if (inFlightPrompts === 0) isLoading.value = false;
       isConnecting.value = false;
       // Clean up startup progress tracking
       if (startupTimer) {
@@ -1478,7 +1480,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       trackError(e instanceof Error ? e : new Error(String(e)));
       throw e;
     } finally {
-      isLoading.value = false;
+      // Same ownership rule as create(): a prompt in flight keeps `isLoading`.
+      if (inFlightPrompts === 0) isLoading.value = false;
     }
   }
 
@@ -1586,6 +1589,13 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   async function steer(text: string, attachments: Attachment[] = []): Promise<void> {
     if (!acpClient || !session.value) {
       throw new Error('No active session');
+    }
+    // `isConnected` flips only after `session/new`/`session/load` resolves —
+    // gate every prompt path below on it so a programmatic steer during a
+    // resume can't fire `session/prompt` mid-load. (The composer can't reach
+    // this today: it's disabled while `!isConnected`.)
+    if (!isConnected.value) {
+      throw new Error('Not connected');
     }
     if (!isLoading.value || inFlightPrompts === 0) {
       return sendPrompt(text, attachments);
@@ -1758,6 +1768,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         // is the same intent, so fall through and resume now rather than
         // waiting out the backoff.
         disarmAutoReconnect();
+        isReconnecting.value = false;
       }
     }
     // Already connected or already trying — leave it alone.
