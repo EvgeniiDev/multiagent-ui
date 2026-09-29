@@ -1,0 +1,39 @@
+{"data_preview": "Ran cat, wc", "event": "adapter_event", "kind": "tool", "ts": "2026-09-22T19:15:58Z"}
+{"data_preview": "tool_call_update", "event": "adapter_event", "kind": "progress", "ts": "2026-09-22T19:15:58Z"}
+{"data_preview": "tool_call_update", "event": "adapter_event", "kind": "progress", "ts": "2026-09-22T19:15:58Z"}
+{"data_preview": "tool_call_update", "event": "adapter_event", "kind": "progress", "ts": "2026-09-22T19:15:58Z"}
+{"data_preview": "tool_call_update", "event": "adapter_event", "kind": "progress", "ts": "2026-09-22T19:15:58Z"}
+{"data_preview": "Done", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": ".  ", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "-", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": " Path", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": ":", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": " `/", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "tmp", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "/p", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "orch", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "-e", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "2", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "e", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "/work", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "2", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "/D", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "ONE", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": ".md", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "` ", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "-", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": " Content", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": " (", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "one", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": " line", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "):", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": " `", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "BG", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "-D", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "EV", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "IN", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "-", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "OK", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "`", "event": "adapter_event", "kind": "text", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "completed:prompt_result_end_turn", "event": "adapter_event", "kind": "steer_ack", "ts": "2026-09-22T19:16:00Z"}
+{"data_preview": "end_turn", "event": "adapter_event", "kind": "done", "ts": "2026-09-22T19:16:00Z"}
