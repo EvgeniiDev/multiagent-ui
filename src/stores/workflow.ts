@@ -199,14 +199,21 @@ export const useWorkflowStore = defineStore('workflow', () => {
         return;
       }
       if (d === null) {
-        // 404 — the run fell out of the registry (or was never real).
+        // 404 — the run fell out of the registry (or was never real). Clear
+        // the run's bookkeeping too, or a pinned run's last status (a stale
+        // banner) lingers over the now-empty stepper.
         detail.value = null;
         events.value = [];
+        runStatus.value = 'active';
+        lastAuditSize.value = null;
         return;
       }
       detail.value = d;
       const size = d.audit?.size ?? null;
-      const auditGrew = lastAuditSize.value === null || size !== lastAuditSize.value;
+      // null on both polls is NOT growth — a run whose audit never
+      // materializes would otherwise keep lastAuditSize null and never go
+      // stale.
+      const auditGrew = size !== null && size !== lastAuditSize.value;
       lastAuditSize.value = size;
       events.value = parseAudit(d.audit?.text ?? '', d.meta);
       runStatus.value = deriveRunStatus(d, now.value, { auditGrew });

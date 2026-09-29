@@ -145,3 +145,57 @@ direction tabs override the inferred direction (click the active tab again
 to release the override).
 
 DEV COMPLETE
+
+## Review-round fixes
+
+Applied the blocking-adjacent nits from REVIEW.md (APPROVE_WITH_NITS);
+cosmetic nits #4/#5/#8/#9/#10/#11 left as-is per the fix brief.
+
+- **Nit #1 — poller leak on mount/unmount race**
+  (`src/components/WorkflowView.vue`): a component-local
+  `let disposed = false` is set in `onBeforeUnmount` and checked in the
+  `initWorkflowStore().then(...)` continuation before `startPolling()`.
+  If the view unmounts while `loadKvStore` is still resolving (worst case
+  probe+fetch timeouts when the state server is down), the orphaned 2 s
+  interval is no longer started. "Poll only while mounted" holds.
+- **Nit #2 — `probePorch()` sticky `false`** (`src/lib/porch/api.ts`): the
+  session probe now awaits the shared in-flight promise; `true` stays
+  cached for the page's life, `false` clears `healthProbe` (identity-
+  checked so a late-resuming caller can't clobber a newer probe) and the
+  next tick re-probes. A state server that comes up after first mount
+  heals the view instead of requiring a reload.
+- **Nit #6 — 404 bookkeeping** (`src/stores/workflow.ts`): the `getRun`
+  null branch now also resets `runStatus` and `lastAuditSize`, so a pinned
+  run that falls out of the registry can't leave a stale banner over an
+  empty stepper.
+- **Nit #7 — `auditGrew` null-both-polls**: `size !== null && size !==
+  lastAuditSize` — a run whose `audit` is `null` every poll no longer
+  counts as growing forever and can go `stale` on the `updated_at` gate.
+- **Nit #3 — duplicated terminal-failure predicate** (trivial dedup, done):
+  `isFailure` is exported from `src/lib/porch/status.ts`; audit.ts's
+  `metaFailed` copy is deleted and the terminal-bookend synthesis calls
+  the shared one.
+- **Test added**: `probePorch re-probes after a false verdict but caches
+  true` — mocks `globalThis.fetch` down → `false`, up → `true`, down again
+  → still `true` (true is session-cached, false is not). 51 tests now.
+
+Verification (re-run after the fixes):
+
+`npm run build:web` (vue-tsc --noEmit then vite build), tail:
+
+```
+dist-web/assets/index-mymPLzux.js   617.72 kB │ gzip: 212.38 kB
+✓ built in 3.77s
+```
+
+`node scripts/test_workflow_porch.mjs`, tail:
+
+```
+ℹ tests 51
+ℹ suites 6
+ℹ pass 51
+ℹ fail 0
+ℹ duration_ms 55.640402
+```
+
+FIX COMPLETE

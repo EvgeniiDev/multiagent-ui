@@ -20,6 +20,7 @@
 // Erasable TS only; no DOM imports — scripts/test_workflow_porch.mjs runs
 // this file under node's native type stripping.
 
+import { isFailure } from './status.ts';
 import type { RunMeta, WfEvent } from './types.ts';
 
 /** Adapter `kind` → normalized `type` (verbatim port of this host's
@@ -171,13 +172,6 @@ function supervisorEvent(rec: Record<string, unknown>, agentId: string): WfEvent
   }
 }
 
-function metaFailed(meta: RunMeta): boolean {
-  const status = asStr(meta.status);
-  if (status === 'failed' || status === 'cancelled') return true;
-  if (typeof meta.exit_code === 'number' && meta.exit_code !== 0) return true;
-  return typeof meta.error === 'string' && meta.error.length > 0;
-}
-
 /**
  * Parse the audit tail into normalized events. Never throws; malformed and
  * unknown lines are skipped (Paseo parity).
@@ -218,7 +212,7 @@ export function parseAudit(text: string, meta: RunMeta | null): WfEvent[] {
       !events.some((e) => e.type === 'run_completed' || e.type === 'run_failed')
     ) {
       events.push({
-        type: metaFailed(meta) ? 'run_failed' : 'run_completed',
+        type: isFailure(meta) ? 'run_failed' : 'run_completed',
         ts: asStr(meta.finished_at) || asStr(meta.updated_at),
         data: typeof meta.error === 'string' && meta.error ? meta.error : null,
         agentId,

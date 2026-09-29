@@ -26,7 +26,7 @@ import {
   inferDirection,
   matchesNode,
 } from '../src/lib/porch/graph.ts';
-import { porchBase } from '../src/lib/porch/api.ts';
+import { porchBase, probePorch } from '../src/lib/porch/api.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const fixture = (name) => readFileSync(join(HERE, 'fixtures', name), 'utf8');
@@ -523,5 +523,27 @@ describe('api', () => {
     const base = porchBase();
     assert.match(base, /^https?:\/\//);
     assert.match(base, /25900|25910/);
+  });
+
+  test('probePorch re-probes after a false verdict but caches true', async () => {
+    const orig = globalThis.fetch;
+    try {
+      // Server down → false, and the failure is not cached: once fetch
+      // recovers, the very next call probes again and reports up.
+      globalThis.fetch = async () => {
+        throw new Error('connection refused');
+      };
+      assert.equal(await probePorch(), false);
+      globalThis.fetch = async () =>
+        new Response(JSON.stringify({ ok: true }), { status: 200 });
+      assert.equal(await probePorch(), true);
+      // true IS session-cached — a later outage does not flip the verdict.
+      globalThis.fetch = async () => {
+        throw new Error('down again');
+      };
+      assert.equal(await probePorch(), true);
+    } finally {
+      globalThis.fetch = orig;
+    }
   });
 });

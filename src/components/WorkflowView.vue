@@ -23,11 +23,19 @@ import WorkflowStepper from '../features/workflow/WorkflowStepper.vue';
 
 const wf = useWorkflowStore();
 
+// initWorkflowStore() can resolve after unmount (loadKvStore waits on the
+// state server). Without this guard the .then below would start a 2s
+// interval the Pinia store then keeps for the rest of the session.
+let disposed = false;
+
 onMounted(() => {
-  void wf.initWorkflowStore().then(() => wf.startPolling());
+  void wf.initWorkflowStore().then(() => {
+    if (!disposed) wf.startPolling();
+  });
 });
 onBeforeUnmount(() => {
   // The view is v-if'd in App.vue — unmounting cleanly stops all traffic.
+  disposed = true;
   wf.stopPolling();
 });
 

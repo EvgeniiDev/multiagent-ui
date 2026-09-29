@@ -37,7 +37,9 @@ export interface DeriveStatusOpts {
   auditGrew?: boolean;
 }
 
-function isFailure(meta: PorchRunDetail['meta']): boolean {
+/** Terminal-meta → failed predicate — also used by audit.ts to pick which
+ * terminal bookend to synthesize. Keep it the single copy. */
+export function isFailure(meta: PorchRunDetail['meta']): boolean {
   const status = typeof meta.status === 'string' ? meta.status : '';
   if (status === 'failed' || status === 'cancelled') return true;
   if (typeof meta.exit_code === 'number' && meta.exit_code !== 0) return true;

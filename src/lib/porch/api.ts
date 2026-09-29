@@ -37,11 +37,14 @@ async function fetchWithTimeout(url: string, ms: number): Promise<Response> {
   }
 }
 
-// Session-scoped like storage.ts's probe: one answer decides reachability
-// for every poll on this page — no per-tick probing.
+// Session-scoped like storage.ts's probe — concurrent callers share one
+// in-flight probe and a `true` verdict is cached for the page's life. A
+// `false` verdict is NOT cached: the next call re-probes, so a state
+// server that comes up after first mount heals the view on its own
+// instead of pinning it at "unreachable" until reload.
 let healthProbe: Promise<boolean> | null = null;
 
-export function probePorch(): Promise<boolean> {
+export async function probePorch(): Promise<boolean> {
   if (!healthProbe) {
     healthProbe = (async () => {
       try {
@@ -54,7 +57,11 @@ export function probePorch(): Promise<boolean> {
       }
     })();
   }
-  return healthProbe;
+  const probe = healthProbe;
+  if (await probe) return true;
+  // Clear only if nobody started a newer probe while we awaited.
+  if (healthProbe === probe) healthProbe = null;
+  return false;
 }
 
 export async function listRuns(): Promise<PorchRunSummary[]> {
