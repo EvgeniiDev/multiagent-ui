@@ -17,6 +17,7 @@ import DirectoryPicker from './components/DirectoryPicker.vue';
 import ProjectsView from './components/ProjectsView.vue';
 import BoardView from './components/BoardView.vue';
 import DashboardView from './components/DashboardView.vue';
+import WorkflowView from './components/WorkflowView.vue';
 import ProjectScopeSelector from './components/ProjectScopeSelector.vue';
 import NewSessionDialog from './features/projects/NewSessionDialog.vue';
 import { useUiStore, VIEWS } from './stores/ui';
@@ -423,10 +424,15 @@ function clearError() {
           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
         ><path d="M4 4h4v16H4zM10 4h4v10h-4zM16 4h4v6h-4z" /></svg>
         <svg
-          v-else
+          v-else-if="view.id === 'dashboard'"
           viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
         ><path d="M12 20a8 8 0 110-16 8 8 0 010 16zM12 15.5l3-4.5M12 8.5v4" /></svg>
+        <svg
+          v-else
+          viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+        ><circle cx="6" cy="6" r="2.4" /><circle cx="6" cy="18" r="2.4" /><circle cx="18" cy="12" r="2.4" /><path d="M8.4 6H12a3 3 0 0 1 3 3v.6M8.4 18H12a3 3 0 0 0 3-3v-.6" /></svg>
       </button>
     </nav>
 
@@ -493,11 +499,16 @@ function clearError() {
               stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
             ><path d="M4 4h4v16H4zM10 4h4v10h-4zM16 4h4v6h-4z" /></svg>
             <svg
-              v-else
+              v-else-if="view.id === 'dashboard'"
               viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
               stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
             ><path d="M12 20a8 8 0 110-16 8 8 0 010 16zM12 15.5l3-4.5M12 8.5v4" /></svg>
-          </button>
+            <svg
+              v-else
+              viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+              stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+            ><circle cx="6" cy="6" r="2.4" /><circle cx="6" cy="18" r="2.4" /><circle cx="18" cy="12" r="2.4" /><path d="M8.4 6H12a3 3 0 0 1 3 3v.6M8.4 18H12a3 3 0 0 0 3-3v-.6" /></svg>
+            </button>
           <span class="drawer-view-label">{{ drawerViewLabel }}</span>
         </nav>
         <!-- Project scope next to the session list it filters. Was the
@@ -677,6 +688,7 @@ function clearError() {
         <ProjectsView v-if="uiStore.activeView === 'projects'" />
         <BoardView v-if="uiStore.activeView === 'board'" />
         <DashboardView v-if="uiStore.activeView === 'dashboard'" />
+        <WorkflowView v-if="uiStore.activeView === 'workflow'" />
       </main>
       
       <!-- Traffic Monitor Panel -->

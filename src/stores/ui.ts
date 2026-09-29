@@ -13,13 +13,14 @@ import { loadKvStore, type KVStore } from '../lib/host/storage';
 import { useProjectsStore } from '../features/scope/registry';
 import { useSessionStore } from './session';
 
-export type ViewId = 'chat' | 'projects' | 'board' | 'dashboard';
+export type ViewId = 'chat' | 'projects' | 'board' | 'dashboard' | 'workflow';
 
 export const VIEWS: { id: ViewId; label: string; key: string }[] = [
   { id: 'chat', label: 'Chat', key: '1' },
   { id: 'projects', label: 'Projects', key: '2' },
   { id: 'board', label: 'Board', key: '3' },
   { id: 'dashboard', label: 'Dashboard', key: '4' },
+  { id: 'workflow', label: 'Workflow', key: '5' },
 ];
 
 const STORE_PATH = 'preferences.json';

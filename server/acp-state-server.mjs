@@ -34,6 +34,119 @@ const STATE_DIR =
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const NAME_RE = /^[a-z0-9._-]{1,64}$/;
 
+// --- porch read-only bridge -------------------------------------------------
+// The Workflow view visualizes porch delegate runs, which the browser cannot
+// read off disk. This exposes the run registry read-only. Path mirrors
+// porch's `_steer_root()` (lib/sessions.py): PORCH_STEER_DIR, else
+// XDG_CACHE_HOME/pragmatic-orchestration/steer, else ~/.cache/... .
+//
+// Real run-dir layout on this host (verified 2026-09-29):
+//   <root>/runs/<run_id>/meta.json   agent_id, cwd, status, pid, child_pid,
+//                                    exit_code, run_id, started_at, finished_at
+//   <root>/runs/<run_id>/audit.jsonl events: { event, kind, ts, data_preview }
+//   <root>/runs/<run_id>/turns/      per-turn artifacts
+//   <root>/runs/<run_id>/final.txt   final answer once terminal
+// NOTE: this porch build does NOT write normalized/<agent>.jsonl (Paseo's
+// format). The workflow workstream's reader must parse audit.jsonl (`event`
+// field), not `type`. This endpoint returns raw file contents; parsing/
+// projection stays client-side so the contract is one place.
+const RUN_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+const AUDIT_TAIL_BYTES = 512 * 1024;
+
+function porchSteerRoot() {
+  const env = process.env.PORCH_STEER_DIR;
+  if (env && env.trim()) return resolve(env.replace(/^~(?=$|\/)/, homedir()));
+  const xdg = process.env.XDG_CACHE_HOME;
+  const base = xdg && xdg.trim() ? xdg : join(homedir(), '.cache');
+  return join(base, 'pragmatic-orchestration', 'steer');
+}
+function porchRunsDir() {
+  return join(porchSteerRoot(), 'runs');
+}
+function porchRunDir(runId) {
+  if (!RUN_ID_RE.test(runId)) return null;
+  const dir = resolve(porchRunsDir(), runId);
+  if (!dir.startsWith(resolve(porchRunsDir()) + sep)) return null;
+  return dir;
+}
+async function readJsonSafe(p) {
+  try {
+    return JSON.parse(await fs.readFile(p, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+async function listPorchRuns() {
+  let entries = [];
+  try {
+    entries = await fs.readdir(porchRunsDir(), { withFileTypes: true });
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return [];
+    throw e;
+  }
+  const out = [];
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue;
+    const meta = await readJsonSafe(join(porchRunsDir(), ent.name, 'meta.json'));
+    if (!meta) continue;
+    out.push({
+      runId: meta.run_id || ent.name,
+      agentId: meta.agent_id ?? null,
+      backend: meta.backend ?? null,
+      model: meta.model ?? null,
+      cwd: meta.cwd ?? null,
+      status: meta.status ?? null,
+      pid: meta.pid ?? null,
+      childPid: meta.child_pid ?? null,
+      exitCode: meta.exit_code ?? null,
+      startedAt: meta.started_at ?? null,
+      finishedAt: meta.finished_at ?? null,
+      updatedAt: meta.updated_at ?? null,
+    });
+  }
+  out.sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)));
+  return out;
+}
+async function readTail(p, maxBytes) {
+  let fh;
+  try {
+    fh = await fs.open(p, 'r');
+  } catch {
+    return null;
+  }
+  try {
+    const st = await fh.stat();
+    const start = st.size > maxBytes ? st.size - maxBytes : 0;
+    const len = st.size - start;
+    const buf = Buffer.alloc(len);
+    await fh.read(buf, 0, len, start);
+    let text = buf.toString('utf-8');
+    // Dropped a partial first line when we started mid-file.
+    if (start > 0) {
+      const nl = text.indexOf('\n');
+      if (nl >= 0) text = text.slice(nl + 1);
+    }
+    return { text, truncated: start > 0, size: st.size };
+  } finally {
+    await fh.close();
+  }
+}
+async function readPorchRun(runId) {
+  const dir = porchRunDir(runId);
+  if (!dir) return { invalid: true };
+  const meta = await readJsonSafe(join(dir, 'meta.json'));
+  if (!meta) return { missing: true };
+  const state = await readJsonSafe(join(dir, 'state.json'));
+  const audit = await readTail(join(dir, 'audit.jsonl'), AUDIT_TAIL_BYTES);
+  let final = null;
+  try {
+    final = await fs.readFile(join(dir, 'final.txt'), 'utf-8');
+  } catch {
+    /* not terminal yet */
+  }
+  return { meta, state, audit, final };
+}
+
 function send(res, status, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(status, {
@@ -160,6 +273,28 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && path === '/api/state') {
       const docs = await listDocs();
       send(res, 200, { docs });
+      return;
+    }
+
+    // Porch read-only routes for the Workflow view.
+    if (req.method === 'GET' && path === '/api/porch/runs') {
+      send(res, 200, { runs: await listPorchRuns() });
+      return;
+    }
+    const pr = /^\/api\/porch\/runs\/([^/]+)$/.exec(path);
+    if (pr && req.method === 'GET') {
+      const runId = decodeURIComponent(pr[1]);
+      const { meta, state, audit, final, missing, invalid } =
+        await readPorchRun(runId);
+      if (invalid) {
+        send(res, 400, { error: 'invalid run id' });
+        return;
+      }
+      if (missing || !meta) {
+        send(res, 404, { error: 'not found' });
+        return;
+      }
+      send(res, 200, { meta, state, audit, final });
       return;
     }
 
