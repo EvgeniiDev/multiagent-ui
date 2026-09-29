@@ -179,6 +179,12 @@ export function createSessionRuntime(deps: RuntimeDeps) {
 
   // Current ACP client — one transport per tab.
   let acpClient: AcpClientBridge | null = null;
+  /**
+   * Turns in flight on this tab. Normally 0-or-1; `steer` briefly overlaps
+   * the cancelled turn with its replacement, so `isLoading` is lifted by a
+   * count, not a boolean — the Stop button must survive the handoff.
+   */
+  let inFlightPrompts = 0;
 
   // ---- History tail cache (localStorage, write-through) -------------------
   // `session/load` can only replay the WHOLE transcript top-down (no tail
@@ -284,7 +290,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   // Handle an unexpected transport close (e.g. WebSocket dropped while idle,
   // local agent process exited). The bridge has already rejected any
   // in-flight requests; we just need to tear down UI state so the user gets
-  // a clear "disconnected" signal instead of a stale "connected" view.
+  // a clear "disconnected" signal instead of a stale "connected" view —
+  // and arm the auto-reconnect loop so they don't have to ask for it.
   function handleUnexpectedClose(reason?: string): void {
     // If `acpClient` is already null, this fired during a voluntary
     // disconnect that's tearing down anyway — nothing to do.
@@ -297,6 +304,73 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     clearPermissionTimer();
     pendingPermission.value = null;
     error.value = `Connection lost: ${reason ?? 'transport closed'}`;
+    // Auto-reconnect runs through `resume`, so `session/load` re-claims the
+    // session's socket routing on the bridge automatically. Skipped while
+    // the OS reports offline — App.vue's `online` listener fires the
+    // foreground `tryReconnect` when the network comes back.
+    const saved = session.value ?? descriptor.value;
+    const offline =
+      typeof navigator !== 'undefined' && navigator.onLine === false;
+    if (saved?.supportsLoadSession && !connectionAborted && !offline) {
+      armAutoReconnect(saved);
+    }
+  }
+
+  // ---- Auto-reconnect on unexpected close -----------------------------------
+  // Backoff: 1.5 s doubling up to a 30 s cap, retried forever — a bridge
+  // restart or a NAT drop should not leave tabs dead until the user notices.
+  // Only fires on UNEXPECTED closes: `disconnect()` unlistens onClose before
+  // closing, so voluntary teardowns never reach here.
+  const AUTO_RECONNECT_BASE_MS = 1500;
+  const AUTO_RECONNECT_MAX_MS = 30_000;
+  let autoReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let autoReconnectAttempts = 0;
+
+  function disarmAutoReconnect(): void {
+    if (autoReconnectTimer !== null) {
+      clearTimeout(autoReconnectTimer);
+      autoReconnectTimer = null;
+    }
+  }
+
+  function armAutoReconnect(saved: SavedSession): void {
+    disarmAutoReconnect();
+    const delay = Math.min(
+      AUTO_RECONNECT_BASE_MS * 2 ** autoReconnectAttempts,
+      AUTO_RECONNECT_MAX_MS
+    );
+    autoReconnectAttempts += 1;
+    isReconnecting.value = true;
+    autoReconnectTimer = setTimeout(() => {
+      autoReconnectTimer = null;
+      void autoReconnectAttempt(saved);
+    }, delay);
+  }
+
+  async function autoReconnectAttempt(saved: SavedSession): Promise<void> {
+    // Another path already reconnected (foreground tryReconnect, a sidebar
+    // click → openTab → resume) or the tab went away while the timer slept.
+    if (
+      connectionAborted ||
+      acpClient ||
+      isConnected.value ||
+      isLoading.value ||
+      isConnecting.value
+    ) {
+      isReconnecting.value = false;
+      return;
+    }
+    try {
+      await resume(saved);
+      autoReconnectAttempts = 0;
+      isReconnecting.value = false;
+    } catch {
+      if (connectionAborted) {
+        isReconnecting.value = false;
+      } else {
+        armAutoReconnect(saved);
+      }
+    }
   }
 
   // ---- Autonomous permission handling --------------------------------------
@@ -1120,6 +1194,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       await deps.persistSessions();
 
       isConnected.value = true;
+      autoReconnectAttempts = 0;
       messages.value = [];
       toolCalls.value.clear();
 
@@ -1335,6 +1410,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       }
 
       isConnected.value = true;
+      autoReconnectAttempts = 0;
       // Messages already populated by session/update notifications during loadSession
 
       useActivityStore().recordEntry({
@@ -1439,6 +1515,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     }
 
     isLoading.value = true;
+    inFlightPrompts += 1;
     const activity = useActivityStore();
     activity.recordEntry({
       kind: 'turn-start',
@@ -1487,8 +1564,33 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       });
       throw e;
     } finally {
-      isLoading.value = false;
+      inFlightPrompts = Math.max(0, inFlightPrompts - 1);
+      if (inFlightPrompts === 0) isLoading.value = false;
     }
+  }
+
+  /**
+   * Mid-run steer: the user typed a message while a turn was still running.
+   * Cancel the in-flight turn first — `session/cancel` is a notification and
+   * ordering with the next write is guaranteed on the single socket — then
+   * send the text as a fresh turn. The cancelled prompt resolves with
+   * `stopReason:'cancelled'` on agents that honor it; its ledger entry
+   * records `cancelled` honestly. The cancel is best-effort (§R4): an agent
+   * that ignores it still gets the new prompt, and we never block on it.
+   */
+  async function steer(text: string, attachments: Attachment[] = []): Promise<void> {
+    if (!acpClient || !session.value) {
+      throw new Error('No active session');
+    }
+    if (!isLoading.value || inFlightPrompts === 0) {
+      return sendPrompt(text, attachments);
+    }
+    try {
+      await acpClient.cancel({ sessionId: session.value.sessionId });
+    } catch (e) {
+      console.warn('steer: session/cancel failed, sending prompt anyway:', e);
+    }
+    await sendPrompt(text, attachments);
   }
 
   // Cancel current operation
@@ -1503,6 +1605,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   // Cancel ongoing connection attempt
   async function cancelConnection(): Promise<void> {
     connectionAborted = true;
+    disarmAutoReconnect();
+    isReconnecting.value = false;
 
     // Disconnect if client exists
     if (acpClient) {
@@ -1550,6 +1654,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     // Abort an in-flight connect: without this a mid-create close would let
     // `session/new` land on a tab that's already gone.
     connectionAborted = true;
+    disarmAutoReconnect();
+    isReconnecting.value = false;
     const sessionStart = session.value?.lastUpdated || Date.now();
     const sessionDuration = Math.round((Date.now() - sessionStart) / 1000);
 
@@ -1632,6 +1738,23 @@ export function createSessionRuntime(deps: RuntimeDeps) {
    * doesn't advertise session-load support, etc.).
    */
   async function tryReconnect(): Promise<boolean> {
+    // Verify a socket that LOOKS connected before deciding there's nothing
+    // to do: the OS may have suspended the heartbeat while we were
+    // backgrounded, leaving a half-open TCP that still reports OPEN.
+    // A failed probe aborts the socket — `onTransportClose` runs
+    // `handleUnexpectedClose`, which clears acpClient/isConnected so we
+    // fall through to the resume path below.
+    if (isConnected.value && acpClient) {
+      const alive = await acpClient.probe(3_000).catch(() => false);
+      if (alive) return false;
+      if (!acpClient) {
+        // The abort above already ran the unexpected-close teardown —
+        // including arming the background reconnect loop. This manual call
+        // is the same intent, so fall through and resume now rather than
+        // waiting out the backoff.
+        disarmAutoReconnect();
+      }
+    }
     // Already connected or already trying — leave it alone.
     if (isConnected.value || isConnecting.value || isLoading.value) {
       return false;
@@ -1709,6 +1832,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     create,
     resume,
     sendPrompt,
+    steer,
     cancelOperation,
     cancelConnection,
     resolvePermission,

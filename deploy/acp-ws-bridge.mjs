@@ -642,9 +642,16 @@ function noteTraffic() {
  * only way two sockets' `id:2` stay distinguishable on the shared child)
  * and are recorded for the watchdog + response routing. Session-driving
  * requests also claim their sessionId for per-session routing (see
- * sessionOwner). Unparseable lines pass through verbatim. */
+ * sessionOwner). Unparseable lines pass through verbatim.
+ *
+ * `$/ping` heartbeat frames are answered HERE, inside the per-line loop —
+ * never forwarded to the child and never counted as traffic (a keepalive
+ * every 25 s would re-arm lastTrafficAt forever and mask a genuinely
+ * wedged agent from the watchdog). A `$/pong` goes straight to the asking
+ * socket with a bare ws.send — never through broadcast(), so it cannot
+ * leak into another tab. Intercepting in ws.on('message') instead would
+ * break multi-line payloads, so it must stay inside this loop. */
 function noteOutbound(payload, ws) {
-  noteTraffic();
   const out = [];
   for (const line of payload.split('\n')) {
     const trimmed = line.trim();
@@ -654,6 +661,27 @@ function noteOutbound(payload, ws) {
       msg = JSON.parse(trimmed);
     } catch {
       out.push(trimmed);
+      continue;
+    }
+    if (msg && msg.method === '$/ping') {
+      try {
+        if (msg.id !== undefined && msg.id !== null) {
+          // Request form: answer with the caller's own id — nothing is
+          // forwarded to the shared child, so no bridged id is consumed and
+          // pendingClientReqs stays clean.
+          ws.send(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { pong: true } }));
+        } else {
+          ws.send(JSON.stringify({
+            jsonrpc: '2.0', method: '$/pong',
+            params: {
+              ...(msg.params && typeof msg.params === 'object' ? msg.params : {}),
+              ts: Date.now(),
+            },
+          }));
+        }
+      } catch {
+        /* socket dying — the close handler cleans up */
+      }
       continue;
     }
     if (msg && msg.id !== undefined && msg.id !== null && typeof msg.method === 'string') {
@@ -685,6 +713,9 @@ function noteOutbound(payload, ws) {
     }
     out.push(trimmed);
   }
+  // Only frames actually forwarded to the agent count as traffic — a payload
+  // that was all `$/ping` keepalives must not re-arm the watchdog clock.
+  if (out.length > 0) noteTraffic();
   return out.length ? out.join('\n') + '\n' : '';
 }
 
@@ -764,11 +795,56 @@ const watchdog = setInterval(() => {
 }, WATCHDOG_TICK_MS);
 watchdog.unref?.();
 
+// ---------------------------------------------------------------------------
+// WebSocket-protocol liveness sweep
+// ---------------------------------------------------------------------------
+// A client that vanishes without a FIN (laptop sleep, network drop, dead
+// browser tab held open by the OS) leaves a half-open socket: reads block
+// forever and ws.send() silently buffers. Every WS_PING_INTERVAL_MS each
+// socket must have produced SOME inbound frame (a pong for our protocol
+// ping, or any data frame — the ws.on('message') handler renews it too);
+// sockets that didn't are terminated, which runs the ordinary 'close'
+// cleanup: drop sessionOwner claims and pendingClientReqs entries.
+// Detection bound ≈ 2×interval. Browsers cannot send protocol pings, so the
+// client side uses the app-level `$/ping`/`$/pong` above; this sweep is the
+// server side of the same story and works through https-front's raw TCP
+// pipe because protocol pings are just frames.
+const WS_PING_INTERVAL_MS = Number(
+  argValue('--ws-ping-interval-ms', process.env.ACP_WS_PING_INTERVAL_MS || 30_000)
+);
+if (WS_PING_INTERVAL_MS > 0) {
+  const wsSweep = setInterval(() => {
+    for (const ws of clients) {
+      if (ws.readyState !== 1) continue;
+      if (ws.isAlive === false) {
+        log('ws sweep: terminating unresponsive client');
+        try {
+          ws.terminate();
+        } catch {
+          /* ignore */
+        }
+        continue;
+      }
+      ws.isAlive = false;
+      try {
+        ws.ping();
+      } catch {
+        /* ignore */
+      }
+    }
+  }, WS_PING_INTERVAL_MS);
+  wsSweep.unref?.();
+}
+
 /** Deliver one agent frame. A frame that names a claimed sessionId goes to
  * the owning socket only; a response (dest — the socket whose request it
  * answers, known by its bridged id) goes to that socket only; everything
  * else (sessionless frames, sessions nobody claimed, stray responses)
  * keeps the old broadcast-to-everyone behavior. */
+
+/** Send-buffer cap per socket — see broadcast(). */
+const WS_BUFFERED_CAP = 32 * 1024 * 1024;
+
 function broadcast(line, msg, dest) {
   const sid = msg?.params?.sessionId;
   const owner =
@@ -776,6 +852,16 @@ function broadcast(line, msg, dest) {
   const targets = owner && clients.has(owner) ? [owner] : clients;
   for (const ws of targets) {
     if (ws.readyState === 1) {
+      // Backstop for the sweep window: a socket that stopped draining piles
+      // up ws.send() buffers (a replay into a dead tab can run to tens of
+      // MB). Past the cap we skip it — the sweep will terminate it shortly.
+      if ((ws.bufferedAmount ?? 0) > WS_BUFFERED_CAP) {
+        if (!ws.capLogged) {
+          ws.capLogged = true;
+          log('ws bufferedAmount over cap — dropping frames for undrained client');
+        }
+        continue;
+      }
       try {
         ws.send(line);
       } catch (e) {
@@ -851,10 +937,18 @@ server.on('error', (e) => log('server error:', e.message));
 wss.on('connection', (ws) => {
   clients.add(ws);
   log(`client connected (${clients.size} active)`);
+  // Liveness lease for the sweep: any inbound frame (protocol pong or data)
+  // proves the peer alive. `error` always precedes `close`; without a
+  // listener it would throw through the EventEmitter contract.
+  ws.isAlive = true;
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
+  ws.on('error', (e) => log('ws error:', e instanceof Error ? e.message : e));
   if (!child) spawnChild();
 
   ws.on('message', (data) => {
-    if (!child) spawnChild();
+    ws.isAlive = true;
     const payload = data.toString();
     try {
       // Resolve relative working directories against the bridge root so the
@@ -880,9 +974,15 @@ wss.on('connection', (ws) => {
         log(`resolved relative cwd -> ${msg.params.cwd}`);
       }
       // noteOutbound rewrites request ids to bridge-unique ones; what goes
-      // to the child is its returned payload, not the raw frame.
+      // to the child is its returned payload, not the raw frame. `$/ping`
+      // heartbeat lines are answered inline there and dropped — so a
+      // heartbeat-only payload produces an empty `out` and must not reach
+      // the child (nor respawn it just to keep a NAT mapping warm).
       const out = noteOutbound(line, ws);
-      child.stdin.write(out || line);
+      if (out) {
+        if (!child) spawnChild();
+        child.stdin.write(out);
+      }
     } catch (e) {
       log('stdin write failed:', e.message);
     }

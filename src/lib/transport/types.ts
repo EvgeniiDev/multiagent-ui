@@ -24,6 +24,16 @@ export interface AcpTransport {
    */
   onClose(cb: (reason?: string) => void): Unsubscribe;
 
+  /**
+   * Optional liveness probe: resolve true if the peer is provably alive
+   * within `timeoutMs`, false otherwise. Implementations may abort the
+   * socket on a failed probe (a timed-out probe means half-open) — callers
+   * then see the ordinary `onClose` path. Transports that cannot half-open
+   * (a stdio pipe dies with its process) may omit it; callers treat an
+   * absent probe as "alive".
+   */
+  probe?(timeoutMs: number): Promise<boolean>;
+
   /** Tear down the transport and release all resources. Idempotent. */
   close(): Promise<void>;
 }

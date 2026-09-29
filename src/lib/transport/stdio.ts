@@ -80,6 +80,11 @@ export class StdioTransport implements AcpTransport {
     return this.closeListeners.add(cb);
   }
 
+  /** A stdio pipe cannot half-open — liveness is the process's own state. */
+  probe(): Promise<boolean> {
+    return Promise.resolve(!this.closed);
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
