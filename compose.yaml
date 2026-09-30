@@ -61,6 +61,10 @@ services:
 
   runner:
     <<: *node
+    # U1: fixed uid matching the mounted host user — porch refuses control of
+    # run dirs owned by a different uid, and root-owned files inside ~/.pi,
+    # ~/.codex or ~/.local/share/devin would break the host CLIs.
+    user: "1001:1001"
     command: ["node", "/repo/server/acp-runner.mjs", "--serve"]
     environment:
       HOME: /home/hermes
@@ -68,6 +72,19 @@ services:
       STATE_URL: http://127.0.0.1:25900
       ROOT_DIR: /home/hermes/projects
       RUNNER_ID: host-runner
+      # Persistent execution root for porch registry/output/attempt dirs.
+      ACP_EXEC_DIR: /home/hermes/.hermes/acp-ui-state/execution
+    # Volumes REPLACE the anchor list, so repeat it and add runner-only mounts:
+    # ~/.codex (Codex auth + session store) and ~/.gitconfig (commit identity).
+    volumes:
+      - .:/repo:ro
+      - /home/hermes/projects:/home/hermes/projects:rw
+      - /home/hermes/.local:/home/hermes/.local:rw
+      - /home/hermes/.pi:/home/hermes/.pi:rw
+      - /home/hermes/.hermes:/home/hermes/.hermes:rw
+      - /home/hermes/.local/share/devin:/home/hermes/.local/share/devin:rw
+      - /home/hermes/.codex:/home/hermes/.codex:rw
+      - /home/hermes/.gitconfig:/home/hermes/.gitconfig:ro
 
   https-front:
     <<: *node

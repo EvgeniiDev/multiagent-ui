@@ -2,8 +2,11 @@ FROM node:22-slim
 # pi coding agent + ACP adapter live in the image; config & sessions come
 # from the host via the ~/.pi bind mount. Versions pinned to the host
 # installs so session files stay format-compatible.
+#
+# U1 runtime deps: porch is a bash CLI driving python3 (steer supervisor /
+# control / config parse) and CLI agents need git for worktree/commit work.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libatomic1 \
+ && apt-get install -y --no-install-recommends libatomic1 bash git python3 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 RUN npm install -g ws \
  && npm install -g @earendil-works/pi-coding-agent@0.85.1 pi-acp@0.0.33
