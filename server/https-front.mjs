@@ -83,7 +83,14 @@ function withCors(headers = {}) {
   return { ...out, ...CORS_HEADERS };
 }
 
-function httpProxy(targetPort) {
+// Per-target header overrides: forwarded proto/host so upstreams behind TLS
+// see the real client-facing origin (Express trust-proxy picks it up).
+// Format: { <listenPort>: { host, proto } }. host=null keeps rewriting off.
+const TARGET_HEADERS = process.env.ACP_FRONT_HEADERS
+  ? JSON.parse(process.env.ACP_FRONT_HEADERS)
+  : {};
+
+function httpProxy(targetPort, listenPort) {
   return (req, res) => {
     // Preflight is answered here: the upstreams are plain services that know
     // nothing about CORS, and forwarding OPTIONS would 404/405 the browser.
@@ -92,13 +99,34 @@ function httpProxy(targetPort) {
       res.end();
       return;
     }
+    const override = TARGET_HEADERS[listenPort];
+    // Default: preserve the client-facing Host so upstreams that build
+    // absolute URLs/hints (paseo injectConnectionHint) see the real origin.
+    // Opt out per-target with {"<port>": {"host": "..."}} or rewriteHost.
+    // Preserve the client-facing Host by default (upstreams building
+    // absolute URLs/hints see the real origin). Rewrite to loopback only
+    // when the target explicitly asks (rewriteHost) or gives no host key.
+    const headers = { ...req.headers };
+    if (override?.host && override.rewriteHost) {
+      headers.host = override.host;
+    } else if (!override?.host && !('host' in headers)) {
+      headers.host = `${UPSTREAM_HOST}:${targetPort}`;
+    }
+    if (override) {
+      // X-Forwarded-Proto/Host: Express req.protocol + req.headers.host
+      // follow them when trust proxy allows. Always send proto; send host
+      // from the original request when no explicit host override is given.
+      if (override.proto) headers['x-forwarded-proto'] = override.proto;
+      const fwdHost = override.host || req.headers.host;
+      if (fwdHost) headers['x-forwarded-host'] = fwdHost;
+    }
     const upstream = http.request(
       {
         host: UPSTREAM_HOST,
         port: targetPort,
         method: req.method,
         path: req.url,
-        headers: { ...req.headers, host: `${UPSTREAM_HOST}:${targetPort}` },
+        headers,
       },
       (upstreamRes) => {
         res.writeHead(upstreamRes.statusCode ?? 502, withCors(upstreamRes.headers));
@@ -115,18 +143,34 @@ function httpProxy(targetPort) {
   };
 }
 
-function wsProxy(targetPort) {
+function wsProxy(targetPort, listenPort) {
   // Raw TCP tunnel for upgraded connections and WebSockets: after the request
   // line + headers are forwarded, both sockets are simply piped together.
+  // Host is preserved from the client (upstreams doing same-origin checks
+  // need the real origin host); X-Forwarded-Proto/Host added per target.
   return (req, clientSocket, head) => {
     const upstream = net.connect(targetPort, UPSTREAM_HOST, () => {
+      const override = TARGET_HEADERS[listenPort];
       const headerLines = [`${req.method} ${req.url} HTTP/1.1`];
+      let sawForwardedProto = false;
+      let sawForwardedHost = false;
       for (let i = 0; i < req.rawHeaders.length; i += 2) {
         const name = req.rawHeaders[i];
-        const value = req.rawHeaders[i + 1];
-        headerLines.push(
-          name.toLowerCase() === 'host' ? `${name}: ${UPSTREAM_HOST}:${targetPort}` : `${name}: ${value}`,
-        );
+        const lname = name.toLowerCase();
+        if (lname === 'host' && override?.host && override.rewriteHost) {
+          headerLines.push(`${name}: ${override.host}`);
+          continue;
+        }
+        if (lname === 'x-forwarded-proto') sawForwardedProto = true;
+        if (lname === 'x-forwarded-host') sawForwardedHost = true;
+        headerLines.push(`${name}: ${req.rawHeaders[i + 1]}`);
+      }
+      if (override?.proto && !sawForwardedProto) {
+        headerLines.push(`X-Forwarded-Proto: ${override.proto}`);
+      }
+      const fwdHost = override?.host || (!override ? null : req.headers.host);
+      if (override && fwdHost && !sawForwardedHost) {
+        headerLines.push(`X-Forwarded-Host: ${fwdHost}`);
       }
       upstream.write(headerLines.join('\r\n') + '\r\n\r\n');
       if (head?.length) upstream.write(head);
@@ -149,9 +193,9 @@ if (!fs.existsSync(CERT) || !fs.existsSync(KEY)) {
 for (const [listenPort, upstreamPort] of Object.entries(TARGETS)) {
   const server = https.createServer(
     { cert: fs.readFileSync(CERT), key: fs.readFileSync(KEY) },
-    httpProxy(Number(upstreamPort)),
+    httpProxy(Number(upstreamPort), listenPort),
   );
-  server.on('upgrade', wsProxy(Number(upstreamPort)));
+  server.on('upgrade', wsProxy(Number(upstreamPort), listenPort));
   server.listen(Number(listenPort), '0.0.0.0', () =>
     log(`https ${listenPort} -> http ${upstreamPort}`),
   );
