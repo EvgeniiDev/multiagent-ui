@@ -8,6 +8,8 @@ import { loadKvStore, type KVStore } from '../lib/host';
 import { readAttachments, formatBytes, extractReplayedAttachments, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from '../lib/attachments';
 import ModePicker from './ModePicker.vue';
 import ModelPicker from './ModelPicker.vue';
+import WorkflowPanel from './WorkflowPanel.vue';
+import { useWorkflowStore } from '../stores/workflow';
 import CommandPalette from './CommandPalette.vue';
 import VoiceInput from './VoiceInput.vue';
 import type { Attachment, AttachmentMeta, SlashCommand } from '../lib/types';
@@ -26,6 +28,14 @@ const props = defineProps<{
 }>();
 
 const sessionStore = useSessionStore();
+const wfStore = useWorkflowStore();
+
+// Composer run mode (chat vs workflow) — the workflow store owns it and
+// persists it in workflow.json; the side panel v-if's off it.
+const RUN_MODES: { id: 'chat' | 'workflow'; name: string }[] = [
+  { id: 'chat', name: 'Chat' },
+  { id: 'workflow', name: 'Workflow' },
+];
 const inputText = ref('');
 const messagesContainer = ref<HTMLElement | null>(null);
 const commandPaletteRef = ref<InstanceType<typeof CommandPalette> | null>(null);
@@ -776,14 +786,15 @@ function getToolKind(kind: string): string {
 
 <template>
   <div class="chat-view">
-    <div class="chat-header">
-      <h2>{{ currentSession?.title || 'Chat' }}</h2>
-      <div class="header-right">
-        <!-- Session creation lives in the sidebar (+) and the welcome
-             screen; the header keeps only the session title + agent name. -->
-        <span class="agent-name">{{ currentSession?.agentName }}<span v-if="isAutonomous" class="auto-badge">auto</span></span>
+    <div class="chat-column">
+      <div class="chat-header">
+        <h2>{{ currentSession?.title || 'Chat' }}</h2>
+        <div class="header-right">
+          <!-- Session creation lives in the sidebar (+) and the welcome
+               screen; the header keeps only the session title + agent name. -->
+          <span class="agent-name">{{ currentSession?.agentName }}<span v-if="isAutonomous" class="auto-badge">auto</span></span>
+        </div>
       </div>
-    </div>
     
     <div
       ref="messagesContainer"
@@ -1050,6 +1061,12 @@ function getToolKind(kind: string): string {
               compact
               @change="handleModeChange"
             />
+            <ModePicker
+              :modes="RUN_MODES"
+              :current-mode-id="wfStore.chatMode"
+              compact
+              @change="(id) => wfStore.setChatMode(id as 'chat' | 'workflow')"
+            />
             <span class="composer-spacer" aria-hidden="true"></span>
             <span
               v-if="contextLabel"
@@ -1080,20 +1097,44 @@ function getToolKind(kind: string): string {
             </button>
           </div>
         </div>
-      </div>    </div>
+      </div>
+    </div>
+    </div><!-- chat-column -->
+
+    <!-- Workflow run mode: the porch stepper docked right of the feed. -->
+    <WorkflowPanel v-if="wfStore.chatMode === 'workflow'" class="workflow-side" />
   </div>
 </template>
 
 <style scoped>
 .chat-view {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   /* Flex sibling of the tab strip in .main-content: take the remaining
    * height and allow shrinking below min-content — height:100% here made
    * the composer overflow past the viewport by exactly the tab strip's
    * height whenever 2+ tabs were open. */
   flex: 1;
   min-height: 0;
+}
+
+/* The chat feed itself (header + messages + composer) stays a column; the
+ * workflow side panel is a row sibling docked right of it. */
+.chat-column {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Workflow run-mode side panel: fixed-width stepper column, border shared
+ * with the app's pane style. */
+.workflow-side {
+  width: 380px;
+  flex: 0 0 380px;
+  border-left: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  background: var(--bg-main, #fbf8f3);
 }
 
 .chat-header {
@@ -1905,6 +1946,12 @@ function getToolKind(kind: string): string {
 /* ---------- Mobile / narrow-viewport tweaks ---------- */
 
 @media (max-width: 800px) {
+  /* Narrow screens: the stepper column would eat the feed — hide it; the
+   * composer switch still works, the panel just isn't shown here. */
+  .workflow-side {
+    display: none;
+  }
+
   /* The mobile hamburger lives in the scope bar (in flow, right edge) —
      the header needs no reserved gutter. Push the header below the camera
      notch / status bar so picker buttons aren't clipped on phones with a

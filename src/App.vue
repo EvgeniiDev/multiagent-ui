@@ -17,7 +17,6 @@ import DirectoryPicker from './components/DirectoryPicker.vue';
 import ProjectsView from './components/ProjectsView.vue';
 import BoardView from './components/BoardView.vue';
 import DashboardView from './components/DashboardView.vue';
-import WorkflowView from './components/WorkflowView.vue';
 import ProjectScopeSelector from './components/ProjectScopeSelector.vue';
 import NewSessionDialog from './features/projects/NewSessionDialog.vue';
 import { useUiStore, VIEWS } from './stores/ui';
@@ -688,7 +687,6 @@ function clearError() {
         <ProjectsView v-if="uiStore.activeView === 'projects'" />
         <BoardView v-if="uiStore.activeView === 'board'" />
         <DashboardView v-if="uiStore.activeView === 'dashboard'" />
-        <WorkflowView v-if="uiStore.activeView === 'workflow'" />
       </main>
       
       <!-- Traffic Monitor Panel -->

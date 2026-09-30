@@ -1,24 +1,17 @@
 <script setup lang="ts">
-// Workflow view — a top-level mode (like Chat/Board) that visualizes porch
-// runs as a live stepper: one node per pipeline stage, each expandable to
-// its streamed output (text / reasoning / tool calls / lifecycle lines).
-// Ported from Paseo's workflow panel; the porch run-dir reader under
-// src/lib/porch/ is adapted to THIS host's format (audit.jsonl, not
-// normalized/).
+// Workflow side panel — the porch-run stepper docked next to the chat feed
+// (composer's run-mode = "workflow"). Same store and stepper as the former
+// top-level Workflow view, minus the run-list strip: in a narrow column the
+// panel just follows the latest run ("auto-trigger"); pinning a run stays
+// possible via the store, this surface doesn't need the list.
 //
-// Data path: the browser cannot read ~/.cache/pragmatic-orchestration/steer
-// directly. Runs come from the state server's read-only porch endpoints
-// (GET /api/porch/runs, GET /api/porch/runs/:id — server/acp-state-server.mjs)
-// polled by src/stores/workflow.ts every 2s while this view is mounted.
-// The view does not dispatch runs — the state server is read-only; porch
-// runs start on the host via scripts/porch-dispatch. "Auto-trigger" maps
-// to follow-latest: the newest running run opens itself here on the next
-// poll.
+// Data path: state server's read-only porch endpoints (GET /api/porch/runs,
+// GET /api/porch/runs/:id) polled by src/stores/workflow.ts every 2s while
+// this panel is mounted.
 import { computed, onMounted, onBeforeUnmount } from 'vue';
 import { useWorkflowStore } from '../stores/workflow';
 import { DIRECTIONS } from '../lib/porch/graph';
 import type { Direction } from '../lib/porch/types';
-import RunList from '../features/workflow/RunList.vue';
 import WorkflowStepper from '../features/workflow/WorkflowStepper.vue';
 
 const wf = useWorkflowStore();
@@ -34,7 +27,6 @@ onMounted(() => {
   });
 });
 onBeforeUnmount(() => {
-  // The view is v-if'd in App.vue — unmounting cleanly stops all traffic.
   disposed = true;
   wf.stopPolling();
 });
@@ -62,8 +54,6 @@ const summaryLine = computed(() => {
   const agent = meta?.agent_id ?? sum?.agentId;
   const backend = meta?.backend ?? sum?.backend;
   if (agent || backend) parts.push(`${agent ?? '?'}@${backend ?? '?'}`);
-  const model = meta?.model ?? sum?.model;
-  if (model) parts.push(model);
   const status = meta?.status ?? sum?.status;
   if (status) parts.push(status);
   const started = meta?.started_at ?? sum?.startedAt;
@@ -90,10 +80,10 @@ const nodeCounts = computed<Record<string, number>>(() => {
 </script>
 
 <template>
-  <div class="view-pane" :aria-busy="!wf.ready">
-    <header class="pane-head">
+  <aside class="wf-panel" :aria-busy="!wf.ready">
+    <header class="panel-head">
       <h2>Workflow</h2>
-      <span class="pane-note" aria-live="polite" :title="summaryLine">{{ summaryLine }}</span>
+      <span class="panel-note" aria-live="polite" :title="summaryLine">{{ summaryLine }}</span>
     </header>
 
     <nav class="tab-bar" aria-label="Workflow direction">
@@ -116,7 +106,7 @@ const nodeCounts = computed<Record<string, number>>(() => {
       {{ wf.errorText ?? wf.errorMessage }}
     </div>
 
-    <div class="pane-body">
+    <div class="panel-body">
       <template v-if="wf.porchUp === false">
         <div class="wf-empty">
           <p>Porch endpoint unreachable.</p>
@@ -130,68 +120,60 @@ const nodeCounts = computed<Record<string, number>>(() => {
         </div>
       </template>
       <template v-else>
-        <RunList
-          v-if="wf.runs.length > 0"
-          :runs="wf.runs"
-          :selected-run-id="wf.selectedRunId"
-          :following="wf.followLatest"
-          :now="wf.now"
-          @select="wf.selectRun"
-          @follow="wf.resumeFollow"
+        <WorkflowStepper
+          :nodes="wf.nodes"
+          :active-index="wf.activeNodeIndex"
+          :terminal="wf.terminal"
+          :expanded-node-id="wf.expandedNodeId"
+          :expanded-blocks="wf.expandedBlocks"
+          :counts="nodeCounts"
+          @toggle="wf.toggleNode"
         />
-        <div class="wf-stepper-wrap">
-          <WorkflowStepper
-            :nodes="wf.nodes"
-            :active-index="wf.activeNodeIndex"
-            :terminal="wf.terminal"
-            :expanded-node-id="wf.expandedNodeId"
-            :expanded-blocks="wf.expandedBlocks"
-            :counts="nodeCounts"
-            @toggle="wf.toggleNode"
-          />
-          <div v-if="wf.auditTruncated" class="wf-tail-note">showing last 512 KiB of audit.jsonl</div>
-        </div>
+        <div v-if="wf.auditTruncated" class="wf-tail-note">showing last 512 KiB of audit.jsonl</div>
       </template>
     </div>
-  </div>
+  </aside>
 </template>
 
 <style scoped>
-.view-pane {
-  position: relative;
+.wf-panel {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
   overflow: hidden;
 }
 
-.pane-head {
+.panel-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 1rem;
-  padding: 0.625rem 1rem;
+  gap: 0.75rem;
+  padding: 0.5rem 0.875rem;
   border-bottom: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
 }
 
-.pane-head h2 {
+.panel-head h2 {
   margin: 0;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   font-weight: 600;
 }
 
-.pane-note {
+.panel-note {
   font-family: var(--font-mono, monospace);
-  font-size: 0.6875rem;
+  font-size: 0.625rem;
   color: var(--text-muted, #a39a8e);
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   text-align: right;
 }
 
 .tab-bar {
   display: flex;
   gap: 0.125rem;
-  padding: 0 0.75rem;
+  padding: 0 0.5rem;
   border-bottom: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
   overflow-x: auto;
 }
@@ -200,14 +182,14 @@ const nodeCounts = computed<Record<string, number>>(() => {
   display: flex;
   align-items: center;
   gap: 0.3rem;
-  min-height: 30px;
-  padding: 0 0.625rem;
+  min-height: 28px;
+  padding: 0 0.5rem;
   border: none;
   border-bottom: 2px solid transparent;
   background: transparent;
   color: var(--text-secondary, #6b6259);
   font-family: inherit;
-  font-size: 0.75rem;
+  font-size: 0.71875rem;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -227,8 +209,8 @@ const nodeCounts = computed<Record<string, number>>(() => {
 }
 
 .wf-banner {
-  padding: 0.375rem 1rem;
-  font-size: 0.75rem;
+  padding: 0.3125rem 0.875rem;
+  font-size: 0.6875rem;
   color: var(--text-secondary, #6b6259);
   background: var(--tint-hover, rgba(43, 39, 35, 0.045));
   border-bottom: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
@@ -237,19 +219,12 @@ const nodeCounts = computed<Record<string, number>>(() => {
   color: var(--text-accent, #c2532f);
 }
 
-.pane-body {
-  position: relative;
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.wf-stepper-wrap {
+.panel-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
 }
 
 .wf-empty {
@@ -259,36 +234,24 @@ const nodeCounts = computed<Record<string, number>>(() => {
   align-items: center;
   justify-content: center;
   gap: 0.375rem;
-  padding: 2rem;
-  font-size: 0.8125rem;
+  padding: 1.5rem;
+  font-size: 0.75rem;
   color: var(--text-secondary, #6b6259);
   text-align: center;
 }
 .wf-hint {
-  font-size: 0.75rem;
+  font-size: 0.6875rem;
   color: var(--text-muted, #a39a8e);
 }
 .wf-hint code {
   font-family: var(--font-mono, monospace);
-  font-size: 0.6875rem;
+  font-size: 0.625rem;
 }
 
 .wf-tail-note {
-  padding: 0.25rem 1rem;
+  padding: 0.25rem 0.875rem;
   font-family: var(--font-mono, monospace);
-  font-size: 0.625rem;
+  font-size: 0.5625rem;
   color: var(--text-muted, #a39a8e);
-}
-
-/* Same 800px breakpoint as BoardView / the App.vue sidebar drawer. */
-@media (max-width: 800px) {
-  .pane-note {
-    display: none;
-  }
-  .tab-btn {
-    min-height: 44px;
-    flex: 1;
-    justify-content: center;
-  }
 }
 </style>

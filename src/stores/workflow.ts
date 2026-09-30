@@ -51,6 +51,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const manualDirection = ref<Direction | null>(null);
   const expandedNodeId = ref<string | null>(null);
   const runStatus = ref<RunStatus>('active');
+  /** Side-panel switch: 'chat' shows plain chat, 'workflow' shows the porch
+   * run stepper next to the feed. Global preference (workflow.json). */
+  const chatMode = ref<'chat' | 'workflow'>('chat');
   /** null = not probed yet; false = state server unreachable. */
   const porchUp = ref<boolean | null>(null);
   const errorMessage = ref<string | null>(null);
@@ -132,6 +135,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     await store.set('direction', manualDirection.value);
     await store.set('selectedRunId', selectedRunId.value);
     await store.set('followLatest', followLatest.value);
+    await store.set('chatMode', chatMode.value);
     await store.save();
   }
 
@@ -144,6 +148,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
     }
     selectedRunId.value = await store.get<string | null>('selectedRunId');
     followLatest.value = (await store.get<boolean>('followLatest')) ?? true;
+    const mode = await store.get<string>('chatMode');
+    if (mode === 'chat' || mode === 'workflow') chatMode.value = mode;
     ready.value = true;
   }
 
@@ -266,6 +272,13 @@ export const useWorkflowStore = defineStore('workflow', () => {
     void persist();
   }
 
+  /** Pick the composer's run mode — toggles the workflow side panel. */
+  function setChatMode(mode: 'chat' | 'workflow'): void {
+    if (chatMode.value === mode) return;
+    chatMode.value = mode;
+    void persist();
+  }
+
   function toggleNode(nodeId: string): void {
     expandedNodeId.value = expandedNodeId.value === nodeId ? null : nodeId;
   }
@@ -277,6 +290,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     selectedRunId,
     selectedSummary,
     followLatest,
+    chatMode,
     manualDirection,
     direction,
     nodes,
@@ -298,6 +312,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     stopPolling,
     selectRun,
     resumeFollow,
+    setChatMode,
     setDirection,
     eventsFor,
     toggleNode,
