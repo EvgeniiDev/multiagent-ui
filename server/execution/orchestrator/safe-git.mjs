@@ -4,6 +4,7 @@ import {promises as fs,constants} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
+import {randomUUID} from 'node:crypto';
 const locks=new Map();
 function environment(extra={}) {
  const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>!k.startsWith('GIT_')));
@@ -38,11 +39,27 @@ async function locate(repo){
  const alternates=path.join(objects,'info','alternates');if(await optional(alternates)){if((await fs.readFile(alternates,'utf8')).trim())throw new Error('Git alternates rejected');}
  return {dir,common,objects};
 }
+async function publishFile(source,parentHandle,name){
+ const anchor=`/proc/self/fd/${parentHandle.fd}`,target=path.join(anchor,name);
+ const old=await optional(target);if(old?.isSymbolicLink())throw new Error('Unsafe Git metadata destination');
+ const temporary=path.join(anchor,`.safe-${randomUUID()}`);
+ const handle=await fs.open(temporary,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
+ try{await fs.copyFile(source,`/proc/self/fd/${handle.fd}`);await handle.sync();await fs.rename(temporary,target);await parentHandle.sync();}
+ finally{await handle.close();await fs.rm(temporary,{force:true});}
+}
 async function persistMetadata(source,target){
  const st=await optional(source);if(!st)return;
- if(st.isDirectory()){const dst=await optional(target);if(dst?.isSymbolicLink())throw new Error('Unsafe Git metadata destination');await fs.mkdir(target,{recursive:true,mode:0o700});for(const name of await fs.readdir(source))await persistMetadata(path.join(source,name),path.join(target,name));return;}
- const dst=await optional(target);if(dst?.isSymbolicLink())throw new Error('Unsafe Git metadata destination');
- const tmp=`${target}.safe-${process.pid}`;await fs.copyFile(source,tmp);await fs.rename(tmp,target);
+ if(st.isDirectory()){
+  const dst=await optional(target);if(dst?.isSymbolicLink())throw new Error('Unsafe Git metadata destination');
+  await fs.mkdir(target,{recursive:true,mode:0o700});
+  const dir=await fs.open(target,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
+  try{for(const name of await fs.readdir(source))await persistMetadata(path.join(source,name),path.join(`/proc/self/fd/${dir.fd}`,name));}
+  finally{await dir.close();}return;
+ }
+ // Parents are already pinned directory-descriptor anchors; '/.' opens
+ // the directory itself without treating the deliberate proc-fd link as a leaf.
+ const parent=await fs.open(`${path.dirname(target)}/.`,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
+ try{await publishFile(source,parent,path.basename(target));}finally{await parent.close();}
 }
 async function publishObjects(source,target){
  const handle=await fs.open(target,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
@@ -55,7 +72,7 @@ async function publishObjects(source,target){
    if(!old)await fs.mkdir(dst,{mode:0o700});await publishObjects(src,dst);
   }else if(st.isFile()){
    const old=await optional(dst);if(old){if(!old.isFile()||old.isSymbolicLink())throw new Error('Unsafe Git object leaf');continue;}
-   const temp=path.join(anchor,`.object-${process.pid}-${Date.now()}`);await fs.copyFile(src,temp);await fs.rename(temp,dst);
+   await publishFile(src,handle,name);
   }else throw new Error('Unsafe Git object type');
  }}finally{await handle.close();}
 }
@@ -101,8 +118,8 @@ async function execute(repo,args,opts){
    await publishObjects(path.join(shadow,'objects'),path.join(commonAnchor,'objects'));
    for(const name of await fs.readdir(shadow))if(/^sharedindex\.[0-9a-f]+$/.test(name))await persistMetadata(path.join(shadow,name),path.join(sourceAnchor,name));
    for(const name of ['HEAD','index','packed-refs'])await persistMetadata(path.join(shadow,name),path.join(sourceAnchor,name));
-   const replacement=path.join(sourceAnchor,`refs.safe-${process.pid}`);
-   await fs.rm(replacement,{recursive:true,force:true});await copyMetadata(path.join(shadow,'refs'),replacement);
+   const replacement=await fs.mkdtemp(path.join(sourceAnchor,'.refs-'));
+   await persistMetadata(path.join(shadow,'refs'),replacement);
    await fs.rm(path.join(sourceAnchor,'refs'),{recursive:true,force:true});await fs.rename(replacement,path.join(sourceAnchor,'refs'));
   }
   return result;
