@@ -567,6 +567,24 @@ def validation_passes(run):
     return checks.get("verdict") == "pass"
 
 
+def mode_provenance_ok(mode, run):
+    required = {
+        "fusion": {"panelist", "judge", "integrator", "reviewer", "checker"},
+        "orchestrator": {"decomposer", "worker", "verifier", "assembler", "reviewer", "checker"},
+        "swarm": {"participant", "reviewer", "checker"},
+    }.get(mode)
+    completed = [a for a in (run or {}).get("attempts", [])
+                 if a.get("porchRunId") and a.get("status") == "completed"]
+    roles = {a.get("role") for a in completed}
+    if not required or (run or {}).get("mode") != mode or not required.issubset(roles):
+        return False
+    if mode in ("fusion", "swarm"):
+        role = "panelist" if mode == "fusion" else "participant"
+        return len({a.get("participantId") for a in completed
+                    if a.get("role") == role and a.get("participantId")}) >= 2
+    return True
+
+
 def check_run_evidence(mode, run, card_id, fixture_root):
     """Result hash + validation gate + nonempty attempts with a real
     provider attempt + workspace diff inside the fixture root."""
@@ -575,6 +593,8 @@ def check_run_evidence(mode, run, card_id, fixture_root):
                      if isinstance(a, dict) and a.get("porchRunId")]
     check(f"{mode}-attempts-nonempty-real-provider", len(real_attempts) > 0,
           f"attempts={len(attempts)} real={len(real_attempts)}")
+    provenance = mode_provenance_ok(mode, run)
+    check(f"{mode}-native-mode-completed-provider-roles", provenance, str(sorted({a.get("role") for a in real_attempts})))
     acc = (run or {}).get("acceptance") or {}
     check(f"{mode}-result-hash", bool(acc.get("resultSha256")),
           str(acc.get("resultSha256"))[:24])
@@ -608,7 +628,7 @@ def check_run_evidence(mode, run, card_id, fixture_root):
         else:
             ws_detail = f"workspace binding mismatch project={project_bound} run={w.get('runId')}"
     check(f"{mode}-workspace-real-clamp-diff-and-tests", ws_ok, ws_detail)
-    return (len(real_attempts) > 0 and bool(acc.get("resultSha256"))
+    return (provenance and len(real_attempts) > 0 and bool(acc.get("resultSha256"))
             and validation_passes(run) and ws_ok)
 
 
@@ -1082,6 +1102,10 @@ def _offline_self_check():
         ok = ok and bool(cond)
         print(f"{'PASS' if cond else 'FAIL'}  {name}"
               + (f"  ({detail})" if detail else ""), flush=True)
+
+    _check("offline-provenance-refuses-solo-fallback", not mode_provenance_ok("swarm", {"mode": "solo", "attempts": []}))
+    _check("offline-provenance-refuses-absent-review", not mode_provenance_ok("orchestrator", {"mode": "orchestrator", "attempts": [{"role": "worker", "status": "completed", "porchRunId": "observed-run"}]}))
+    _check("offline-provenance-refuses-duplicate-peer", not mode_provenance_ok("swarm", {"mode": "swarm", "attempts": [{"role": role, "status": "completed", "porchRunId": "observed-run", "participantId": "one"} for role in ["participant", "participant", "reviewer", "checker"]]}))
 
     # 1. Fixture CAS merge preserves foreign records, project carries path,
     #    card uses real lane fields (backlog status null).
