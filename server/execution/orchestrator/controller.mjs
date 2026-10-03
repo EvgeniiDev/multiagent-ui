@@ -1337,6 +1337,29 @@ export function createOrchDriver(deps = {}) {
     if (!run.orchestrator || typeof run.orchestrator !== 'object') return 'not_orchestrator';
     let oz = run.orchestrator;
 
+    // The graph has its own durable owner, independently of its attempts.
+    // A restart must adopt it before settlement or issuance can continue.
+    // Lease age grants no authority: the authenticated claim verifies the
+    // exact recorded process/environment death proof in the domain.
+    if (RUN_NONTERMINAL.has(run.status) && oz.owner && !owns(oz.owner)) {
+      if (typeof adoptionProofFor !== 'function') return 'foreign_owner';
+      let proof;
+      try { proof = await adoptionProofFor(oz.owner); } catch { return 'foreign_owner'; }
+      if (!proof) return 'foreign_owner';
+      const claimKey = sha256Hex(canonicalJson({
+        owner: { runnerId: oz.owner.runnerId, instanceId: oz.owner.instanceId }, proof,
+      })).slice(0, 16);
+      try {
+        await send(card, 'orch_claim', {
+          runId: run.id, adopt: true, proof, leaseMs: deps.leaseMs, ...self(),
+        }, `oca-${run.id}-${claimKey}-by-${instanceId}`);
+      } catch { return 'foreign_owner'; }
+      const fresh = await getRun(run.id).catch(() => null);
+      if (!fresh?.orchestrator || !owns(fresh.orchestrator.owner)) return 'foreign_owner';
+      run = fresh;
+      oz = run.orchestrator;
+    }
+
     // 1) Supervise every live orch attempt — observation beats issuance.
     let acted = null;
     for (let round = 0; round < 8; round += 1) {

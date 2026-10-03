@@ -307,10 +307,12 @@ async function driverFixture(options={}) {
     catch(e){errors.push({type,code:e.code,message:e.message});throw e;}
   };
   const events=[];
-  const driver=createOrchDriver({runtime,send,self:()=>SELF,getRun:id=>client.getRun(id),getDocument:(id,v)=>client.getDocument(id,v),getArtifact:(id,a)=>client.getArtifact(id,a),recordEvent:async(...args)=>events.push(args),stateDir,storage,projectsDir:dirname(projectDir),instanceId:SELF.instanceId,ensureWorkspace:async()=>{
+  const driverDeps={runtime,send,getRun:id=>client.getRun(id),getDocument:(id,v)=>client.getDocument(id,v),getArtifact:(id,a)=>client.getArtifact(id,a),recordEvent:async(...args)=>events.push(args),stateDir,storage,projectsDir:dirname(projectDir),canLaunch:options.canLaunch??(()=>true),ensureWorkspace:async()=>{
     const wsPath=join(root,'materialized'); if(!await fs.stat(wsPath).catch(()=>null)){git(projectDir,'clone','-q',projectDir,wsPath);}
     return{ok:true,ws:{path:wsPath}};
-  }});
+  }};
+  const newDriver=(identity=SELF,adoptionProofFor=null)=>createOrchDriver({...driverDeps,self:()=>identity,instanceId:identity.instanceId,adoptionProofFor});
+  const driver=newDriver(options.identity??SELF);
   const run=()=>client.getRun(runId);
   const tick=async()=>driver.drive(await client.getCard('card-a'),await run());
   const complete=async(att,finalText='')=>{jobs.get(att.porchRunId).wait={outcome:'terminal',status:'completed',runExitCode:0,finalText};};
@@ -318,7 +320,7 @@ async function driverFixture(options={}) {
     await tick();await tick();let r=await run();const att=r.attempts.find(a=>a.role==='decomposer');assert.ok(att,'driver launched decomposition');
     await complete(att,J({decomposition:{subtasks:tasks}}));await tick();await tick();return run();
   };
-  return{...env,runId,run,tick,complete,decompose,driver,runtime,jobs,canonicals,snapshots,starts,trace,errors,events,client,send};
+  return{...env,runId,run,tick,complete,decompose,driver,newDriver,runtime,jobs,canonicals,snapshots,starts,trace,errors,events,client,send};
 }
 
 test('driver: decomposition launches only ready work and settles candidate before verifier',async()=>{
@@ -397,4 +399,39 @@ test('driver: refused cancellation is retried until request and physical drain a
   const card=await f.client.getCard('card-a');const response=await cmd(f.svc,'card-a',{commandId:'retry-stop',type:'stop',expectedControlRevision:card.controlRevision,payload:{reason:'stop'}});assert.equal(response.status,200,J(response.json));
   await f.tick();assert.equal((await f.run()).status,'stopping');assert.equal(calls,1);
   await f.tick();const run=await f.run();assert.equal(calls,2);assert.equal(run.status,'cancelled');assert.equal(run.attempts[0].namespace.state,'stopped');
+});
+
+test('driver: restarted owner adopts completed graph only with authenticated matching dead-process proof',async()=>{
+  let admit=true;
+  const original={...SELF,pidStarttime:'original-start'};
+  const f=await driverFixture({identity:original,canLaunch:()=>admit});
+  let run=await f.decompose([taskSpec('a')]);const work=run.attempts.find(a=>a.role==='worker');
+  await fs.writeFile(join(f.jobs.get(work.porchRunId).repoPath,'src/a.js'),'export const a = 2;\n');await f.complete(work);await f.tick();await f.tick();
+  run=await f.run();const verifier=run.attempts.find(a=>a.role==='verifier');assert.ok(verifier);
+  admit=false;await f.complete(verifier,J({decision:'accept',findings:[]}));await f.tick();
+  run=await f.run();assert.equal(run.phase,'integrate');assert.equal(run.orchestrator.graph.status,'complete');
+  const launches=f.starts.length, replacement={...SELF,instanceId:'inst-restarted',pid:4243,pidStarttime:'replacement-start'};
+  const tickWith=async driver=>driver.drive(await f.client.getCard('card-a'),await f.run());
+  admit=true;
+  assert.equal(await tickWith(f.newDriver(replacement)), 'foreign_owner');
+  assert.equal(f.starts.length,launches);assert.equal((await f.run()).orchestrator.owner.instanceId,original.instanceId);
+  for(const proof of [
+    {kind:'process_dead',pid:999,starttime:original.pidStarttime,finding:'absent'},
+    {kind:'process_dead',pid:original.pid,starttime:original.pidStarttime,finding:'alive'},
+  ]) {
+    assert.equal(await tickWith(f.newDriver(replacement,()=>proof)),'foreign_owner');
+    assert.equal(f.starts.length,launches);
+  }
+  const asked=[];
+  const restarted=f.newDriver(replacement,owner=>{
+    asked.push(owner);
+    return{kind:'process_dead',pid:owner.pid,starttime:owner.pidStarttime,pidNs:owner.envKey.pidNs,finding:'absent'};
+  });
+  await tickWith(restarted);run=await f.run();
+  assert.equal(run.orchestrator.owner.instanceId,replacement.instanceId,'durable run owner changes before assembly');
+  assert.equal(asked[0].instanceId,original.instanceId);assert.equal(asked[0].pidStarttime,original.pidStarttime);
+  assert.ok(run.events.some(e=>e.type==='orch_adopted'));
+  const assembler=run.attempts.find(a=>a.role==='assembler');assert.ok(assembler,'adopted complete graph launches assembler');
+  assert.equal(assembler.owner.instanceId,replacement.instanceId);assert.equal(f.starts.length,launches+1);
+  await tickWith(restarted);assert.equal(f.starts.length,launches+1,'next tick supervises existing assembler');
 });
