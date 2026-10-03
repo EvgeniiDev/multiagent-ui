@@ -110,8 +110,10 @@ test('B3: parallel conflicting recordResolution — exactly one wins', async () 
   const db = await parentDiffOnBase(dir, base, baseDir, 'b', async (rp) => {
     await fs.writeFile(path.join(rp, 'f.txt'), 'from-b\n');
   });
+  const resolutionBases = new Map();
   const mkRes = async (name, fContent) => {
     const { repoPath: ir } = await createPrivateRepo({ sourcePath: dir, baseCommit: base, name, baseDir });
+    resolutionBases.set(ir, G(ir, 'rev-parse', 'HEAD'));
     const ap = spawnSync('git', ['apply', '-'], { cwd: ir, input: da.formatPatch, encoding: 'utf8' });
     assert.equal(ap.status, 0); // a applies; b conflicts -> hand-merge below
     await fs.writeFile(path.join(ir, 'f.txt'), fContent);
@@ -121,7 +123,7 @@ test('B3: parallel conflicting recordResolution — exactly one wins', async () 
   };
   const ir1 = await mkRes('b3-r1', 'merged one\n');
   const ir2 = await mkRes('b3-r2', 'merged two\n');
-  const baseCommit = da.inputCommit;
+  const baseCommit = resolutionBases.get(ir1);
   const baseTree = await treeHashFor(ir1, baseCommit);
   const storeDir = path.join(baseDir, 'store');
   const inputs = [
@@ -134,7 +136,7 @@ test('B3: parallel conflicting recordResolution — exactly one wins', async () 
   ];
   const results = await Promise.allSettled([
     recordResolution({ storeDir, inputs, order: ['a', 'b'], baseTree, baseCommit, repoPath: ir1, parentDiffs: pd, resolvedPaths: ['f.txt'] }),
-    recordResolution({ storeDir, inputs, order: ['a', 'b'], baseTree, baseCommit, repoPath: ir2, parentDiffs: pd, resolvedPaths: ['f.txt'] }),
+    recordResolution({ storeDir, inputs, order: ['a', 'b'], baseTree, baseCommit: resolutionBases.get(ir2), repoPath: ir2, parentDiffs: pd, resolvedPaths: ['f.txt'] }),
   ]);
   const ok = results.filter((r) => r.status === 'fulfilled');
   const bad = results.filter((r) => r.status === 'rejected');
