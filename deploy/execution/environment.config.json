@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 1,
+  "environment": {
+    "socketPath": "controller/env.sock",
+    "tokenFile": "controller/channel-token",
+    "registryFile": "controller/registry.json",
+    "workerNamePrefix": "acp-f1-w-",
+    "networkNamePrefix": "acp-f1-n-",
+    "labelPrefix": "ai.acp.f1",
+    "workerUid": 1001,
+    "workerGid": 1001,
+    "maxExecMs": 3600000,
+    "maxOutputBytes": 8388608,
+    "maxInputBytes": 262144,
+    "maxPromptBytes": 524288,
+    "allowDebugExec": true,
+    "egressGateway": {
+      "alias": "egress-gw",
+      "proxyPort": 3128,
+      "proxyUrl": "http://egress-gw:3128",
+      "labelSelector": "ai.acp.f1=egress-gw"
+    }
+  },
+  "roots": {
+    "env": {
+      "hostPath": "/home/hermes/.hermes/acp-ui-state/f1-env",
+      "mountPath": "/home/hermes/.hermes/acp-ui-state/f1-env",
+      "access": "rw",
+      "purpose": "environment root: workers/, runtime/, capability/, depsets/, canonical/, controller/"
+    },
+    "projects": {
+      "hostPath": "/home/hermes/projects",
+      "mountPath": "/home/hermes/projects",
+      "access": "ro",
+      "purpose": "registered project sources (git trees); SAME path as host so worktree-linked .git gitdir pointers resolve verbatim"
+    },
+    "piCreds": {
+      "hostPath": "/home/hermes/.pi/agent",
+      "mountPath": "/ro/pi-agent",
+      "access": "ro",
+      "purpose": "credential+model source; controller copies only the profile's provider subset"
+    },
+    "piExt": {
+      "hostPath": "/home/hermes/.pi/agent/npm/node_modules",
+      "mountPath": "/ro/pi-ext",
+      "access": "ro",
+      "purpose": "registered extension packages (npm-installed); workers bind it at /work/node_modules — contains NO credentials"
+    },
+    "piSkills": {
+      "hostPath": "/home/hermes/.pi/agent/skills",
+      "mountPath": "/ro/pi-skills",
+      "access": "ro",
+      "purpose": "registered skill dirs; workers bind it at /work/skills"
+    },
+    "porchSkill": {
+      "hostPath": "/home/hermes/.pi/agent/skills/pragmatic-orchestration",
+      "mountPath": "/ro/porch-skill",
+      "access": "ro",
+      "purpose": "porch skill root (scripts/ + prompts/) — snapshot source"
+    }
+  },
+  "images": {
+    "worker": { "ref": "acp-f1-worker:0.85.1" }
+  },
+  "roles": {
+    "panelist":   { "projectMode": "snapshot-ro",   "inputs": ["task", "work-order"], "deps": false, "canonical": false },
+    "judge":      { "projectMode": "snapshot-ro",   "inputs": ["task", "answers", "rubric"], "deps": false, "canonical": false },
+    "integrator": { "projectMode": "private-repo",  "inputs": ["task", "work-order", "requirements", "plan", "design", "results"], "deps": true,  "canonical": true },
+    "setup":      { "projectMode": "workdir-rw",    "inputs": [], "deps": false, "canonical": false, "setup": true },
+    "probe":      { "projectMode": "none",          "inputs": ["task"], "deps": false, "canonical": false }
+  },
+  "execPolicy": {
+    "envKeys": [
+      "PORCH_STEER_DIR", "PORCH_OUTPUT_DIR", "PORCH_RUN_DIR", "PORCH_CONFIG",
+      "PORCH_SAVE_OUTPUTS", "PORCH_PI_SESSION_ID", "PI_CODING_AGENT_SESSION_DIR"
+    ],
+    "cwdKeys": {
+      "project": "/work/project",
+      "home": "/work/home",
+      "attempt": "/work/attempt",
+      "inputs": "/work/inputs",
+      "deps": "/work/deps"
+    },
+    "templates": [
+      {
+        "name": "porch",
+        "head": ["/work/conf/porch/scripts/porch", "delegate"],
+        "argPattern": "^[A-Za-z0-9_./=:@-]{1,512}$",
+        "pathRoots": ["/work/conf", "/work/attempt", "/work/project", "/work/inputs"],
+        "maxArgs": 32
+      },
+      {
+        "name": "proc-probe",
+        "head": ["/opt/env/proc-probe.mjs"],
+        "argPattern": "^[0-9]{1,10}$",
+        "pathRoots": [],
+        "maxArgs": 2
+      },
+      {
+        "name": "debug",
+        "head": ["/bin/bash", "-c"],
+        "argPattern": "^[\\x09\\x0a\\x20-\\x7e]{1,16384}$",
+        "pathRoots": [],
+        "maxArgs": 4,
+        "requiresFlag": "allowDebugExec"
+      }
+    ],
+    "maxBodyBytes": 4194304
+  },
+  "egress": {
+    "allowlist": [
+      { "host": "anymodel.org",          "ports": [443], "kind": "provider" },
+      { "host": "openrouter.ai",         "ports": [443], "kind": "provider" },
+      { "host": "api.openrouter.ai",     "ports": [443], "kind": "provider" },
+      { "host": "duckduckgo.com",        "ports": [443], "kind": "search" },
+      { "host": "html.duckduckgo.com",   "ports": [443], "kind": "search" },
+      { "host": "lite.duckduckgo.com",   "ports": [443], "kind": "search" },
+      { "host": "links.duckduckgo.com",  "ports": [443], "kind": "search" },
+      { "host": "registry.npmjs.org",    "ports": [443], "kind": "registry" },
+      { "host": "192.168.1.146",         "ports": [8767], "kind": "provider", "privateUpstream": true }
+    ]
+  },
+  "setups": {
+    "node-deps": {
+      "argv": ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+      "lockfiles": ["package-lock.json"],
+      "depPath": "node_modules",
+      "checkArgv": ["node", "-e", "process.stdout.write(require.resolve('vue'))"],
+      "timeoutMs": 600000,
+      "checkTimeoutMs": 120000
+    }
+  }
+}

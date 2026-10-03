@@ -54,13 +54,67 @@ services:
 
   state:
     <<: *node
+    # State files are shared with host processes running as hermes.
+    user: "1001:1001"
     command: ["node", "/repo/server/acp-state-server.mjs"]
     environment:
+      # Service-level environment REPLACES the anchor map — HOME/PATH must be
+      # re-listed (the live container historically ran with neither, so
+      # os.homedir() fell back to passwd).
+      HOME: /home/hermes
+      PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      NODE_PATH: /home/hermes/.local/lib/node_modules
       STATE_DIR: /home/hermes/.hermes/acp-ui-state
       PORT: "25900"
+      # External porch-run reader root (read-only mount below). Explicit so
+      # it does not depend on HOME/XDG resolution; managed runs are NOT here —
+      # they live under the runner's ACP_EXEC_DIR per attempt.
+      PORCH_STEER_DIR: /home/hermes/.cache/pragmatic-orchestration/steer
+      # U3 (prepared — inactive until deployed): managed workspace root shared
+      # with the runner at the identical absolute path via the projects
+      # mount. State and runner both run uid 1001, so the internal token and
+      # the workspace root are same-uid readable/writable; the explicit uid
+      # still pins the provisioning contract if the service uid ever changes.
+      # No service is started/restarted for this yet.
+      ACP_WORKSPACE_DIR: /home/hermes/projects/.acp-workspaces
+      ACP_EXEC_TOKEN_UID: "1001"
+      ACP_EXEC_TOKEN_GID: "1001"
+      # U4 (prepared — inactive until the key exists): the ops credential for
+      # POST /api/internal/environments/retire. The key file lives in
+      # /home/hermes/.acp-ops on the HOST — deliberately OUTSIDE every path
+      # the runner mounts (state and runner share uid 1001, so a 0600 file
+      # under a shared mount would not separate them). It binds read-only
+      # into the state container ALONE; the runner has no mount for it and
+      # cannot reach it through any shared path. Missing/unreadable/
+      # malformed, or identical to the runner token => the retire route
+      # stays closed with an ops_unavailable diagnosis; boot never fails.
+      # Provision (host, do NOT commit the key):
+      #   install -d -m 0700 -o 1001 -g 1001 /home/hermes/.acp-ops
+      #   openssl rand -hex 24 \
+      #     | install -m 0600 -o 1001 -g 1001 /dev/stdin /home/hermes/.acp-ops/ops-token
+      ACP_OPS_TOKEN_FILE: /run/acp-ops/ops-token
+    # volumes REPLACE the anchor list — repeat every anchor mount and add the
+    # single private ops-key dir (read-only).
+    volumes:
+      - .:/repo:ro
+      - /home/hermes/projects:/home/hermes/projects:rw
+      - /home/hermes/.local:/home/hermes/.local:rw
+      - /home/hermes/.pi:/home/hermes/.pi:rw
+      - /home/hermes/.hermes:/home/hermes/.hermes:rw
+      - /home/hermes/.local/share/devin:/home/hermes/.local/share/devin:rw
+      - /home/hermes/.acp-ops:/run/acp-ops:ro
+      # External porch registry — READ-ONLY, state only. Lets the workflow
+      # panel show real external runs next to managed ones (the live spec
+      # lacks this mount, so the reader returns an empty list today).
+      - /home/hermes/.cache/pragmatic-orchestration/steer:/home/hermes/.cache/pragmatic-orchestration/steer:ro
 
   runner:
     <<: *node
+    # U7: unique env identity — with network_mode:host every container would
+    # otherwise inherit the HOST's hostname, making envInstance.containerId
+    # identical across all services and retire-environment's uniqueness
+    # proof permanently unachievable. Pin a per-service hostname.
+    hostname: acp-ui-runner
     # U1: fixed uid matching the mounted host user — porch refuses control of
     # run dirs owned by a different uid, and root-owned files inside ~/.pi,
     # ~/.codex or ~/.local/share/devin would break the host CLIs.
@@ -72,6 +126,9 @@ services:
       STATE_URL: http://127.0.0.1:25900
       ROOT_DIR: /home/hermes/projects
       RUNNER_ID: host-runner
+      # U3 (prepared): must equal the state's ACP_WORKSPACE_DIR — the same
+      # absolute path is visible in both namespaces via the projects mount.
+      ACP_WORKSPACE_DIR: /home/hermes/projects/.acp-workspaces
       # Persistent execution root for porch registry/output/attempt dirs.
       ACP_EXEC_DIR: /home/hermes/.hermes/acp-ui-state/execution
     # Volumes REPLACE the anchor list, so repeat it and add runner-only mounts:
@@ -129,3 +186,62 @@ services:
       HOME: /home/hermes
       PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       STATE_URL: http://127.0.0.1:25900
+
+  # ======================= F1 environment (enable-gated) =======================
+  # Prepared but NOT part of the default stack — `docker compose up -d` never
+  # starts these; they require the explicit `f1` profile:
+  #     docker compose --profile f1 up -d env-controller egress-gw
+  # The environment is exercised by scripts/execution_environment_smoke.mjs.
+  env-controller:
+    image: acp-f1-worker:0.85.1
+    build:
+      context: .
+      dockerfile: deploy/execution/Dockerfile.worker
+    profiles: ["f1"]
+    user: "1001:1001"
+    # Docker socket group membership (socket is root:docker 0660 on host).
+    # Override via DOCKER_SOCK_GID when the host's docker gid differs.
+    group_add: ["${DOCKER_SOCK_GID:-105}"]
+    command: ["node", "/repo/deploy/execution/env-controller.mjs",
+              "--config", "/run/f1/environment.config.json"]
+    environment:
+      ACP_F1_DOCKER_SOCK: /var/run/docker.sock
+    network_mode: "none"
+    volumes:
+      # The Docker socket exists ONLY in this service — workers and the
+      # gateway never see it; all container ops go through the exec gate.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/repo:ro
+      - ./deploy/execution/environment.config.json:/run/f1/environment.config.json:ro
+      # env root at the IDENTICAL host path — controller-written pointers
+      # (worktree .git files, worker dirs) resolve verbatim on the host.
+      - /home/hermes/.hermes/acp-ui-state/f1-env:/home/hermes/.hermes/acp-ui-state/f1-env
+      - /home/hermes/projects:/home/hermes/projects:ro
+      - /home/hermes/.pi/agent:/ro/pi-agent:ro
+      - /home/hermes/.pi/agent/npm/node_modules:/ro/pi-ext:ro
+      - /home/hermes/.pi/agent/skills:/ro/pi-skills:ro
+      - /home/hermes/.pi/agent/skills/pragmatic-orchestration:/ro/porch-skill:ro
+    restart: unless-stopped
+
+  egress-gw:
+    image: acp-f1-worker:0.85.1
+    profiles: ["f1"]
+    user: "1001:1001"
+    command: ["node", "/repo/deploy/execution/egress-gw.mjs"]
+    environment:
+      ACP_F1_CONFIG: /run/f1/environment.config.json
+    labels:
+      - "ai.acp.f1=egress-gw"
+    volumes:
+      - .:/repo:ro
+      - ./deploy/execution/environment.config.json:/run/f1/environment.config.json:ro
+    networks:
+      # The only outbound interface of the F1 topology: the gateway holds it
+      # alone; worker nets are `internal` and get the gw attached on demand.
+      - f1-egress
+    restart: unless-stopped
+
+networks:
+  f1-egress:
+    name: acp-f1-egress
+    driver: bridge

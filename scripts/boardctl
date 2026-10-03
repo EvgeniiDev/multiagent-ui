@@ -23,6 +23,13 @@ device, and a card claimed here is not taken twice.
     boardctl delegate --session sess-1 --subagent explore --end --outcome done \
         --detail "mapped 3 entry points"
 
+Managed execution cards (`execution.managed: true`) are lifecycle-owned:
+review/verdict writes, move/claim/flag/rm and `set --stage/--status` are
+refused — the evidence lives in the run record, not in .acp/cards files.
+    boardctl review 3f2a                 # validation: checks, findings, verdicts, decision
+    boardctl accept 3f2a                 # accept the verified result hash
+    boardctl stop 3f2a                   # request stop (never gated)
+
 Every command takes --json for machine-readable output. The acting agent name
 comes from --agent, else $BOARD_AGENT, else "boardctl".
 
@@ -134,6 +141,113 @@ def mutate(name: str, default: dict, fn, tries: int = 6):
                 continue
             raise
     raise CliError(f"{name}: lost {tries} revision races ({last})", 3)
+
+
+# --- managed execution API ---------------------------------------------------
+#
+# A card carrying `execution.managed: true` is owned by the execution core:
+# the server projects stage/status onto the board row from the aggregate, so
+# legacy board writes silently revert. All managed interaction goes through
+# the execution API on the same state server — the aggregate is the evidence,
+# never a .acp/cards file and never a BOARD_STATE_DIR path.
+#
+#   GET  /api/execution/cards/<id>            card view (revision, run id)
+#   GET  /api/execution/runs/<id>             full run (validation, acceptance)
+#   POST /api/execution/cards/<id>/commands   user-channel commands
+
+
+def _exec_request(path: str, method: str = "GET",
+                  body: "dict | None" = None) -> "tuple[int, dict]":
+    """(status, payload) on /api/execution — HTTP errors come back structured
+    ({error, code, ...}) instead of raising so command paths can inspect the
+    domain code. Transport failures still raise CliError."""
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        f"{DEFAULT_URL}/api/execution{path}",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read() or b"{}"
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            payload = {"error": raw.decode(errors="replace")[:400]}
+        if not isinstance(payload, dict):
+            payload = {"error": str(payload)}
+        return exc.code, payload
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise CliError(
+            f"state server unreachable at {DEFAULT_URL} ({exc}); "
+            "is the state service running?",
+            3,
+        ) from None
+
+
+def _exec_get_card(card_id: str) -> dict:
+    st, p = _exec_request(f"/cards/{card_id}")
+    if st == 404:
+        raise CliError(
+            f"{card_id[:8]}: the server has no managed aggregate for this card "
+            "(execution may not be enabled here)", 2)
+    if st != 200:
+        raise CliError(f"GET managed card -> {st}: {p.get('error', p)}", 3)
+    return p
+
+
+def _exec_get_run(run_id: str) -> dict:
+    st, p = _exec_request(f"/runs/{run_id}")
+    if st != 200:
+        raise CliError(f"GET run {run_id[:8]} -> {st}: {p.get('error', p)}", 3)
+    return p
+
+
+def _exec_command(card: dict, ctype: str, payload: dict,
+                  tries: int = 6) -> dict:
+    """POST a user-channel command bound to the current controlRevision,
+    retrying revision races with a fresh view — the commandId is fresh on
+    each attempt so a retried command can never collide with itself."""
+    last: Exception | None = None
+    for _ in range(tries):
+        view = _exec_get_card(card["id"])
+        body = {
+            "commandId": f"bc-{uuid.uuid4().hex[:20]}",
+            "type": ctype,
+            "expectedControlRevision": int(view.get("controlRevision") or 0),
+            "payload": payload,
+        }
+        st, p = _exec_request(f"/cards/{card['id']}/commands", "POST", body)
+        if st == 409 and p.get("code") == "revision_conflict":
+            last = CliError(str(p.get("error") or "revision_conflict"), 3)
+            time.sleep(0.15)
+            continue
+        if st >= 400 or p.get("ok") is False:
+            raise CliError(
+                f"{ctype} refused: {p.get('error') or p} "
+                f"[{p.get('code') or st}]", 1 if st == 409 else 3)
+        return p
+    raise CliError(f"{ctype}: lost {tries} revision races ({last})", 3)
+
+
+def _managed(card: dict) -> bool:
+    ex = card.get("execution")
+    return isinstance(ex, dict) and ex.get("managed") is True
+
+
+def _require_unmanaged(card: dict, op: str) -> None:
+    """Fail closed on lifecycle-owned ops against a managed card. The server
+    overlays the aggregate projection onto every board write, so mutating
+    stage/status/claims from here would look applied and silently revert —
+    an honest refusal beats a no-op write."""
+    if _managed(card):
+        raise CliError(
+            f"{card['id'][:8]} is a managed execution card — {op} is owned by "
+            "the execution lifecycle. Managed ops: `boardctl review`, "
+            "`boardctl accept`, `boardctl stop`.", 1)
 
 
 # --- model helpers ----------------------------------------------------------
@@ -688,6 +802,8 @@ def _save_card(card: dict, actor_note: str) -> dict:
 def cmd_set(args) -> int:
     cards = load_cards()
     card = resolve(cards, args.card)
+    if (args.stage or args.status) and _managed(card):
+        _require_unmanaged(card, "stage/status")
     prev_status = card.get("status")
     changes: "list[str]" = []
     _apply(card, args, changes)
@@ -704,6 +820,7 @@ def cmd_set(args) -> int:
 def cmd_move(args) -> int:
     cards = load_cards()
     card = resolve(cards, args.card)
+    _require_unmanaged(card, "move")
     prev_status = card.get("status")
     stage, status = check_stage_status(args.stage, args.status)
     changes: "list[str]" = []
@@ -722,6 +839,10 @@ def cmd_move(args) -> int:
 def cmd_flag(args) -> int:
     cards = load_cards()
     card = resolve(cards, args.card)
+    # blocked/cancelled on a managed row are projection-owned — the server
+    # writes them from the aggregate and any local flag reverts on the next
+    # repair pass. `boardctl stop` is the real managed operator action.
+    _require_unmanaged(card, f"{args.name} flag")
     on = args.flag == "set"
     detail = ""
     if args.name == "blocked":
@@ -743,6 +864,9 @@ def cmd_flag(args) -> int:
 def cmd_claim(args) -> int:
     cards = load_cards()
     card = resolve(cards, args.card)
+    # A managed card is dispatched by the scheduler — a claims.json row on
+    # it reserves nothing and only looks like ownership.
+    _require_unmanaged(card, "claim")
     if card.get("cancelled"):
         raise CliError("card is cancelled", 1)
     if card.get("blocked"):
@@ -938,6 +1062,9 @@ def cmd_next(args) -> int:
 def cmd_rm(args) -> int:
     cards = load_cards()
     card = resolve(cards, args.card)
+    # The server also refuses managed rows in mergeBoardWrite; failing here
+    # first makes the refusal legible instead of a bare 409.
+    _require_unmanaged(card, "delete")
     claims = live_claims(read_doc("claims.json", empty_claims())[0])
     if card["id"] in claims and not args.force:
         raise CliError(f"card is claimed by {claims[card['id']]['agentName']} (use --force)", 3)
@@ -965,14 +1092,154 @@ def cmd_rm(args) -> int:
 def cmd_review(args) -> int:
     """`boardctl review <card>` — show the findings doc; `--round N` records
     the round; `--close FID` closes findings; `--sync` applies the derived
-    board state (backlog cards + round-limit flag)."""
+    board state (backlog cards + round-limit flag).
+
+    Managed card: the review evidence lives in the run's validation record
+    (verified findings/verdict artifacts + check reports + the gate
+    decision), so the view comes from the execution API and every file-write
+    flag is refused — there is no findings FILE to mutate."""
     cards = load_cards()
     card = resolve(cards, args.card)
+    if _managed(card):
+        if args.sync or args.round is not None or args.close:
+            raise CliError(
+                f"{card['id'][:8]} is managed — findings/verdicts are "
+                "immutable validation evidence inside the run record; "
+                "there is no review file to write", 1)
+        return _review_managed(card, args)
     if args.sync:
         return _review_sync(card, args)
     if args.round is not None or args.close:
         return _review_write(card, args)
     return _review_show(card, args)
+
+
+def _review_managed(card: dict, args) -> int:
+    """Read-only managed review view: run + validation evidence through the
+    execution aggregate (GETs are unauthenticated reads of recorded truth —
+    no offline files involved)."""
+    view = _exec_get_card(card["id"])
+    run_id = view.get("currentRunId")
+    run = _exec_get_run(run_id) if run_id else None
+    val = (run or {}).get("validation") or {}
+    checks = val.get("checks") or {}
+    findings_doc = ((val.get("reports") or {}).get("findings") or {}).get("doc") or {}
+    verdicts_doc = ((val.get("reports") or {}).get("verdicts") or {}).get("doc") or {}
+    verdict_map = {}
+    for v in verdicts_doc.get("verdicts") or []:
+        if isinstance(v, dict) and v.get("findingId"):
+            verdict_map[v["findingId"]] = v
+    findings = [f for f in findings_doc.get("findings") or [] if isinstance(f, dict)]
+    acceptance = (run or {}).get("acceptance") or {}
+    payload = {
+        "card": card["id"],
+        "managed": True,
+        "controlRevision": view.get("controlRevision"),
+        "run": run_id,
+        "runStatus": (run or {}).get("status"),
+        "validation": {
+            "id": val.get("id"),
+            "round": val.get("round"),
+            "status": val.get("status"),
+            "phase": val.get("phase"),
+            "checks": {"status": checks.get("status"), "verdict": checks.get("verdict"),
+                       "reports": checks.get("reports") or []},
+            "decision": val.get("decision"),
+            "resultSha256": val.get("resultSha256"),
+        },
+        "acceptance": acceptance,
+        "findings": findings,
+        "verdicts": verdicts_doc.get("verdicts") or [],
+    }
+
+    def render() -> str:
+        if not run:
+            return (f"{card['id'][:8]}: managed, no run yet "
+                    f"(controlRevision {view.get('controlRevision')})")
+        head = (f"run {str(run_id)[:8]}  {run.get('status')}   "
+                f"validation r{val.get('round', '-')} {val.get('status') or '-'}"
+                f"/{val.get('phase') or '-'}"
+                f"   checks: {checks.get('status') or '-'}"
+                f" {checks.get('verdict') or '-'}")
+        if val.get("decision"):
+            dec = val["decision"]
+            head += f"   decision: {dec.get('outcome') if isinstance(dec, dict) else dec}"
+        if acceptance.get("resultSha256"):
+            head += f"\n  result {str(acceptance['resultSha256'])[:16]}…" \
+                    " — accept with: boardctl accept " + card["id"][:8]
+        rows = [head]
+        for rep in checks.get("reports") or []:
+            if not isinstance(rep, dict):
+                continue
+            rows.append(
+                f"  check[{rep.get('index', '?')}] {rep.get('status') or '?'}"
+                + (f" exit={rep['exitCode']}" if rep.get("exitCode") is not None else "")
+                + (f" {rep.get('error')}" if rep.get("error") else ""))
+        for x in findings:
+            st = x.get("status") or "open"
+            v = verdict_map.get(str(x.get("id") or ""))
+            mark = (f" [{v.get('verdict')}"
+                    + (f" by {v.get('checker')}" if v.get("checker") else "")
+                    + (f": {v.get('reason')}" if v.get("reason") else "")
+                    + "]") if v else ""
+            rows.append(
+                f"  {str(x.get('id')):<10} {str(x.get('severity')):<9} {st:<7}"
+                f" r{x.get('round', '-')}  {str(x.get('where') or '-'):<24}"
+                f" {str(x.get('text') or '')}{mark}")
+        return "\n".join(rows)
+
+    emit(payload, args, render)
+    return 0
+
+
+def cmd_accept(args) -> int:
+    """`boardctl accept <card>` — managed cards only: send accept_result bound
+    to the exact verified resultSha256 the run is holding at the
+    awaiting_acceptance gate. Legacy flow stays `move <id> reviewtest
+    accepted`."""
+    cards = load_cards()
+    card = resolve(cards, args.card)
+    if not _managed(card):
+        raise CliError(
+            f"{card['id'][:8]} is not managed — legacy accept is "
+            f"`boardctl move {args.card} reviewtest accepted`", 1)
+    view = _exec_get_card(card["id"])
+    run_id = view.get("currentRunId")
+    if not run_id:
+        raise CliError(f"{card['id'][:8]}: no managed run to accept", 1)
+    run = _exec_get_run(run_id)
+    status = run.get("status")
+    sha = ((run.get("acceptance") or {}).get("resultSha256"))
+    if status != "awaiting_acceptance" or not sha:
+        raise CliError(
+            f"run {str(run_id)[:8]} is {status} — acceptance requires the "
+            "verified awaiting_acceptance gate (checks + reviewer/checker "
+            "evidence settled)", 1)
+    res = _exec_command(card, "accept_result",
+                        {"runId": run_id, "resultSha256": sha})
+    emit(res, args,
+         lambda: f"{card['id'][:8]}: accepted run {str(run_id)[:8]} "
+                 f"(result {sha[:16]}…)")
+    return 0
+
+
+def cmd_stop(args) -> int:
+    """`boardctl stop <card>` — managed cards only: a user-channel `stop`
+    command that is NEVER gated server-side. Legacy children are stopped by
+    `acp-runner cancel <cardId>`."""
+    cards = load_cards()
+    card = resolve(cards, args.card)
+    if not _managed(card):
+        raise CliError(
+            f"{card['id'][:8]} is not managed — legacy runs are stopped with "
+            "`acp-runner cancel <cardId>`", 1)
+    res = _exec_command(
+        card, "stop",
+        {"by": ACTOR, "reason": args.reason or "stopped via boardctl"})
+    emit(res, args,
+         lambda: f"{card['id'][:8]}: stop requested "
+                 f"({json.dumps(res.get('result') or {})[:200]})")
+    return 0
 
 
 def _review_show(card: dict, args) -> int:
@@ -1065,9 +1332,21 @@ def cmd_review_check(args) -> int:
     checker never edits it) and records the same fact in the activity
     ledger under `role=review-checker`, so the panel shows who checked
     what. Bound by the same rules as the file contract: unknown finding id
-    is an error; `rejected` findings stop blocking but stay in history."""
+    is an error; `rejected` findings stop blocking but stay in history.
+
+    Managed card: REFUSED. Verdicts there are produced by the managed
+    checker attempt writing `.acp-out/review_verdict.json` in its pristine
+    copy, imported by the scheduler as a verified artifact and recorded via
+    the internal `record_report` channel — a CLI write could never carry
+    that provenance, so a human verdict is not evidence."""
     cards = load_cards()
     card = resolve(cards, args.card)
+    if _managed(card):
+        raise CliError(
+            f"{card['id'][:8]} is managed — verdicts are checker-attempt "
+            "evidence recorded through the verified-artifact channel; a "
+            "user/CLI write cannot mint them. Inspect with `boardctl "
+            f"review {card['id'][:8]}`.", 1)
     doc, _f = _load_review_doc(card, args.project_path)
     if doc is None:
         raise CliError(
@@ -1425,6 +1704,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="dir holding .acp/cards/<id> "
                         "(default: registry lookup / $ACP_PROJECT_PATH / cwd)")
     s.set_defaults(func=cmd_review_check)
+
+    s = sub.add_parser("accept", parents=[common],
+                       help="accept a managed run at its verified result hash")
+    s.add_argument("card")
+    s.set_defaults(func=cmd_accept)
+
+    s = sub.add_parser("stop", parents=[common],
+                       help="request stop on a managed card (never gated)")
+    s.add_argument("card")
+    s.add_argument("--reason", default="")
+    s.set_defaults(func=cmd_stop)
     return p
 
 

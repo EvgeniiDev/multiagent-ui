@@ -136,12 +136,18 @@ function baseProfile(over = {}) {
 }
 
 // Fake docker API — records calls, simulates container lifecycle.
+// `inspectHook(id, container)` may return a canned inspect payload, throw
+// (transport/5xx-equivalent failure), or return undefined to fall through
+// to the default simulated inspect. `calls` records mutating docker calls
+// in order so tests can assert ZERO stop/remove/exec against a worker.
 function fakeDocker() {
   const containers = new Map();
   const nets = new Map();
   let n = 0;
   return {
     created: [],
+    calls: [],
+    inspectHook: null,
     async ping() { return true; },
     async version() { return { Version: 'test' }; },
     async imageInspect() { return { Id: 'sha256:' + 'ab'.repeat(32), RepoDigests: [] }; },
@@ -154,28 +160,34 @@ function fakeDocker() {
       return { Id: nets.get(spec.Name).Id };
     },
     async networkConnect() { return {}; },
+    async networkDisconnect(netId, cid) { this.calls.push(['networkDisconnect', netId]); return true; },
     async networkRemove(name) { nets.delete(name); return true; },
     async containerCreate(spec) {
       const id = `ctr-${++n}`;
       const c = { Id: id, spec, state: 'created', running: false };
       containers.set(id, c);
       this.created.push(spec);
+      this.calls.push(['containerCreate', id]);
       return { Id: id };
     },
-    async containerStart(id) { containers.get(id).running = true; containers.get(id).state = 'running'; return {}; },
-    async containerStop(id) { const c = containers.get(id); if (c) { c.running = false; c.state = 'exited'; } return true; },
-    async containerRemove(id) { containers.delete(id); return true; },
+    async containerStart(id) { this.calls.push(['containerStart', id]); containers.get(id).running = true; containers.get(id).state = 'running'; return {}; },
+    async containerStop(id) { this.calls.push(['containerStop', id]); const c = containers.get(id); if (c) { c.running = false; c.state = 'exited'; } return true; },
+    async containerRemove(id) { this.calls.push(['containerRemove', id]); containers.delete(id); return true; },
     async containerInspect(id) {
+      if (this.inspectHook) {
+        const r = await this.inspectHook(id, containers.get(id));
+        if (r !== undefined) return r;
+      }
       const c = containers.get(id);
       if (!c) return null;
       return { Id: id, State: { Running: c.running, Status: c.state, StartedAt: 't0' },
         Image: 'sha256:img', Config: c.spec };
     },
-    async execCreate(cid, opts) { const id = `exec-${++n}`; this.lastExec = { cid, opts, id }; return { Id: id }; },
+    async execCreate(cid, opts) { this.calls.push(['execCreate', cid]); const id = `exec-${++n}`; this.lastExec = { cid, opts, id }; return { Id: id }; },
     execResult: { stdout: '', stderr: '', exitCode: 0 },
     async execStart() { const r = this.execResult; return { stdout: r.stdout, stderr: r.stderr, timedOut: false }; },
     async execInspect() { return { ExitCode: this.execResult.exitCode }; },
-    async killContainer(id) { containers.delete(id); },
+    async killContainer(id) { this.calls.push(['killContainer', id]); containers.delete(id); },
     _containers: containers, _nets: nets,
   };
 }
@@ -444,10 +456,225 @@ let controller, docker;
   try { await controller.handle('worker.prepare', spec); check('vanished worker no-duplicate', false); }
   catch (e) { check('vanished worker no-duplicate', e.code === 'worker_terminal'); }
 
+  // worker.status maps Docker states narrowly: only exited/dead report
+  // 'stopped' (pid namespace down — the F1 reaper's probe-skip basis).
+  // Transitional states pass through raw so consumers fail closed.
+  {
+    const spec2 = { ...spec, workerId: 'w-att-state', attemptId: 'att-state' };
+    const prep2 = await controller.handle('worker.prepare', spec2);
+    check('state-probe worker prepared', prep2.ok === true);
+    const cid2 = prep2.worker.containerId;
+    const setFakeState = (running, state) => {
+      const c = docker._containers.get(cid2);
+      c.running = running; c.state = state;
+    };
+    const stOf = async () =>
+      (await controller.handle('worker.status', { workerId: 'w-att-state' })).state;
+    for (const s of ['restarting', 'paused', 'created', 'removing']) {
+      setFakeState(false, s);
+      const got = await stOf();
+      check(`docker ${s} is not reported stopped`, got === s, `state=${got}`);
+    }
+    setFakeState(false, 'exited');
+    check('docker exited reports stopped', (await stOf()) === 'stopped');
+    setFakeState(false, 'dead');
+    check('docker dead reports stopped', (await stOf()) === 'stopped');
+    setFakeState(true, 'running');
+    check('docker running reports running', (await stOf()) === 'running');
+    setFakeState(false, 'restarting');
+    const listed = await controller.handle('worker.list');
+    check('worker.list agrees on transitional state',
+      listed.workers.find((w) => w.workerId === 'w-att-state')?.state === 'restarting');
+  }
+
   // canonical prepare + import cycle (integrator)
   const can = await controller.handle('canonical.prepare', {
     canonicalId: 'can-1', projectRoot: 'acp-ui-agent-modes', baseSha: sha });
   check('canonical.prepare ok', can.ok === true && can.canonical.state === 'ready');
+}
+
+// ---------- 5b. D14 — inspect error vs confirmed absence ----------------------
+// docker.containerInspect returns null ONLY on HTTP 404; every other failure
+// (socket error, timeout, 5xx, malformed body) throws. The controller must
+// never turn a non-404 failure into durable 'gone' — only a real 404 may
+// write rec.gone. Status/list/exec/reconcile all share one classification.
+sect('inspect-d14');
+{
+  const shaD = await git(path.join(tmp, 'projects', 'acp-ui-agent-modes'), ['rev-parse', 'HEAD']);
+  const profD = baseProfile({ search: { enabled: false, provider: null, params: {} } });
+  const specD = {
+    workerId: 'w-att-d14', attemptId: 'att-d14', role: 'panelist',
+    profileId: 'f1-panelist', profile: profD, prompt: 'test prompt',
+    materials: { projectRoot: 'acp-ui-agent-modes', snapshotSha: shaD,
+      inputs: [{ name: 'task', content: 'do x' }] },
+    profileDigest: profileDigest(profD),
+  };
+  const prepD = await controller.handle('worker.prepare', specD);
+  check('d14 worker prepared', prepD.ok === true);
+  const cidD = prepD.worker.containerId;
+  const recD = () => controller.registry.workers['w-att-d14'];
+  const diskD = async () => JSON.parse(
+    await fs.readFile(path.join(tmp, 'env', 'controller', 'registry.json'), 'utf8'))
+    .workers['w-att-d14'];
+  const d14State = async () =>
+    (await controller.handle('worker.status', { workerId: 'w-att-d14' }));
+  const setC = (running, state) => {
+    const c = docker._containers.get(cidD); c.running = running; c.state = state;
+  };
+  const noGone = (rec) => rec && rec.gone !== true && rec.state !== 'gone';
+  const thrower = (err) => async (id) => { if (id === cidD) throw err; return undefined; };
+  const execDebug = () => controller.handle('worker.exec',
+    { workerId: 'w-att-d14', template: 'debug', args: ['id'] });
+
+  check('baseline: running maps running',
+    (await d14State()).state === 'running' && recD().state === 'running');
+
+  // transitional + never-seen statuses pass through raw — never 'stopped'
+  // or 'gone' — and never write the durable record.
+  for (const s of ['created', 'restarting', 'removing', 'paused', 'bogus-future']) {
+    setC(false, s);
+    const st = await d14State();
+    check(`status: docker '${s}' passes through, registry untouched`,
+      st.state === s && noGone(recD()) && noGone(await diskD()), `state=${st.state}`);
+  }
+  // paused with Running===true is 'running' — the namespace is up; whether
+  // exec works is the daemon's call, not the classifier's.
+  setC(true, 'paused');
+  check('status: paused-with-Running reports running',
+    (await d14State()).state === 'running');
+  setC(true, 'running');
+
+  // malformed inspect payloads (HTTP 200 with no usable State) → 'unknown',
+  // still never 'stopped'/'gone'.
+  for (const payload of [{ Id: cidD }, { Id: cidD, State: null },
+      { Id: cidD, State: {} },
+      { Id: cidD, State: { Running: false, Status: 42 } }]) {
+    docker.inspectHook = async (id) => (id === cidD ? payload : undefined);
+    const st = await d14State();
+    check(`status: malformed inspect ${JSON.stringify(payload.State ?? null).slice(0, 48)} -> 'unknown'`,
+      st.state === 'unknown' && noGone(recD()) && noGone(await diskD()));
+  }
+  docker.inspectHook = null;
+
+  // transport-class failures — 5xx, socket-equivalent (status 0), and a bare
+  // connection error — all report inspect_failed, never poison the registry.
+  for (const err of [
+      Object.assign(new Error('docker container inspect failed (500): daemon exploded'),
+        { code: 'docker_api', status: 500 }),
+      Object.assign(new Error('docker container inspect failed (0): socket hangup'),
+        { code: 'docker_api', status: 0 }),
+      Object.assign(new Error('connect ECONNREFUSED /var/run/docker.sock'),
+        { code: 'ECONNREFUSED' })]) {
+    docker.inspectHook = thrower(err);
+    const st = await d14State();
+    check(`status: inspect error (${err.status ?? err.code}) -> inspect_failed, registry untouched`,
+      st.state === 'inspect_failed' && typeof st.inspectError === 'string'
+      && noGone(recD()) && noGone(await diskD()));
+    const li = await controller.handle('worker.list');
+    check(`list: inspect error (${err.status ?? err.code}) -> inspect_failed`,
+      li.workers.find((x) => x.workerId === 'w-att-d14')?.state === 'inspect_failed');
+    try {
+      await execDebug();
+      check(`exec: inspect error (${err.status ?? err.code}) refused without gone`, false);
+    } catch (e) {
+      check(`exec: inspect error (${err.status ?? err.code}) refused without gone`,
+        e.code === 'worker_inspect_failed' && noGone(recD()) && noGone(await diskD()));
+    }
+    // re-prepare on unverifiable state refuses honestly — not 'worker_terminal'
+    try {
+      await controller.handle('worker.prepare', specD);
+      check(`prepare: inspect error (${err.status ?? err.code}) refused without gone`, false);
+    } catch (e) {
+      check(`prepare: inspect error (${err.status ?? err.code}) refused without gone`,
+        e.code === 'worker_inspect_failed' && noGone(recD()) && noGone(await diskD()));
+    }
+  }
+  docker.inspectHook = null;
+
+  // non-running but PRESENT container — exec refuses with an honest code
+  // and still writes no gone flag.
+  setC(false, 'exited');
+  try {
+    await execDebug();
+    check('exec: exited container refused as not-running (not gone)', false);
+  } catch (e) {
+    check('exec: exited container refused as not-running (not gone)',
+      e.code === 'worker_not_running' && noGone(recD()) && noGone(await diskD()));
+  }
+  setC(true, 'running');
+  check('exec: running worker executes again', (await execDebug()).ok === true);
+
+  // confirmed 404 — the ONLY path allowed to write the durable gone flag.
+  docker._containers.delete(cidD);
+  const stG = await d14State();
+  check('status: confirmed 404 reports gone + persists the mark',
+    stG.state === 'gone' && recD().gone === true && (await diskD()).gone === true
+    && typeof (await diskD()).goneAt === 'string');
+  try {
+    await execDebug();
+    check('exec: confirmed-gone worker throws worker_gone', false);
+  } catch (e) { check('exec: confirmed-gone worker throws worker_gone', e.code === 'worker_gone'); }
+  try {
+    await controller.handle('worker.prepare', specD);
+    check('prepare: confirmed-gone re-prepare stays worker_terminal', false);
+  } catch (e) {
+    check('prepare: confirmed-gone re-prepare stays worker_terminal',
+      e.code === 'worker_terminal');
+  }
+
+  // reconcileOnce — a fresh controller over a seeded registry + the same
+  // fake docker. Boot-time daemon failure must NOT mass-mark workers gone,
+  // and transitional docker states must not collapse to 'stopped'.
+  const env2 = path.join(tmp, 'env-reconcile');
+  await fs.mkdir(path.join(env2, 'controller'), { recursive: true });
+  docker._containers.set('ctr-restart', { Id: 'ctr-restart', spec: {}, running: false, state: 'restarting' });
+  docker._containers.set('ctr-exited', { Id: 'ctr-exited', spec: {}, running: false, state: 'exited' });
+  docker._containers.set('ctr-dead', { Id: 'ctr-dead', spec: {}, running: false, state: 'dead' });
+  docker._containers.set('ctr-malformed', { Id: 'ctr-malformed', spec: {}, running: false, state: 'exited' });
+  const regDoc = { version: 1, canonicals: {}, depSets: {}, workers: {
+    'w-rc-trans': { workerId: 'w-rc-trans', containerId: 'ctr-restart', state: 'running', role: 'panelist', attemptId: 'att-rt' },
+    'w-rc-exited': { workerId: 'w-rc-exited', containerId: 'ctr-exited', state: 'running', role: 'panelist', attemptId: 'att-re' },
+    'w-rc-dead': { workerId: 'w-rc-dead', containerId: 'ctr-dead', state: 'running', role: 'panelist', attemptId: 'att-rd' },
+    'w-rc-vanish': { workerId: 'w-rc-vanish', containerId: 'ctr-nope', state: 'running', role: 'panelist', attemptId: 'att-rv' },
+    'w-rc-err': { workerId: 'w-rc-err', containerId: 'ctr-err', state: 'running', role: 'panelist', attemptId: 'att-rx' },
+    'w-rc-malf': { workerId: 'w-rc-malf', containerId: 'ctr-malformed', state: 'running', role: 'panelist', attemptId: 'att-rm' },
+    'w-rc-noc': { workerId: 'w-rc-noc', containerId: null, state: 'prepared', role: 'panelist', attemptId: 'att-rn' },
+  } };
+  await fs.writeFile(path.join(env2, 'controller', 'registry.json'), JSON.stringify(regDoc));
+  docker.inspectHook = async (id) => {
+    if (id === 'ctr-err') {
+      throw Object.assign(new Error('docker container inspect failed (503): daemon restarting'),
+        { code: 'docker_api', status: 503 });
+    }
+    if (id === 'ctr-malformed') return { Id: id };           // 200 but no State
+    return undefined;
+  };
+  const cfg2 = validateEnvironmentConfig(baseConfig({
+    roots: { env: { hostPath: env2, mountPath: env2, access: 'rw' } },
+  }), { view: 'controller' });
+  const c2 = createEnvController({ config: cfg2, docker });
+  await c2.boot();
+  const rw = c2.registry.workers;
+  check('reconcile: transitional docker state stays honest (not stopped)',
+    rw['w-rc-trans'].state === 'restarting' && rw['w-rc-trans'].gone !== true);
+  check('reconcile: exited -> stopped', rw['w-rc-exited'].state === 'stopped'
+    && rw['w-rc-exited'].gone !== true);
+  check('reconcile: dead -> stopped', rw['w-rc-dead'].state === 'stopped');
+  check('reconcile: confirmed 404 -> gone + flag persisted',
+    rw['w-rc-vanish'].state === 'gone' && rw['w-rc-vanish'].gone === true);
+  check('reconcile: inspect failure keeps last durable state (not gone)',
+    rw['w-rc-err'].state === 'running' && rw['w-rc-err'].gone !== true);
+  check('reconcile: malformed inspect keeps honest state (unknown, not stopped/gone)',
+    rw['w-rc-malf'].state === 'unknown' && rw['w-rc-malf'].gone !== true);
+  check('reconcile: containerless record left alone',
+    rw['w-rc-noc'].state === 'prepared' && rw['w-rc-noc'].gone !== true);
+  const disk2 = JSON.parse(
+    await fs.readFile(path.join(env2, 'controller', 'registry.json'), 'utf8'));
+  check('reconcile: durable file agrees — no poisoned entries',
+    disk2.workers['w-rc-err'].state === 'running' && disk2.workers['w-rc-err'].gone !== true
+    && disk2.workers['w-rc-trans'].state === 'restarting'
+    && disk2.workers['w-rc-vanish'].gone === true);
+  docker.inspectHook = null;
 }
 
 // ---------- 6. RPC auth over a real unix socket -------------------------------
@@ -581,6 +808,61 @@ sect('container-runtime');
   const rec2 = await rt.reconcile({ workerId: 'w-nonexistent' });
   check('reconcile missing worker = gone, no matches',
     rec2.workers[0].state === 'gone' && rec2.matches.length === 0);
+
+  // D14 follow-up: reconcile 'gone' is positive proof, not "not running".
+  // The fusion consumers' orphan gate reads w.gone !== false, so a false
+  // 'gone' here can durably resolve a still-launching attempt orphaned.
+  // Only 'gone' (confirmed 404) and 'stopped' (exited|dead — pid namespace
+  // down) may set it; inspect_failed, transitional, malformed, unknown,
+  // and failed status calls are unverifiable — gone stays false.
+  const statusByWorker = {
+    'w-rc-inspect':   'inspect_failed',
+    'w-rc-restart':   'restarting',
+    'w-rc-created':   'created',
+    'w-rc-paused':    'paused',
+    'w-rc-removing':  'removing',
+    'w-rc-unknown':   'unknown',
+    'w-rc-bogus':     'bogus-future',
+    'w-rc-stopped':   'stopped',
+    'w-rc-gone':      'gone',
+  };
+  const stubGone = {
+    calls: [],
+    async call(method, params) {
+      this.calls.push([method, params]);
+      if (method === 'worker.status') {
+        if (params.workerId === 'w-rc-throw') {
+          throw Object.assign(new Error('no such worker'), { code: 'unknown_worker' });
+        }
+        if (params.workerId === 'w-rc-rpc') {
+          throw Object.assign(new Error('socket hangup'), { code: 'controller_unreachable' });
+        }
+        return { ok: true, workerId: params.workerId, controller: {},
+          state: statusByWorker[params.workerId] ?? 'running' };
+      }
+      if (method === 'worker.exec') {
+        return { ok: true, exitCode: 0, stderr: '', stdout: '[]' };
+      }
+      throw Object.assign(new Error(`no stub for ${method}`), { code: 'unexpected' });
+    },
+  };
+  const rtG = createContainerRuntime({ config: cfg, client: stubGone,
+    envRoot: path.join(tmp, 'env') });
+  for (const [wid, s] of Object.entries(statusByWorker)) {
+    const recS = await rtG.reconcile({ workerId: wid });
+    const wrow = recS.workers.find((w) => w.workerId === wid);
+    const expectGone = s === 'gone' || s === 'stopped';
+    check(`reconcile worker state '${s}' -> gone=${expectGone} (proof only)`,
+      wrow && wrow.state === s && wrow.gone === expectGone
+      && recS.matches.length === 0, JSON.stringify(wrow));
+  }
+  for (const wid of ['w-rc-throw', 'w-rc-rpc']) {
+    const recF = await rtG.reconcile({ workerId: wid });
+    const wrow = recF.workers.find((w) => w.workerId === wid);
+    check(`reconcile worker.status failure (${wid}) is not gone evidence`,
+      wrow && wrow.gone === false && wrow.state !== 'gone'
+      && recF.matches.length === 0, JSON.stringify(wrow));
+  }
 
   // observer timeout does not cancel: stub exec timeout
   const stub2 = { ...stubClient, async call(m, p) {
@@ -850,6 +1132,102 @@ sect('worker-reaper');
         card: mkCard(), run: mkRun(mkAttempt('att-rpc')), att: mkAttempt('att-rpc') });
       check('controller RPC failure defers',
         r2.action === 'deferred' && r2.code === 'worker_state_unknown' && noMutations(w2.stub));
+      // transitional Docker state (restarting/paused/created) surfaces raw —
+      // the reaper must defer, never treat it as a stopped pid namespace
+      const w3 = await mkWorld('att-trans', { workerState: 'restarting' });
+      const r3 = await mkReaper(w3.rt).reapAttempt({
+        card: mkCard(), run: mkRun(mkAttempt('att-trans')), att: mkAttempt('att-trans') });
+      check('transitional worker state defers (not a stopped namespace)',
+        r3.action === 'deferred' && r3.code === 'worker_state_unknown' && noMutations(w3.stub));
+    }
+    {
+      // D14: every state outside {running,stopped,gone} — including the
+      // controller's inspect-failure marker — defers BEFORE any probe or
+      // mutation. Zero worker.exec means process-identity was never asked.
+      for (const s of ['inspect_failed', 'unknown', 'created', 'removing']) {
+        const att = mkAttempt(`att-d14-${s}`);
+        const w = await mkWorld(`att-d14-${s}`, { workerState: s });
+        const r = await mkReaper(w.rt).reapAttempt({ card: mkCard(), run: mkRun(att), att });
+        check(`reaper defers on controller state '${s}' (no probes/mutations)`,
+          r.action === 'deferred' && r.code === 'worker_state_unknown' && noMutations(w.stub)
+          && calls(w.stub, 'worker.exec').length === 0, JSON.stringify(r));
+      }
+    }
+    {
+      // D14 end-to-end: the REAL controller (over fake docker) behind the
+      // REAL container runtime — the classification must survive the whole
+      // worker.status path, not just a scripted stub answer.
+      const shaE = await git(
+        path.join(tmp, 'projects', 'acp-ui-agent-modes'), ['rev-parse', 'HEAD']);
+      const profE = baseProfile({ search: { enabled: false, provider: null, params: {} } });
+      const specE = (wid, att) => ({
+        workerId: wid, attemptId: att, role: 'panelist',
+        profileId: 'f1-panelist', profile: profE, prompt: 'e2e prompt',
+        materials: { projectRoot: 'acp-ui-agent-modes', snapshotSha: shaE,
+          inputs: [{ name: 'task', content: 'do x' }] },
+        profileDigest: profileDigest(profE),
+      });
+      const loopback = { async call(method, params) { return controller.handle(method, params); } };
+      const noDockerMutation = (since, cid) => !docker.calls.slice(since)
+        .some(([m, id]) => (m === 'containerStop' || m === 'containerRemove' || m === 'execCreate')
+          && (cid === undefined || id === cid));
+
+      // -- inspect transport failure on a LIVE container: defer, zero damage --
+      const attE1 = mkAttempt('att-d14e2e');
+      const wE1 = await mkWorld('att-d14e2e');
+      const prepE1 = await controller.handle('worker.prepare', specE('w-att-d14e2e', 'att-d14e2e'));
+      check('e2e: real worker prepared', prepE1.ok === true);
+      const cidE1 = prepE1.worker.containerId;
+      const rtE1 = createContainerRuntime({ config: cfg, client: loopback, envRoot: wE1.envRoot });
+      docker.inspectHook = async (id) => {
+        if (id === cidE1) {
+          throw Object.assign(new Error('docker container inspect failed (0): socket gone'),
+            { code: 'docker_api', status: 0 });
+        }
+        return undefined;
+      };
+      const markE1 = docker.calls.length;
+      const rE1 = await mkReaper(rtE1).reapAttempt({ card: mkCard(), run: mkRun(attE1), att: attE1 });
+      check('e2e: real inspect failure defers worker_state_unknown, nothing touched',
+        rE1.action === 'deferred' && rE1.code === 'worker_state_unknown'
+        && noDockerMutation(markE1) && docker._containers.has(cidE1), JSON.stringify(rE1));
+      check('e2e: controller registry not poisoned by inspect failure',
+        controller.registry.workers['w-att-d14e2e'].gone !== true
+        && controller.registry.workers['w-att-d14e2e'].state === 'running');
+      docker.inspectHook = null;
+
+      // -- confirmed 404 with NO prior proof: 'gone' is not removal permission --
+      const attE2 = mkAttempt('att-d14gone');
+      const wE2 = await mkWorld('att-d14gone');
+      const prepE2 = await controller.handle('worker.prepare', specE('w-att-d14gone', 'att-d14gone'));
+      const cidE2 = prepE2.worker.containerId;
+      docker._containers.delete(cidE2);            // real 404 at the docker layer
+      const rtE2 = createContainerRuntime({ config: cfg, client: loopback, envRoot: wE2.envRoot });
+      const markE2 = docker.calls.length;
+      const rE2 = await mkReaper(rtE2).reapAttempt({ card: mkCard(), run: mkRun(attE2), att: attE2 });
+      check('e2e: confirmed 404 without prior proof defers absent_without_prior_proof',
+        rE2.action === 'deferred' && rE2.code === 'absent_without_prior_proof'
+        && noDockerMutation(markE2), JSON.stringify(rE2));
+      check('e2e: confirmed 404 did durably mark gone (honest absence record)',
+        controller.registry.workers['w-att-d14gone'].gone === true);
+
+      // -- stopped worker: remove-only reap flows through the real controller --
+      const attE3 = mkAttempt('att-d14stop');
+      const wE3 = await mkWorld('att-d14stop');
+      const prepE3 = await controller.handle('worker.prepare', specE('w-att-d14stop', 'att-d14stop'));
+      const cidE3 = prepE3.worker.containerId;
+      docker._containers.get(cidE3).running = false;
+      docker._containers.get(cidE3).state = 'exited';
+      const rtE3 = createContainerRuntime({ config: cfg, client: loopback, envRoot: wE3.envRoot });
+      const markE3 = docker.calls.length;
+      const rE3 = await mkReaper(rtE3).reapAttempt({ card: mkCard(), run: mkRun(attE3), att: attE3 });
+      check('e2e: stopped worker reaps via remove only through the real controller',
+        rE3.action === 'reaped'
+        && docker.calls.slice(markE3).some(([m, id]) => m === 'containerRemove' && id === cidE3)
+        && !docker.calls.slice(markE3).some(([m, id]) =>
+          (m === 'containerStop' || m === 'execCreate') && id === cidE3), JSON.stringify(rE3));
+      check('e2e: stopped worker container actually removed',
+        !docker._containers.has(cidE3));
     }
     {
       // spawned===false record + gone worker: never infer "never spawned"

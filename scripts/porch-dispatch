@@ -96,6 +96,13 @@ def check_card_free(card: str, agent: str) -> None:
     if out.returncode != 0:
         raise SystemExit(f"boardctl show {card} failed: {out.stderr.strip() or out.returncode}")
     data = json.loads(out.stdout)
+    # A card under managed execution (execution.managed, written by the
+    # execution core, U2+) is off-limits to legacy dispatch entirely.
+    if (data.get("execution") or {}).get("managed"):
+        raise Refused(
+            f"карточка {card} под управлением execution core — "
+            f"legacy dispatch не трогает managed-карточки"
+        )
     # A blocking flag is a veto the same way a live claim is: `blocked` is a
     # flag on the card, not a stage — it stays in place, visibly marked, and
     # nothing may be dispatched onto it until the flag clears.

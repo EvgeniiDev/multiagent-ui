@@ -1,0 +1,68 @@
+# compose.u7-preparation.yaml — U7 P5-phase flags, stacked AFTER
+# compose.u7.yaml + compose.u7-on.yaml.
+#
+# Enables idea preparation on BOTH sides of the contract:
+#   state  — the preparation command surface (start_preparation /
+#            answer_question / continue_discussion / request_draft /
+#            change_skill_binding / confirm_gate / stop_preparation /
+#            handoff_preparation), the per-card preparation view, and the
+#            binding registry listing leave 501-gated territory
+#            (ACP_EXEC_PREPARATION).
+#   runner — the managed driver constructs the preparation supervisor:
+#            a separate sweep pump that discovers running attempts off the
+#            managed-card index and drives the durable P3 lead over real
+#            `pi --mode rpc` children (per-session workspace + seeded
+#            pi-agent dir under <STATE_DIR>/execution/preparation/).
+#
+# Preparation is deliberately SUBORDINATE to managed execution: this
+# overlay never sets ACP_EXEC_START — stacked on top of compose.u7-on.yaml
+# the runner has start=1 already; stacked on the OFF overlay the flag is
+# rendered but the driver is not built at all.
+#
+# The lead's model identity comes from the runner's real Pi profile:
+#   ACP_PREP_PI_AGENT_DIR — the source ~/.pi/agent dir whose auth.json /
+#            models.json seed each session's private agent dir (the host
+#            profile is copied, never written).
+#   ACP_PREP_PROVIDER / ACP_PREP_MODEL / ACP_PREP_THINKING — explicit argv
+#            flags on every lead invocation (the seeded settings.json is a
+#            fallback, never the authority).
+#   ACP_PREP_TICK_MS — sweep cadence (1000ms in tests; production default
+#            is the managed tick cadence).
+#
+# Transition to PREPARATION (manager clearance only; state+runner
+# recreated, every other service untouched):
+#   docker compose -p acp-ui -f compose.yaml -f compose.u7.yaml \
+#     -f compose.u7-on.yaml -f compose.u7-preparation.yaml \
+#     up -d --no-deps state runner
+#
+# Toggling back is `up -d` without this file (the ON stack) — each
+# direction is an explicit, logged transition step.
+
+services:
+  state:
+    environment:
+      ACP_EXEC_PREPARATION: "1"
+    volumes:
+      # Several pinned bindings (ce-*) keep their skill resources under
+      # ~/.codex plugin cache — the runner already mounts it rw for lead
+      # turns; the state service needs the same tree READ-ONLY so
+      # preparationVerify can re-hash the pinned manifest honestly instead
+      # of refusing every codex-cached binding as resource_missing. The
+      # base state's volume list has no .codex entry — this is additive.
+      - /home/hermes/.codex:/home/hermes/.codex:ro
+  runner:
+    environment:
+      ACP_EXEC_PREPARATION: "1"
+      # Test cadence — the sweep polls the card index once a second so the
+      # E2E sees prompt→question and answer→settle transitions promptly.
+      ACP_PREP_TICK_MS: "1000"
+      # The runner's mounted host pi profile (compose.yaml mounts ~/.pi at
+      # the identical path) — auth/models are COPIED into each session's
+      # private agent dir; the source is never written.
+      ACP_PREP_PI_AGENT_DIR: /home/hermes/.pi/agent
+      # Explicit lead model — the real profile's default (zen-relay
+      # muse-spark). Pinned here so the invocation never silently follows
+      # whatever the profile's settings.json currently says.
+      ACP_PREP_PROVIDER: "zen-relay"
+      ACP_PREP_MODEL: "muse-spark-1.3-contributor-free"
+      ACP_PREP_THINKING: "low"

@@ -1,0 +1,1893 @@
+{
+  "schemaVersion": 1,
+  "pi": {
+    "binary": "pi",
+    "version": "0.85.1"
+  },
+  "bindings": [
+    {
+      "bindingId": "grill-me-intent",
+      "title": "Grill Me — intent interview (stateless, chat)",
+      "stage": "intent",
+      "status": "available",
+      "provider": "pi-agent skills (~/.pi/agent/skills), upstream grill-me + shared grilling primitive",
+      "adapterVersion": "p0-probe-1",
+      "skillDirs": [
+        "/home/hermes/.pi/agent/skills/grill-me"
+      ],
+      "extraResources": [
+        "/home/hermes/.pi/agent/skills/grill-with-docs/references/grilling.md"
+      ],
+      "skillNames": [
+        "grill-me"
+      ],
+      "questionChannel": "chat",
+      "tools": [
+        "read",
+        "bash"
+      ],
+      "readOnlyRoots": [],
+      "probe": {
+        "prompt": "/skill:grill-me A 'snooze card' feature for our kanban board app: a user can park a card until a chosen date, it disappears from the board while snoozed, and resurfaces in its column when the date arrives.",
+        "answers": [
+          "Primary actor: a single board user managing their own backlog. Scope: one board, one user view — no team/shared snooze state.",
+          "Snoozed cards must be findable: a 'Snoozed' filter or list per column. They never send notifications — resurfacing is silent.",
+          "If the card's column was deleted while snoozed, it resurfaces in the board's first column. Timezone: the user's local date, end-of-day.",
+          "Non-goals: recurring snooze, snoozing someone else's card, automation rules. Keep the smallest version that solves 'get it out of my face until then'.",
+          "Editing a snoozed card: allowed via the snoozed list; editing does not wake it. Waking early is a manual 'unsnooze' action.",
+          "A card with an open managed run must not be snoozed — the action is disabled with a reason. That decision is settled.",
+          "Yes — that's the whole scope I care about. Go ahead and close out if the frontier is empty."
+        ],
+        "interruptTest": true,
+        "maxPrompts": 10,
+        "timeoutMs": 480000
+      },
+      "expect": {
+        "artifacts": [],
+        "minChatQuestions": 2,
+        "finalTextPattern": null
+      },
+      "resourceManifest": {
+        "algo": "sha256",
+        "digest": "042452bff12ee4c8700acab12cd89c121ccaa746e291b55b4560d214e9a308a4",
+        "files": [
+          {
+            "path": "/home/hermes/.pi/agent/skills/grill-me/SKILL.md",
+            "sha256": "7b073a7d520bda676b12d08a03f3d7db4a5c1c75e88c4ee0661ec7a62c537da8",
+            "bytes": 5634
+          },
+          {
+            "path": "/home/hermes/.pi/agent/skills/grill-with-docs/references/grilling.md",
+            "sha256": "10ff989e7498b23b5acb49d5048f11dcd906757d2f79c5cdf8a00001381296f2",
+            "bytes": 1987
+          }
+        ],
+        "pinnedAt": "2026-10-02T16:54:27.632Z"
+      },
+      "adapterId": "pi-skill",
+      "requires": [],
+      "gateContract": [
+        {
+          "type": "intent_confirm",
+          "stage": "intent"
+        }
+      ],
+      "result": {
+        "mode": "conversation",
+        "importAs": "none",
+        "artifacts": [],
+        "handoffs": []
+      }
+    },
+    {
+      "bindingId": "grill-with-docs",
+      "title": "Grill with Docs — divergence grilling + CONTEXT.md/ADR writes",
+      "stage": "intent",
+      "status": "available",
+      "provider": "pi-agent skills (~/.pi/agent/skills), upstream grill-with-docs",
+      "adapterVersion": "p0-probe-1",
+      "skillDirs": [
+        "/home/hermes/.pi/agent/skills/grill-with-docs"
+      ],
+      "skillNames": [
+        "grill-with-docs"
+      ],
+      "questionChannel": "chat",
+      "tools": [
+        "read",
+        "write",
+        "edit",
+        "bash"
+      ],
+      "readOnlyRoots": [],
+      "probe": {
+        "prompt": "/skill:grill-with-docs We need to pin down a design decision: whether 'snoozed cards' in our kanban app live as a per-user overlay or as shared board state. Interview me.",
+        "answers": [
+          "Snooze is per-user: my snooze must not hide the card from teammates. Shared board state stays authoritative.",
+          "Terminology: call it 'card snooze'. A snoozed card is still a card — not archived, not deleted. 'Archive' already means permanent removal.",
+          "The data lives server-side so a snooze follows the user across devices. Local-only is a non-goal.",
+          "Unsnooze triggers: manual unsnooze, or the snooze date arriving. Editing a card never wakes it.",
+          "One edge that matters: a teammate moves a snoozed card to another column — it resurfaces in the NEW column for me.",
+          "If we've covered it, wrap up — write whatever glossary entries the conversation earned."
+        ],
+        "maxPrompts": 10,
+        "timeoutMs": 480000
+      },
+      "expect": {
+        "artifacts": [
+          "CONTEXT.md"
+        ],
+        "minChatQuestions": 2
+      },
+      "resourceManifest": {
+        "algo": "sha256",
+        "digest": "11c5d65635060ede4f5465882ad8ff2789f28679c273b861c6feb68ab1fce66f",
+        "files": [
+          {
+            "path": "/home/hermes/.pi/agent/skills/grill-with-docs/references/ADR-FORMAT.md",
+            "sha256": "944c92aa790e8fbdc9199640b170979abb8a34ba8d0fe18c2a01a63bce140ca0",
+            "bytes": 2733
+          },
+          {
+            "path": "/home/hermes/.pi/agent/skills/grill-with-docs/references/CONTEXT-FORMAT.md",
+            "sha256": "17ab16ce783e4d2801ee52fd9acdf550cbf44de65ae76797a93943bbedf22a13",
+            "bytes": 2290
+          },
+          {
+            "path": "/home/hermes/.pi/agent/skills/grill-with-docs/references/domain-modeling.md",
+            "sha256": "327a2b50620e2fd70abc6893cd6965e76b20f8d0adb0dc2c8d5eb3845efb643e",
+            "bytes": 3331
+          },
+          {
+            "path": "/home/hermes/.pi/agent/skills/grill-with-docs/references/grilling.md",
+            "sha256": "10ff989e7498b23b5acb49d5048f11dcd906757d2f79c5cdf8a00001381296f2",
+            "bytes": 1987
+          },
+          {
+            "path": "/home/hermes/.pi/agent/skills/grill-with-docs/SKILL.md",
+            "sha256": "b1713af2fb76130961f6556427487d0e2349c1c98d67005856cc79b953ebaec0",
+            "bytes": 1118
+          }
+        ],
+        "pinnedAt": "2026-10-02T16:54:27.634Z"
+      },
+      "adapterId": "pi-skill",
+      "requires": [],
+      "gateContract": [
+        {
+          "type": "intent_confirm",
+          "stage": "intent"
+        }
+      ],
+      "result": {
+        "mode": "workspace_artifact",
+        "importAs": "none",
+        "artifacts": [
+          "CONTEXT.md",
+          "docs/**/*.md"
+        ],
+        "handoffs": []
+      }
+    },
+    {
+      "bindingId": "ce-brainstorm",
+      "title": "Compound Engineering ce-brainstorm — requirements-only unified plan",
+      "stage": "requirements",
+      "status": "available",
+      "provider": "compound-engineering 3.24.0 (.codex plugin cache)",
+      "adapterVersion": "p0-probe-1",
+      "skillDirs": [
+        "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm"
+      ],
+      "skillNames": [
+        "ce-brainstorm"
+      ],
+      "questionChannel": "extension_ui",
+      "tools": [
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "ask_user"
+      ],
+      "readOnlyRoots": [],
+      "probe": {
+        "prompt": "/skill:ce-brainstorm Saved filter views for our kanban board: a user can save the current filter/sort combination under a name, re-apply it later, and share it with the team via a link. I need a written requirements doc at the end — a file, not just chat.",
+        "answers": [
+          "The primary actor is an individual board user saving their own views. Sharing is view-only: a teammate opening the link gets the same filters applied to the same board.",
+          "Scope: filters + sort + column visibility. Card contents never change. Non-goals: permission systems, view-level edit locks, cross-board views.",
+          "A view is a named snapshot, not a live subscription — if the board's columns change later, unmatched entries are ignored, not errors.",
+          "Sharing: anyone with board access + the link. No per-view ACLs in this version.",
+          "Renaming and deleting your own views: yes. Deleting never affects the board or other users.",
+          "Success looks like: a user saves a view in under 5 seconds and a teammate opens the link and sees the identical filtered board. Keep it minimal — go with your recommendations on anything else.",
+          "Confirmed — write the requirements-only plan file now.",
+          "Yes, that scope is final. Write the file under docs/plans/.",
+          "Nothing to change — write the artifact."
+        ],
+        "ui": {
+          "rules": [
+            {
+              "match": "next|handoff|what would you like",
+              "cancel": true
+            }
+          ],
+          "default": {
+            "select": "first",
+            "confirm": true,
+            "input": "Go with the simplest option you recommended."
+          }
+        },
+        "maxPrompts": 16,
+        "timeoutMs": 720000
+      },
+      "expect": {
+        "artifacts": [
+          "docs/plans/*.md"
+        ],
+        "frontmatter": {
+          "artifact_contract": "ce-unified-plan/v1",
+          "artifact_readiness": "requirements-only"
+        },
+        "minUiRequests": 1
+      },
+      "resourceManifest": {
+        "algo": "sha256",
+        "digest": "b6a7ba03578c22ec14217781a6f8b7e571c9fce428e85e0fb803399254846629",
+        "files": [
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/agents/slack-researcher.md",
+            "sha256": "3b6e95a727d89781fbeec697dd30228c19a2315ef3c1f4df4de0d0f9c6df3c0f",
+            "bytes": 10430
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/approaches.md",
+            "sha256": "3fe5e35301a3341a48dc73b8265cf8a9c99c1dbe8282e26e82f809a77c84ee53",
+            "bytes": 7597
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/bakeoff.md",
+            "sha256": "1e0346356b93c98233f4a48e48aeeb0c059a3f251943c73a7e9d27c5cfae621a",
+            "bytes": 1640
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/blindspot-pass.md",
+            "sha256": "011b6c013dbbd8d35d66ff5b4a53983c615185c6ea03c24c22bfa3d0c32ed3cb",
+            "bytes": 7560
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/brainstorm-sections.md",
+            "sha256": "3134becba49f332215819db865f1c9cae7b8780d862247c35bddf1b4ecf07eb2",
+            "bytes": 25477
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/dialogue.md",
+            "sha256": "71c129c13694dd9e913df85ffa0f5f96eabf69acde4c34d95efc4787d1e5fe52",
+            "bytes": 14824
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/handoff.md",
+            "sha256": "57cde5bd8b133b99246fcde5b33bf114ba8022c1316d65781b50c456f2f9c1d7",
+            "bytes": 12775
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/html-rendering.md",
+            "sha256": "5a7dad658002ef8fad487a846fb87880c29044ac04cb9f7a07c611def0ffc318",
+            "bytes": 34608
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/interaction-rules.md",
+            "sha256": "7adebd180f76d140d47f3877f89a6243a40b27677380a5a0a776a9b4696a7cba",
+            "bytes": 6642
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/markdown-rendering.md",
+            "sha256": "61a56eeddd9582a49fd42c8bd7ce2ce72e88b0c879a0b3293a671d64436a91a4",
+            "bytes": 10837
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/model-tiers.md",
+            "sha256": "b9723b3e86dd426fdde3f9a9a958191c702ed79ff390bb4d8a09e5b8fd80a5f8",
+            "bytes": 1758
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/output-mode.md",
+            "sha256": "0ebe008eee904f551333f1a7978293d44601e3c54f1199109c3841f8d52d3f22",
+            "bytes": 5012
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/phase-0.md",
+            "sha256": "640b79ab15e6c8a4ff783df8a760d080c94729bc6281866946402bc33c977262",
+            "bytes": 14001
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/plan-write.md",
+            "sha256": "70ee0caab295300538dfabdb98290650486f69041cd3de4ab2ac2ba5bc273fa0",
+            "bytes": 4966
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/product-pressure-test.md",
+            "sha256": "61cbfc9ea8bc1fce8b33331cf4808358d073f9f7cf851c51431d3e1a8cc660a1",
+            "bytes": 3619
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/reasoning-elevation.md",
+            "sha256": "e163910bbe93f2bd3368476e67a2070ec7e44a322612d456106aa2d3e2485309",
+            "bytes": 17547
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/settled-decisions.md",
+            "sha256": "e4fa8cecdccdb5d8a141b720c26a733fb143292a81671c21b144fac2584d5b22",
+            "bytes": 4941
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/synthesis-summary.md",
+            "sha256": "89da8269ac491b18ef54e3bb8403d0f448a31b690abd0acb6b2160fd4067e0ee",
+            "bytes": 29132
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/universal-brainstorming.md",
+            "sha256": "a9e6557b5edd130328f51c2676288b42eb03283b5701fec2df84bbf72ddcffdf",
+            "bytes": 7816
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/verdict-routing.md",
+            "sha256": "0532d7e2e517b98f380ebf21ac54228c15eb9e7041310c2ffc638b6695cb91c2",
+            "bytes": 4347
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/visual-probes.md",
+            "sha256": "6abc7a25fa31a18a255145928066bded2a2d1f25b5abbdf1338862e06687ed9f",
+            "bytes": 11880
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/scripts/elevation-dispatch.sh",
+            "sha256": "ba8219c15db2909fb1c272d2137b124a78a06329af2cca0e80276f6e8918ef3d",
+            "bytes": 13515
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/scripts/light-webserver.js",
+            "sha256": "4146d6a18f4261b6b78fdd4cc65a67dad4c34ec9c986664a54c42a985d55eb6e",
+            "bytes": 41902
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/scripts/packs-resolve.py",
+            "sha256": "0e7de94883fcaa19576a93ed206513de6609720898e2a20ed4be5b599691a939",
+            "bytes": 31513
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/scripts/peer-job-runner.py",
+            "sha256": "aac862a60af97eb4b9da6c90a1c688d27618ccb830ea5b1ee816b2ae653bfb0a",
+            "bytes": 104164
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/SKILL.md",
+            "sha256": "5ffe0af9c8fd7d91706c64c7c0d39ceb1249e5832160dfa493ae990193f633e4",
+            "bytes": 7605
+          }
+        ],
+        "pinnedAt": "2026-10-02T16:54:27.644Z"
+      },
+      "adapterId": "pi-skill",
+      "requires": [
+        "scratch.ce",
+        "workspace.documents"
+      ],
+      "gateContract": [
+        {
+          "type": "artifact_confirm",
+          "stage": "requirements"
+        }
+      ],
+      "result": {
+        "mode": "workspace_artifact",
+        "docKind": "requirements",
+        "importAs": "document",
+        "artifacts": [
+          "docs/plans/*.md"
+        ],
+        "handoffs": [
+          {
+            "to": "ce-pov",
+            "mode": "denied",
+            "reason": "route_out_of_scope",
+            "detail": "verdict routing exits preparation; a PoV need is an explicit user selection"
+          }
+        ]
+      }
+    },
+    {
+      "bindingId": "ce-plan",
+      "title": "Compound Engineering ce-plan — Durable implementation-ready plan + ce-doc-review handoff",
+      "stage": "plan",
+      "status": "available",
+      "provider": "compound-engineering 3.24.0 (.codex plugin cache)",
+      "adapterVersion": "p0-probe-1",
+      "skillDirs": [
+        "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan",
+        "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review"
+      ],
+      "skillNames": [
+        "ce-plan",
+        "ce-doc-review"
+      ],
+      "questionChannel": "extension_ui",
+      "tools": [
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "ask_user"
+      ],
+      "readOnlyRoots": [],
+      "probe": {
+        "seed": [
+          {
+            "path": "docs/plans/2026-10-02-0900-requirements-saved-views-plan.md",
+            "content": "---\nartifact_contract: ce-unified-plan/v1\nartifact_readiness: requirements-only\nproduct_contract_source: ce-brainstorm\n---\n\n# Saved Filter Views — requirements\n\n## Goal Capsule\nA kanban board user saves the current filter/sort/column-visibility combination as a named view, re-applies it later, and shares it via link. Teammates opening the link see the identical filtered board, read-only.\n\n## Product Contract\n\n### Requirements\n- R1: save the board's current filter state (filter text, sort order, column visibility) under a user-chosen name.\n- R2: views are per-user owned; listing shows only the user's own views plus shared ones they opened.\n- R3: a shared link applies the view to the same board for any board member; read-only, never modifies the board.\n- R4: views are snapshots — columns/filters that no longer exist are ignored silently.\n- R5: rename and delete own views; deleting never affects the board.\n\n### Key Decisions\n- KD1 — snapshot semantics over live subscription (session-settled: user-directed). Governs R4.\n\n### Scope Boundaries\nNo per-view ACLs, no cross-board views, no view-level locks, no automation triggers.\n\n### Acceptance Examples\n- AE1: user saves \"bugs this week\" view, reopens board a day later, applies it in one click.\n- AE2: user copies the link; teammate opens it and sees the same filtered board.\n"
+          }
+        ],
+        "prompt": "/skill:ce-plan {ws}/docs/plans/2026-10-02-0900-requirements-saved-views-plan.md",
+        "answers": [
+          "Stack for this scratch project: plain Vue 3 + a small Node state server with a JSON store. Board already has filter/sort state in the UI store.",
+          "Storage: a `views` table/collection keyed by board+owner; the share link is `/board/<id>?view=<viewId>` — no token auth beyond board membership.",
+          "Tests: unit tests for the serialize/apply logic and one API-flow test for save+apply+share. Keep the plan small.",
+          "Yes — proceed with your recommended structure."
+        ],
+        "ui": {
+          "rules": [
+            {
+              "match": "next|what would you like|plan ready",
+              "cancel": true
+            }
+          ],
+          "default": {
+            "select": "first",
+            "confirm": true,
+            "input": "Go with your recommended option."
+          }
+        },
+        "maxPrompts": 14,
+        "timeoutMs": 900000
+      },
+      "expect": {
+        "artifacts": [
+          "docs/plans/*.md"
+        ],
+        "frontmatter": {
+          "artifact_contract": "ce-unified-plan/v1"
+        },
+        "minUiRequests": 1
+      },
+      "resourceManifest": {
+        "algo": "sha256",
+        "digest": "4f5c3ae6cc4496f13c77977bf7153a73eee6e851bc1d2605e466cb129e815ecf",
+        "files": [
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/bulk-preview.md",
+            "sha256": "89c33a794cfcbd0f5b697716308275f4a6fc6a8a17526aff09762a234b595fc4",
+            "bytes": 13564
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/cross-model-eval.md",
+            "sha256": "7b0a95e2ff7a70d2a62f36d8c16e904940b68c362bb9d7323c1844638441b4f6",
+            "bytes": 8959
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/cross-model-review.md",
+            "sha256": "b32baf837ed9f7e2f556d07a55fdd3634ec139b14418cd560bbefe9013dbb38c",
+            "bytes": 34557
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/decision-primer.md",
+            "sha256": "e93be39fa2fcaff47ad3ac93f33ecd14e5a588c03d6a97a375d1ad6db1f9cc3b",
+            "bytes": 3134
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/dispatch.md",
+            "sha256": "79a9e20d506df80892c3cdae4cf5aad5119708cf6defccc534db86a24c2816e7",
+            "bytes": 6021
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/document-intake.md",
+            "sha256": "a4e61041cf3000f37d5095390dfc22f287ea68355e3c3417f6e485cf5f8fa887",
+            "bytes": 6682
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/findings-schema.json",
+            "sha256": "5afae17c51e77db9de829a732a218e28d79bb2957165cce1d01ba94e311a5b5d",
+            "bytes": 5318
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/modes.md",
+            "sha256": "d99e8186ef0034a510ab0986349116c19a0216ceb7f66fe6445d88f5fee512fd",
+            "bytes": 2578
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/open-questions-defer.md",
+            "sha256": "fc894a016ad63d26ff02e2d8db58c586d10105f1642b6e8288dac475e370b1a0",
+            "bytes": 11484
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/persona-selection.md",
+            "sha256": "3229a7d2cd11d5407378edad99804aa6bdd221dd89d50e5405d0c9559b8180ea",
+            "bytes": 4856
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/adversarial-document-reviewer.md",
+            "sha256": "68e19288806b22d4b43af23b4933412fea1d1b1d8fce7ab5bfbee28184a59948",
+            "bytes": 11207
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/coherence-reviewer.md",
+            "sha256": "1dc77d51f1ecb4c5b737f65a5c94de89f281a2a9ac43935f160f5c843bb4b3bd",
+            "bytes": 10920
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/design-lens-reviewer.md",
+            "sha256": "4660788e617e0432c78383af34c8fb23f08c43ec06d87d3645a9a2605e6f14f0",
+            "bytes": 4381
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/feasibility-reviewer.md",
+            "sha256": "100370ba01de5b76215c70c414a03d5f678f0e66e21cde1c85ececc1f7a36173",
+            "bytes": 5710
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/product-lens-reviewer.md",
+            "sha256": "94dce599787078846fd0a3568ff8c6c6b2d7172e304f2a431458051118d37007",
+            "bytes": 9164
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/scope-guardian-reviewer.md",
+            "sha256": "a4662df667c3c01779af45939cf30e73f91801b38ed110aab106cfae70346e40",
+            "bytes": 5939
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/security-lens-reviewer.md",
+            "sha256": "ac357ef0b61fac0dfaac4019852840cce262e9029056a20e4c7849c8a3bfd611",
+            "bytes": 4703
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/whole-doc-reviewer.md",
+            "sha256": "8dfce03228c41e00cc2216fbfc58f33899784cf413ea0c5462d30bea307a8dfe",
+            "bytes": 3081
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/rendering-floor.md",
+            "sha256": "18fcb0c26fafc8f1d8110055ebcb1225762b1c8fbb21eededa2be315c36d3082",
+            "bytes": 12819
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/review-output-template.md",
+            "sha256": "4958ff2f73609ab8092b6db2083eedc3fb076181d4a1dd610f83317e77ec6c9c",
+            "bytes": 13163
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/subagent-template.md",
+            "sha256": "79e37c0fa7eae87d6813214672b67eedc68a0e177954c362f2119ecf14e86fdb",
+            "bytes": 24553
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/synthesis-and-presentation.md",
+            "sha256": "837275a808ca9a54eec7b2210e848659404b17de5e9282e8550f0977447816ec",
+            "bytes": 42157
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/walkthrough.md",
+            "sha256": "c1e4eada8f2fa2144ffed31e2b887c4ca1974a8eb0611d3922c8adf4444eac0d",
+            "bytes": 39147
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/scripts/cross-model-doc-review.sh",
+            "sha256": "73dec73d0fb28c8cf6f51de58a8afad4b8b2ca6d5cde0c5e6f0609126b98ef27",
+            "bytes": 64132
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/scripts/packs-resolve.py",
+            "sha256": "0e7de94883fcaa19576a93ed206513de6609720898e2a20ed4be5b599691a939",
+            "bytes": 31513
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/scripts/peer-job-runner.py",
+            "sha256": "aac862a60af97eb4b9da6c90a1c688d27618ccb830ea5b1ee816b2ae653bfb0a",
+            "bytes": 104164
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/SKILL.md",
+            "sha256": "21ab49c5541a1c743a444b9808394dd872347b1f823d5b88107cc3279c9ed411",
+            "bytes": 7814
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/agent-native-planning-strategist.md",
+            "sha256": "c1fa081b48f74b2f6ddee983e864de31f2008c3c6ae7ffd7b4baddd6333cfb68",
+            "bytes": 4107
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/architecture-strategist.md",
+            "sha256": "dd5dad43dd328d7507fcc18ebe4e728cff68a49cc6086d3fd80429c8c335986d",
+            "bytes": 3253
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/best-practices-researcher.md",
+            "sha256": "e88dfc0c35f73fc62bcd191c30c31b5180ce357cd50d1cc5092ebf39a6d76160",
+            "bytes": 7178
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/data-integrity-guardian.md",
+            "sha256": "e524b44001f54043ca74fff19ffced4d1f8945fb181eb931fcae5609d9e6e1a8",
+            "bytes": 3246
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/data-migration-reviewer.md",
+            "sha256": "93f0a3aff200978b6149857769edf511a4768072f8834ca604ea72cc031750c3",
+            "bytes": 5806
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/deployment-verification-agent.md",
+            "sha256": "5396d0068f5aaa9c34ecd6dceaaf189c1bd2805907c6e1145f61a49af8aaa27d",
+            "bytes": 5151
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/framework-docs-researcher.md",
+            "sha256": "472957f010aefc4ac77a01feddbc974a4e2b5c317df00f28b5a54af1d84b7cd8",
+            "bytes": 5637
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/git-history-analyzer.md",
+            "sha256": "e9bdeac17155f1bd88cd76fd7fb982f227a64b926e5ea0a30253fd317586a809",
+            "bytes": 2836
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/learnings-researcher.md",
+            "sha256": "4bab1bcb93bbf36b644dd3f9006555a112904c5c9e1c4655e08b15411557167b",
+            "bytes": 19657
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/pattern-recognition-specialist.md",
+            "sha256": "c180a732746a064b4950bf9d44d3b8921432f6c032bdb4924c2158ae067be2b8",
+            "bytes": 3660
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/performance-oracle.md",
+            "sha256": "3290155a1e41b7631988168602c195adaf46b20286c46dfe23c8fcb26d4d2525",
+            "bytes": 4566
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/repo-research-analyst.md",
+            "sha256": "e1dbed5e82d618d87e290f73f2c4c4de726ee5f248821709d2505163ac107e5f",
+            "bytes": 15027
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/security-sentinel.md",
+            "sha256": "dc4c05421f11c924beeafc426bfd8aa95f43ec9af684f571faa0da357c7cd17c",
+            "bytes": 4135
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/slack-researcher.md",
+            "sha256": "b5912adc0ab3cadf8db821577e495527518bae5982c77069451bba7d0a3724fa",
+            "bytes": 10463
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/spec-flow-analyzer.md",
+            "sha256": "d189fdb10b5698336502f0aedbe60dbdd8ec54cedf23e1dbd8d27b6ba4fa1807",
+            "bytes": 4802
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/agents/web-researcher.md",
+            "sha256": "4cd095f98c6704648e14cc875651d3e4344b45f0dafcb6e174b93b48158e18cb",
+            "bytes": 9122
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/approach-altitude.md",
+            "sha256": "0b76ce85e2921fead21a0757bc1e3a41d7f8a2b1907eb5cb593f4fae63dd97e9",
+            "bytes": 7554
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/bakeoff.md",
+            "sha256": "93169f55de3d04688cdf634ee3ee45c294f15b72d89384b24f2f71972842ee94",
+            "bytes": 1811
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/deepening-workflow.md",
+            "sha256": "9dedc36c1fa03726446d0069cebc4a6b4d2f650defe9600bd13533f76576622f",
+            "bytes": 20657
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/final-review.md",
+            "sha256": "375418217a62bf7dc96848cecc5908889162da11c8fe9df77a51bf020e3ccf2f",
+            "bytes": 18710
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/html-rendering.md",
+            "sha256": "5a7dad658002ef8fad487a846fb87880c29044ac04cb9f7a07c611def0ffc318",
+            "bytes": 34608
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/intake.md",
+            "sha256": "fd8824a25b2d899f992c8071b22d57f32182e40212db82ed2227af50d86ec055",
+            "bytes": 19876
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/markdown-rendering.md",
+            "sha256": "61a56eeddd9582a49fd42c8bd7ce2ce72e88b0c879a0b3293a671d64436a91a4",
+            "bytes": 10837
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/output-contracts.md",
+            "sha256": "90f33f179a845c3634c9fcae2cd2c501af187bf9ade183d011109909e05b25e3",
+            "bytes": 2962
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/output-mode.md",
+            "sha256": "632b35708c68babd86d4327069c38e4fe2d3e43d658da391f1aec6a26c31255f",
+            "bytes": 7423
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/plan-handoff.md",
+            "sha256": "5413de5879589da9dfc31efe7b3662eb47af44bbb508c77b9bbec551415d0026",
+            "bytes": 25687
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/plan-sections.md",
+            "sha256": "769c14080fd484679040726d10f127726665a040713fda3ff386bcc7c5cd0a67",
+            "bytes": 30276
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/reasoning-elevation.md",
+            "sha256": "e163910bbe93f2bd3368476e67a2070ec7e44a322612d456106aa2d3e2485309",
+            "bytes": 17547
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/research.md",
+            "sha256": "ab0c30ea4b51aa2c089fe064b5665ade70c7978461f85fcc82fd5558722597c6",
+            "bytes": 21516
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/resume.md",
+            "sha256": "93a030e981a9aaae3772994ce66c1c0a064529f96e01827160b853f54c022fb8",
+            "bytes": 9536
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/settled-decisions.md",
+            "sha256": "e4fa8cecdccdb5d8a141b720c26a733fb143292a81671c21b144fac2584d5b22",
+            "bytes": 4941
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/structure.md",
+            "sha256": "6a27ca9990cc6d561370ae90dda4bf7e181404fed8d8dc52474b0acc1e62dfac",
+            "bytes": 18666
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/synthesis-summary.md",
+            "sha256": "7a4c3d26ddf99f755267cc00afa43b24935b550e8fb57c5ae83d65c723cd0302",
+            "bytes": 43975
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/references/universal-planning.md",
+            "sha256": "e04ef0ab4b050843c9ce20e055ba2c94e5d3771deb4bad56fc8191c38134c492",
+            "bytes": 15698
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/scripts/elevation-dispatch.sh",
+            "sha256": "ba8219c15db2909fb1c272d2137b124a78a06329af2cca0e80276f6e8918ef3d",
+            "bytes": 13515
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/scripts/packs-resolve.py",
+            "sha256": "0e7de94883fcaa19576a93ed206513de6609720898e2a20ed4be5b599691a939",
+            "bytes": 31513
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/scripts/peer-job-runner.py",
+            "sha256": "aac862a60af97eb4b9da6c90a1c688d27618ccb830ea5b1ee816b2ae653bfb0a",
+            "bytes": 104164
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-plan/SKILL.md",
+            "sha256": "5d71bd297d42920da98a09e00dee233e59d4038161ef7d9523e2f6ec6b75e491",
+            "bytes": 7880
+          }
+        ],
+        "pinnedAt": "2026-10-02T16:54:27.670Z"
+      },
+      "adapterId": "pi-skill",
+      "requires": [
+        "scratch.ce",
+        "workspace.documents"
+      ],
+      "gateContract": [
+        {
+          "type": "artifact_confirm",
+          "stage": "plan"
+        }
+      ],
+      "result": {
+        "mode": "workspace_artifact",
+        "docKind": "plan",
+        "importAs": "document",
+        "artifacts": [
+          "docs/plans/*.md"
+        ],
+        "handoffs": [
+          {
+            "to": "ce-doc-review",
+            "mode": "host_choice",
+            "reason": "document_review",
+            "detail": "optional plan document review in the document workspace"
+          },
+          {
+            "to": "ce-work",
+            "mode": "denied",
+            "reason": "implementation_authority_denied",
+            "detail": "the offer is recorded; implementation is never launched from preparation"
+          }
+        ]
+      }
+    },
+    {
+      "bindingId": "ce-doc-review",
+      "title": "Compound Engineering ce-doc-review — non-interactive document review",
+      "stage": "review",
+      "status": "available",
+      "provider": "compound-engineering 3.24.0 (.codex plugin cache)",
+      "adapterVersion": "p0-probe-1",
+      "skillDirs": [
+        "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review"
+      ],
+      "skillNames": [
+        "ce-doc-review"
+      ],
+      "questionChannel": "chat",
+      "tools": [
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "ask_user"
+      ],
+      "readOnlyRoots": [],
+      "probe": {
+        "seed": [
+          {
+            "path": "docs/plans/2026-10-02-0915-requirements-card-tags-plan.md",
+            "content": "---\nartifact_contract: ce-unified-plan/v1\nartifact_readiness: requirements-only\nproduct_contract_source: ce-brainstorm\n---\n\n# Card Tags — requirements\n\n## Goal Capsule\nBoard users attach named color-coded tags to cards and filter the board by tag.\n\n## Product Contract\n\n### Requirements\n- R1: a card carries zero or more tags; tags are per-board.\n- R2: tag create/rename/delete from card or board settings; deleting a tag removes it from all cards.\n- R3: board filter bar gains a tag multi-select; filtering is OR within tags.\n- R4: tags render as colored chips on card fronts.\n\n### Key Decisions\n- KD1 — tags are board-scoped, not global (session-settled: user-directed). Governs R2.\n\n### Scope Boundaries\nNo tag hierarchies, no cross-board tags, no tag permissions.\n\n### Acceptance Examples\n- AE1: user creates 'urgent' red tag, applies to two cards, filters board to just those cards.\n- AE2: renaming a tag updates every card that carries it.\n"
+          }
+        ],
+        "prompt": "/skill:ce-doc-review mode:non-interactive {ws}/docs/plans/2026-10-02-0915-requirements-card-tags-plan.md",
+        "answers": [],
+        "maxPrompts": 6,
+        "timeoutMs": 600000
+      },
+      "expect": {
+        "artifacts": [],
+        "finalTextPattern": "coverage|review|finding"
+      },
+      "resourceManifest": {
+        "algo": "sha256",
+        "digest": "4924b7ca2ed273e6ea273d3f831a0523a5dd3a91de1637115e0aecd317f83077",
+        "files": [
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/bulk-preview.md",
+            "sha256": "89c33a794cfcbd0f5b697716308275f4a6fc6a8a17526aff09762a234b595fc4",
+            "bytes": 13564
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/cross-model-eval.md",
+            "sha256": "7b0a95e2ff7a70d2a62f36d8c16e904940b68c362bb9d7323c1844638441b4f6",
+            "bytes": 8959
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/cross-model-review.md",
+            "sha256": "b32baf837ed9f7e2f556d07a55fdd3634ec139b14418cd560bbefe9013dbb38c",
+            "bytes": 34557
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/decision-primer.md",
+            "sha256": "e93be39fa2fcaff47ad3ac93f33ecd14e5a588c03d6a97a375d1ad6db1f9cc3b",
+            "bytes": 3134
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/dispatch.md",
+            "sha256": "79a9e20d506df80892c3cdae4cf5aad5119708cf6defccc534db86a24c2816e7",
+            "bytes": 6021
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/document-intake.md",
+            "sha256": "a4e61041cf3000f37d5095390dfc22f287ea68355e3c3417f6e485cf5f8fa887",
+            "bytes": 6682
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/findings-schema.json",
+            "sha256": "5afae17c51e77db9de829a732a218e28d79bb2957165cce1d01ba94e311a5b5d",
+            "bytes": 5318
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/modes.md",
+            "sha256": "d99e8186ef0034a510ab0986349116c19a0216ceb7f66fe6445d88f5fee512fd",
+            "bytes": 2578
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/open-questions-defer.md",
+            "sha256": "fc894a016ad63d26ff02e2d8db58c586d10105f1642b6e8288dac475e370b1a0",
+            "bytes": 11484
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/persona-selection.md",
+            "sha256": "3229a7d2cd11d5407378edad99804aa6bdd221dd89d50e5405d0c9559b8180ea",
+            "bytes": 4856
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/adversarial-document-reviewer.md",
+            "sha256": "68e19288806b22d4b43af23b4933412fea1d1b1d8fce7ab5bfbee28184a59948",
+            "bytes": 11207
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/coherence-reviewer.md",
+            "sha256": "1dc77d51f1ecb4c5b737f65a5c94de89f281a2a9ac43935f160f5c843bb4b3bd",
+            "bytes": 10920
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/design-lens-reviewer.md",
+            "sha256": "4660788e617e0432c78383af34c8fb23f08c43ec06d87d3645a9a2605e6f14f0",
+            "bytes": 4381
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/feasibility-reviewer.md",
+            "sha256": "100370ba01de5b76215c70c414a03d5f678f0e66e21cde1c85ececc1f7a36173",
+            "bytes": 5710
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/product-lens-reviewer.md",
+            "sha256": "94dce599787078846fd0a3568ff8c6c6b2d7172e304f2a431458051118d37007",
+            "bytes": 9164
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/scope-guardian-reviewer.md",
+            "sha256": "a4662df667c3c01779af45939cf30e73f91801b38ed110aab106cfae70346e40",
+            "bytes": 5939
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/security-lens-reviewer.md",
+            "sha256": "ac357ef0b61fac0dfaac4019852840cce262e9029056a20e4c7849c8a3bfd611",
+            "bytes": 4703
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/whole-doc-reviewer.md",
+            "sha256": "8dfce03228c41e00cc2216fbfc58f33899784cf413ea0c5462d30bea307a8dfe",
+            "bytes": 3081
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/rendering-floor.md",
+            "sha256": "18fcb0c26fafc8f1d8110055ebcb1225762b1c8fbb21eededa2be315c36d3082",
+            "bytes": 12819
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/review-output-template.md",
+            "sha256": "4958ff2f73609ab8092b6db2083eedc3fb076181d4a1dd610f83317e77ec6c9c",
+            "bytes": 13163
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/subagent-template.md",
+            "sha256": "79e37c0fa7eae87d6813214672b67eedc68a0e177954c362f2119ecf14e86fdb",
+            "bytes": 24553
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/synthesis-and-presentation.md",
+            "sha256": "837275a808ca9a54eec7b2210e848659404b17de5e9282e8550f0977447816ec",
+            "bytes": 42157
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/walkthrough.md",
+            "sha256": "c1e4eada8f2fa2144ffed31e2b887c4ca1974a8eb0611d3922c8adf4444eac0d",
+            "bytes": 39147
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/scripts/cross-model-doc-review.sh",
+            "sha256": "73dec73d0fb28c8cf6f51de58a8afad4b8b2ca6d5cde0c5e6f0609126b98ef27",
+            "bytes": 64132
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/scripts/packs-resolve.py",
+            "sha256": "0e7de94883fcaa19576a93ed206513de6609720898e2a20ed4be5b599691a939",
+            "bytes": 31513
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/scripts/peer-job-runner.py",
+            "sha256": "aac862a60af97eb4b9da6c90a1c688d27618ccb830ea5b1ee816b2ae653bfb0a",
+            "bytes": 104164
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/SKILL.md",
+            "sha256": "21ab49c5541a1c743a444b9808394dd872347b1f823d5b88107cc3279c9ed411",
+            "bytes": 7814
+          }
+        ],
+        "pinnedAt": "2026-10-02T16:54:27.676Z"
+      },
+      "adapterId": "pi-skill",
+      "requires": [
+        "scratch.ce"
+      ],
+      "gateContract": [],
+      "result": {
+        "mode": "review_report",
+        "importAs": "none",
+        "artifacts": [],
+        "handoffs": [
+          {
+            "to": "ce-doc-review-cross-model",
+            "mode": "denied",
+            "reason": "external_peer_egress_unproven",
+            "detail": "cross-model judgment pass needs unproven provider-CLI egress; the base skill treats it as additive"
+          }
+        ]
+      }
+    },
+    {
+      "bindingId": "superpowers-architectural",
+      "title": "Superpowers brainstorming(architectural)→spec commit→writing-plans chain",
+      "stage": "design",
+      "status": "available",
+      "provider": "superpowers plugin (~/.hermes/plugins/superpowers)",
+      "adapterVersion": "p0-probe-1",
+      "skillDirs": [
+        "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming",
+        "/home/hermes/.hermes/plugins/superpowers/skills/writing-plans"
+      ],
+      "skillNames": [
+        "brainstorming",
+        "writing-plans"
+      ],
+      "questionChannel": "chat",
+      "tools": [
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "ask_user"
+      ],
+      "readOnlyRoots": [],
+      "probe": {
+        "prompt": "/skill:brainstorming I want to add a notification center to our kanban app: an in-app inbox where card events (mentions, due dates, run completions) land, with read/unread state and per-event-type muting. This is a new subsystem — treat it as architectural work through your full process.",
+        "answers": [
+          "Primary user: a board member who wants to catch up on what changed without watching the board. Events: mentions in card comments, due-date arrivals, and managed-run completions.",
+          "Sources are the app's existing domain events — the notification center subscribes to them; it does not create new event types. Delivery is in-app only: no email, no push, no websockets requirement beyond the app's existing channel.",
+          "Read/unread per event; mark-all-read per board; muting per event type per board. Retention: last 200 events per user — older ones drop silently.",
+          "Go with your recommended approach — in-process subscription over a queue table is fine if that's what you recommend.",
+          "The design looks right — proceed to write the spec document.",
+          "Yes, the spec is approved — go on to the implementation plan.",
+          "Neither execution option — this work ends at the approved plan. Do not start implementing."
+        ],
+        "ui": {
+          "rules": [
+            {
+              "match": "execution option|which approach|subagent-driven|inline execution",
+              "text": "Neither — planning ends at the approved plan; do not start implementing."
+            }
+          ],
+          "default": {
+            "select": "first",
+            "confirm": true,
+            "input": "Go with your recommendation."
+          }
+        },
+        "maxPrompts": 16,
+        "timeoutMs": 900000
+      },
+      "expect": {
+        "artifacts": [
+          "docs/superpowers/specs/*-design.md",
+          "docs/superpowers/plans/*.md"
+        ],
+        "gitCommit": true,
+        "minChatQuestions": 2
+      },
+      "resourceManifest": {
+        "algo": "sha256",
+        "digest": "0f4beb6f6f948aa147bebee36979393123b53c64d864dd403907eb163bec1c36",
+        "files": [
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/scripts/frame-template.html",
+            "sha256": "6a8a4e58bd6a44b904e2e3c57de774481d909204597e1498de53f1b2fecc4c4e",
+            "bytes": 8094
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/scripts/helper.js",
+            "sha256": "43c6d69954a46ec34a2a262bcc62a9a7e83e839c739f199cb72646d397c686e3",
+            "bytes": 5615
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/scripts/server.cjs",
+            "sha256": "2d2961ea8d11f56c5f4c3a1a68d22709efa5d7601a2246d8c880774e7e9e8412",
+            "bytes": 25693
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/scripts/start-server.sh",
+            "sha256": "a4e5ae84275bcaacd2f84345afeabe59cf7b00ba080e123da7cc1fb226f12847",
+            "bytes": 6908
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/scripts/stop-server.sh",
+            "sha256": "0b5ccbbd57f62d3ed88993f7940b5ee0e5c0fc9b21c550c623da4f6292e47daf",
+            "bytes": 3263
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/SKILL.md",
+            "sha256": "74edf03ea6d24ef53db48677b93558d14a979bdf052ca3f57ecdca0c66791608",
+            "bytes": 15456
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/spec-document-reviewer-prompt.md",
+            "sha256": "95a0a195de9d984be2fffa95bab16fc8c563bc296a9cfc5e9c29cb3ece0d7457",
+            "bytes": 1747
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/visual-companion.md",
+            "sha256": "77eb44a4ec3408bb3dafb872288ecd94beb8cf21da4f2bafa54fd08255d7808b",
+            "bytes": 13383
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/writing-plans/plan-document-reviewer-prompt.md",
+            "sha256": "aa728b96aad603c8be28875a4305637f6c984aa81ffcadcb13e743202fa2a0c7",
+            "bytes": 1713
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/writing-plans/SKILL.md",
+            "sha256": "48508f44bbfd7d24b029fbf3a314f3cd14c9615599059366e922f47b8dc08cf2",
+            "bytes": 7053
+          }
+        ],
+        "pinnedAt": "2026-10-02T16:54:27.679Z"
+      },
+      "adapterId": "pi-skill",
+      "requires": [
+        "workspace.git",
+        "workspace.documents"
+      ],
+      "gateContract": [
+        {
+          "type": "artifact_confirm",
+          "stage": "design"
+        }
+      ],
+      "result": {
+        "mode": "workspace_artifact",
+        "docKind": "design",
+        "importAs": "document",
+        "artifacts": [
+          "docs/superpowers/specs/*-design.md",
+          "docs/superpowers/plans/*.md"
+        ],
+        "handoffs": [
+          {
+            "to": "superpowers-execution-handoffs",
+            "mode": "denied",
+            "reason": "implementation_authority_denied",
+            "detail": "the execution handoff is recorded; the binding never selects it"
+          },
+          {
+            "to": "superpowers-visual-companion",
+            "mode": "denied",
+            "reason": "browser_surface_out_of_scope",
+            "detail": "the just-in-time mockup helper needs a browser surface out of scope"
+          }
+        ]
+      }
+    },
+    {
+      "bindingId": "ce-work",
+      "title": "Compound Engineering ce-work — implementation handoff",
+      "stage": "plan",
+      "status": "unsupported",
+      "provider": "compound-engineering 3.24.0 (.codex plugin cache)",
+      "adapterVersion": "p0-probe-1",
+      "skillDirs": [
+        "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work"
+      ],
+      "questionChannel": "chat",
+      "tools": null,
+      "unsupported": {
+        "reason": "implementation_authority_denied",
+        "route": "ce-plan Phase 5.4 menu option 'Start ce-work'",
+        "detail": "Preparation hands an accepted plan to the core; skill-side implementation is never launched from a preparation session. The menu must be shown and the selection recorded — choosing it is a user handoff decision, not a binding capability."
+      },
+      "resourceManifest": {
+        "algo": "sha256",
+        "digest": "2353bc0db0b980c79a01ba49caeadcfcd7cac746514dd2b693a896c3636aeb5f",
+        "files": [
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/agents/figma-design-sync.md",
+            "sha256": "de3986fee0254f70678e1ed0d7bdac4d3ef8d1a876159c83b7706e0cb757546a",
+            "bytes": 8266
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/agents/implementation-worker.md",
+            "sha256": "6d2f19a7bebc9fb7d87e11004b54ae43dac16657377282e6c35c1a07e439bd2c",
+            "bytes": 1964
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/cross-model-execution.md",
+            "sha256": "f3316717f4af8e314b97f95e987aa82023e99059a2327b791046a3ebbf920b82",
+            "bytes": 30735
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/cross-model-work-eval.md",
+            "sha256": "7eb42aee394061697128574cb329b1314814d0ad201c9b63dba11b137b939b26",
+            "bytes": 18264
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/execution-engines.md",
+            "sha256": "64d5e2215fb3ad08898507c389f59eec889d488bcb1abd6a3aa632bc496107c3",
+            "bytes": 20296
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/execution-strategy.md",
+            "sha256": "68ec45881483c55b76b2305ab5905e7ed46faca70426ef134cd9328ee7464273",
+            "bytes": 15563
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/implementation-loop.md",
+            "sha256": "e76df7ce5f62a00d14e1387a00149b5cea831c68d1eedfb0ada8e7c63e8a5348",
+            "bytes": 16897
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/implementation-result-schema.json",
+            "sha256": "abe5f4ace0e0d98c0bcfa30f769a287f04eba3176d8bcf7212a5ee4d649a9060",
+            "bytes": 1350
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/input-triage.md",
+            "sha256": "ef83f250c8c0fa9983ef366e1f098201bd96e195582cc58ffb8cb73866753824",
+            "bytes": 9790
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/non-code-execution.md",
+            "sha256": "db2b50d32c3dfa3dd1772684b76c3cf7d5384906da5aad6caa5141eebe04e3ec",
+            "bytes": 2320
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/return-to-caller.md",
+            "sha256": "e426f90557035e176cc4bc8ff0e16c499d93e5d0696021cd579fa446fba6f589",
+            "bytes": 3573
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/review-findings-followup.md",
+            "sha256": "0ce66835e4d3e60f9aef36c4de589f8dbcb04553818a0ef5f68e222e67a93ef1",
+            "bytes": 8068
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/shipping-workflow.md",
+            "sha256": "af7bfbcfa25bf21b9a7e4220a8a5b3bca008fd8571fadff98a6359d8d41c6cab",
+            "bytes": 17373
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/tracker-defer.md",
+            "sha256": "916820dc9f229cfb4327bd4b06372cb0930fbad7c42d8ab660f6174fb1b006fa",
+            "bytes": 14433
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/work-intake.md",
+            "sha256": "24aa07f503fcf9a66aefc838c7c6808a6f3dad62a92085c8bcaba2af50a56d64",
+            "bytes": 6648
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/references/workspace-setup.md",
+            "sha256": "c30b97e951c610884c8d349e0959abcfd831348b28581cb45d4698e188a6c3fe",
+            "bytes": 4727
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/scripts/cross-model-work.sh",
+            "sha256": "de0d0669a0ef7f1fddcd2065f397628e154d651050dbfac5fd5a388723e8f7ea",
+            "bytes": 40316
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/scripts/peer-job-runner.py",
+            "sha256": "aac862a60af97eb4b9da6c90a1c688d27618ccb830ea5b1ee816b2ae653bfb0a",
+            "bytes": 104164
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/scripts/unit_workspace_ignored.py",
+            "sha256": "9ce83a16ebc06af61fee4b22334d4384f4387035669df7d0e4afbf9ab8f296e4",
+            "bytes": 3059
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/scripts/unit_workspace_integration.py",
+            "sha256": "b69040ccbee60fb8c7b1fc80b9fde638a14baac12683a6e52899a08600f5f88d",
+            "bytes": 31248
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/scripts/unit_workspace_jobs.py",
+            "sha256": "89f8cea2261e33df593a2dc5df13fc757645390a8816d2bba38061a192f4db8f",
+            "bytes": 56324
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/scripts/unit_workspace_lifecycle.py",
+            "sha256": "0b0d4ba5125f92f8441425c8c1fdfd7ba5577849dafce2fd90d17de39cf90a5d",
+            "bytes": 50994
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/scripts/unit_workspace_state.py",
+            "sha256": "a38d75dfc919f4dab3ee0d5345a99ebaf28062c10fb1df47fc914e793933d724",
+            "bytes": 43319
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/scripts/unit_workspace_transaction.py",
+            "sha256": "b04646a8a28216f8f38b1db68d8578af5ceb777ef4e17b04ee2f3e8fe2608208",
+            "bytes": 26523
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/scripts/unit-workspace.py",
+            "sha256": "669e8be96565d5e9c31523ce13e37d97aa36c635c221546e09bfa99c182a91bd",
+            "bytes": 8013
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-work/SKILL.md",
+            "sha256": "2c04d41ca6be4c126411c5248f058552da245eb6090643228f30f6595468ed76",
+            "bytes": 7606
+          }
+        ],
+        "pinnedAt": "2026-10-02T16:54:27.692Z"
+      }
+    },
+    {
+      "bindingId": "ce-pov",
+      "title": "Compound Engineering ce-pov — technology verdict route",
+      "stage": "requirements",
+      "status": "unsupported",
+      "provider": "compound-engineering 3.24.0 (.codex plugin cache)",
+      "adapterVersion": "p0-probe-1",
+      "skillDirs": [
+        "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov"
+      ],
+      "questionChannel": "chat",
+      "tools": null,
+      "unsupported": {
+        "reason": "route_out_of_scope",
+        "route": "ce-brainstorm Phase 0.1c verdict routing",
+        "detail": "Verdict questions route OUT of the brainstorm by design. Not part of the initial preparation profile; a verdict need is an explicit user selection, never an automatic route. Unprobed — registered as a named unsupported route rather than silently followed."
+      },
+      "resourceManifest": {
+        "algo": "sha256",
+        "digest": "1f1b2c2955c7c352d1867b4813ffc5e68036317f6728a44051d0ec9323233c7a",
+        "files": [
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/references/agents/external-evidence-researcher.md",
+            "sha256": "0766dee4c79f67add69afc7d9dfb9ceb0d0b3dfcccac4dee61c4cf49e1a04371",
+            "bytes": 2582
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/references/agents/pov-peer.md",
+            "sha256": "af8efabe06ba14d7369fb6ef1f6ccdd63cc9798ee1eb0a8d6a963faaddb3a927",
+            "bytes": 2604
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/references/agents/precedent-activity-scout.md",
+            "sha256": "dadce766a786e2f7b3123f7ccfacbba2824ff694ca7c2b20104b1fcd2235fe20",
+            "bytes": 2986
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/references/agents/project-grounding-scout.md",
+            "sha256": "b3205c018a099ed0d1387e10bf08f6317489a1e55a3fc0331ba1d94179e5a84b",
+            "bytes": 4555
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/references/boundaries.md",
+            "sha256": "18a97f4de97d33a411e5dcb38159be54802306d2479d92f28f355684e7aed8f4",
+            "bytes": 3449
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/references/cross-model-panel.md",
+            "sha256": "04870b83734961b74985a4e0b990388127f224aefff84e4b5c1ddf9497b36673",
+            "bytes": 32412
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/references/followup.md",
+            "sha256": "5a5efa9d28281046093fd0534c5bfd491b16a4516cb0db149f69f44fb254cfb5",
+            "bytes": 1334
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/references/grounding.md",
+            "sha256": "229899a66b350f1410d179a84698787abf80b9890f2497b0d12c67f00bc15b6b",
+            "bytes": 6380
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/references/intake.md",
+            "sha256": "ba61a0c62c0efe8776f4f1a8f98e45b25df80fb2947dafc07c3bc5fe759c9e45",
+            "bytes": 6094
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/references/invocation.md",
+            "sha256": "ce95e462f0fc8f08cf942f96ea8f98cd07471faec6408b95a73b3fe2c0244f1a",
+            "bytes": 4599
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/references/method.md",
+            "sha256": "b0e9893fed277743927263b8bfe0e4ed984718a5b0966ea6009590be4098d304",
+            "bytes": 7404
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/references/pov-schema.json",
+            "sha256": "e2cb3fcee61351eb4946a358ea10e9d22ee4dc6cd3e83fa256b07d6671ea3028",
+            "bytes": 1947
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/references/report.md",
+            "sha256": "4299dc92cd36a904745bf789f6a8fcaa498d25fe2915d410c986b670c947fdda",
+            "bytes": 1141
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/scripts/cross-model-pov.sh",
+            "sha256": "7fecdc7f73daf7143967af004d2ee23af7b5121097dbbf13580e4f6a24ed2f8e",
+            "bytes": 48361
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/scripts/peer-job-runner.py",
+            "sha256": "aac862a60af97eb4b9da6c90a1c688d27618ccb830ea5b1ee816b2ae653bfb0a",
+            "bytes": 104164
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-pov/SKILL.md",
+            "sha256": "458a25300d7309efa9ee0cf21afc760ecb728e25ca3e253c809bfb74203862c6",
+            "bytes": 7612
+          }
+        ],
+        "pinnedAt": "2026-10-02T16:54:27.701Z"
+      }
+    },
+    {
+      "bindingId": "superpowers-execution-handoffs",
+      "title": "Superpowers executing-plans / subagent-driven-development — post-plan execution",
+      "stage": "plan",
+      "status": "unsupported",
+      "provider": "superpowers plugin (~/.hermes/plugins/superpowers)",
+      "adapterVersion": "p0-probe-1",
+      "skillDirs": [
+        "/home/hermes/.hermes/plugins/superpowers/skills/executing-plans",
+        "/home/hermes/.hermes/plugins/superpowers/skills/subagent-driven-development"
+      ],
+      "questionChannel": "chat",
+      "tools": null,
+      "unsupported": {
+        "reason": "implementation_authority_denied",
+        "route": "writing-plans execution handoff (2 options)",
+        "detail": "The writing-plans terminal handoff offers implementation. Preparation records the offer and waits for the user's own decision; the binding never selects an execution option."
+      },
+      "resourceManifest": {
+        "algo": "sha256",
+        "digest": "428d902ba3f3750c777bc2047d3df28dd47c0ed7cee4da3be4f7d0d3eec84257",
+        "files": [
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/executing-plans/SKILL.md",
+            "sha256": "c4c3d8b628c51114cd165fb8246fe02744cd8be180032328391252e653028d9b",
+            "bytes": 2305
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/subagent-driven-development/implementer-prompt.md",
+            "sha256": "81dd9d5a3fb0b09b96b5829f03b9796842f3199ef7591d1ba1c2db2a515f64d0",
+            "bytes": 6335
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/subagent-driven-development/re-review-prompt.md",
+            "sha256": "db0d5849478bc79cbde97b9b2cf0e58b50be8b8ed18464b0252c2bf27b6440a6",
+            "bytes": 4756
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/subagent-driven-development/scripts/review-package",
+            "sha256": "fac3d4bd7f94369e8037b9ead2a8a502dca6ab333902b560b9455dbb3c450ebe",
+            "bytes": 1469
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/subagent-driven-development/scripts/sdd-workspace",
+            "sha256": "95a09d9d3983ad1aafd093ca72b4587946dea885c6e302caa02a779a2f911c31",
+            "bytes": 1586
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/subagent-driven-development/scripts/task-brief",
+            "sha256": "d6954ef7841c7da3d77373e6ff5118b3f2f2e998606fd95d33e6527851bce044",
+            "bytes": 1158
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/subagent-driven-development/SKILL.md",
+            "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5",
+            "bytes": 32339
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/subagent-driven-development/task-reviewer-prompt.md",
+            "sha256": "eea23e33ec570c3041f40e9569fa711d61b8029f9eecf908345138aa1c6e61ab",
+            "bytes": 9021
+          }
+        ],
+        "pinnedAt": "2026-10-02T16:54:27.703Z"
+      }
+    },
+    {
+      "bindingId": "ce-doc-review-cross-model",
+      "title": "ce-doc-review cross-model judgment pass",
+      "stage": "review",
+      "status": "unsupported",
+      "provider": "compound-engineering 3.24.0 (.codex plugin cache)",
+      "adapterVersion": "p0-probe-1",
+      "skillDirs": [
+        "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review"
+      ],
+      "questionChannel": "chat",
+      "tools": null,
+      "unsupported": {
+        "reason": "external_peer_egress_unproven",
+        "route": "ce-doc-review Phase 2 cross-model judgment pass (conditional trio only)",
+        "detail": "Requires dedicated provider CLIs (codex/claude/grok/composer routes) and the checkout egress policy. The base skill treats the pass as additive and non-blocking — absence is named in Coverage, not an error. Registered unsupported until a peer route is actually proven."
+      },
+      "resourceManifest": {
+        "algo": "sha256",
+        "digest": "4924b7ca2ed273e6ea273d3f831a0523a5dd3a91de1637115e0aecd317f83077",
+        "files": [
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/bulk-preview.md",
+            "sha256": "89c33a794cfcbd0f5b697716308275f4a6fc6a8a17526aff09762a234b595fc4",
+            "bytes": 13564
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/cross-model-eval.md",
+            "sha256": "7b0a95e2ff7a70d2a62f36d8c16e904940b68c362bb9d7323c1844638441b4f6",
+            "bytes": 8959
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/cross-model-review.md",
+            "sha256": "b32baf837ed9f7e2f556d07a55fdd3634ec139b14418cd560bbefe9013dbb38c",
+            "bytes": 34557
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/decision-primer.md",
+            "sha256": "e93be39fa2fcaff47ad3ac93f33ecd14e5a588c03d6a97a375d1ad6db1f9cc3b",
+            "bytes": 3134
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/dispatch.md",
+            "sha256": "79a9e20d506df80892c3cdae4cf5aad5119708cf6defccc534db86a24c2816e7",
+            "bytes": 6021
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/document-intake.md",
+            "sha256": "a4e61041cf3000f37d5095390dfc22f287ea68355e3c3417f6e485cf5f8fa887",
+            "bytes": 6682
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/findings-schema.json",
+            "sha256": "5afae17c51e77db9de829a732a218e28d79bb2957165cce1d01ba94e311a5b5d",
+            "bytes": 5318
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/modes.md",
+            "sha256": "d99e8186ef0034a510ab0986349116c19a0216ceb7f66fe6445d88f5fee512fd",
+            "bytes": 2578
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/open-questions-defer.md",
+            "sha256": "fc894a016ad63d26ff02e2d8db58c586d10105f1642b6e8288dac475e370b1a0",
+            "bytes": 11484
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/persona-selection.md",
+            "sha256": "3229a7d2cd11d5407378edad99804aa6bdd221dd89d50e5405d0c9559b8180ea",
+            "bytes": 4856
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/adversarial-document-reviewer.md",
+            "sha256": "68e19288806b22d4b43af23b4933412fea1d1b1d8fce7ab5bfbee28184a59948",
+            "bytes": 11207
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/coherence-reviewer.md",
+            "sha256": "1dc77d51f1ecb4c5b737f65a5c94de89f281a2a9ac43935f160f5c843bb4b3bd",
+            "bytes": 10920
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/design-lens-reviewer.md",
+            "sha256": "4660788e617e0432c78383af34c8fb23f08c43ec06d87d3645a9a2605e6f14f0",
+            "bytes": 4381
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/feasibility-reviewer.md",
+            "sha256": "100370ba01de5b76215c70c414a03d5f678f0e66e21cde1c85ececc1f7a36173",
+            "bytes": 5710
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/product-lens-reviewer.md",
+            "sha256": "94dce599787078846fd0a3568ff8c6c6b2d7172e304f2a431458051118d37007",
+            "bytes": 9164
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/scope-guardian-reviewer.md",
+            "sha256": "a4662df667c3c01779af45939cf30e73f91801b38ed110aab106cfae70346e40",
+            "bytes": 5939
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/security-lens-reviewer.md",
+            "sha256": "ac357ef0b61fac0dfaac4019852840cce262e9029056a20e4c7849c8a3bfd611",
+            "bytes": 4703
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/personas/whole-doc-reviewer.md",
+            "sha256": "8dfce03228c41e00cc2216fbfc58f33899784cf413ea0c5462d30bea307a8dfe",
+            "bytes": 3081
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/rendering-floor.md",
+            "sha256": "18fcb0c26fafc8f1d8110055ebcb1225762b1c8fbb21eededa2be315c36d3082",
+            "bytes": 12819
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/review-output-template.md",
+            "sha256": "4958ff2f73609ab8092b6db2083eedc3fb076181d4a1dd610f83317e77ec6c9c",
+            "bytes": 13163
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/subagent-template.md",
+            "sha256": "79e37c0fa7eae87d6813214672b67eedc68a0e177954c362f2119ecf14e86fdb",
+            "bytes": 24553
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/synthesis-and-presentation.md",
+            "sha256": "837275a808ca9a54eec7b2210e848659404b17de5e9282e8550f0977447816ec",
+            "bytes": 42157
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/references/walkthrough.md",
+            "sha256": "c1e4eada8f2fa2144ffed31e2b887c4ca1974a8eb0611d3922c8adf4444eac0d",
+            "bytes": 39147
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/scripts/cross-model-doc-review.sh",
+            "sha256": "73dec73d0fb28c8cf6f51de58a8afad4b8b2ca6d5cde0c5e6f0609126b98ef27",
+            "bytes": 64132
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/scripts/packs-resolve.py",
+            "sha256": "0e7de94883fcaa19576a93ed206513de6609720898e2a20ed4be5b599691a939",
+            "bytes": 31513
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/scripts/peer-job-runner.py",
+            "sha256": "aac862a60af97eb4b9da6c90a1c688d27618ccb830ea5b1ee816b2ae653bfb0a",
+            "bytes": 104164
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-doc-review/SKILL.md",
+            "sha256": "21ab49c5541a1c743a444b9808394dd872347b1f823d5b88107cc3279c9ed411",
+            "bytes": 7814
+          }
+        ],
+        "pinnedAt": "2026-10-02T16:54:27.709Z"
+      },
+      "requires": [
+        "native.peer_egress"
+      ]
+    },
+    {
+      "bindingId": "superpowers-visual-companion",
+      "title": "Superpowers visual companion — browser mockup surface",
+      "stage": "design",
+      "status": "unsupported",
+      "provider": "superpowers plugin (~/.hermes/plugins/superpowers)",
+      "adapterVersion": "p0-probe-1",
+      "skillDirs": [
+        "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming"
+      ],
+      "questionChannel": "chat",
+      "tools": null,
+      "unsupported": {
+        "reason": "browser_surface_out_of_scope",
+        "route": "brainstorming just-in-time visual companion offer",
+        "detail": "Needs a local helper web server plus a user browser session. The skill treats it as an optional per-question surface; P0 does not stand up browser infrastructure for it."
+      },
+      "resourceManifest": {
+        "algo": "sha256",
+        "digest": "7ada28e5ec5988f680ef442a308f7f19ff7e5f2d89d81e0953fe915600cd1975",
+        "files": [
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/scripts/frame-template.html",
+            "sha256": "6a8a4e58bd6a44b904e2e3c57de774481d909204597e1498de53f1b2fecc4c4e",
+            "bytes": 8094
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/scripts/helper.js",
+            "sha256": "43c6d69954a46ec34a2a262bcc62a9a7e83e839c739f199cb72646d397c686e3",
+            "bytes": 5615
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/scripts/server.cjs",
+            "sha256": "2d2961ea8d11f56c5f4c3a1a68d22709efa5d7601a2246d8c880774e7e9e8412",
+            "bytes": 25693
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/scripts/start-server.sh",
+            "sha256": "a4e5ae84275bcaacd2f84345afeabe59cf7b00ba080e123da7cc1fb226f12847",
+            "bytes": 6908
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/scripts/stop-server.sh",
+            "sha256": "0b5ccbbd57f62d3ed88993f7940b5ee0e5c0fc9b21c550c623da4f6292e47daf",
+            "bytes": 3263
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/SKILL.md",
+            "sha256": "74edf03ea6d24ef53db48677b93558d14a979bdf052ca3f57ecdca0c66791608",
+            "bytes": 15456
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/spec-document-reviewer-prompt.md",
+            "sha256": "95a0a195de9d984be2fffa95bab16fc8c563bc296a9cfc5e9c29cb3ece0d7457",
+            "bytes": 1747
+          },
+          {
+            "path": "/home/hermes/.hermes/plugins/superpowers/skills/brainstorming/visual-companion.md",
+            "sha256": "77eb44a4ec3408bb3dafb872288ecd94beb8cf21da4f2bafa54fd08255d7808b",
+            "bytes": 13383
+          }
+        ],
+        "pinnedAt": "2026-10-02T16:54:27.711Z"
+      },
+      "requires": [
+        "native.browser_render"
+      ]
+    },
+    {
+      "bindingId": "ce-slack-researcher",
+      "title": "ce-brainstorm opt-in Slack researcher",
+      "stage": "requirements",
+      "status": "unsupported",
+      "provider": "compound-engineering 3.24.0 (.codex plugin cache)",
+      "adapterVersion": "p0-probe-1",
+      "skillDirs": [
+        "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm"
+      ],
+      "questionChannel": "chat",
+      "tools": null,
+      "unsupported": {
+        "reason": "capability_absent",
+        "route": "ce-brainstorm Phase 1.1 opt-in Slack context dispatch",
+        "detail": "No Slack/MCP tools are installed in the pi profile; the skill's own contract for 'No tools' is a named note, never a simulated search. User did not request Slack context."
+      },
+      "resourceManifest": {
+        "algo": "sha256",
+        "digest": "b6a7ba03578c22ec14217781a6f8b7e571c9fce428e85e0fb803399254846629",
+        "files": [
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/agents/slack-researcher.md",
+            "sha256": "3b6e95a727d89781fbeec697dd30228c19a2315ef3c1f4df4de0d0f9c6df3c0f",
+            "bytes": 10430
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/approaches.md",
+            "sha256": "3fe5e35301a3341a48dc73b8265cf8a9c99c1dbe8282e26e82f809a77c84ee53",
+            "bytes": 7597
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/bakeoff.md",
+            "sha256": "1e0346356b93c98233f4a48e48aeeb0c059a3f251943c73a7e9d27c5cfae621a",
+            "bytes": 1640
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/blindspot-pass.md",
+            "sha256": "011b6c013dbbd8d35d66ff5b4a53983c615185c6ea03c24c22bfa3d0c32ed3cb",
+            "bytes": 7560
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/brainstorm-sections.md",
+            "sha256": "3134becba49f332215819db865f1c9cae7b8780d862247c35bddf1b4ecf07eb2",
+            "bytes": 25477
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/dialogue.md",
+            "sha256": "71c129c13694dd9e913df85ffa0f5f96eabf69acde4c34d95efc4787d1e5fe52",
+            "bytes": 14824
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/handoff.md",
+            "sha256": "57cde5bd8b133b99246fcde5b33bf114ba8022c1316d65781b50c456f2f9c1d7",
+            "bytes": 12775
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/html-rendering.md",
+            "sha256": "5a7dad658002ef8fad487a846fb87880c29044ac04cb9f7a07c611def0ffc318",
+            "bytes": 34608
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/interaction-rules.md",
+            "sha256": "7adebd180f76d140d47f3877f89a6243a40b27677380a5a0a776a9b4696a7cba",
+            "bytes": 6642
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/markdown-rendering.md",
+            "sha256": "61a56eeddd9582a49fd42c8bd7ce2ce72e88b0c879a0b3293a671d64436a91a4",
+            "bytes": 10837
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/model-tiers.md",
+            "sha256": "b9723b3e86dd426fdde3f9a9a958191c702ed79ff390bb4d8a09e5b8fd80a5f8",
+            "bytes": 1758
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/output-mode.md",
+            "sha256": "0ebe008eee904f551333f1a7978293d44601e3c54f1199109c3841f8d52d3f22",
+            "bytes": 5012
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/phase-0.md",
+            "sha256": "640b79ab15e6c8a4ff783df8a760d080c94729bc6281866946402bc33c977262",
+            "bytes": 14001
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/plan-write.md",
+            "sha256": "70ee0caab295300538dfabdb98290650486f69041cd3de4ab2ac2ba5bc273fa0",
+            "bytes": 4966
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/product-pressure-test.md",
+            "sha256": "61cbfc9ea8bc1fce8b33331cf4808358d073f9f7cf851c51431d3e1a8cc660a1",
+            "bytes": 3619
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/reasoning-elevation.md",
+            "sha256": "e163910bbe93f2bd3368476e67a2070ec7e44a322612d456106aa2d3e2485309",
+            "bytes": 17547
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/settled-decisions.md",
+            "sha256": "e4fa8cecdccdb5d8a141b720c26a733fb143292a81671c21b144fac2584d5b22",
+            "bytes": 4941
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/synthesis-summary.md",
+            "sha256": "89da8269ac491b18ef54e3bb8403d0f448a31b690abd0acb6b2160fd4067e0ee",
+            "bytes": 29132
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/universal-brainstorming.md",
+            "sha256": "a9e6557b5edd130328f51c2676288b42eb03283b5701fec2df84bbf72ddcffdf",
+            "bytes": 7816
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/verdict-routing.md",
+            "sha256": "0532d7e2e517b98f380ebf21ac54228c15eb9e7041310c2ffc638b6695cb91c2",
+            "bytes": 4347
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/references/visual-probes.md",
+            "sha256": "6abc7a25fa31a18a255145928066bded2a2d1f25b5abbdf1338862e06687ed9f",
+            "bytes": 11880
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/scripts/elevation-dispatch.sh",
+            "sha256": "ba8219c15db2909fb1c272d2137b124a78a06329af2cca0e80276f6e8918ef3d",
+            "bytes": 13515
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/scripts/light-webserver.js",
+            "sha256": "4146d6a18f4261b6b78fdd4cc65a67dad4c34ec9c986664a54c42a985d55eb6e",
+            "bytes": 41902
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/scripts/packs-resolve.py",
+            "sha256": "0e7de94883fcaa19576a93ed206513de6609720898e2a20ed4be5b599691a939",
+            "bytes": 31513
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/scripts/peer-job-runner.py",
+            "sha256": "aac862a60af97eb4b9da6c90a1c688d27618ccb830ea5b1ee816b2ae653bfb0a",
+            "bytes": 104164
+          },
+          {
+            "path": "/home/hermes/.codex/plugins/cache/openai-curated-remote/compound-engineering/3.24.0/skills/ce-brainstorm/SKILL.md",
+            "sha256": "5ffe0af9c8fd7d91706c64c7c0d39ceb1249e5832160dfa493ae990193f633e4",
+            "bytes": 7605
+          }
+        ],
+        "pinnedAt": "2026-10-02T16:54:27.716Z"
+      },
+      "requires": [
+        "tool.slack_mcp"
+      ]
+    }
+  ]
+}

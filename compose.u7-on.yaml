@@ -1,0 +1,32 @@
+# compose.u7-on.yaml — U7 ON-phase flags, stacked AFTER compose.u7.yaml.
+#
+# Enables the managed execution surface on BOTH sides of the contract:
+#   state  — `start`/`accept_result`/validation commands leave 501-gated
+#            territory (ACP_EXEC_START + ACP_EXEC_VALIDATION),
+#   runner — createManagedDriver builds client/runtime/scheduler/pump and
+#            the serial tick loop (ACP_EXEC_START; ACP_EXEC_VALIDATION lets
+#            the scheduler run the validation pipeline).
+#
+# Transition to ON (manager clearance only; state+runner recreated, every
+# other service untouched):
+#   docker compose -p acp-ui -f compose.yaml -f compose.u7.yaml \
+#     -f compose.u7-on.yaml up -d state runner
+#
+# There is deliberately no OFF file — OFF is compose.u7.yaml alone. Toggling
+# back is a second `up -d` without this file; each direction is an explicit,
+# logged transition step.
+
+services:
+  state:
+    environment:
+      ACP_EXEC_START: "1"
+      ACP_EXEC_VALIDATION: "1"
+  runner:
+    environment:
+      ACP_EXEC_START: "1"
+      ACP_EXEC_VALIDATION: "1"
+      # Route porch through the repo-owned pi RPC boundary wrapper: it
+      # exports PORCH_BIN_PI=deploy/pi-rpc-boundary.mjs inside porch's own
+      # env (below the buildChildEnv PORCH_* scrub) then execs real porch.
+      # Only pi-cli backend spawns consult it; all subcommands unchanged.
+      ACP_PORCH_CLI: /repo/deploy/porch-pi-boundary.sh

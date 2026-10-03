@@ -1,11 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
-import {
-  useBoardStore,
-  type BoardCard,
-  type BoardStageId,
-  type CardStatus,
-} from '../../stores/board';
+import { useBoardStore, type BoardCard } from '../../stores/board';
 import { useSessionStore } from '../../stores/session';
 import { useConfigStore } from '../../stores/config';
 import { useProjectsStore } from '../../stores/projects';
@@ -24,6 +19,9 @@ import {
 } from '../../stores/artifacts';
 import { BOARD_STAGES, PRIORITIES, statusesForStage, stageLabel } from './columns';
 import { fmtStamp } from './format';
+import ExecutionPanel from './ExecutionPanel.vue';
+import PreparationPanel from './PreparationPanel.vue';
+import { useCardDraft, draftFromCard } from './useCardDraft';
 
 const props = defineProps<{
   cardId: string;
@@ -33,6 +31,8 @@ const emit = defineEmits<{
   close: [];
   'open-session': [session: { agentName: string; sessionId: string }];
   'open-card': [cardId: string];
+  /** Managed-run navigation: jump to the chat view's workflow panel. */
+  'open-workflow': [target: { cardId: string; runId: string }];
 }>();
 
 const board = useBoardStore();
@@ -44,123 +44,35 @@ const reviewStore = useReviewStore();
 const artifactsStore = useArtifactsStore();
 
 const card = computed(() => board.cards.find((c) => c.id === props.cardId) ?? null);
+/** Server-owned lifecycle: the managed card's stage/status/flags/project/
+ * session come from the execution engine, not the draft. */
+const isManaged = computed(() => card.value?.execution?.managed === true);
+const managedReason =
+  'managed by the execution engine — controlled in the Managed execution section below';
 
-// Local draft, debounced back into the store. Edits are never lost to a
-// misclick outside the drawer — there is no cancel path by design.
-interface Draft {
-  title: string;
-  description: string;
-  project: string;
-  agent: string;
-  priority: 'high' | 'medium' | 'low';
-  acceptance: string;
-  verification: string;
-  blocked: boolean;
-  blockedReason: string;
-  cancelled: boolean;
-  stage: BoardStageId;
-  status: CardStatus | null;
-  links: { label: string; url: string }[];
-  sessionKey: string;
-}
-
-const draft = ref<Draft>({
-  title: '',
-  description: '',
-  project: '',
-  agent: '',
-  priority: 'medium',
-  acceptance: '',
-  verification: '',
-  blocked: false,
-  blockedReason: '',
-  cancelled: false,
-  stage: 'backlog',
-  status: null,
-  links: [],
-  sessionKey: '',
+// Local draft, debounced back into the store — the whole state machine
+// (edited-field deltas, switch-flush, unmount flush) lives in
+// useCardDraft.ts so the identical logic is behavioral-tested in node.
+// Edits are never lost to a misclick outside the drawer — there is no
+// cancel path by design.
+const {
+  draft,
+  lastSavedAt,
+  markDirty,
+  flush,
+  flushNow,
+  resetToCard,
+  onStagePicked,
+} = useCardDraft({
+  card,
+  cardId: computed(() => props.cardId),
+  findCard: (id) => board.cards.find((c) => c.id === id) ?? null,
+  moveCard: (id, stage) => board.moveCard(id, stage),
+  setCardStatus: (id, status) => board.setCardStatus(id, status),
+  setCardFlag: (id, flag, value, reason) => board.setCardFlag(id, flag, value, reason),
+  updateCard: (id, patch) => board.updateCard(id, patch),
+  onRefused: (reason) => alert(reason),
 });
-
-const lastSavedAt = ref<number | null>(null);
-let saveTimer: ReturnType<typeof setTimeout> | null = null;
-
-function draftFromCard(c: BoardCard): Draft {
-  return {
-    title: c.title,
-    description: c.description,
-    project: c.project,
-    agent: c.agent,
-    priority: c.priority,
-    acceptance: c.acceptance,
-    verification: c.verification,
-    blocked: c.blocked,
-    blockedReason: c.blockedReason,
-    cancelled: c.cancelled,
-    stage: c.stage,
-    status: c.status,
-    links: c.links.map((l) => ({ ...l })),
-    sessionKey: c.session ? `${c.session.agentName}::${c.session.sessionId}` : '',
-  };
-}
-
-watch(
-  () => props.cardId,
-  () => {
-    if (card.value) draft.value = draftFromCard(card.value);
-  },
-  { immediate: true }
-);
-
-function markDirty() {
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(flush, 400);
-}
-
-function flush() {
-  saveTimer = null;
-  const c = card.value;
-  if (!c) return;
-  const d = draft.value;
-  // Stage first (a stage change may reset the status), then the in-stage
-  // status, then the flags — each through its own mutation so the stage's
-  // status rules and the ledger entries stay intact.
-  if (d.stage !== c.stage) {
-    board.moveCard(c.id, d.stage);
-  }
-  if (d.status && d.status !== c.status) {
-    const r = board.setCardStatus(c.id, d.status);
-    // The review-cycle gate refuses `agent_tested` while blocking findings
-    // are open — surface the reason and snap the draft back to reality.
-    if (!r.ok && r.reason) {
-      alert(r.reason);
-      draft.value.status = c.status;
-    }
-  }
-  if (d.blocked !== c.blocked)
-    board.setCardFlag(c.id, 'blocked', d.blocked, d.blocked ? d.blockedReason.trim() : '');
-  if (d.cancelled !== c.cancelled) board.setCardFlag(c.id, 'cancelled', d.cancelled);
-  const sessionKey = d.sessionKey;
-  const session = sessionKey
-    ? { agentName: sessionKey.split('::')[0], sessionId: sessionKey.split('::').slice(1).join('::') }
-    : null;
-  board.updateCard(c.id, {
-    title: d.title.trim() || 'Untitled card',
-    description: d.description,
-    project: d.project.trim(),
-    agent: d.agent,
-    priority: d.priority,
-    acceptance: d.acceptance,
-    verification: d.verification,
-    // A cleared flag never keeps a reason — the flag/reason pair is written
-    // through setCardFlag above, so this stays consistent with it.
-    blockedReason: d.blocked ? d.blockedReason.trim() : '',
-    links: d.links
-      .filter((l) => l.label.trim() || l.url.trim())
-      .map((l) => ({ label: l.label.trim(), url: l.url.trim() })),
-    session,
-  });
-  lastSavedAt.value = Date.now();
-}
 
 const agents = computed(() => configStore.allAgentNames);
 
@@ -178,37 +90,29 @@ const attachedSession = computed(() => {
   );
 });
 
-function onStagePicked() {
-  // Keep the draft's status if it exists in the new stage, else reset to
-  // the stage's initial (null for backlog/done).
-  const allowed = statusesForStage(draft.value.stage);
-  if (!draft.value.status || !allowed.includes(draft.value.status)) {
-    draft.value.status = allowed[0] ?? null;
-  }
-  markDirty();
-}
-
 function onSessionPicked() {
   // When a session is attached and the project is still empty, default the
   // project to the session's cwd last segment (spec: project defaults to
   // the last path segment).
-  if (!draft.value.project.trim() && attachedSession.value?.cwd) {
+  if (!draft.value.project.trim() && attachedSession.value?.cwd && !isManaged.value) {
     draft.value.project = projectName(attachedSession.value.cwd);
+    markDirty('project');
   }
-  markDirty();
+  markDirty('sessionKey');
 }
 
 function addLink() {
   draft.value.links.push({ label: '', url: '' });
+  markDirty('links');
 }
 
 function removeLink(i: number) {
   draft.value.links.splice(i, 1);
-  markDirty();
+  markDirty('links');
 }
 
 function onDuplicate() {
-  flush();
+  flushNow();
   const copy = board.duplicateCard(props.cardId);
   if (copy) emit('close');
 }
@@ -216,6 +120,10 @@ function onDuplicate() {
 function onRemove() {
   const c = card.value;
   if (!c) return;
+  if (c.execution?.managed === true) {
+    alert('This card is managed by the execution engine — its lifecycle is controlled in the managed execution section.');
+    return;
+  }
   if (confirm(`Delete "${c.title || 'Untitled card'}"?`)) {
     board.removeCard(c.id);
     emit('close');
@@ -395,14 +303,12 @@ function onApplyTransition() {
   const p = proposal.value;
   if (!c || p.kind === 'none') return;
   flush();
-  if (p.kind === 'move') board.moveCard(c.id, p.to);
-  else if (p.kind === 'status') {
-    const r = board.setCardStatus(c.id, p.status);
-    if (!r.ok && r.reason) alert(r.reason);
-  } else {
-    board.setCardFlag(c.id, 'blocked', true, p.reason);
-  }
-  if (card.value) draft.value = draftFromCard(card.value);
+  let r: { ok: boolean; reason?: string } = { ok: true };
+  if (p.kind === 'move') r = board.moveCard(c.id, p.to);
+  else if (p.kind === 'status') r = board.setCardStatus(c.id, p.status);
+  else r = board.setCardFlag(c.id, 'blocked', true, p.reason);
+  if (!r.ok && r.reason) alert(r.reason);
+  resetToCard();
 }
 
 onMounted(() => {
@@ -419,10 +325,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onEsc, true);
-  if (saveTimer) {
-    clearTimeout(saveTimer);
-    flush();
-  }
+  // The pending-draft flush on unmount is the composable's own dispose —
+  // it flushes against the still-current card id.
 });
 </script>
 
@@ -444,20 +348,21 @@ onBeforeUnmount(() => {
       <label class="field">
         <span class="field-label">Title</span>
         <input v-model="draft.title" data-field="title" class="f-input" type="text"
-          placeholder="Card title" @input="markDirty" />
+          placeholder="Card title" @input="markDirty('title')" />
       </label>
 
       <label class="field">
         <span class="field-label">Description</span>
         <textarea v-model="draft.description" data-field="description" class="f-input" rows="3"
-          placeholder="What needs doing" @input="markDirty" />
+          placeholder="What needs doing" @input="markDirty('description')" />
       </label>
 
       <div class="field-row">
         <label class="field">
-          <span class="field-label">Project</span>
+          <span class="field-label">Project<template v-if="isManaged"> · managed</template></span>
           <input v-model="draft.project" data-field="project" class="f-input mono" type="text"
-            list="board-project-list" placeholder="project" @input="markDirty" />
+            list="board-project-list" placeholder="project" :disabled="isManaged"
+            :title="isManaged ? managedReason : ''" @input="markDirty('project')" />
           <datalist id="board-project-list">
             <option v-for="p in board.projectOptions" :key="p" :value="p" />
           </datalist>
@@ -465,7 +370,7 @@ onBeforeUnmount(() => {
 
         <label class="field">
           <span class="field-label">Agent</span>
-          <select v-model="draft.agent" data-field="agent" class="f-input" @change="markDirty">
+          <select v-model="draft.agent" data-field="agent" class="f-input" @change="markDirty('agent')">
             <option value="">Unassigned</option>
             <option v-for="a in agents" :key="a" :value="a">{{ a }}</option>
           </select>
@@ -482,23 +387,25 @@ onBeforeUnmount(() => {
             :class="{ active: draft.priority === p.id }"
             role="radio"
             :aria-checked="draft.priority === p.id"
-            @click="draft.priority = p.id; markDirty()"
+            @click="draft.priority = p.id; markDirty('priority')"
           >{{ p.label }}</button>
         </div>
       </div>
 
       <div class="field-row">
         <label class="field">
-          <span class="field-label">Stage</span>
-          <select v-model="draft.stage" data-field="stage" class="f-input" @change="onStagePicked">
+          <span class="field-label">Stage<template v-if="isManaged"> · managed</template></span>
+          <select v-model="draft.stage" data-field="stage" class="f-input" :disabled="isManaged"
+            :title="isManaged ? managedReason : ''" @change="onStagePicked">
             <option v-for="c in BOARD_STAGES" :key="c.id" :value="c.id">{{ c.label }}</option>
           </select>
         </label>
 
         <label class="field">
-          <span class="field-label">Status</span>
+          <span class="field-label">Status<template v-if="isManaged"> · managed</template></span>
           <select v-model="draft.status" data-field="status" class="f-input"
-            :disabled="!statusesForStage(draft.stage).length" @change="markDirty">
+            :disabled="!statusesForStage(draft.stage).length || isManaged"
+            :title="isManaged ? managedReason : ''" @change="markDirty('status')">
             <option v-if="!statusesForStage(draft.stage).length" :value="null">—</option>
             <option v-for="s in statusesForStage(draft.stage)" :key="s" :value="s">{{ s }}</option>
           </select>
@@ -506,21 +413,25 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="field">
-        <span class="field-label">Flags</span>
+        <span class="field-label">Flags<template v-if="isManaged"> · managed</template></span>
         <div class="prio-seg" role="group" aria-label="Card flags">
           <button
             class="seg-btn flag-btn"
             :class="{ active: draft.blocked }"
             :aria-pressed="draft.blocked"
+            :disabled="isManaged"
+            :title="isManaged ? managedReason : ''"
             data-field="blocked"
-            @click="draft.blocked = !draft.blocked; markDirty()"
+            @click="draft.blocked = !draft.blocked; markDirty('blocked')"
           >blocked</button>
           <button
             class="seg-btn flag-btn"
             :class="{ active: draft.cancelled }"
             :aria-pressed="draft.cancelled"
+            :disabled="isManaged"
+            :title="isManaged ? managedReason : ''"
             data-field="cancelled"
-            @click="draft.cancelled = !draft.cancelled; markDirty()"
+            @click="draft.cancelled = !draft.cancelled; markDirty('cancelled')"
           >cancelled</button>
         </div>
       </div>
@@ -528,28 +439,29 @@ onBeforeUnmount(() => {
       <label v-if="draft.blocked" class="field">
         <span class="field-label">Blocked reason</span>
         <input v-model="draft.blockedReason" data-field="blockedReason" class="f-input" type="text"
-          placeholder="what blocks it (optional card ref)" @input="markDirty" />
+          placeholder="what blocks it (optional card ref)" :disabled="isManaged"
+          :title="isManaged ? managedReason : ''" @input="markDirty('blockedReason')" />
       </label>
 
       <label class="field">
         <span class="field-label">Acceptance criteria</span>
         <textarea v-model="draft.acceptance" data-field="acceptance" class="f-input" rows="4"
-          placeholder="One per line" @input="markDirty" />
+          placeholder="One per line" @input="markDirty('acceptance')" />
       </label>
 
       <label class="field">
         <span class="field-label">Verification steps</span>
         <textarea v-model="draft.verification" data-field="verification" class="f-input" rows="4"
-          placeholder="How to prove it works" @input="markDirty" />
+          placeholder="How to prove it works" @input="markDirty('verification')" />
       </label>
 
       <div class="field">
         <span class="field-label">Links</span>
         <div v-for="(link, i) in draft.links" :key="i" class="link-row">
           <input v-model="link.label" class="f-input link-label" type="text" placeholder="label"
-            aria-label="Link label" @input="markDirty" />
+            aria-label="Link label" @input="markDirty('links')" />
           <input v-model="link.url" class="f-input mono link-url" type="text" placeholder="https://…"
-            aria-label="Link URL" @input="markDirty" />
+            aria-label="Link URL" @input="markDirty('links')" />
           <button class="link-del" aria-label="Remove link" @click="removeLink(i)">×</button>
         </div>
         <button class="link-add" @click="addLink">+ Add link</button>
@@ -576,8 +488,9 @@ onBeforeUnmount(() => {
       </div>
 
       <label class="field">
-        <span class="field-label">Attached session</span>
-        <select v-model="draft.sessionKey" data-field="session" class="f-input" @change="onSessionPicked">
+        <span class="field-label">Attached session<template v-if="isManaged"> · managed</template></span>
+        <select v-model="draft.sessionKey" data-field="session" class="f-input" :disabled="isManaged"
+          :title="isManaged ? managedReason : ''" @change="onSessionPicked">
           <option value="">None</option>
           <option
             v-for="s in sessionOptions"
@@ -586,6 +499,13 @@ onBeforeUnmount(() => {
           >{{ s.agentName }} · {{ s.title }}</option>
         </select>
       </label>
+
+      <PreparationPanel :card-id="card.id" />
+
+      <ExecutionPanel
+        :card-id="card.id"
+        @open-workflow="(t) => emit('open-workflow', t)"
+      />
 
       <div
         v-if="reviewState && (reviewState.findings.length || reviewState.round !== null || reviewState.error)"

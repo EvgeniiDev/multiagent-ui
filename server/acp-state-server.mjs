@@ -1,150 +1,44 @@
-// acp-state-server.mjs — shared KV state service for the ACP UI panel.
+// acp-state-server.mjs — HTTP adapter for the durable state service.
 //
-// Lets every device on the host (laptop, phone) read/write the same panel
-// state (board, projects, sessions, limits, activity, preferences, ...).
-// The panel's `src/lib/host/storage.ts` talks to this over HTTP when the
-// host answers on port 25900, and silently falls back to `localStorage`
-// otherwise.
+// All request semantics (legacy KV CAS, porch read-only, /api/execution/*)
+// live in server/execution/state-service.mjs behind service.request(); this
+// file only adapts sockets to it — so importing this module does NOT bind a
+// port (main() runs only when executed directly) and tests can exercise the
+// real handler with fake req/res objects.
+//
+// Deployment contract (unchanged):
+//   STATE_DIR (default ~/.hermes/acp-ui-state) — compose sets the host path
+//     directly; the container runs on host networking and sees it as-is.
+//   PORT      (default 25900)
 //
 //   STATE_DIR=/tmp/state-test PORT=25909 node server/acp-state-server.mjs
 //
-// Routes (permissive CORS: `*`, content-type, GET/PUT/DELETE/OPTIONS):
-//   GET    /health            -> { ok: true, dir, docs: N }
-//   GET    /api/state         -> { docs: [{ name, rev, updatedAt, bytes }] }
-//   GET    /api/state/:name   -> { name, rev, updatedAt, data } (404 if missing)
-//   PUT    /api/state/:name   body { data, rev? } -> { name, rev, updatedAt }
-//                              rev mismatch -> 409 + current { rev, updatedAt }
-//                              body > 5 MiB -> 413
-//   DELETE /api/state/:name   -> { name, deleted: true } (404 if missing)
-//
-// Name validation: /^[a-z0-9._-]{1,64}$/ -> 400 otherwise.
-// Writes are atomic (temp file + rename); `rev` increments on every PUT.
-//
-// Node only, zero dependencies.
+// Permissive CORS `*` (unchanged); POST added to allowed methods for the
+// execution command route. Over-5 MiB bodies -> 413; malformed URL -> 400.
 
 import { createServer } from 'node:http';
-import { promises as fs } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { createStateService } from './execution/state-service.mjs';
 
-const PORT = Number(process.env.PORT || '25900');
-const STATE_DIR =
-  process.env.STATE_DIR || join(homedir(), '.hermes', 'acp-ui-state');
-const MAX_BODY_BYTES = 5 * 1024 * 1024;
-const NAME_RE = /^[a-z0-9._-]{1,64}$/;
+export const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
-// --- porch read-only bridge -------------------------------------------------
-// The Workflow view visualizes porch delegate runs, which the browser cannot
-// read off disk. This exposes the run registry read-only. Path mirrors
-// porch's `_steer_root()` (lib/sessions.py): PORCH_STEER_DIR, else
-// XDG_CACHE_HOME/pragmatic-orchestration/steer, else ~/.cache/... .
-//
-// Real run-dir layout on this host (verified 2026-09-29):
-//   <root>/runs/<run_id>/meta.json   agent_id, cwd, status, pid, child_pid,
-//                                    exit_code, run_id, started_at, finished_at
-//   <root>/runs/<run_id>/audit.jsonl events: { event, kind, ts, data_preview }
-//   <root>/runs/<run_id>/turns/      per-turn artifacts
-//   <root>/runs/<run_id>/final.txt   final answer once terminal
-// NOTE: this porch build does NOT write normalized/<agent>.jsonl (Paseo's
-// format). The workflow workstream's reader must parse audit.jsonl (`event`
-// field), not `type`. This endpoint returns raw file contents; parsing/
-// projection stays client-side so the contract is one place.
-const RUN_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
-const AUDIT_TAIL_BYTES = 512 * 1024;
+// The socket-facing contract — same shape the flat server sent.
+const CORS_HEADERS = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'GET,PUT,POST,DELETE,OPTIONS',
+  'access-control-allow-headers': 'content-type',
+};
 
-function porchSteerRoot() {
-  const env = process.env.PORCH_STEER_DIR;
-  if (env && env.trim()) return resolve(env.replace(/^~(?=$|\/)/, homedir()));
-  const xdg = process.env.XDG_CACHE_HOME;
-  const base = xdg && xdg.trim() ? xdg : join(homedir(), '.cache');
-  return join(base, 'pragmatic-orchestration', 'steer');
-}
-function porchRunsDir() {
-  return join(porchSteerRoot(), 'runs');
-}
-function porchRunDir(runId) {
-  if (!RUN_ID_RE.test(runId)) return null;
-  const dir = resolve(porchRunsDir(), runId);
-  if (!dir.startsWith(resolve(porchRunsDir()) + sep)) return null;
-  return dir;
-}
-async function readJsonSafe(p) {
-  try {
-    return JSON.parse(await fs.readFile(p, 'utf-8'));
-  } catch {
-    return null;
-  }
-}
-async function listPorchRuns() {
-  let entries = [];
-  try {
-    entries = await fs.readdir(porchRunsDir(), { withFileTypes: true });
-  } catch (e) {
-    if (e && e.code === 'ENOENT') return [];
-    throw e;
-  }
-  const out = [];
-  for (const ent of entries) {
-    if (!ent.isDirectory()) continue;
-    const meta = await readJsonSafe(join(porchRunsDir(), ent.name, 'meta.json'));
-    if (!meta) continue;
-    out.push({
-      runId: meta.run_id || ent.name,
-      agentId: meta.agent_id ?? null,
-      backend: meta.backend ?? null,
-      model: meta.model ?? null,
-      cwd: meta.cwd ?? null,
-      status: meta.status ?? null,
-      pid: meta.pid ?? null,
-      childPid: meta.child_pid ?? null,
-      exitCode: meta.exit_code ?? null,
-      startedAt: meta.started_at ?? null,
-      finishedAt: meta.finished_at ?? null,
-      updatedAt: meta.updated_at ?? null,
-    });
-  }
-  out.sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)));
-  return out;
-}
-async function readTail(p, maxBytes) {
-  let fh;
-  try {
-    fh = await fs.open(p, 'r');
-  } catch {
-    return null;
-  }
-  try {
-    const st = await fh.stat();
-    const start = st.size > maxBytes ? st.size - maxBytes : 0;
-    const len = st.size - start;
-    const buf = Buffer.alloc(len);
-    await fh.read(buf, 0, len, start);
-    let text = buf.toString('utf-8');
-    // Dropped a partial first line when we started mid-file.
-    if (start > 0) {
-      const nl = text.indexOf('\n');
-      if (nl >= 0) text = text.slice(nl + 1);
-    }
-    return { text, truncated: start > 0, size: st.size };
-  } finally {
-    await fh.close();
-  }
-}
-async function readPorchRun(runId) {
-  const dir = porchRunDir(runId);
-  if (!dir) return { invalid: true };
-  const meta = await readJsonSafe(join(dir, 'meta.json'));
-  if (!meta) return { missing: true };
-  const state = await readJsonSafe(join(dir, 'state.json'));
-  const audit = await readTail(join(dir, 'audit.jsonl'), AUDIT_TAIL_BYTES);
-  let final = null;
-  try {
-    final = await fs.readFile(join(dir, 'final.txt'), 'utf-8');
-  } catch {
-    /* not terminal yet */
-  }
-  return { meta, state, audit, final };
+export function resolveConfig(env = process.env) {
+  const stateDir =
+    env.STATE_DIR && env.STATE_DIR.trim()
+      ? env.STATE_DIR.trim()
+      : join(homedir(), '.hermes', 'acp-ui-state');
+  const port = Number(env.PORT || '25900');
+  return { stateDir, port };
 }
 
 function send(res, status, obj) {
@@ -152,69 +46,13 @@ function send(res, status, obj) {
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(body),
-    'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET,PUT,DELETE,OPTIONS',
-    'access-control-allow-headers': 'content-type',
+    ...CORS_HEADERS,
   });
   res.end(body);
 }
 
-function docPath(name) {
-  // Names are validated against NAME_RE (no slashes, no `..`), and we
-  // resolve + prefix-check anyway so a hostile name can never escape dir.
-  const p = resolve(STATE_DIR, `${name}.json`);
-  if (p !== resolve(STATE_DIR, `${name}.json`) || !p.startsWith(resolve(STATE_DIR) + sep)) {
-    return null;
-  }
-  return p;
-}
-
-async function readDoc(name) {
-  const p = docPath(name);
-  if (!p) return { invalid: true };
-  try {
-    const raw = await fs.readFile(p, 'utf-8');
-    return { doc: JSON.parse(raw) };
-  } catch (e) {
-    if (e && e.code === 'ENOENT') return { missing: true };
-    throw e;
-  }
-}
-
-async function listDocs() {
-  let files = [];
-  try {
-    files = await fs.readdir(STATE_DIR);
-  } catch (e) {
-    if (e && e.code === 'ENOENT') return [];
-    throw e;
-  }
-  const out = [];
-  for (const f of files) {
-    if (!f.endsWith('.json')) continue;
-    const name = f.slice(0, -'.json'.length);
-    if (!NAME_RE.test(name)) continue;
-    try {
-      const st = await fs.stat(join(STATE_DIR, f));
-      const raw = await fs.readFile(join(STATE_DIR, f), 'utf-8');
-      let rev = 0;
-      let updatedAt = 0;
-      try {
-        const parsed = JSON.parse(raw);
-        if (typeof parsed.rev === 'number') rev = parsed.rev;
-        if (typeof parsed.updatedAt === 'number') updatedAt = parsed.updatedAt;
-      } catch {
-        // Corrupt file: still list it by size so /health stays honest.
-      }
-      out.push({ name, rev, updatedAt, bytes: st.size });
-    } catch {
-      // Raced with a delete — skip.
-    }
-  }
-  out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  return out;
-}
-
+// Drains-but-drops past the limit so the socket stays usable; rejects with
+// PAYLOAD_TOO_LARGE, which the handler maps to 413.
 function readBody(req) {
   return new Promise((resolveBody, reject) => {
     const chunks = [];
@@ -224,7 +62,6 @@ function readBody(req) {
       size += c.length;
       if (size > MAX_BODY_BYTES) {
         tooBig = true;
-        // Keep draining so the socket stays usable, but drop the bytes.
         return;
       }
       chunks.push(c);
@@ -242,181 +79,88 @@ function readBody(req) {
   });
 }
 
-const server = createServer(async (req, res) => {
-  const cors = {
-    'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET,PUT,DELETE,OPTIONS',
-    'access-control-allow-headers': 'content-type',
-  };
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204, cors);
-    res.end();
-    return;
-  }
-
-  let url;
-  try {
-    url = new URL(req.url || '/', 'http://localhost');
-  } catch {
-    send(res, 400, { error: 'bad request' });
-    return;
-  }
-  const path = url.pathname;
-
-  try {
-    if (req.method === 'GET' && path === '/health') {
-      const docs = await listDocs();
-      send(res, 200, { ok: true, dir: STATE_DIR, docs: docs.length });
+export function createRequestHandler(service) {
+  return async function handler(req, res) {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, CORS_HEADERS);
+      res.end();
       return;
     }
-
-    if (req.method === 'GET' && path === '/api/state') {
-      const docs = await listDocs();
-      send(res, 200, { docs });
+    let url;
+    try {
+      url = new URL(req.url || '/', 'http://localhost');
+    } catch {
+      send(res, 400, { error: 'bad request' });
       return;
     }
-
-    // Porch read-only routes for the Workflow view.
-    if (req.method === 'GET' && path === '/api/porch/runs') {
-      send(res, 200, { runs: await listPorchRuns() });
-      return;
-    }
-    const pr = /^\/api\/porch\/runs\/([^/]+)$/.exec(path);
-    if (pr && req.method === 'GET') {
-      const runId = decodeURIComponent(pr[1]);
-      const { meta, state, audit, final, missing, invalid } =
-        await readPorchRun(runId);
-      if (invalid) {
-        send(res, 400, { error: 'invalid run id' });
-        return;
-      }
-      if (missing || !meta) {
-        send(res, 404, { error: 'not found' });
-        return;
-      }
-      send(res, 200, { meta, state, audit, final });
-      return;
-    }
-
-    const m = /^\/api\/state\/([^/]+)$/.exec(path);
-    if (m && req.method) {
-      const name = decodeURIComponent(m[1]);
-      if (!NAME_RE.test(name)) {
-        send(res, 400, { error: 'invalid name (^[a-z0-9._-]{1,64}$)' });
-        return;
-      }
-
-      if (req.method === 'GET') {
-        const { doc, missing } = await readDoc(name);
-        if (missing || !doc) {
-          send(res, 404, { error: 'not found' });
+    try {
+      let bodyText;
+      if (req.method === 'PUT' || req.method === 'POST') {
+        // Declared length over the limit: drain the socket so keep-alive stays
+        // usable, then refuse — same 413 as a body that actually streamed past.
+        const declared = Number(req.headers?.['content-length']);
+        if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+          try {
+            for await (const _ of req) {
+              /* drain */
+            }
+          } catch {
+            /* socket gone — still answer */
+          }
+          send(res, 413, { error: 'document exceeds 5 MiB', code: 'too_large' });
           return;
         }
-        send(res, 200, {
-          name,
-          rev: doc.rev,
-          updatedAt: doc.updatedAt,
-          data: doc.data,
-        });
-        return;
-      }
-
-      if (req.method === 'PUT') {
-        let raw;
         try {
-          raw = await readBody(req);
+          bodyText = await readBody(req);
         } catch (e) {
           if (e && e.code === 'PAYLOAD_TOO_LARGE') {
-            send(res, 413, { error: 'document exceeds 5 MiB' });
+            send(res, 413, { error: 'document exceeds 5 MiB', code: 'too_large' });
             return;
           }
           throw e;
         }
-        let body;
-        try {
-          body = raw ? JSON.parse(raw) : {};
-        } catch {
-          send(res, 400, { error: 'invalid JSON body' });
-          return;
-        }
-        if (!body || typeof body !== 'object' || !('data' in body)) {
-          send(res, 400, { error: 'body must be { data, rev? }' });
-          return;
-        }
-        if (Buffer.byteLength(JSON.stringify(body.data), 'utf-8') > MAX_BODY_BYTES) {
-          send(res, 413, { error: 'document exceeds 5 MiB' });
-          return;
-        }
-        const wantRev =
-          body.rev === undefined || body.rev === null ? null : Number(body.rev);
-        if (wantRev !== null && !Number.isInteger(wantRev)) {
-          send(res, 400, { error: 'rev must be an integer' });
-          return;
-        }
-
-        const { doc: cur } = await readDoc(name);
-        const curRev = cur && typeof cur.rev === 'number' ? cur.rev : 0;
-        if (wantRev !== null && cur && wantRev !== curRev) {
-          send(res, 409, {
-            error: 'rev conflict',
-            rev: curRev,
-            updatedAt: cur.updatedAt,
-          });
-          return;
-        }
-        const next = {
-          name,
-          rev: curRev + 1,
-          updatedAt: Date.now(),
-          data: body.data,
-        };
-        const payload = JSON.stringify(next);
-        // Atomic write: temp file NEXT TO the destination (same device, so
-        // the rename is legal) + rename. A scratch dir under /tmp breaks
-        // with EXDEV once the state dir is a bind mount — different
-        // filesystem, rename refuses.
-        const dest = docPath(name);
-        const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
-        try {
-          await fs.writeFile(tmp, payload, 'utf-8');
-          await fs.rename(tmp, dest);
-        } catch (e) {
-          await fs.unlink(tmp).catch(() => {});
-          throw e;
-        }
-        send(res, 200, { name, rev: next.rev, updatedAt: next.updatedAt });
-        return;
       }
-
-      if (req.method === 'DELETE') {
-        const p = docPath(name);
-        try {
-          await fs.unlink(p);
-        } catch (e) {
-          if (e && e.code === 'ENOENT') {
-            send(res, 404, { error: 'not found' });
-            return;
-          }
-          throw e;
-        }
-        send(res, 200, { name, deleted: true });
-        return;
+      const { status, json } = await service.request({
+        method: req.method,
+        path: url.pathname,
+        query: url.searchParams,
+        bodyText,
+        headers: req.headers,
+      });
+      send(res, status, json);
+    } catch (e) {
+      console.error('request failed:', e);
+      try {
+        send(res, 500, { error: 'internal error', code: 'internal' });
+      } catch {
+        // Response already half-sent — nothing left to do.
       }
     }
+  };
+}
 
-    send(res, 404, { error: 'not found' });
-  } catch (e) {
-    console.error('request failed:', e);
-    try {
-      send(res, 500, { error: 'internal error' });
-    } catch {
-      // Response already half-sent — nothing left to do.
-    }
+async function main() {
+  const { stateDir, port } = resolveConfig(process.env);
+  const service = await createStateService({ stateDir });
+  const server = createServer(createRequestHandler(service));
+  server.listen(port, '0.0.0.0', () => {
+    console.log(`acp-state-server listening on :${port} dir=${stateDir}`);
+  });
+}
+
+// Only bind a port when this file is the entry point — importing the module
+// (tests, tooling) must never listen.
+const isMain = (() => {
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
   }
-});
+})();
 
-await fs.mkdir(STATE_DIR, { recursive: true });
-
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`acp-state-server listening on :${PORT} dir=${STATE_DIR}`);
-});
+if (isMain) {
+  main().catch((e) => {
+    console.error('acp-state-server failed:', e);
+    process.exit(1);
+  });
+}

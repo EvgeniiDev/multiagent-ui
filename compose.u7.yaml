@@ -1,0 +1,90 @@
+# compose.u7.yaml — U7 integration transition override (feature OFF phase).
+#
+# REVIEW BEFORE USE. This file exists to transition the ONE existing acp-ui
+# compose project in place on the fixed ports — it is NOT a second stack and
+# must only ever run with `-p acp-ui` so container names/ownership stay
+# identical. Only the services named on the command line are recreated;
+# everything else (stt, https-front, bridge-pi, bridge-devin,
+# bridge-opencode, all foreign containers) is left running/untouched.
+#
+# Transition (after manager clearance ONLY — via scripts/u7_transition.py,
+# never ad-hoc; every up uses --no-deps, no --remove-orphans, no down):
+#   cd /home/hermes/projects/acp-ui-agent-modes
+#   docker build -f Dockerfile.node -t acp-ui-u7:latest .
+#   docker compose -p acp-ui stop cron
+#   docker compose -p acp-ui -f compose.yaml -f compose.u7.yaml \
+#     up -d --no-deps state runner web bridge-hermes
+#
+# ON phase (managed execution enabled on BOTH state and runner):
+#   docker compose -p acp-ui -f compose.yaml -f compose.u7.yaml \
+#     -f compose.u7-on.yaml up -d --no-deps state runner
+#
+# Restore (Compose-driven, actual pretest spec — generated file, see
+# scripts/u7_restore_override.py):
+#   docker compose -p acp-ui \
+#     -f /home/hermes/.cache/acp-u7-devin/restore-acp-ui.yaml \
+#     up -d --no-deps state runner web bridge-hermes
+#   docker compose -p acp-ui start cron
+#
+# Isolation contract: every U7 path is a *-u7 sibling under the mounts that
+# already exist — the live board/claims/presets/projects, the live
+# STATE_DIR, the production ops dir and the main dist-web are never
+# written. The state seed writes a marker doc `u7-test-marker.json`;
+# scripts/_e2e_compose_harness.py refuses to run any suite when the marker
+# is absent, so no test payload can ever reach the live server.
+
+services:
+  state:
+    image: acp-ui-u7:latest          # rebuilt Dockerfile.node (bash/git/python3)
+    environment:
+      # Fresh isolated state root — never the live /home/hermes/.hermes/acp-ui-state.
+      STATE_DIR: /home/hermes/.hermes/acp-ui-state-u7
+      ACP_WORKSPACE_DIR: /home/hermes/projects/.acp-workspaces-u7
+      # Explicit rendered OFF — never inherited from host env or image:
+      # truthy is only 1|true|yes|on, "0" is a stated, visible disable.
+      ACP_EXEC_START: "0"
+      ACP_EXEC_VALIDATION: "0"
+      # ACP_EXEC_TOKEN_UID/GID and ACP_OPS_TOKEN_FILE come from compose.yaml.
+    volumes:
+      # Test ops credentials — NOT the production ~/.acp-ops. Replaces the
+      # base-file mount source for the same target; state-only, read-only,
+      # outside every runner/projects mount.
+      - /home/hermes/.acp-ops-u7:/run/acp-ops:ro
+
+  runner:
+    image: acp-ui-u7:latest
+    environment:
+      # Must equal the state's ACP_WORKSPACE_DIR — same absolute path through
+      # the shared /home/hermes/projects mount.
+      ACP_WORKSPACE_DIR: /home/hermes/projects/.acp-workspaces-u7
+      # Isolated porch registry/steer/output/attempts — basename MUST stay
+      # `execution` (fail-closed check) and must live inside the test
+      # STATE_DIR tree, not the live one.
+      ACP_EXEC_DIR: /home/hermes/.hermes/acp-ui-state-u7/execution
+      # Explicit rendered OFF (see state service note). The ON phase stacks
+      # compose.u7-on.yaml which sets these to "1" on both services.
+      ACP_EXEC_START: "0"
+      ACP_EXEC_VALIDATION: "0"
+
+  web:
+    # python:3.12-slim unchanged; only the served tree changes to the
+    # isolated host-built dist-web. Main's dist-web is never overwritten.
+    volumes:
+      - /home/hermes/projects/acp-ui-agent-modes/dist-web:/repo/dist-web:ro
+
+  bridge-hermes:
+    image: acp-ui-u7:latest
+    # Live runs uid 1001 (foreign fix present in main compose, mirrored here
+    # so the fixture container matches the real owner).
+    user: "1001:1001"
+    # Real bridge code (deploy/ == server/ byte-identical) + a deterministic
+    # mock ACP child. This proves bridge-level protocol invariants only —
+    # per-session routing and per-socket request-id namespacing — NOT real
+    # CLI integration, which is proven separately through managed porch runs.
+    command:
+      [
+        "node", "/repo/server/acp-ws-bridge.mjs",
+        "--port", "25901",
+        "--cmd", "node /repo/scripts/u7_mock_acp.mjs",
+        "--agent-name", "MockACP",
+      ]

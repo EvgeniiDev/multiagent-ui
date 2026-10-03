@@ -67,7 +67,8 @@ function onExample() {
 }
 
 function onMove(cardId: string, to: BoardStageId, beforeId?: string | null) {
-  board.moveCard(cardId, to, beforeId ?? null);
+  const r = board.moveCard(cardId, to, beforeId ?? null);
+  if (!r.ok && r.reason) alert(r.reason);
 }
 
 function onSetStatus(cardId: string, status: CardStatus) {
@@ -78,12 +79,22 @@ function onSetStatus(cardId: string, status: CardStatus) {
 }
 
 function onSetFlag(cardId: string, flag: 'blocked' | 'cancelled', on: boolean) {
-  board.setCardFlag(cardId, flag, on);
+  const r = board.setCardFlag(cardId, flag, on);
+  if (!r.ok && r.reason) alert(r.reason);
 }
 
 function onRemove(cardId: string) {
   const card = board.cards.find((c) => c.id === cardId);
   if (!card) return;
+  if (card.execution?.managed === true) {
+    // Managed rows are server-owned — refuse before the confirm dialog so
+    // the reason is visible rather than buried behind a delete prompt.
+    alert(
+      'This card is managed by the execution engine and cannot be deleted ' +
+        'from the board — control it from the managed execution section.',
+    );
+    return;
+  }
   if (confirm(`Delete "${card.title || 'Untitled card'}"?`)) {
     board.removeCard(cardId);
   }

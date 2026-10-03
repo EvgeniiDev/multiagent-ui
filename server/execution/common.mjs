@@ -140,6 +140,11 @@ export function spawnBounded(argv, opts = {}) {
     maxStdout = 256 * 1024,
     maxStderr = 256 * 1024,
     input = undefined,
+    // Synchronous hook invoked the moment a child handle exists — callers use
+    // it to durably record the launcher's identity (pid) BEFORE the handshake
+    // resolves; a supervisor may only be registered after this point, so the
+    // record is the anchor for post-crash termination proof.
+    onSpawn = undefined,
   } = opts;
   const startedAt = Date.now();
   return new Promise((resolvePromise) => {
@@ -154,6 +159,10 @@ export function spawnBounded(argv, opts = {}) {
         stdoutTruncated: false, stderrTruncated: false,
         durationMs: Date.now() - startedAt });
       return;
+    }
+    const childPid = child.pid ?? null;
+    if (onSpawn) {
+      try { onSpawn(child); } catch { /* observers never break the child */ }
     }
     let out = Buffer.alloc(0), err = Buffer.alloc(0);
     let outTrunc = false, errTrunc = false;
@@ -178,7 +187,7 @@ export function spawnBounded(argv, opts = {}) {
       resolvePromise({ durationMs: Date.now() - startedAt, ...result });
     };
     const payload = (code, signal, observationCut) => ({
-      ok: true, code, signal, timedOut, observationCut,
+      ok: true, code, signal, timedOut, observationCut, pid: childPid,
       stdout: out.toString('utf8'), stderr: err.toString('utf8'),
       stdoutTruncated: outTrunc, stderrTruncated: errTrunc,
     });
@@ -198,7 +207,7 @@ export function spawnBounded(argv, opts = {}) {
     child.stdin.on('error', () => {});
     child.on('error', (e) => finish({
       ok: false, spawnError: e.message, code: null, signal: null,
-      timedOut, observationCut: false,
+      timedOut, observationCut: false, pid: childPid,
       stdout: out.toString('utf8'), stderr: err.toString('utf8'),
       stdoutTruncated: outTrunc, stderrTruncated: errTrunc,
     }));
