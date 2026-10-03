@@ -132,7 +132,8 @@ test('shared validation phases park Swarm admission without blocking the run',as
  const f=await fixture();try{
   f.att.status='completed';f.att.namespace={state:'gone',workerId:'w-att',settledAt:1};f.run.swarm.phase='verify';for(const p of f.run.swarm.participants)p.ready=true;
   const d=createSwarmDriver({runtime:{canonicalPrepare:async()=>({ok:true,canonical:{hostDir:f.root}})},send:f.send,self:()=>({runnerId:'me'}),getRun:async()=>f.run,stateDir:join(f.root,'state'),now:()=>1});
-  for(const phase of ['verify','review','check_review','awaiting_acceptance']){f.run.phase=phase;f.run.validation={status:'active',phase};assert.equal(await d.drive({},f.run),'core_validation');assert.equal(f.run.status,'active');assert.equal(f.run.validation.status,'active');}
+  for(const phase of ['verify','review','check_review','awaiting_acceptance']){f.run.phase=phase;f.run.validation={status:'active',phase};assert.equal(await d.drive({},f.run),'core_validation');assert.equal(f.run.status,'active');assert.equal(f.run.phase,phase);assert.equal(f.run.validation.status,'active');}
+  f.run.phase='awaiting_acceptance';f.run.validation.status='passed';assert.equal(await d.drive({},f.run),'core_validation');assert.equal(f.run.phase,'awaiting_acceptance');assert.equal(f.run.status,'active');assert.equal(f.run.validation.status,'passed');
   assert.equal(f.traces.includes('swarm_phase'),false);
  }finally{await f.cleanup();}
 });
