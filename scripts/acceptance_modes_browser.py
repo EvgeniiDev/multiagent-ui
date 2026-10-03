@@ -128,7 +128,7 @@ UI_URL = "https://127.0.0.1:25809/"
 EXPECTED_STATE_DIR = "/home/hermes/.hermes/acp-ui-state"
 FIXTURE_ROOT_PREFIX = "/home/hermes/projects"
 TERMINAL = {"awaiting_acceptance", "succeeded", "failed", "cancelled",
-            "stopped", "blocked"}
+            "stopped"}
 MODES = ("preparation", "fusion", "orchestrator", "swarm")
 MIN_TIMEOUT_S = 600
 
@@ -394,7 +394,7 @@ def track_page(page):
     def _dialog(d):
         try:
             if d.type == "prompt":
-                d.accept("1" if "attempts" in (d.message or "") else "")
+                d.accept(d.default_value or ("1" if "attempts" in (d.message or "") else ""))
             else:
                 d.accept()
         except Exception:
@@ -709,6 +709,14 @@ def mode_preparation(pw, args, outdir, card_id, exec_ctx):
         prep = (pv.get("preparation") or {}) if isinstance(pv, dict) else {}
         n_open = len([q for q in ((prep.get("checkpoint") or {}).get("openQuestions") or [])
                        if q.get("status") == "open"])
+        kickoff_done = any(a.get("kind") == "kickoff" and a.get("status") == "completed"
+                           for a in prep.get("attempts", []))
+        live_turns = [a for a in prep.get("attempts", [])
+                      if a.get("status") in ("queued", "launching", "running", "cancelling")]
+        check("prep-grill-completed-before-drafts", kickoff_done and not live_turns,
+              f"kickoff_completed={kickoff_done} live_turns={len(live_turns)}")
+        if not kickoff_done or live_turns:
+            return False
         check("prep-grill-settled-no-open-questions", n_open == 0,
               f"answered_any={answered_any} open={n_open}")
         shot(page, outdir, "preparation-answered")
@@ -936,20 +944,21 @@ def advance_pending_actions(page, mode, card_id, deadline):
                             break
                     except Exception:
                         pass
-            # Swarm question steering: fill participant inputs for waiting rows.
+            # Only answer explicitly waiting participants; unsolicited input
+            # clears readiness and would prevent Swarm convergence.
             if not acted and mode == "swarm":
-                for inp in page.locator('[data-testid^="swarm-input-"]').all():
-                    try:
-                        pid = (inp.get_attribute("data-testid") or "").removeprefix("swarm-input-")
-                        send = page.locator(f'[data-testid="swarm-send-{pid}"]')
-                        if send.count() and send.first.is_enabled():
-                            inp.fill("Proceed with the smallest scope.")
-                            send.first.click()
-                            page.wait_for_timeout(3000)
-                            acted = True
-                            break
-                    except Exception:
-                        continue
+                waiting = [p for p in ((run.get("swarm") or {}).get("participants") or [])
+                           if (p.get("waiting") or {}).get("reason") == "question"]
+                for participant in waiting:
+                    pid = participant.get("participantId")
+                    inp = page.locator(f'[data-testid="swarm-input-{pid}"]')
+                    send = page.locator(f'[data-testid="swarm-send-{pid}"]')
+                    if inp.count() and send.count() and send.first.is_enabled():
+                        inp.fill("Proceed with the approved clamp requirements and Node tests. Keep the smallest scope.")
+                        send.first.click()
+                        page.wait_for_timeout(3000)
+                        acted = True
+                        break
         if not acted:
             page.wait_for_timeout(10000)
     return False

@@ -24,6 +24,7 @@ import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { safeGit } from './safe-git.mjs';
 import { RuntimeError, normPath, ensureDir } from '../common.mjs';
 import { invalid, conflict } from './errors.mjs';
 import { sha256, canonicalJson } from './canonical.mjs';
@@ -49,20 +50,7 @@ function gitEnv(extra = {}) {
 // Minimal argv runner — never through a shell. Rejects on spawn failure;
 // resolves {code, stdout, stderr} otherwise; callers map nonzero exits.
 function runGit(cwd, args, { env = gitEnv(), input = undefined } = {}) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn('git', args, { cwd, env, shell: false });
-    let out = '';
-    let err = '';
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { err += d; });
-    child.on('error', (e) => reject(new RuntimeError('git_unavailable',
-      `git binary unavailable: ${e.message}`)));
-    child.on('close', (code) => resolvePromise({ code, stdout: out, stderr: err }));
-    try {
-      if (input !== undefined) child.stdin.write(input);
-      child.stdin.end();
-    } catch { /* child already gone; close reports */ }
-  });
+  return safeGit(cwd, args, { env, input });
 }
 
 async function mustClean(cwd, args, what) {
@@ -76,20 +64,10 @@ async function mustClean(cwd, args, what) {
 
 // Raw-bytes git runner (blobs may be binary; string collection would mangle
 // them). Rejects on spawn failure or nonzero exit.
-function gitBytes(cwd, args) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn('git', args, { cwd, shell: false });
-    const chunks = [];
-    child.stdout.on('data', (d) => chunks.push(d));
-    child.stderr.on('data', () => {});
-    child.on('error', (e) => reject(new RuntimeError('git_unavailable',
-      `git binary unavailable: ${e.message}`)));
-    child.on('close', (code) => {
-      if (code !== 0) {
-        reject(new RuntimeError('git_failed', `git ${args[0]} exited ${code}`));
-      } else resolvePromise(Buffer.concat(chunks));
-    });
-  });
+async function gitBytes(cwd, args) {
+  const result = await safeGit(cwd, args, { binary: true });
+  if (result.code !== 0) throw new RuntimeError('git_failed', `git ${args[0]} exited ${result.code}`);
+  return result.stdout;
 }
 
 const NULL_SHA = '0000000000000000000000000000000000000000';
@@ -213,22 +191,14 @@ export async function createPrivateRepo({ sourcePath, baseCommit, name, baseDir 
     await mustClean(repoPath, ['init', '-q'], 'git init');
     // Stream the source tree in: archive stdout → tar extract. No refs,
     // no objects, no alternates travel with a tarball.
+    const archive = await safeGit(sourcePath, ['archive', baseCommit], { binary: true });
+    if (archive.code !== 0) throw new RuntimeError('git_failed', `git archive exited ${archive.code}`);
     await new Promise((resolvePromise, reject) => {
-      const archive = spawn('git', ['archive', baseCommit], { cwd: sourcePath, shell: false });
       const untar = spawn('tar', ['-x', '-C', repoPath], { shell: false });
-      archive.on('error', (e) => reject(new RuntimeError('git_unavailable',
-        `git archive unavailable: ${e.message}`)));
-      untar.on('error', (e) => reject(new RuntimeError('copy_failed',
-        `tar extract unavailable: ${e.message}`)));
-      archive.stdout.on('data', (d) => { untar.stdin.write(d); });
-      archive.on('close', (code) => {
-        untar.stdin.end();
-        if (code !== 0) reject(new RuntimeError('git_failed', `git archive exited ${code}`));
-      });
-      untar.on('close', (code) => {
-        if (code !== 0) reject(new RuntimeError('copy_failed', `tar extract exited ${code}`));
-        else resolvePromise();
-      });
+      untar.on('error', reject);
+      untar.on('close', code => code === 0 ? resolvePromise() : reject(new RuntimeError('copy_failed', `tar exited ${code}`)));
+      untar.stdin.on('error', reject);
+      untar.stdin.end(archive.stdout);
     });
     await mustClean(repoPath, ['add', '-A'], 'stage base tree');
     const gotTree = await mustClean(repoPath, ['write-tree'], 'write base tree');
