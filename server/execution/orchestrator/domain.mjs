@@ -225,6 +225,50 @@ export async function buildOrchestratorRun(D, ctx, aggregate, payload, now) {
   return run;
 }
 
+// Continuation preserves the mode and validated execution composition. A
+// previous task graph was approved against its own frozen inputs/results;
+// transplanting it onto current inputs would fabricate acceptance evidence.
+// Re-decompose from the newly resolved project base in a fresh workspace.
+// The old run/workspace/artifacts remain intact as historical evidence.
+export async function buildOrchestratorContinuation(D, ctx, aggregate, payload, prev, now) {
+  if (prev?.mode !== 'orchestrator' || !prev.orchestrator) {
+    throw new D.CommandError(422, 'orchestrator_invalid', 'continuation requires an Orchestrator predecessor');
+  }
+  const oz = prev.orchestrator;
+  const composition = structuredClone(prev.composition);
+  if (!composition?.preset?.members) {
+    throw new D.CommandError(422, 'composition_missing', 'Orchestrator predecessor has no saved review composition');
+  }
+  const compat = await ctx.compat();
+  for (const role of ['implementer', 'reviewer', 'checker']) {
+    composition.preset.members[role] = D.validateMember(role, composition.preset.members[role], compat);
+  }
+  const run = await buildOrchestratorRun({
+    ...D, requireApprovedInputs: (c, a) => D.requireApprovedInputs(c, a, 'continue'),
+  }, ctx, { ...aggregate, composition }, {
+    baseRef: payload?.baseRef ?? prev.baseRef ?? 'HEAD',
+    freshWorkspace: true,
+    orchestrator: {
+      decomposer: structuredClone(oz.decomposer), verifier: structuredClone(oz.verifier),
+      integrator: structuredClone(oz.integrator), workers: structuredClone(oz.workers),
+      limits: structuredClone(oz.limits),
+    },
+  }, now);
+  run.orchestrator.continuedFrom = prev.id;
+  run.continuation = {
+    fromRunId: prev.id, fromStatus: prev.status, fromFinishedAt: prev.finishedAt ?? null,
+    carryPolicy: 'fresh_decomposition',
+    // Diagnostics carry as context, never as current proofs or findings gates.
+    fromError: structuredClone(prev.error ?? null),
+    fromDiagnostic: structuredClone(prev.diagnostic ?? null),
+    priorWorkspaceId: prev.workspaceId ?? null,
+    priorResult: structuredClone(prev.result ?? null),
+    userNote: typeof payload?.note === 'string' && payload.note.trim()
+      ? payload.note.trim().slice(0, 2000) : null,
+  };
+  return run;
+}
+
 // ---- shared helpers --------------------------------------------------------------
 
 export function orchestratorRun(D, aggregate, payload) {
