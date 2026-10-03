@@ -203,3 +203,30 @@ test('stop drains a physically paused worker without thawing it', async () => {
   assert.equal(f.calls.some(c => c[0] === 'unpause'),false);
   await assert.rejects(f.controller.handle('worker.thaw', { workerId:'w-one' }));
 });
+
+test('fromCanonical builds the current registered commit even when original project lacks that object', async () => {
+  const f = await fixture(); const canonical = await f.canonical();
+  f.config.roles.integrator = { name:'integrator', projectMode:'private-repo', inputs:[], canonical:true };
+  await fs.writeFile(path.join(canonical.worktree,'canonical-only.txt'),'current canonical');
+  git(canonical.worktree,'add','-A'); git(canonical.worktree,'-c','user.name=test','-c','user.email=test@test','commit','-qm','canonical change');
+  const head = git(canonical.worktree,'rev-parse','HEAD');
+  assert.throws(() => execFileSync('git', ['-C',f.project,'cat-file','-e',`${head}^{commit}`], { stdio:'pipe' }), 'source project does not have the canonical-only commit');
+  const prepared = await f.prepare('w-fix', { canonicalId:canonical.id, snapshotSha:head, fromCanonical:true }, 'integrator');
+  assert.equal(prepared.worker.project.sha,head);
+  assert.equal(await fs.readFile(path.join(prepared.worker.workerDir,'project/canonical-only.txt'),'utf8'),'current canonical');
+  assert.equal(git(path.join(prepared.worker.workerDir,'project'),'rev-parse','HEAD^{tree}'),git(canonical.worktree,'rev-parse','HEAD^{tree}'));
+});
+
+test('fromCanonical rejects stale HEAD and mismatched registered source bindings', async () => {
+  const f = await fixture(); const canonical = await f.canonical();
+  f.config.roles.integrator = { name:'integrator', projectMode:'private-repo', inputs:[], canonical:true };
+  await fs.writeFile(path.join(canonical.worktree,'canonical-only.txt'),'current canonical');
+  git(canonical.worktree,'add','-A'); git(canonical.worktree,'-c','user.name=test','-c','user.email=test@test','commit','-qm','canonical change');
+  const head = git(canonical.worktree,'rev-parse','HEAD');
+  await assert.rejects(f.prepare('w-stale', { canonicalId:canonical.id, snapshotSha:f.sha, fromCanonical:true },'integrator'), { code:'canonical_binding_mismatch' });
+  await assert.rejects(f.prepare('w-wrong-project', { projectRoot:'wrong', canonicalId:canonical.id, snapshotSha:head, fromCanonical:true },'integrator'), { code:'canonical_binding_mismatch' });
+  await assert.rejects(f.prepare('w-wrong-canonical', { canonicalId:'unknown', snapshotSha:head, fromCanonical:true },'integrator'), { code:'canonical_not_prepared' });
+  await fs.writeFile(path.join(canonical.worktree,'canonical-only.txt'),'dirty change');
+  await assert.rejects(f.prepare('w-dirty', { canonicalId:canonical.id, snapshotSha:head, fromCanonical:true },'integrator'), { code:'canonical_dirty' });
+  assert.equal(f.created.length,0,'unproven sources never launch a worker');
+});

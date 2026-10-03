@@ -321,8 +321,21 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     const projectDir = path.join(workerDir, 'project');
     await ensureDir(projectDir);
     if (roleSpec.projectMode === 'none') return { mode: 'none' };
+    const fromCanonical = roleSpec.projectMode === 'private-repo' && materials.fromCanonical === true;
     let src;
-    if (materials.snapshotId !== undefined) {
+    if (fromCanonical) {
+      canonical = await registeredCanonical(materials.canonicalId);
+      if (canonical.projectRoot !== materials.projectRoot || materials.snapshotId !== undefined) {
+        throw new RuntimeError('canonical_binding_mismatch', 'fromCanonical source must match its registered project binding');
+      }
+      src = canonical.worktree;
+      const currentHead = await gitStdout(src, ['rev-parse', 'HEAD'], 'canonical_read_failed', 'canonical HEAD');
+      if (materials.snapshotSha !== currentHead) {
+        throw new RuntimeError('canonical_binding_mismatch', 'fromCanonical snapshotSha must equal current registered canonical HEAD');
+      }
+      const dirty = await gitStdout(src, ['status', '--porcelain', '--untracked-files=all'], 'canonical_read_failed', 'canonical status');
+      if (dirty) throw new RuntimeError('canonical_dirty', 'fromCanonical requires a clean committed canonical tree');
+    } else if (materials.snapshotId !== undefined) {
       const snapshot = registry.swarmSnapshots[materials.snapshotId];
       if (!snapshot || snapshot.state !== 'ready'
         || snapshot.projectRoot !== materials.projectRoot || snapshot.snapshotSha !== materials.snapshotSha) {
@@ -348,21 +361,11 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
       // fromCanonical: the F3 fix round builds the private repo from the
       // CANONICAL worktree's HEAD (which carries the prior import), never
       // from the pristine snapshot — otherwise fixes would lose prior work.
-      const fromCanonical = materials.fromCanonical === true;
-      if (fromCanonical && !canonical?.worktree) {
-        throw new RuntimeError('canonical_not_prepared',
-          'fromCanonical requires a prepared canonical worktree');
-      }
-      const srcTreeSha = fromCanonical
-        ? await gitStdout(canonical.worktree, ['rev-parse', 'HEAD^{tree}'],
-            'repo_init_failed', 'canonical HEAD tree')
-        : await gitStdout(src, ['rev-parse', `${sha}^{tree}`],
-            'repo_init_failed', 'source tree');
-      if (fromCanonical) {
-        await gitArchiveExtract(canonical.worktree, 'HEAD', projectDir);
-      } else {
-        await gitArchiveExtract(src, sha, projectDir);
-      }
+      const srcTreeSha = await gitStdout(src, ['rev-parse', `${sha}^{tree}`],
+        'repo_init_failed', 'source tree');
+      // The verified SHA pins the copied bytes even if canonical HEAD
+      // advances after this admission decision.
+      await gitArchiveExtract(src, sha, projectDir);
       await gitStdout(projectDir, ['init', '-q', '-b', 'task'], 'repo_init_failed', 'git init');
       const add = await git(projectDir, ['add', '-A']);
       if (add.code !== 0) throw new RuntimeError('repo_init_failed', `git add: ${add.stderr.slice(0, 300)}`);

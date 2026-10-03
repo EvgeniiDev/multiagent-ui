@@ -202,7 +202,7 @@ export function createHandoffDriver(deps = {}) {
     ].join('\n');
   }
 
-  async function integratorInputs(card, run, wo, { fix = false, dependencies = null } = {}) {
+  async function integratorInputs(card, run, wo, { fix = false, dependencies = null, sourceSnapshotSha = null } = {}) {
     const fz = run.fusion;
     const task = fz.snapshot?.task;
     const taskText = await docText(card.cardId, task);
@@ -228,7 +228,7 @@ export function createHandoffDriver(deps = {}) {
     });
     const materials = integratorMaterials({
       projectRoot: snap.projectRoot,
-      snapshotSha: snap.snapshotSha,
+      snapshotSha: sourceSnapshotSha ?? snap.snapshotSha,
       canonicalId: fz.integrate?.canonicalId ?? canonicalIdFor(run),
       taskText, workOrderText: woText,
       requirementsText, planText, designText,
@@ -320,7 +320,7 @@ export function createHandoffDriver(deps = {}) {
     }
     const wo = currentWo(run);
     if (!wo) return null;
-    const b = await integratorInputs(card, run, wo, { fix: att.fix !== undefined && att.fix !== null, dependencies: att.launch?.dependencies ?? null });
+    const b = await integratorInputs(card, run, wo, { fix: att.fix !== undefined && att.fix !== null, dependencies: att.launch?.dependencies ?? null, sourceSnapshotSha: att.launch?.snapshotSha ?? null });
     return { ...b, profileId: roleSpec.profileId, profile: roleSpec.profile };
   }
 
@@ -638,7 +638,14 @@ export function createHandoffDriver(deps = {}) {
     }
     const prepared = await prepareDependencies(card, run, canonId);
     if (!prepared.ok) return 'dependencies_unprepared';
-    const built = await integratorInputs(card, run, wo, { fix, dependencies: prepared.dependencies });
+    let sourceSnapshotSha = fz.snapshot.project.snapshotSha;
+    if (fix) {
+      const status = await runtime.canonicalStatus(canonId).catch(() => null);
+      if (!status?.ok || !/^[0-9a-f]{40}$/.test(status.canonical?.head ?? '')) return 'canonical_unreadable';
+      sourceSnapshotSha = status.canonical.head;
+    }
+    if (prepared.dependencies && prepared.dependencies.snapshotSha !== sourceSnapshotSha) return 'dependencies_unprepared';
+    const built = await integratorInputs(card, run, wo, { fix, dependencies: prepared.dependencies, sourceSnapshotSha });
     const spec = fz.integrator;
     const n = (run.attempts || []).filter((a) => a && a.role === 'integrator').length + 1;
     const attemptId = `ia-${run.id.slice(4)}-n${n}`;
@@ -653,6 +660,7 @@ export function createHandoffDriver(deps = {}) {
       inputs: built.inputs,
       workerId: `w-${attemptId}`,
       canonicalId: canonId,
+      snapshotSha: built.materials.snapshotSha,
       ...(prepared.dependencies ? { dependencies: prepared.dependencies } : {}),
     };
     try {
