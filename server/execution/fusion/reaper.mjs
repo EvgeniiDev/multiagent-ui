@@ -48,7 +48,7 @@
 // session log, porch registry and artifacts are all retained by design
 // (worker.remove tears down container+network only).
 
-import { ATTEMPT_TERMINAL } from '../execution-domain.mjs';
+import { ATTEMPT_TERMINAL } from './reaper-contract.mjs';
 
 const RUN_DONE = new Set(['completed', 'failed', 'cancelled']);
 const REAP_FINAL = new Set(['reaped', 'already_absent']);
