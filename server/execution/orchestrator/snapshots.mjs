@@ -18,7 +18,7 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { safeGit } from './safe-git.mjs';
 import { RuntimeError, normPath } from '../common.mjs';
 import { invalid, conflict } from './errors.mjs';
 import { sha256, canonicalJson } from './canonical.mjs';
@@ -57,18 +57,7 @@ export function transitivePredecessors(tasks, taskId) {
   return topoOrder(tasks).filter((id) => closure.has(id));
 }
 
-function gitArgs(cwd, args) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn('git', args, { cwd, shell: false });
-    let out = '';
-    let err = '';
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { err += d; });
-    child.on('error', (e) => reject(new RuntimeError('git_unavailable',
-      `git binary unavailable: ${e.message}`)));
-    child.on('close', (code) => resolvePromise({ code, stdout: out, stderr: err }));
-  });
-}
+function gitArgs(cwd, args) { return safeGit(cwd, args); }
 
 async function mustGit(cwd, args, what) {
   const res = await gitArgs(cwd, args);
@@ -127,36 +116,16 @@ export async function assembleDependencySnapshot({
       }
       // `git apply --check` first: a patch that does not apply is a
       // snapshot_conflict thrown BEFORE any worker launches.
-      const applied = await new Promise((resolvePromise, reject) => {
-        const child = spawn('git', ['apply', '--check', '-'], { cwd: repoPath, shell: false });
-        let err = '';
-        child.stderr.on('data', (d) => { err += d; });
-        child.on('error', (e) => reject(new RuntimeError('git_unavailable',
-          `git binary unavailable: ${e.message}`)));
-        child.on('close', (code) => resolvePromise({ code, err }));
-        try {
-          child.stdin.write(diff.formatPatch);
-          child.stdin.end();
-        } catch (e) { reject(e); }
-      });
+      const checked = await safeGit(repoPath, ['apply', '--check', '-'], { input: diff.formatPatch });
+      const applied = { code: checked.code, err: checked.stderr };
       if (applied.code !== 0) {
         throw conflict('snapshot_conflict',
           `predecessor "${id}" does not apply onto the assembled base of "${taskId}": ${
             applied.err.trim().slice(0, 300)}`,
           { taskId, dependency: id });
       }
-      await new Promise((resolvePromise, reject) => {
-        const child = spawn('git', ['apply', '-'], { cwd: repoPath, shell: false });
-        child.on('error', (e) => reject(new RuntimeError('git_unavailable',
-          `git binary unavailable: ${e.message}`)));
-        child.on('close', (code) => (code === 0
-          ? resolvePromise()
-          : reject(new RuntimeError('git_failed', `git apply exited ${code}`))));
-        try {
-          child.stdin.write(diff.formatPatch);
-          child.stdin.end();
-        } catch (e) { reject(e); }
-      });
+      const appliedResult = await safeGit(repoPath, ['apply', '-'], { input: diff.formatPatch });
+      if (appliedResult.code !== 0) throw new RuntimeError('git_failed', `git apply exited ${appliedResult.code}`);
       await mustGit(repoPath, ['add', '-A'], `stage parent ${id}`);
       await mustGit(repoPath,
         ['-c', 'user.name=acp-orchestrator', '-c', 'user.email=acp-orchestrator@localhost',
