@@ -751,9 +751,19 @@ export function createOrchDriver(deps = {}) {
       kind: 'worker-diff', name: `worker-diff-${task.id}-n${att.n ?? 1}.json`,
       text: canonicalJson(exportDiff, '  '),
     });
+    const responses = Object.values(run.artifacts ?? {}).filter(
+      (a) => a.attemptId === att.id && a.kind === 'worker-response');
+    if (responses.length > 1) return { code: 'worker_response_ambiguous' };
+    const response = responses[0];
+    const report = { ...(freeze.report ?? freeze), ...(response ? {
+      // This is the worker's captured account, not a trusted check outcome.
+      // The verifier independently evaluates the frozen candidate and claims.
+      workerResponse: { artifactId: response.id, sha256: response.sha256,
+        text: await artifactText(run, response.id) },
+    } : {}) };
     const repArt = await commitArtifact(card, run, att, {
       kind: 'worker-report', name: `worker-report-${task.id}-n${att.n ?? 1}.json`,
-      text: canonicalJson(freeze.report ?? freeze, '  '),
+      text: canonicalJson(report, '  '),
     });
     return {
       code: 'ok',
@@ -775,6 +785,13 @@ export function createOrchDriver(deps = {}) {
 
   async function resolveWorker(card, run, att, { outcome, reason, wt }) {
     if (outcome === 'completed') {
+      if (typeof wt?.finalText === 'string') {
+        await commitArtifact(card, run, att, {
+          kind: 'worker-response', name: `worker-response-${att.id}.txt`,
+          text: wt.finalText,
+        });
+        run = await refresh(run);
+      }
       const imp = await importWorkerResult(card, run, att);
       if (imp.code !== 'ok') {
         outcome = 'failed';

@@ -493,3 +493,22 @@ test('driver: fresh continuation carries prior rejection diagnostics without imp
   assert.ok(prompt.includes(predecessor.orchestrator.specHistory.at(-1).sha256));
   assert.equal(fresh.orchestrator.specHistory.length,0,'context never becomes current spec approval/proof');
 });
+
+test('driver: verifier receives exact committed worker response together with freeze evidence', async () => {
+  const f=await driverFixture();await f.decompose([taskSpec('a')]);
+  let run=await f.run();const worker=run.attempts.findLast(a=>a.role==='worker');
+  const response='Ran node --test: exit 0\nTAP version 13\n# tests 3\n# pass 3\n# fail 0\nSTATUS: DONE';
+  await f.complete(worker,response);await f.tick();await f.tick();
+  run=await f.run();const task=run.orchestrator.tasks[0];
+  const report=JSON.parse((await f.client.getArtifact(run.id,task.state.resultCandidate.reportArtifactId)).content);
+  const committed=await f.client.getArtifact(run.id,report.workerResponse.artifactId);
+  assert.equal(committed.content,response);
+  assert.equal(report.workerResponse.text,response);
+  assert.equal(committed.sha256,report.workerResponse.sha256);
+  assert.ok(report.treeHash,'freeze metadata remains alongside the captured account');
+  const verifier=run.attempts.findLast(a=>a.role==='verifier');
+  const materials=f.jobs.get(verifier.porchRunId).params.materials;
+  assert.equal(JSON.parse(materials.inputs.find(i=>i.name==='report').content).workerResponse.text,response);
+  // Re-drive from durable records; report bytes still refer to this exact attempt.
+  await f.tick();assert.equal((await f.client.getArtifact(run.id,report.workerResponse.artifactId)).content,response);
+});
