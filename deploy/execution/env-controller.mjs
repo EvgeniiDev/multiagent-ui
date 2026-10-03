@@ -211,7 +211,8 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
       await docker.networkCreate({
         Name: name, Internal: true, Driver: 'bridge',
         Labels: labels,
-        Options: {},
+        // Match the gateway bridge below the host tunnel's MTU (1420).
+        Options: { 'com.docker.network.driver.mtu': '1400' },
       });
       net = await docker.networkInspect(name);
       if (!net) throw new RuntimeError('network_create_failed', `network ${name} not inspectable after create`);

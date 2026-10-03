@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { createEnvController } from '../deploy/execution/env-controller.mjs';
+import { createDockerApi } from '../deploy/execution/docker-api.mjs';
 import { profileDigest } from '../server/execution/environment/agent-profile.mjs';
 
 const roots = [];
@@ -50,6 +52,28 @@ async function fixture() {
   const canonical = async () => (await controller.handle('canonical.prepare', { canonicalId:'canonical', projectRoot:'project', snapshotSha:sha })).canonical;
   return { root, project, sha, config, docker, controller, containers, calls, created, prepare, canonical };
 }
+
+test('worker network Docker API payload sets the tunnel-safe bridge MTU', async (t) => {
+  const f = await fixture(); const socketPath = path.join(f.root,'docker.sock');
+  let payload, network;
+  const server = http.createServer(async (req,res) => {
+    res.setHeader('content-type','application/json');
+    if (req.url === '/version') { res.end(JSON.stringify({ ApiVersion:'1.49' })); return; }
+    assert.equal(req.method,'POST'); assert.match(req.url,/\/networks\/create$/);
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    payload = JSON.parse(Buffer.concat(chunks));
+    res.writeHead(201); res.end(JSON.stringify({ Id:'network' }));
+  });
+  await new Promise(resolve => server.listen(socketPath,resolve));
+  t.after(() => new Promise((resolve,reject) => server.close(error => error ? reject(error) : resolve())));
+  const api = createDockerApi({ socketPath });
+  f.docker.networkInspect = async () => network ?? null;
+  f.docker.networkCreate = async spec => { network = await api.networkCreate(spec); return network; };
+  await f.prepare('w-network');
+  assert.deepEqual(payload.Options,{ 'com.docker.network.driver.mtu':'1400' });
+  assert.equal(payload.Internal,true); assert.equal(payload.Driver,'bridge');
+  assert.equal(payload.Labels['test.worker'],'w-network');
+});
 
 test('freeze and thaw use registered Docker container and preserve a paused live namespace', async () => {
   const f = await fixture(); const { worker } = await f.prepare('w-one');
