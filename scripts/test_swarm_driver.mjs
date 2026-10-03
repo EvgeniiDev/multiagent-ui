@@ -69,3 +69,14 @@ test('never-spawned terminal launch drains only with exact durable failure and a
   spawned=false;assert.equal(await d.drive({},f.run),'namespace_recovered');assert.equal(f.att.namespace.state,'gone');
  }finally{await f.cleanup();}
 });
+
+test('agreed coordination drains existing turns before admitting implementation',async()=>{
+ const f=await fixture();try{
+  f.run.phase=f.run.swarm.phase='coordinate';for(const p of f.run.swarm.participants)p.declaration={files:[],contracts:'c',approach:'a',risks:'r'};
+  const protocol=createSwarmProtocol({initialState:f.run.swarm.protocol,runId:f.run.id});const auth=protocol.getState().participants.a.activeTurn;
+  protocol.dispatch({type:'open_decision',id:'allocation',text:'allocate',scope:{kind:'global'},auth});const b=protocol.dispatch({type:'start_turn',participantId:'b',attemptId:'b-turn',turnId:'b-turn',phase:'coordinate'}).lease;
+  const latest=protocol.getState().decisions.allocation.revisions.at(-1);for(const lease of [auth,b])protocol.dispatch({type:'ack_decision',decisionId:'allocation',rev:latest.rev,revHash:latest.revHash,auth:lease});protocol.dispatch({type:'end_turn',auth:b,outcome:'continue'});f.run.swarm.protocol=protocol.getState();
+  let snapshots=0;const d=createSwarmDriver({runtime:{canonicalPrepare:async()=>({ok:true,canonical:{hostDir:f.root}}),wait:async()=>({outcome:'timeout'}),swarmSnapshot:async()=>{snapshots++;throw new Error('must not admit a new coordination turn');}},send:f.send,self:()=>({runnerId:'me'}),getRun:async()=>f.run,stateDir:join(f.root,'state'),now:()=>1});
+  assert.equal(await d.drive({},f.run),'coordination_draining');assert.equal(snapshots,0);assert.equal(f.run.attempts.length,1);
+ }finally{await f.cleanup();}
+});
