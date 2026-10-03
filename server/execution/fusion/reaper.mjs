@@ -204,7 +204,13 @@ export function createWorkerReaper({
     if (!reg || reg.ok !== true || reg.complete !== true) {
       return defer('registry_incomplete', 'porch registry scan incomplete or unreadable');
     }
-    const rows = (reg.rows || []).filter((r) => r && !r.corrupt);
+    if (!Array.isArray(reg.rows)) {
+      return defer('registry_incomplete', 'porch registry scan has no row list');
+    }
+    const rows = reg.rows;
+    if (rows.some((r) => !r || r.corrupt)) {
+      return defer('registry_row_corrupt', 'porch registry scan contains a corrupt row');
+    }
     // Exact identity per row, bound or not: meta.run_id must exist and
     // equal the row's own directory name (the directory only addresses the
     // row — meta.json is the record), meta status and state status must
@@ -251,7 +257,23 @@ export function createWorkerReaper({
       if (d) return defer(d[0], d[1]);
     }
 
+    const pids = [];
+    let invalidPid = null;
+    for (const r of rows) {
+      for (const [value, role] of [[r.pid, 'supervisor'], [r.childPid, 'child']]) {
+        if (value != null && (!Number.isInteger(value) || value <= 0)) {
+          invalidPid ??= { role, runId: r.runId };
+        }
+      }
+      if (Number.isInteger(r.pid) && r.pid > 0) pids.push({ pid: r.pid, role: 'supervisor', runId: r.runId });
+      if (Number.isInteger(r.childPid) && r.childPid > 0) pids.push({ pid: r.childPid, role: 'child', runId: r.runId });
+    }
+
     // ---- already-absent: needs the prior durable proof + 'gone' --------------
+    if (invalidPid && wstate === 'gone') {
+      return defer('process_identity_unverifiable',
+        `recorded ${invalidPid.role} pid for run ${invalidPid.runId} is invalid`);
+    }
     if (wstate === 'gone') {
       const tp = cur?.terminalProof ?? null;
       const proven = !!tp
@@ -273,11 +295,6 @@ export function createWorkerReaper({
     }
 
     // ---- 4. drain: every owned worker process positively dead -----------------
-    const pids = [];
-    for (const r of rows) {
-      if (Number.isInteger(r.pid) && r.pid > 0) pids.push({ pid: r.pid, role: 'supervisor', runId: r.runId });
-      if (Number.isInteger(r.childPid) && r.childPid > 0) pids.push({ pid: r.childPid, role: 'child', runId: r.runId });
-    }
     const drained = [];
     if (wstate === 'stopped') {
       // Controller-confirmed namespace down — every owned process is dead;
@@ -287,7 +304,7 @@ export function createWorkerReaper({
       // A RUNNING container needs a non-empty positive drain proof: zero
       // recorded pids means zero processes were verified dead — absence of
       // process evidence is not process-drain proof.
-      if (!pids.length) {
+      if (!pids.length && !invalidPid) {
         return defer('process_identity_missing',
           'worker running but the registry recorded no supervisor/child pid — drain unproven');
       }
@@ -302,6 +319,10 @@ export function createWorkerReaper({
         }
         drained.push({ ...p, evidence: cls, starttime: probe.starttime ?? null, pidNs: probe.pidNs ?? null });
       }
+    }
+    if (invalidPid) {
+      return defer('process_identity_unverifiable',
+        `recorded ${invalidPid.role} pid for run ${invalidPid.runId} is invalid`);
     }
 
     // ---- durable proof BEFORE any destructive call -----------------------------
