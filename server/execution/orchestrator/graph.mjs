@@ -17,8 +17,7 @@
 // is frozen for work: no task transitions, no second proposal.
 
 import { SAFE_ID_RE } from '../common.mjs';
-import { SHA256_RE } from '../execution-store.mjs';
-import { canonicalJson } from '../environment/agent-profile.mjs';
+import { SHA256_RE, canonicalJson } from './canonical.mjs';
 import { invalid, conflict } from './errors.mjs';
 import {
   isObj, reqStr, assertOnlyKeys, assertNoSecrets, boundedJson,
