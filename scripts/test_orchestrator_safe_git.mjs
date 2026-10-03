@@ -52,3 +52,11 @@ test('exact-tree archive ignores worker export-ignore and export-subst attribute
   assert.equal(await fs.readFile(path.join(dest,'file'),'utf8'),'base');assert.equal(await fs.readFile(path.join(dest,'version'),'utf8'),'$Format:%H$\n');
  }finally{await fs.rm(root,{recursive:true,force:true});}
 });
+test('metadata publication never follows a preplanted predictable temporary symlink',async()=>{
+ const {root,repo}=await basic();try{
+  const marker=path.join(root,'host-marker');await fs.writeFile(marker,'keep host bytes');
+  await fs.symlink(marker,path.join(repo,'.git',`index.safe-${process.pid}`));await fs.writeFile(path.join(repo,'new'),'new');
+  const result=await safeGit(repo,['add','-A']);assert.equal(result.code,0);
+  assert.equal(await fs.readFile(marker,'utf8'),'keep host bytes');
+ }finally{await fs.rm(root,{recursive:true,force:true});}
+});
