@@ -3554,13 +3554,19 @@ export function createManagedScheduler({
   // finalizeStoppingRun, live-validation supervision, and begin_validation
   // issuance at active+awaiting_validation with a bound workspace.
   async function driveManagedValidationTail(card, run, out) {
+    // Mode workers belong to F1; reviewer/checker attempts belong to the
+    // shared process runtime and must be observed before validation can
+    // consume their reports (including after an owner restart).
+    const liveRole = (run.attempts || []).find((a) => a
+      && ['reviewer', 'checker'].includes(a.role) && ATTEMPT_LIVE.has(a.status));
+    if (liveRole) {
+      const rr = await resumeAttempt(card, run, liveRole).catch(() => 'resume_retry');
+      out[rr] = (out[rr] || 0) + 1;
+      run = await client.getRun(run.id);
+      if (!run || (run.attempts || []).some((a) => a?.id === liveRole.id
+        && ATTEMPT_LIVE.has(a.status))) return;
+    }
     if (!RUN_LIVE.has(run.status)) {
-      const liveAtt = (run.attempts || []).find(
-        (a) => a && ATTEMPT_LIVE.has(a.status));
-      if (liveAtt) {
-        const rr = await resumeAttempt(card, run, liveAtt).catch(() => 'resume_retry');
-        out[rr] = (out[rr] || 0) + 1;
-      }
       const v = run.validation;
       if (v && VAL_LIVE.has(v.status)) {
         const rr = await driveValidation(card, run, true).catch(() => 'validation_retry');
