@@ -242,6 +242,12 @@ export async function createStateService({ stateDir, env = process.env, faults, 
     // seam): default off; features.preparation in tests or
     // ACP_EXEC_PREPARATION=1.
     preparation: features?.preparation === true || env.ACP_EXEC_PREPARATION === '1',
+    // O1 orchestrator (decomposition, parallel workers, integration):
+    // default off; features.orchestrator in tests or ACP_EXEC_ORCHESTRATOR=1.
+    orchestrator: features?.orchestrator === true || env.ACP_EXEC_ORCHESTRATOR === '1',
+    // S1-S4 swarm (participants, brokered edits, decisions):
+    // default off; features.swarm in tests or ACP_EXEC_SWARM=1.
+    swarm: features?.swarm === true || env.ACP_EXEC_SWARM === '1',
   };
 
   // Authenticated internal transport: a 0600 token file chown'd to the

@@ -835,7 +835,12 @@ export async function materializeResultCopy(manifest, sourceDir, destDir,
 // Re-enumerate a materialized copy and compare it to the manifest exactly —
 // content hash, link target AND file mode; extra/missing/mutated entries
 // are mismatches.
-export async function verifyResultCopy(manifest, destDir) {
+// `exempt` lists relative path prefixes that may exist in the copy without
+// being part of the result manifest — used by the U5 dep supply, which
+// links a controller-owned dep set (e.g. node_modules) into the copy AFTER
+// receipt. Exempt paths are only excused as EXTRAS: a manifest entry that
+// collides with the exempt prefix still verifies normally.
+export async function verifyResultCopy(manifest, destDir, { exempt = [] } = {}) {
   const problems = [];
   const copyEntries = new Map();
   const walk = async (dir, relBase) => {
@@ -877,6 +882,7 @@ export async function verifyResultCopy(manifest, destDir) {
     }
   }
   for (const rel of copyEntries.keys()) {
+    if (exempt.some((x) => rel === x || rel.startsWith(`${x}/`))) continue;
     if (!manifest.entries.some((e) => e.path === rel)) {
       problems.push(`extra file in copy: ${rel}`);
     }

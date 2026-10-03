@@ -74,6 +74,7 @@ import {
 import { sha256, writeStagedArtifact } from './execution-store.mjs';
 import { createPanelDriver } from './fusion/controller.mjs';
 import { createHandoffDriver } from './fusion/handoff.mjs';
+import { createOrchDriver } from './orchestrator/controller.mjs';
 import { createWorkerReaper } from './fusion/reaper.mjs';
 import {
   profileIdFor, porchConfigSnapshot, configSha256, buildImplementerPrompt,
@@ -140,10 +141,21 @@ export function createManagedScheduler({
   stuckMs = DEFAULT_STUCK_MS,
   hooks = {},
   fusion = null,           // F2: {runtime (the F1 constrained container runtime), capabilityStore} — null disables fusion driving
+  orchestrator = null,     // O-unit: {runtime?} — defaults to the shared F1 runtime; null disables orchestrator driving
+  swarm = null,            // S-unit: {runtime?, driver?} — the native swarm module (domain.mjs/driver.mjs) wires through here
 } = {}) {
   if (!client) throw new RuntimeError('invalid_argument', 'scheduler requires a client');
   if (!runtime) throw new RuntimeError('invalid_argument', 'scheduler requires a runtime');
   validationEnabled = validationEnabled ?? env?.ACP_EXEC_VALIDATION === '1';
+
+  // U5 dep supply: the shared constrained F1 runtime plus the controller's
+  // materialized dep-set root (host view) and the declared setup depPaths.
+  // A run whose integrate record declares setupId-bound dependencies gets
+  // them re-bound + supplied into the validation copies; other runs are
+  // entirely unaffected.
+  const f1Runtime = fusion?.runtime ?? orchestrator?.runtime ?? swarm?.runtime ?? null;
+  const depsDir = fusion?.depsDir ?? orchestrator?.depsDir ?? null;
+  const setupDepPaths = fusion?.setupDepPaths ?? orchestrator?.setupDepPaths ?? null;
 
   let wsRootResolved = null;
   async function wsRoot() {
@@ -2917,6 +2929,21 @@ export function createManagedScheduler({
       }
       const wroot = await wsRoot();
       const dirs = val.dirs;
+      // 1b. Declared dependency binding — BEFORE any copy is trusted: the
+      //    controller-owned dep set must re-bind to the EXACT durable proof
+      //    ({setupId, depSetId, lockHash, snapshotSha} on the integrate
+      //    record). A run that declares deps but cannot bind them is
+      //    unproven — never validated against pretend dependencies.
+      const depsBound = await boundDepsFor(run, valId);
+      if (depsBound?.error) {
+        await recordEvent(card, run, 'validation_deps_unbound', {
+          validationId: valId, code: depsBound.error,
+          message: String(depsBound.message).slice(0, 300),
+        }).catch(() => {});
+        await endValidation(card, run, valId, 'unproven',
+          `dependency binding failed: ${depsBound.message}`);
+        return;
+      }
       // 2. Pristine copies with PER-COPY durable receipts. Containment is
       //    proven by REALPATH before any rm/read/mkdir: the dir itself must
       //    not be a symlink and its nearest existing ancestor must resolve
@@ -2991,7 +3018,8 @@ export function createManagedScheduler({
             return;
           }
           if (copyLive(key)) continue; // working copy — expected mutations
-          const v = await verifyResultCopy(manifest, dirs[key]);
+          const v = await verifyResultCopy(
+            manifest, dirs[key], { exempt: depsBound?.exempt ?? [] });
           if (!v.ok) {
             // A RECEIPTED copy that fails verification is corruption
             // evidence — retain the reservation, never wipe it.
@@ -3027,6 +3055,25 @@ export function createManagedScheduler({
         await send(card, 'validation_progress', {
           runId: run.id, validationId: valId, copiesReady: true, ...self(),
         }, `vp-${valId}-copies`);
+      }
+      // 2b. Supply the bound dep set into the consuming copies — verify runs
+      //    the approved checks, review/check host the role attempts. 'base'
+      //    stays pristine forever. Injected paths are exempt from manifest
+      //    verification (bound above); any occupation by non-dep content is
+      //    corruption — the copy is retained unproven, never overwritten.
+      if (depsBound) {
+        for (const key of ['verify', 'review', 'check']) {
+          const link = await ensureDepLink(dirs[key], depsBound.depPath, depsBound.hostDir);
+          if (!link.ok) {
+            await recordEvent(card, run, 'validation_deps_corrupt', {
+              validationId: valId, copy: key,
+              problem: String(link.why).slice(0, 300),
+            }).catch(() => {});
+            await endValidation(card, run, valId, 'unproven',
+              `dependency supply into ${key} failed: ${link.why}`);
+            return;
+          }
+        }
       }
       // 3. Approved checks in order — owned process groups, durable logs
       //    imported as artifacts before the report lands. A durable pre-spawn
@@ -3332,6 +3379,106 @@ export function createManagedScheduler({
     });
   }
 
+  // --- declared dependency binding (U5 supply) ------------------------------
+  // A setup-enabled integrate result carries the durable proof record
+  //   run.fusion.integrate.dependencies = {setupId, depSetId, lockHash, snapshotSha}
+  // bound to the imported commit (orchestrator integrations may record the
+  // same shape). U5 checks + reviewer/checker attempts run in host copies
+  // of that result — the controller-owned dep set is re-prepared against
+  // the declared setup + canonical binding, the returned identity must
+  // EQUAL the durable proof (never silently accepted), and the materialized
+  // tree is linked into each consuming copy at the setup's declared
+  // depPath. A run without declared dependencies takes none of this.
+  function declaredDepsFor(run) {
+    const d = run?.fusion?.integrate?.dependencies
+      ?? run?.orchestrator?.integration?.dependencies ?? null;
+    if (!d || typeof d !== 'object' || typeof d.setupId !== 'string' || !d.setupId) return null;
+    return d;
+  }
+
+  // Resolved once per (run, validation, proof) — the durable record never
+  // changes inside a round and deps.prepare is itself idempotent/cached.
+  const depBindCache = new Map();
+  async function boundDepsFor(run, valId) {
+    const declared = declaredDepsFor(run);
+    if (!declared) return null;
+    const key = `${run.id}:${valId}:${declared.setupId}:${declared.depSetId ?? ''}:${declared.snapshotSha ?? ''}`;
+    if (depBindCache.has(key)) return depBindCache.get(key);
+    const fail = (error, message) => {
+      const bound = { error, message };
+      depBindCache.set(key, bound);
+      return bound;
+    };
+    if (typeof f1Runtime?.prepareDependencies !== 'function' || !depsDir) {
+      return fail('deps_unsupported',
+        `run declares setupId ${declared.setupId} but the constrained runtime cannot prepare dependencies`);
+    }
+    let prep;
+    try {
+      const canonicalId = run?.fusion?.integrate?.import?.canonicalId
+        ?? run?.fusion?.integrate?.canonicalId
+        ?? run?.orchestrator?.integration?.canonicalId ?? null;
+      prep = await f1Runtime.prepareDependencies({ setupId: declared.setupId, canonicalId });
+    } catch (e) {
+      return fail('deps_prepare_failed', String(e?.message ?? e).slice(0, 300));
+    }
+    if (!prep?.ok
+      || (declared.depSetId && prep.depSetId !== declared.depSetId)
+      || (declared.lockHash && prep.lockHash !== declared.lockHash)
+      || (declared.snapshotSha && prep.snapshotSha !== declared.snapshotSha)) {
+      return fail('dependency_binding_mismatch',
+        `deps.prepare returned ${JSON.stringify({
+          depSetId: prep?.depSetId ?? null,
+          lockHash: prep?.lockHash ?? null,
+          snapshotSha: prep?.snapshotSha ?? null,
+        })} — the run declares ${JSON.stringify({
+          depSetId: declared.depSetId ?? null,
+          lockHash: declared.lockHash ?? null,
+          snapshotSha: declared.snapshotSha ?? null,
+        })}`);
+    }
+    const depPath = setupDepPaths?.[declared.setupId] ?? null;
+    if (!depPath) {
+      return fail('deps_path_unknown',
+        `setup ${declared.setupId} has no declared depPath in the environment config`);
+    }
+    const bound = {
+      depSetId: prep.depSetId,
+      hostDir: join(depsDir, prep.depSetId),
+      depPath, exempt: [depPath], proof: prep,
+    };
+    depBindCache.set(key, bound);
+    return bound;
+  }
+
+  // Link the materialized dep set into a validation copy at the declared
+  // depPath. Every parent component must be a real dir; an occupied target
+  // is corruption, never overwritten.
+  async function ensureDepLink(copyDir, depPath, targetDir) {
+    const parts = depPath.split('/').filter(Boolean);
+    if (!parts.length) return { ok: false, why: 'empty depPath' };
+    let cur = copyDir;
+    for (const seg of parts.slice(0, -1)) {
+      cur = join(cur, seg);
+      const st = await fsp.lstat(cur).catch(() => null);
+      if (!st) { await fsp.mkdir(cur); continue; }
+      if (st.isSymbolicLink() || !st.isDirectory()) {
+        return { ok: false, why: `dep path component ${seg} is not a real directory` };
+      }
+    }
+    const linkPath = join(copyDir, ...parts);
+    const st = await fsp.lstat(linkPath).catch(() => null);
+    if (st) {
+      if (st.isSymbolicLink()
+        && (await fsp.readlink(linkPath).catch(() => null)) === targetDir) {
+        return { ok: true };
+      }
+      return { ok: false, why: `dep path ${depPath} is occupied by non-dep content` };
+    }
+    await fsp.symlink(targetDir, linkPath, 'dir');
+    return { ok: true };
+  }
+
   // The validation dispatcher — called whenever run.validation is live.
   // `drainOnly` (terminal run): never issues new work — only reconciles or
   // cancels the reservation.
@@ -3397,6 +3544,74 @@ export function createManagedScheduler({
       return 'validation_started';
     }
     return 'validation_running';
+  }
+
+  // O4/S4 — the shared U5 tail for orchestrator and swarm runs. Once the
+  // mode driver has finished (decompose/graph → integrate import, or swarm
+  // protocol → broker freeze → acceptance), the run rides the core
+  // validation surface IDENTICALLY to a solo/fusion implementation run:
+  // live-attempt supervision on a terminal run, stop-drain through
+  // finalizeStoppingRun, live-validation supervision, and begin_validation
+  // issuance at active+awaiting_validation with a bound workspace.
+  async function driveManagedValidationTail(card, run, out) {
+    if (!RUN_LIVE.has(run.status)) {
+      const liveAtt = (run.attempts || []).find(
+        (a) => a && ATTEMPT_LIVE.has(a.status));
+      if (liveAtt) {
+        const rr = await resumeAttempt(card, run, liveAtt).catch(() => 'resume_retry');
+        out[rr] = (out[rr] || 0) + 1;
+      }
+      const v = run.validation;
+      if (v && VAL_LIVE.has(v.status)) {
+        const rr = await driveValidation(card, run, true).catch(() => 'validation_retry');
+        out[rr] = (out[rr] || 0) + 1;
+      }
+      return;
+    }
+    if (run.status === 'stopping') {
+      const valLive = run.validation && VAL_LIVE.has(run.validation.status);
+      if (valLive) {
+        const rr = await driveValidation(card, run).catch(() => 'validation_retry');
+        out[rr] = (out[rr] || 0) + 1;
+        return;
+      }
+      const rr = await finalizeStoppingRun(card, run).catch(() => 'stop_retry');
+      out[rr] = (out[rr] || 0) + 1;
+      return;
+    }
+    const valLive = run.validation && VAL_LIVE.has(run.validation.status);
+    if (valLive) {
+      const rr = await driveValidation(card, run).catch(() => 'validation_retry');
+      out[rr] = (out[rr] || 0) + 1;
+      return;
+    }
+    const prevValDone = !run.validation
+      || ['settled', 'cancelled', 'failed'].includes(run.validation.status);
+    const valCount = (run.validationHistory || []).length + (run.validation ? 1 : 0);
+    if (validationEnabled && run.status === 'active' && run.phase === 'awaiting_validation'
+        && prevValDone && !run.fixContext && run.workspaceId) {
+      if (run.validation?.status === 'failed' && valCount >= 3) {
+        await send(card, 'complete_run', {
+          runId: run.id, status: 'blocked',
+          reason: `validation failed ${valCount} times — no automatic retry`,
+          ...self(),
+        }, `cr-${run.id}-validation-exhausted`).catch(() => {});
+        out.validation_exhausted = (out.validation_exhausted || 0) + 1;
+        return;
+      }
+      const validationId = newValidationId(run);
+      try {
+        await send(card, 'begin_validation', {
+          runId: run.id, validationId, leaseMs, ...self(),
+        }, `bv-${validationId}`);
+        out.validation_started = (out.validation_started || 0) + 1;
+      } catch (e) {
+        out[isErr(e, 'limit_reached') ? 'limited' : 'validation_refused']
+          = (out[isErr(e, 'limit_reached') ? 'limited' : 'validation_refused'] || 0) + 1;
+      }
+      return;
+    }
+    out[`${run.mode}_parked`] = (out[`${run.mode}_parked`] || 0) + 1;
   }
 
   async function driveRun(card, runSummary, out) {
@@ -3492,6 +3707,23 @@ export function createManagedScheduler({
       // driver (integrator fix); 'awaiting_acceptance' drifts via the
       // handoff drift check. Anything else parks.
       out.fusion_parked = (out.fusion_parked || 0) + 1;
+      return;
+    }
+    if (run.mode === 'orchestrator' || run.mode === 'swarm') {
+      // O-unit + S-unit: every orchestration/swarm attempt lives in the
+      // shared F1 constrained runtime — NEVER the solo process path.
+      // Unwired modes drive nothing (fail closed).
+      const modeDriver = run.mode === 'orchestrator'
+        ? orchDriver : await swarmDriver();
+      if (!modeDriver) {
+        out[`${run.mode}_unwired`] = (out[`${run.mode}_unwired`] || 0) + 1;
+        return;
+      }
+      const r = await modeDriver.drive(card, run);
+      out[r] = (out[r] || 0) + 1;
+      run = await client.getRun(run.id);
+      if (!run || run.mode !== 'orchestrator' && run.mode !== 'swarm') return;
+      await driveManagedValidationTail(card, run, out);
       return;
     }
     if (!RUN_LIVE.has(run.status)) {
@@ -4457,12 +4689,81 @@ export function createManagedScheduler({
     now,
   }) : null;
 
+  // O-unit orchestrator driver — decomposer → task work/verify/fix rounds →
+  // assembler → canonical import → U5. Same durable command path; launches
+  // go through the shared F1 constrained runtime (orchestrator.runtime
+  // overrides only for a dedicated wiring — roles are disjoint).
+  const orchRuntime = orchestrator?.runtime ?? fusion?.runtime ?? null;
+  const orchDriver = orchRuntime ? createOrchDriver({
+    runtime: orchRuntime,
+    send,
+    storage: orchestrator?.storage ?? null,
+    projectsDir: orchestrator?.projectsDir ?? null,
+    recordEvent,
+    self,
+    getRun: (id) => client.getRun(id),
+    getDocument: (cardId, versionId) => client.getDocument(cardId, versionId),
+    getArtifact: (runId, artifactId) => client.getArtifact?.(runId, artifactId),
+    ensureWorkspace,
+    stateDir,
+    canLaunch: () => !quiesced && !outage && !journalDegraded
+      && (!launchesNeedRegistration() || registrationOk()),
+    adoptionProofFor,
+    cardTitle: fusion?.cardTitle ?? orchestrator?.cardTitle ?? null,
+    launchOrphanMs: orchestrator?.launchOrphanMs ?? fusion?.launchOrphanMs,
+    leaseMs,
+    instanceId,
+    now,
+  }) : null;
+
+  // S-unit swarm driver — the native swarm module (swarm/driver.mjs, owned
+  // by the swarm-runtime worker) is resolved LAZILY: until it lands, swarm
+  // runs drive nothing and the branch answers 'swarm_unwired' (fail closed);
+  // once present, the same shared F1 runtime + durable command path plug in.
+  const swarmRuntime = swarm?.runtime ?? fusion?.runtime ?? null;
+  let _swarmDriver = swarm?.driver ?? null;
+  let _swarmInit = null;
+  function swarmDriver() {
+    if (_swarmDriver) return Promise.resolve(_swarmDriver);
+    if (!swarmRuntime) return Promise.resolve(null);
+    if (!_swarmInit) {
+      _swarmInit = import('./swarm/driver.mjs')
+        .then((m) => {
+          _swarmDriver = m.createSwarmDriver({
+            runtime: swarmRuntime,
+            send,
+            recordEvent,
+            self,
+            getRun: (id) => client.getRun(id),
+            getDocument: (cardId, versionId) => client.getDocument(cardId, versionId),
+            getArtifact: (runId, artifactId) => client.getArtifact?.(runId, artifactId),
+            ensureWorkspace,
+            stateDir,
+            canLaunch: () => !quiesced && !outage && !journalDegraded
+              && (!launchesNeedRegistration() || registrationOk()),
+            adoptionProofFor,
+            cardTitle: swarm?.cardTitle ?? fusion?.cardTitle ?? null,
+            launchOrphanMs: swarm?.launchOrphanMs ?? fusion?.launchOrphanMs,
+            leaseMs,
+            instanceId,
+            now,
+          });
+          return _swarmDriver;
+        })
+        .catch(() => null); // module absent or unconstructable — unwired, never guessed
+    }
+    return _swarmInit;
+  }
+
   // F1 D14 worker reaper — same constrained runtime, driven from tick() so a
   // terminal attempt's worker is collected even after its run stops
-  // dispatching. Reaping is proof-gated inside fusion/reaper.mjs.
-  const workerReaper = fusion?.runtime && typeof fusion.runtime.forAttempt === 'function'
+  // dispatching. Reaping is proof-gated inside fusion/reaper.mjs. The
+  // runtime is shared across fusion/orchestrator/swarm — any mode that
+  // built it provides it (they are the same object in production).
+  const reaperRuntime = fusion?.runtime ?? orchestrator?.runtime ?? swarm?.runtime ?? null;
+  const workerReaper = reaperRuntime && typeof reaperRuntime.forAttempt === 'function'
     ? createWorkerReaper({
-        runtime: fusion.runtime,
+        runtime: reaperRuntime,
         getRun: (id) => client.getRun(id),
         now,
       })
@@ -4474,6 +4775,7 @@ export function createManagedScheduler({
     _tracked: tracked, _journalFile: journalFile, _deadFile: deadFile,
     _recoveryFile: recoveryFile, _outage: () => outage,
     _fusionDriver: fusionDriver, _handoffDriver: handoffDriver,
+    _orchDriver: orchDriver, _swarmDriver: swarmDriver,
     _workerReaper: workerReaper,
   };
 }

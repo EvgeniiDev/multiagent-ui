@@ -75,6 +75,18 @@ import {
   prepAfterAttach, prepAfterRequirementsChanged, prepAssertStartReady,
   preparationSummary,
 } from './preparation/session.mjs';
+import {
+  ORCH_COMMANDS, ORCH_INTERNAL_COMMANDS, ORCH_ATTEMPT_ROLES,
+  buildOrchestratorRun,
+  cmdOrchClaim, cmdOrchDecomposeBegin,
+  checkDecompositionSpec, onDecomposerResolved,
+  cmdOrchTaskBegin, cmdOrchTaskSettle,
+  cmdOrchIntegrateBegin, cmdOrchIntegrateRecord, cmdOrchAnnul,
+  cmdOrchWorkerSettled,
+  checkTaskVerdict, onVerifierResolved, onWorkerResolved, onAssemblerResolved,
+  cmdOrchApprove, cmdOrchDecide, cmdOrchGrant, cmdOrchRetry, cmdOrchAnswer,
+  orchOnStop,
+} from './orchestrator/domain.mjs';
 
 export const MAX_DOC_BYTES = 512 * 1024;
 export const COMMAND_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -100,6 +112,16 @@ export const COMMANDS = new Set([
   // P1 idea preparation: session lifecycle + SkillGate confirmation. All
   // gated on features.preparation (ACP_EXEC_PREPARATION).
   ...PREP_COMMANDS,
+  // O-unit orchestrator: spec approval + input-change decisions + task
+  // grants/retries/answers. Gated on features.orchestrator.
+  ...ORCH_COMMANDS,
+  // S-unit swarm: participant messaging, turn-limit extension, decision.
+  // Gated on features.swarm. The internal swarm_* surface is prefix-admitted
+  // (the domain module loads lazily — see swarmDomainModule) so future
+  // internal names need no shared-layer edit.
+  'swarm_input',
+  'swarm_extend',
+  'swarm_decide',
 ]);
 // Landed in U3–U5; the contract keeps them addressable so clients get an
 // explicit diagnostic instead of silence. `stop` is implemented in U4 and is
@@ -132,6 +154,16 @@ const FUSION_INTERNAL = new Set([
 // driver without the flag can never deliver attempt outcomes.
 const PREPARATION_GATED = new Set([...PREP_COMMANDS]);
 const PREPARATION_INTERNAL = new Set([...PREP_INTERNAL_COMMANDS]);
+// O-unit orchestrator: user commands ride the orchestrator gate; the
+// internal orch_* surface has its own internal-channel gate — a scheduler
+// without the flag can never mint a decomposer/worker attempt.
+const ORCH_GATED = new Set([...ORCH_COMMANDS]);
+const ORCH_INTERNAL = new Set([...ORCH_INTERNAL_COMMANDS]);
+// S-unit swarm: user commands ride the swarm gate; every swarm_* internal
+// type is feature-gated by prefix at the internal-channel check — a
+// scheduler without the flag can never mint a participant attempt.
+const SWARM_GATED = new Set(['swarm_input', 'swarm_extend', 'swarm_decide']);
+const isSwarmType = (type) => typeof type === 'string' && type.startsWith('swarm_');
 // Internal-channel commands: runner bookkeeping only, reachable exclusively
 // through the authenticated internal transport (/api/internal/*) or the
 // in-process service seam — never through the user channel.
@@ -170,6 +202,9 @@ export const INTERNAL_COMMANDS = new Set([
   'annul_acceptance',
   // P1 idea preparation: the lead runtime's durable result delivery seam.
   ...PREP_INTERNAL_COMMANDS,
+  // O-unit orchestrator: run claim, decomposer minter, task/verifier
+  // minters, integrate record and the post-gate drift annul.
+  ...ORCH_INTERNAL_COMMANDS,
 ]);
 // Environment-scoped internal operations (not card commands): routed over
 // /api/internal/environments/* and the internalGlobal seam.
@@ -220,6 +255,11 @@ const RUN_PHASES = new Set([
   // runs the private-repo integrator. 'awaiting_validation' (already
   // listed) hosts the fusion fix round too.
   'judge', 'integrate',
+  // O-unit: decomposition (spec proposal/approval) and the parallel-work
+  // phase — subtask worker/verifier attempts run while phase is 'work';
+  // 'integrate' (listed) hosts the assembler, 'awaiting_validation' the
+  // U5 gate on the assembled result.
+  'decompose', 'work',
 ]);
 const EXEC_ROLES = new Set(['implementer', 'reviewer', 'checker']);
 // U5: all three roles launch — each only inside its recorded phase and with
@@ -1116,6 +1156,30 @@ function applyStopIntent(aggregate, now, { by = 'user', reason = null } = {}) {
   return { stoppedRuns, cancelPending };
 }
 
+// Mode-side stop hooks: the atomic run/attempt stop intent above halts the
+// EXECUTION side; each mode's durable substate mirrors it in the same commit
+// so a restart can never observe "attempts cancelled but the graph still
+// thinks it's active".
+async function applyModeStop(ctx, aggregate, now) {
+  let swarmMod = null;
+  for (const r of aggregate.runs || []) {
+    if (!r) continue;
+    if (!RUN_NONTERMINAL.has(r.status) && r.status !== 'stopping') continue;
+    if (r.mode === 'orchestrator' && r.orchestrator) {
+      orchOnStop(ORCH_DEPS, ctx, r, now);
+    } else if (r.mode === 'swarm' && r.swarm) {
+      // The stop intent (attempt cancels) is already committed by
+      // applyStopIntent — the swarm mirror is best-effort: a missing
+      // module must never block a user's stop. The driver reconciles any
+      // unmiraored substate on its next tick.
+      try {
+        swarmMod ??= await swarmDomainModule();
+        await swarmMod.swarmOnStop?.(ORCH_DEPS, ctx, r, now);
+      } catch { /* stop is never gated */ }
+    }
+  }
+}
+
 async function cmdStop(_ctx, aggregate, payload, now, ctx = _ctx) {
   if (!(aggregate.runs || []).length) {
     throw new CommandError(422, 'nothing_to_stop', 'card has no run to stop');
@@ -1129,6 +1193,7 @@ async function cmdStop(_ctx, aggregate, payload, now, ctx = _ctx) {
     throw new CommandError(409, 'run_terminal',
       `run ${cur?.id} is already ${cur?.status} — nothing live to stop`);
   }
+  await applyModeStop(ctx, aggregate, now);
   for (const r of aggregate.runs) {
     if (r && stoppedRuns.includes(r.id)) stageRun(aggregate, r, ctx);
   }
@@ -1218,6 +1283,21 @@ const PREP_DEPS = {
   CommandError, bumpControl,
   DOC_KINDS, SHA256_RE, COMMAND_ID_RE,
   checkMarkdown, extractPlanChecks,
+};
+
+// Deps bag for the O-unit orchestrator module — same seam style: the module
+// runs inside this serialized queue with the domain's helpers and never
+// imports the domain (no cycle).
+const ORCH_DEPS = {
+  CommandError, reqStr, normPath,
+  SAFE_ID_RE, SHA256_RE, SHA40_RE,
+  runOf, findAttempt, stageRun, bumpControl,
+  newOwner, ownsResource, checkAdoptionProof, clampLeaseMs,
+  ATTEMPT_NONTERMINAL, ATTEMPT_TERMINAL, RUN_NONTERMINAL,
+  liveReservations, describeReservation,
+  requireApprovedInputs, runInputsSnapshot, currentDesignInput,
+  resolveBaseCommit, projectKeyFor, retainableWorkspaceId,
+  validateMember, snapshotReviewRules,
 };
 
 function currentDesignInput(aggregate) {
@@ -1312,9 +1392,11 @@ function retainableWorkspaceId(aggregate) {
 async function cmdStart(ctx, aggregate, payload, now) {
   const wantMode = payload?.mode === undefined ? 'solo' : payload.mode;
   if (wantMode === 'fusion') return cmdStartFusion(ctx, aggregate, payload, now);
+  if (wantMode === 'orchestrator') return cmdStartOrchestrator(ctx, aggregate, payload, now);
+  if (wantMode === 'swarm') return cmdStartSwarm(ctx, aggregate, payload, now);
   if (wantMode !== 'solo') {
     throw new CommandError(422, 'invalid_argument',
-      `payload.mode must be 'solo' or 'fusion' — got ${JSON.stringify(payload?.mode)}`);
+      `payload.mode must be 'solo', 'fusion', 'orchestrator' or 'swarm' — got ${JSON.stringify(payload?.mode)}`);
   }
   const { reqA, planA } = await requireApprovedInputs(ctx, aggregate, 'start');
   const liveRes = liveReservations(aggregate);
@@ -1410,6 +1492,98 @@ async function cmdStartFusion(ctx, aggregate, payload, now) {
   };
 }
 
+// O-unit: `start` with mode 'orchestrator' builds the decomposition-graph
+// run. The durable reservation gate is identical; input approvals resolve
+// inside buildOrchestratorRun (requirements+plan are both mandatory — the
+// run produces code).
+async function cmdStartOrchestrator(ctx, aggregate, payload, now) {
+  if (ctx.features?.orchestrator !== true) {
+    throw new CommandError(501, 'command_unavailable',
+      'orchestrator mode is gated off — enable ACP_EXEC_ORCHESTRATOR');
+  }
+  const liveRes = liveReservations(aggregate);
+  if (liveRes.length) {
+    throw new CommandError(409, 'run_active',
+      `${describeReservation(liveRes)} — stop/resolve it before starting another`);
+  }
+  const run = await buildOrchestratorRun(ORCH_DEPS, ctx, aggregate, payload, now);
+  aggregate.runs.push(run);
+  aggregate.currentRunId = run.id;
+  stageRun(aggregate, run, ctx);
+  bumpControl(aggregate, now);
+  return {
+    aggregate,
+    refreshProjection: true,
+    result: {
+      runId: run.id, status: run.status, phase: run.phase,
+      baseCommit: run.baseCommit,
+      workers: Object.keys(run.orchestrator.workers || {}).length,
+      inputs: run.inputs,
+    },
+  };
+}
+
+// S-unit swarm lazy seam: the domain module is owned by the swarm-runtime
+// worker — resolved lazily so the shared layer never carries a hard
+// dependency on a file that may not be integrated yet. Callers check the
+// features.swarm gate BEFORE calling this (except the stop mirror, which
+// must run regardless); a missing module fails closed with 501 — a swarm
+// command never degrades to a different mode.
+async function swarmDomainModule() {
+  let mod = null;
+  try {
+    mod = await import('./swarm/domain.mjs');
+  } catch { /* treated as absent below */ }
+  if (typeof mod?.buildSwarmRun !== 'function') {
+    throw new CommandError(501, 'command_unavailable',
+      'swarm domain module is not integrated (server/execution/swarm/domain.mjs missing or incomplete)');
+  }
+  return mod;
+}
+
+// Every swarm command type maps to its exported handler by convention:
+// swarm_foo_bar -> mod.cmdSwarmFooBar. Unknown names reject — the module
+// table is the authority.
+function swarmCmd(mod, type) {
+  const name = 'cmdSwarm' + type.slice('swarm_'.length)
+    .split('_').map((s) => (s ? s[0].toUpperCase() + s.slice(1) : '')).join('');
+  const fn = mod[name];
+  if (typeof fn !== 'function') {
+    throw new CommandError(400, 'bad_command',
+      `unhandled swarm command ${JSON.stringify(type)}`);
+  }
+  return fn;
+}
+
+// S-unit: `start` with mode 'swarm' builds the durable swarm run.
+async function cmdStartSwarm(ctx, aggregate, payload, now) {
+  if (ctx.features?.swarm !== true) {
+    throw new CommandError(501, 'command_unavailable',
+      'swarm mode is gated off — enable ACP_EXEC_SWARM');
+  }
+  const liveRes = liveReservations(aggregate);
+  if (liveRes.length) {
+    throw new CommandError(409, 'run_active',
+      `${describeReservation(liveRes)} — stop/resolve it before starting another`);
+  }
+  const mod = await swarmDomainModule();
+  const run = await mod.buildSwarmRun(ORCH_DEPS, ctx, aggregate, payload, now);
+  aggregate.runs.push(run);
+  aggregate.currentRunId = run.id;
+  stageRun(aggregate, run, ctx);
+  bumpControl(aggregate, now);
+  return {
+    aggregate,
+    refreshProjection: true,
+    result: {
+      runId: run.id, status: run.status, phase: run.phase,
+      baseCommit: run.baseCommit,
+      participants: (run.swarm?.participants || []).length,
+      inputs: run.inputs,
+    },
+  };
+}
+
 // `continue` — a NEW run carrying forward the retained workspace, the
 // previous run's result context, and the CURRENTLY approved inputs (the
 // approval gates are never bypassed: after change_requirements the card must
@@ -1465,6 +1639,31 @@ async function cmdContinue(ctx, aggregate, payload, now) {
         inputReused: fusionRun.fusion.inputReused,
         inputs: fusionRun.inputs,
       },
+    };
+  }
+  if (prev.mode === 'swarm') {
+    // S-unit: a swarm continuation mints a NEW swarm run — the domain owns
+    // which durable state carries (participants, protocol, cursor). It can
+    // never degrade to a solo run.
+    if (ctx.features?.swarm !== true) {
+      throw new CommandError(501, 'command_unavailable',
+        'swarm mode is gated off — enable ACP_EXEC_SWARM');
+    }
+    const mod = await swarmDomainModule();
+    if (typeof mod.buildSwarmContinuation !== 'function') {
+      throw new CommandError(501, 'command_unavailable',
+        'swarm domain module does not export buildSwarmContinuation');
+    }
+    const swarmRun = await mod.buildSwarmContinuation(
+      ORCH_DEPS, ctx, aggregate, payload, prev, now);
+    aggregate.runs.push(swarmRun);
+    aggregate.currentRunId = swarmRun.id;
+    stageRun(aggregate, swarmRun, ctx);
+    bumpControl(aggregate, now);
+    return {
+      aggregate,
+      refreshProjection: true,
+      result: { runId: swarmRun.id, status: swarmRun.status, continuedFrom: prev.id },
     };
   }
   const { reqA, planA } = await requireApprovedInputs(ctx, aggregate, 'continue');
@@ -2211,8 +2410,10 @@ async function cmdBindAttempt(ctx, aggregate, payload, now) {
     // (panel_settle / routeWorkOrder / record_integrate_result / gate) own
     // it. A fix integrator binds while the run sits at
     // 'awaiting_validation'; writing att.phase ('integrate') here would
-    // strand the import step in a phase_mismatch loop.
-    if (att.role !== 'panelist' && att.role !== 'judge' && att.role !== 'integrator') {
+    // strand the import step in a phase_mismatch loop. Orchestrator
+    // attempts are identical — the orch commands own every run transition.
+    if (att.role !== 'panelist' && att.role !== 'judge' && att.role !== 'integrator'
+      && !ORCH_ATTEMPT_ROLES.has(att.role) && run.mode !== 'swarm') {
       run.phase = att.phase ?? 'implement';
     }
   }
@@ -2656,18 +2857,25 @@ async function cmdResolveAttempt(ctx, aggregate, payload, now) {
   const isPanelist = att.role === 'panelist';
   const isJudge = att.role === 'judge';
   const isIntegrator = att.role === 'integrator';
+  const isOrch = ORCH_ATTEMPT_ROLES.has(att.role);
+  const isSwarm = run.mode === 'swarm';
   let panelAnswer = null;
   let judgeWorkOrder = null;
   let judgeParsed = null;
   let integReport = null;
   let integParsed = null;
-  if (isPanelist || isJudge || isIntegrator) {
-    // Fusion attempts never move run status/phase on resolve — the panel
-    // terminalizes through panel_settle, the handoff through its own
-    // commands (routeWorkOrder / record_integrate_result / complete_run).
+  let orchSpecDesc = null;
+  let orchSpecDoc = null;
+  let orchVerdict = null;
+  let swarmDesc = null;
+  if (isPanelist || isJudge || isIntegrator || isOrch || isSwarm) {
+    // Fusion/orchestrator/swarm attempts never move run status/phase on
+    // resolve — the mode's own commands own every run transition
+    // (panel_settle / routeWorkOrder / record_integrate_result / orch_* /
+    // swarm_* / gate).
     if (payload.runStatus !== undefined || payload.runPhase !== undefined) {
       throw new CommandError(422, 'invalid_argument',
-        'a fusion-role resolve carries no runStatus/runPhase — the fusion commands own run transitions');
+        'a mode-role resolve carries no runStatus/runPhase — the mode commands own run transitions');
     }
     if (isPanelist) {
       if (outcome === 'completed') {
@@ -2693,6 +2901,27 @@ async function cmdResolveAttempt(ctx, aggregate, payload, now) {
         throw new CommandError(422, 'invalid_argument',
           'payload.report is only meaningful on a completed integrator resolve');
       }
+    } else if (att.role === 'decomposer') {
+      if (outcome === 'completed') {
+        orchSpecDesc = payload.spec ?? null;
+        orchSpecDoc = await checkDecompositionSpec(ORCH_DEPS, ctx, run, att, payload.spec);
+      } else if (payload.spec !== undefined) {
+        throw new CommandError(422, 'invalid_argument',
+          'payload.spec is only meaningful on a completed decomposer resolve');
+      }
+    } else if (att.role === 'verifier') {
+      if (outcome === 'completed') {
+        orchVerdict = checkTaskVerdict(ORCH_DEPS, run, att, payload.verdict);
+      } else if (payload.verdict !== undefined) {
+        throw new CommandError(422, 'invalid_argument',
+          'payload.verdict is only meaningful on a completed verifier resolve');
+      }
+    } else if (isSwarm && outcome === 'completed') {
+      // Swarm descriptor check runs BEFORE the settle mutation — the whole
+      // resolve payload is the module's contract surface.
+      const mod = await swarmDomainModule();
+      swarmDesc = typeof mod.checkSwarmResult === 'function'
+        ? mod.checkSwarmResult(ORCH_DEPS, run, att, payload) : null;
     }
   }
   let runStatus = null;
@@ -2737,7 +2966,7 @@ async function cmdResolveAttempt(ctx, aggregate, payload, now) {
   att.finishedAt = now;
   if (result) {
     att.result = result;
-    if (!isPanelist && !isJudge && !isIntegrator) {
+    if (!isPanelist && !isJudge && !isIntegrator && !isOrch && !isSwarm) {
       run.result = { ...result, attemptId: att.id, role: att.role, at: now };
     }
   }
@@ -2777,6 +3006,21 @@ async function cmdResolveAttempt(ctx, aggregate, payload, now) {
     onJudgeResolved(FUSION_DEPS, aggregate, run, att, outcome, judgeWorkOrder, judgeParsed, now);
   } else if (isIntegrator) {
     onIntegratorResolved(FUSION_DEPS, run, att, outcome, integReport, integParsed, now);
+  } else if (att.role === 'decomposer') {
+    onDecomposerResolved(ORCH_DEPS, aggregate, run, att, outcome, orchSpecDesc, orchSpecDoc, now, ctx);
+  } else if (att.role === 'verifier') {
+    onVerifierResolved(ORCH_DEPS, aggregate, run, att, outcome, orchVerdict, now, ctx);
+  } else if (att.role === 'worker') {
+    onWorkerResolved(ORCH_DEPS, aggregate, run, att, outcome, now, ctx);
+  } else if (att.role === 'assembler') {
+    onAssemblerResolved(ORCH_DEPS, aggregate, run, att, outcome, now, ctx);
+  } else if (isSwarm) {
+    const mod = await swarmDomainModule();
+    if (typeof mod.onSwarmParticipantResolved !== 'function') {
+      throw new CommandError(501, 'command_unavailable',
+        'swarm domain module does not export onSwarmParticipantResolved');
+    }
+    mod.onSwarmParticipantResolved(ORCH_DEPS, aggregate, run, att, outcome, swarmDesc, now, ctx);
   }
   if (runPhase) run.phase = runPhase;
   if (runStatus) {
@@ -4340,7 +4584,7 @@ export async function applyCardCommand(ctx, cardId, body, { channel = 'user' } =
     throw new CommandError(403, 'internal_forbidden',
       'the internal command channel is not reachable over the client API');
   }
-  if (channel === 'internal' && !INTERNAL_COMMANDS.has(type)) {
+  if (channel === 'internal' && !INTERNAL_COMMANDS.has(type) && !isSwarmType(type)) {
     throw new CommandError(400, 'bad_command', `unknown internal command type ${JSON.stringify(type)}`);
   }
   const payload = isObj(body.payload) ? body.payload : {};
@@ -4417,7 +4661,7 @@ export async function applyCardCommand(ctx, cardId, body, { channel = 'user' } =
       }
       const origType = reqStr(payload.type, 'payload.type');
       if (origType === 'command_receipt'
-        || (!INTERNAL_COMMANDS.has(origType) && !COMMANDS.has(origType))) {
+        || (!INTERNAL_COMMANDS.has(origType) && !COMMANDS.has(origType) && !isSwarmType(origType))) {
         throw new CommandError(422, 'invalid_argument',
           `payload.type must name a known command type — got ${JSON.stringify(payload.type)}`);
       }
@@ -4481,6 +4725,14 @@ export async function applyCardCommand(ctx, cardId, body, { channel = 'user' } =
     if (PREPARATION_INTERNAL.has(type) && ctx.features?.preparation !== true) {
       throw new CommandError(501, 'command_unavailable',
         `internal command ${type} is gated off — idea preparation requires ACP_EXEC_PREPARATION`);
+    }
+    if (ORCH_INTERNAL.has(type) && ctx.features?.orchestrator !== true) {
+      throw new CommandError(501, 'command_unavailable',
+        `internal command ${type} is gated off — the orchestrator requires ACP_EXEC_ORCHESTRATOR`);
+    }
+    if (isSwarmType(type) && ctx.features?.swarm !== true) {
+      throw new CommandError(501, 'command_unavailable',
+        `internal command ${type} is gated off — the swarm requires ACP_EXEC_SWARM`);
     }
     let outcome;
     switch (type) {
@@ -4562,11 +4814,43 @@ export async function applyCardCommand(ctx, cardId, body, { channel = 'user' } =
       case 'annul_acceptance':
         outcome = await cmdAnnulAcceptance(FUSION_DEPS, ctx, aggregate, payload, now);
         break;
+      case 'orch_claim':
+        outcome = await cmdOrchClaim(ORCH_DEPS, ctx, aggregate, payload, now);
+        break;
+      case 'orch_decompose_begin':
+        outcome = await cmdOrchDecomposeBegin(ORCH_DEPS, ctx, aggregate, payload, now);
+        break;
+      case 'orch_task_begin':
+        outcome = await cmdOrchTaskBegin(ORCH_DEPS, ctx, aggregate, payload, now);
+        break;
+      case 'orch_task_settle':
+        outcome = await cmdOrchTaskSettle(ORCH_DEPS, ctx, aggregate, payload, now);
+        break;
+      case 'orch_integrate_begin':
+        outcome = await cmdOrchIntegrateBegin(ORCH_DEPS, ctx, aggregate, payload, now);
+        break;
+      case 'orch_integrate_record':
+        outcome = await cmdOrchIntegrateRecord(ORCH_DEPS, ctx, aggregate, payload, now);
+        break;
+      case 'orch_annul':
+        outcome = await cmdOrchAnnul(ORCH_DEPS, ctx, aggregate, payload, now);
+        break;
+      case 'orch_worker_settled':
+        outcome = await cmdOrchWorkerSettled(ORCH_DEPS, ctx, aggregate, payload, now);
+        break;
       case 'prep_result':
       case 'prep_question':
         outcome = await PREP_INTERNAL_HANDLERS[type](PREP_DEPS, ctx, aggregate, payload, now);
         break;
       default:
+        // S-unit swarm internals dispatch through the lazily-loaded domain
+        // module (native worker owns it). The feature gate already fired
+        // above — a missing module fails closed with 501.
+        if (isSwarmType(type)) {
+          const mod = await swarmDomainModule();
+          outcome = await swarmCmd(mod, type)(ORCH_DEPS, ctx, aggregate, payload, now);
+          break;
+        }
         throw new CommandError(400, 'bad_command', `unhandled internal command ${type}`);
     }
     aggregate = outcome.aggregate;
@@ -4646,6 +4930,32 @@ export async function applyCardCommand(ctx, cardId, body, { channel = 'user' } =
     return { status: 501, body: body501 };
   }
 
+  if (ORCH_GATED.has(type) && ctx.features?.orchestrator !== true) {
+    const body501 = {
+      ok: false,
+      error: `command ${type} is gated off — the orchestrator requires ACP_EXEC_ORCHESTRATOR`,
+      code: 'command_unavailable',
+      command: type,
+      gate: 'ACP_EXEC_ORCHESTRATOR',
+    };
+    recordCommand(aggregate, commandId, type, payloadHash, 501, body501, now);
+    await ctx.saveAggregate(aggregate);
+    return { status: 501, body: body501 };
+  }
+
+  if (SWARM_GATED.has(type) && ctx.features?.swarm !== true) {
+    const body501 = {
+      ok: false,
+      error: `command ${type} is gated off — the swarm requires ACP_EXEC_SWARM`,
+      code: 'command_unavailable',
+      command: type,
+      gate: 'ACP_EXEC_SWARM',
+    };
+    recordCommand(aggregate, commandId, type, payloadHash, 501, body501, now);
+    await ctx.saveAggregate(aggregate);
+    return { status: 501, body: body501 };
+  }
+
   let outcome;
   switch (type) {
     case 'enable':
@@ -4696,6 +5006,28 @@ export async function applyCardCommand(ctx, cardId, body, { channel = 'user' } =
     case 'approve_work_order':
       outcome = await cmdApproveWorkOrder(FUSION_DEPS, ctx, aggregate, payload, now);
       break;
+    case 'orch_approve':
+      outcome = await cmdOrchApprove(ORCH_DEPS, ctx, aggregate, payload, now);
+      break;
+    case 'orch_decide':
+      outcome = await cmdOrchDecide(ORCH_DEPS, ctx, aggregate, payload, now);
+      break;
+    case 'orch_grant':
+      outcome = await cmdOrchGrant(ORCH_DEPS, ctx, aggregate, payload, now);
+      break;
+    case 'orch_retry':
+      outcome = await cmdOrchRetry(ORCH_DEPS, ctx, aggregate, payload, now);
+      break;
+    case 'orch_answer':
+      outcome = await cmdOrchAnswer(ORCH_DEPS, ctx, aggregate, payload, now);
+      break;
+    case 'swarm_input':
+    case 'swarm_extend':
+    case 'swarm_decide': {
+      const mod = await swarmDomainModule();
+      outcome = await swarmCmd(mod, type)(ORCH_DEPS, ctx, aggregate, payload, now);
+      break;
+    }
     case 'start_preparation':
     case 'answer_question':
     case 'request_draft':
