@@ -778,6 +778,8 @@ export function createContainerRuntime({
       workerId: rec.workerId ?? null,
       worker: rec.worker ?? null,
       profileDigest: rec.profileDigest ?? null,
+      createdAt: rec.createdAt ?? null,
+      launchStartedAt: rec.launch?.startedAt ?? null,
       diagnostics: rec.launch?.diagnostics ?? null,
       error: rec.error ?? null,
       environment: rec.environment ?? null,
@@ -1013,6 +1015,18 @@ export function createContainerRuntime({
     };
   }
 
+  // Shared dependency preparation — validates setupId against the
+  // deployment config (no arbitrary setup commands) and delegates to the
+  // controller's content-derived depSet cache (changed lockfiles → new set).
+  // Drivers persist depSetId + setupId on the attempt launch binding.
+  async function prepareDependencies({ projectRoot, snapshotSha, setupId } = {}) {
+    const setup = config.setups?.[setupId];
+    if (!setup) {
+      throw new RuntimeError('setup_not_registered', `no such setup: ${setupId}`);
+    }
+    return call('deps.prepare', { projectRoot, snapshotSha, setupId });
+  }
+
   return {
     kind: 'porch-container',
     rootDir, runtimeAttemptsDir, workersDir,
@@ -1021,6 +1035,7 @@ export function createContainerRuntime({
     processIdentityFor, activity: activityFor, attemptDirState, sessionLog,
     listAttempts, registryRunsFor, readReap, writeReap,
     forAttempt, workerIdForAttempt,
+    prepareDependencies,
     // F3 integrator surface: canonical worktree prepare/status and the
     // private-repo → canonical import — same controller channel, same
     // identity rules as worker.prepare.
