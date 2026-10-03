@@ -419,7 +419,7 @@ function createFakeContainerRuntime({ behaviors = {}, canonRoot = null, projectD
     calls.push({ m: 'canonicalStatus', canonicalId });
     const c = canonicals.get(canonicalId);
     if (!c) return { ok: false, error: { code: 'unknown_canonical', message: 'no canonical' } };
-    return { ok: true, canonical: { ...c, headSha: git(c.worktree, 'rev-parse', 'HEAD') } };
+    return { ok: true, canonical: { ...c, head: git(c.worktree, 'rev-parse', 'HEAD'), headSha: git(c.worktree, 'rev-parse', 'HEAD') } };
   }
 
   // Import the worker's private-repo final state into canonical: apply the
@@ -1304,6 +1304,10 @@ test('fix round: gate failure launches an integrator fix from canonical HEAD and
   const fxStart = startsCalls(runtime).find((c) => c.params.attemptId === fxAtt.id);
   assert.equal(fxStart.params.materials.fromCanonical, true,
     'fix attempt rebuilds the private repo from canonical HEAD');
+  assert.equal(fxStart.params.materials.snapshotSha, fxAtt.launch.snapshotSha,
+    'fix material source is an immutable canonical commit binding');
+  assert.equal(fxStart.params.materials.snapshotSha, run.fusion.integrate.import.commitSha,
+    'fix starts from the previous imported canonical commit');
   const fxInputs = fxStart.params.materials.inputs.map((i) => i.name).sort();
   assert.ok(fxInputs.includes('results'), 'fix attempt receives the prior results bundle');
   const resInput = fxStart.params.materials.inputs.find((i) => i.name === 'results');

@@ -89,7 +89,14 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
   const depHost = path.join(envHost, 'depsets');
   const registryFile = envSec.registryFile;
 
-  const registry = { version: 1, workers: {}, canonicals: {}, depSets: {} };
+  const registry = { version: 1, workers: {}, canonicals: {}, depSets: {}, swarmSnapshots: {} };
+  const operations = new Map();
+  async function exclusive(key, work) {
+    const prior = operations.get(key) ?? Promise.resolve();
+    const next = prior.catch(() => {}).then(work);
+    operations.set(key, next);
+    try { return await next; } finally { if (operations.get(key) === next) operations.delete(key); }
+  }
   let registryLoaded = false;
   let gateway = { id: null, name: null };
 
@@ -129,6 +136,7 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     Object.assign(registry.workers, parsed.workers || {});
     Object.assign(registry.canonicals, parsed.canonicals || {});
     Object.assign(registry.depSets, parsed.depSets || {});
+    Object.assign(registry.swarmSnapshots, parsed.swarmSnapshots || {});
   }
 
   async function git(cwd, args, { timeoutMs = GIT_TIMEOUT } = {}) {
@@ -313,7 +321,32 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     const projectDir = path.join(workerDir, 'project');
     await ensureDir(projectDir);
     if (roleSpec.projectMode === 'none') return { mode: 'none' };
-    const src = await projectSource(materials.projectRoot);
+    const fromCanonical = roleSpec.projectMode === 'private-repo' && materials.fromCanonical === true;
+    let src;
+    if (fromCanonical) {
+      canonical = await registeredCanonical(materials.canonicalId);
+      if (canonical.projectRoot !== materials.projectRoot || materials.snapshotId !== undefined) {
+        throw new RuntimeError('canonical_binding_mismatch', 'fromCanonical source must match its registered project binding');
+      }
+      src = canonical.worktree;
+      const currentHead = await gitStdout(src, ['rev-parse', 'HEAD'], 'canonical_read_failed', 'canonical HEAD');
+      if (materials.snapshotSha !== currentHead) {
+        throw new RuntimeError('canonical_binding_mismatch', 'fromCanonical snapshotSha must equal current registered canonical HEAD');
+      }
+      const dirty = await gitStdout(src, ['status', '--porcelain', '--untracked-files=all'], 'canonical_read_failed', 'canonical status');
+      if (dirty) throw new RuntimeError('canonical_dirty', 'fromCanonical requires a clean committed canonical tree');
+    } else if (materials.snapshotId !== undefined) {
+      const snapshot = registry.swarmSnapshots[materials.snapshotId];
+      if (!snapshot || snapshot.state !== 'ready'
+        || snapshot.projectRoot !== materials.projectRoot || snapshot.snapshotSha !== materials.snapshotSha) {
+        throw new RuntimeError('snapshot_binding_mismatch', 'snapshot materials do not match a registered immutable snapshot');
+      }
+      src = await fs.realpath(snapshot.repoGit);
+      const snapshotRoot = await fs.realpath(path.join(envRoot, 'snapshots'));
+      if (!src.startsWith(snapshotRoot + '/')) throw new RuntimeError('snapshot_binding_mismatch', 'snapshot source escaped registered root');
+    } else {
+      src = await projectSource(materials.projectRoot);
+    }
     const sha = await verifyCommit(src, materials.snapshotSha);
     if (roleSpec.projectMode === 'snapshot-ro' || roleSpec.projectMode === 'workdir-rw') {
       await gitArchiveExtract(src, sha, projectDir);
@@ -328,21 +361,11 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
       // fromCanonical: the F3 fix round builds the private repo from the
       // CANONICAL worktree's HEAD (which carries the prior import), never
       // from the pristine snapshot — otherwise fixes would lose prior work.
-      const fromCanonical = materials.fromCanonical === true;
-      if (fromCanonical && !canonical?.worktree) {
-        throw new RuntimeError('canonical_not_prepared',
-          'fromCanonical requires a prepared canonical worktree');
-      }
-      const srcTreeSha = fromCanonical
-        ? await gitStdout(canonical.worktree, ['rev-parse', 'HEAD^{tree}'],
-            'repo_init_failed', 'canonical HEAD tree')
-        : await gitStdout(src, ['rev-parse', `${sha}^{tree}`],
-            'repo_init_failed', 'source tree');
-      if (fromCanonical) {
-        await gitArchiveExtract(canonical.worktree, 'HEAD', projectDir);
-      } else {
-        await gitArchiveExtract(src, sha, projectDir);
-      }
+      const srcTreeSha = await gitStdout(src, ['rev-parse', `${sha}^{tree}`],
+        'repo_init_failed', 'source tree');
+      // The verified SHA pins the copied bytes even if canonical HEAD
+      // advances after this admission decision.
+      await gitArchiveExtract(src, sha, projectDir);
       await gitStdout(projectDir, ['init', '-q', '-b', 'task'], 'repo_init_failed', 'git init');
       const add = await git(projectDir, ['add', '-A']);
       if (add.code !== 0) throw new RuntimeError('repo_init_failed', `git add: ${add.stderr.slice(0, 300)}`);
@@ -363,7 +386,7 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     throw new RuntimeError('invalid_argument', `unknown projectMode ${roleSpec.projectMode}`);
   }
 
-  async function mountList(workerId, roleSpec, depSet) {
+  async function mountList(workerId, roleSpec, depSet, scratch = null) {
     const wh = path.join(workersHost, workerId);
     const binds = [
       [`${wh}/conf`, '/work/conf', 'ro'],
@@ -380,6 +403,7 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
       binds.push([`${wh}/project`, '/work/project',
         roleSpec.projectMode === 'snapshot-ro' ? 'ro' : 'rw']);
     }
+    if (scratch) binds.push([`${wh}/scratch`, '/work/scratch', 'rw']);
     if (depSet) {
       // Mounted where the setup declared the dep path inside the project.
       const target = depSet.depPath
@@ -477,6 +501,18 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
         `worker image ${image.ref} resolves to ${img.Id}, pinned ${image.digest}`);
     }
 
+    const materials = p.materials || {};
+    let scratch = null;
+    if (materials.scratch !== undefined) {
+      const requested = materials.scratch;
+      if (!requested || typeof requested !== 'object' || Array.isArray(requested)
+        || Object.keys(requested).some(k => !['id', 'mount'].includes(k))
+        || requested.mount !== '/work/scratch') {
+        throw new RuntimeError('invalid_scratch', 'scratch requires only a safe id and mount /work/scratch');
+      }
+      assertSafeId('scratch.id', requested.id);
+      scratch = { id: requested.id, mount: '/work/scratch' };
+    }
     const wv = path.join(workersView, workerId);
     const reg = registry.workers[workerId];
     if (reg) {
@@ -484,7 +520,10 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
       // inspect failure is NOT proof of absence — refuse without claiming
       // the container is gone (D14), so 'worker_terminal' stays truthful.
       const { state, inspectError } = await inspectWorker(reg);
-      if (state === 'running') {
+      if (state === 'running' || state === 'paused') {
+        if (!deepEqual(reg.scratch ?? null, scratch)) {
+          throw new RuntimeError('scratch_binding_mismatch', 'existing worker scratch binding is immutable');
+        }
         return { ok: true, worker: reg, existed: true, controller: identity() };
       }
       if (inspectError) {
@@ -496,7 +535,6 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
         + 'a new worker needs a new workerId (attempt retry)');
     }
 
-    const materials = p.materials || {};
     let depSet = null;
     if (materials.depSetId) {
       const ds = registry.depSets[materials.depSetId];
@@ -522,6 +560,13 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
       'attempt/out', 'attempt/pi-sessions', 'inputs', 'project']) {
       await ensureDir(path.join(wv, d));
     }
+    if (scratch) {
+      const scratchDir = path.join(wv, 'scratch');
+      await ensureDir(scratchDir);
+      if (await fs.realpath(scratchDir) !== scratchDir || await fs.realpath(wv) !== wv) {
+        throw new RuntimeError('invalid_scratch', 'scratch must be an owned directory without symlink redirects');
+      }
+    }
     await writeConf(wv, {
       attemptId, profile, profileId,
       prompt: p.prompt, porchConfig: p.porchConfig,
@@ -535,7 +580,7 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     if (depSet?.depPath && roleSpec.projectMode !== 'none') {
       await ensureDir(path.join(wv, 'project', depSet.depPath));
     }
-    const binds = await mountList(workerId, roleSpec, depSet);
+    const binds = await mountList(workerId, roleSpec, depSet, scratch);
 
     const rec = {
       schemaVersion: 1,
@@ -554,8 +599,10 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
       netName: `${envSec.networkNamePrefix}${workerId}`.slice(0, 120),
       project,
       depSetId: depSet?.id ?? null,
-      canonicalId: canonical?.id ?? null,
+      canonicalId: canonical?.id ?? registry.swarmSnapshots[materials.snapshotId]?.canonicalId ?? null,
       canonicalWorktree: canonical?.worktree ?? null,
+      scratch, scratchDir: scratch ? path.join(wv, 'scratch') : null,
+      frozen: false, freezeRequested: false, stopRequested: false,
       containerId: null,
       containerStartedAt: null,
       gone: false,
@@ -597,6 +644,7 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
   // assuming the namespace is down. A null inspect (404) is 'gone'.
   function dockerWorkerState(insp) {
     if (!insp) return 'gone';
+    if (insp.State?.Paused === true || insp.State?.Status === 'paused') return 'paused';
     if (insp.State?.Running === true) return 'running';
     const status = typeof insp.State?.Status === 'string' ? insp.State.Status.toLowerCase() : null;
     if (status === 'exited' || status === 'dead') return 'stopped';
@@ -649,7 +697,9 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     const { state, confirmedGone, inspectError } = await inspectWorker(rec);
     if (confirmedGone) await markGone(rec);
     return {
-      ok: true, workerId, state,
+      ok: true, workerId, state, frozen: state === 'paused',
+      freezeRequested: rec.freezeRequested === true, stopRequested: rec.stopRequested === true,
+      namespaceAlive: state === 'running' || state === 'paused',
       ...(inspectError
         ? { inspectError: String(inspectError?.message || inspectError).slice(0, 300) }
         : {}),
@@ -676,17 +726,71 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     return { ok: true, workers: out, controller: identity() };
   }
 
+  async function workerFreeze(p) {
+    const rec = registry.workers[p?.workerId];
+    if (!rec) throw new RuntimeError('unknown_worker', `no such worker: ${p?.workerId}`);
+    if (rec.stopRequested || rec.gone || ['stopped', 'removed', 'cancelled'].includes(rec.state)) {
+      throw new RuntimeError('worker_terminal', 'cannot freeze a terminal worker');
+    }
+    const observed = await inspectWorker(rec);
+    if (!['running', 'paused'].includes(observed.state)) {
+      throw new RuntimeError('worker_not_running', `cannot freeze worker in state ${observed.state}`);
+    }
+    rec.freezeRequested = true;
+    await saveRegistry();
+    if (observed.state !== 'paused') await docker.containerPause(rec.containerId);
+    const confirmed = await inspectWorker(rec);
+    if (confirmed.state !== 'paused') throw new RuntimeError('worker_freeze_unconfirmed', 'Docker pause is not confirmed');
+    rec.frozen = true; rec.state = 'paused';
+    await saveRegistry();
+    return { ok: true, workerId: rec.workerId, state: 'paused', frozen: true, controller: identity() };
+  }
+
+  async function workerThaw(p) {
+    const rec = registry.workers[p?.workerId];
+    if (!rec) throw new RuntimeError('unknown_worker', `no such worker: ${p?.workerId}`);
+    if (rec.stopRequested || rec.gone || ['stopped', 'removed', 'cancelled'].includes(rec.state)) {
+      throw new RuntimeError('worker_terminal', 'cannot thaw a terminal worker');
+    }
+    const observed = await inspectWorker(rec);
+    if (!['running', 'paused'].includes(observed.state)) {
+      throw new RuntimeError('worker_not_running', `cannot thaw worker in state ${observed.state}`);
+    }
+    rec.freezeRequested = false;
+    await saveRegistry();
+    if (observed.state === 'paused') await docker.containerUnpause(rec.containerId);
+    const confirmed = await inspectWorker(rec);
+    if (confirmed.state !== 'running') throw new RuntimeError('worker_thaw_unconfirmed', 'Docker unpause is not confirmed');
+    rec.frozen = false; rec.state = 'running';
+    await saveRegistry();
+    return { ok: true, workerId: rec.workerId, state: 'running', frozen: false, controller: identity() };
+  }
+
   async function workerStop(p) {
     const workerId = p?.workerId;
     const rec = registry.workers[workerId];
     if (!rec) throw new RuntimeError('unknown_worker', `no such worker: ${workerId}`);
-    if (rec.containerId) {
+    rec.stopRequested = true;
+    await saveRegistry();
+    const before = await inspectWorker(rec);
+    if (before.state === 'paused') {
+      // Never resume cancelled work just to stop it. Force-removing the
+      // registered container drains its frozen namespace directly.
+      await docker.containerRemove(rec.containerId, { force: true });
+    } else if (before.state === 'running') {
       await docker.containerStop(rec.containerId, { timeoutS: p?.timeoutS ?? 5 })
         .catch((e) => { throw new RuntimeError('worker_stop_failed', e.message); });
+    } else if (!['stopped', 'gone'].includes(before.state)) {
+      throw new RuntimeError('worker_stop_unconfirmed', `cannot stop unverifiable worker (${before.state})`);
     }
-    rec.state = 'stopped';
+    const confirmed = await inspectWorker(rec);
+    if (!['stopped', 'gone'].includes(confirmed.state)) {
+      throw new RuntimeError('worker_stop_unconfirmed', 'Docker did not confirm worker drainage');
+    }
+    rec.state = confirmed.state; rec.frozen = false; rec.freezeRequested = false;
+    if (confirmed.confirmedGone) { rec.gone = true; rec.goneAt = new Date().toISOString(); }
     await saveRegistry();
-    return { ok: true, workerId, state: 'stopped', controller: identity() };
+    return { ok: true, workerId, state: confirmed.state, controller: identity() };
   }
 
   async function workerRemove(p) {
@@ -950,14 +1054,98 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     return { ok: true, import: imp, controller: identity() };
   }
 
+  async function registeredCanonical(canonicalId) {
+    if (!CANON_RE.test(canonicalId || '')) throw new RuntimeError('invalid_argument', 'invalid canonicalId');
+    const rec = registry.canonicals[canonicalId];
+    if (!rec || rec.state !== 'ready') throw new RuntimeError('canonical_not_prepared', 'canonical must be registered and ready');
+    const root = await fs.realpath(canonView);
+    const real = await fs.realpath(rec.worktree);
+    if (!real.startsWith(root + '/') || real !== path.join(root, canonicalId, 'worktree')) {
+      throw new RuntimeError('canonical_binding_mismatch', 'canonical path escaped registered binding');
+    }
+    return rec;
+  }
+
+  async function swarmSnapshot(p) {
+    const canonical = await registeredCanonical(p.canonicalId);
+    if (!Number.isSafeInteger(p.generation) || p.generation < 0) {
+      throw new RuntimeError('invalid_argument', 'generation must be a nonnegative safe integer');
+    }
+    if (p.workspacePath !== undefined && p.workspacePath !== canonical.worktree
+      && p.workspacePath !== path.join(canonical.hostDir, 'worktree')) {
+      throw new RuntimeError('canonical_binding_mismatch', 'workspacePath must equal the registered canonical worktree');
+    }
+    for (const worker of Object.values(registry.workers)) {
+      if (worker.role !== 'swarm-participant' || worker.canonicalId !== canonical.id) continue;
+      const observed = await inspectWorker(worker);
+      if (!['paused', 'stopped', 'gone'].includes(observed.state)) {
+        throw new RuntimeError('snapshot_workers_unfrozen', `participant ${worker.workerId} has no physical pause/absence proof (${observed.state})`);
+      }
+    }
+    // Git stages the actual full working tree with fixed argv. Participants
+    // have already been physically frozen by the broker before this call.
+    const added = await git(canonical.worktree, ['add', '-A']);
+    if (added.code !== 0) throw new RuntimeError('snapshot_stage_failed', added.stderr.slice(0, 300));
+    const treeSha = await gitStdout(canonical.worktree, ['write-tree'], 'snapshot_stage_failed', 'snapshot tree');
+    const snapshotId = `ss-${crypto.createHash('sha256').update(`${canonical.id}:${p.generation}`).digest('hex').slice(0, 32)}`;
+    const existing = registry.swarmSnapshots[snapshotId];
+    if (existing) {
+      if (existing.treeSha !== treeSha) throw new RuntimeError('snapshot_generation_conflict', 'generation is already bound to a different working tree');
+      return snapshotResult(existing);
+    }
+    const previousTree = await gitStdout(canonical.worktree, ['rev-parse', 'HEAD^{tree}'], 'snapshot_commit_failed', 'canonical tree');
+    if (treeSha !== previousTree) {
+      const committed = await git(canonical.worktree, ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false',
+        '-c', 'user.email=acp-snapshot@local', '-c', 'user.name=acp-snapshot', 'commit', '-qm', `swarm generation ${p.generation}`]);
+      if (committed.code !== 0) throw new RuntimeError('snapshot_commit_failed', committed.stderr.slice(0, 300));
+    }
+    const snapshotSha = await gitStdout(canonical.worktree, ['rev-parse', 'HEAD'], 'snapshot_commit_failed', 'snapshot HEAD');
+    const repoGit = path.join(envRoot, 'snapshots', snapshotId, 'repo.git');
+    await ensureDir(path.dirname(repoGit));
+    // Isolated object copy pins the snapshot even after canonical imports.
+    // A previous interrupted copy has no durable binding and can be rebuilt.
+    await fs.rm(repoGit, { recursive: true, force: true });
+    const clone = await hostExec(['git', 'clone', '--bare', `file://${canonical.worktree}`, repoGit],
+      { timeoutMs: GIT_TIMEOUT, maxStdout: 1024 * 1024, maxStderr: 256 * 1024 });
+    if (clone.code !== 0) throw new RuntimeError('snapshot_clone_failed', clone.stderr.slice(0, 300));
+    await verifyCommit(repoGit, snapshotSha);
+    const rec = { state: 'ready', snapshotId, canonicalId: canonical.id, generation: p.generation,
+      projectRoot: canonical.projectRoot, snapshotSha, treeSha, repoGit, createdAt: new Date().toISOString() };
+    registry.swarmSnapshots[snapshotId] = rec;
+    await saveRegistry();
+    return snapshotResult(rec);
+  }
+
+  function snapshotResult(rec) {
+    return { ok: true, canonicalId: rec.canonicalId, generation: rec.generation,
+      snapshotSha: rec.snapshotSha, treeSha: rec.treeSha,
+      materials: { projectRoot: rec.projectRoot, snapshotSha: rec.snapshotSha, snapshotId: rec.snapshotId }, controller: identity() };
+  }
+
   // ---- dep sets --------------------------------------------------------------
 
   async function depsPrepare(p) {
+    if (Object.keys(p).some(k => !['setupId', 'projectRoot', 'snapshotSha', 'canonicalId'].includes(k))) {
+      throw new RuntimeError('invalid_argument', 'dependency setup accepts registered binding fields only');
+    }
     const setupId = p?.setupId;
     const setup = config.setups[setupId];
     if (!setup) throw new RuntimeError('setup_not_registered', `no such setup: ${setupId}`);
-    const src = await projectSource(p.projectRoot);
-    const sha = await verifyCommit(src, p.snapshotSha);
+    let src, sha, projectRoot = p.projectRoot;
+    if (p.canonicalId !== undefined) {
+      const canonical = await registeredCanonical(p.canonicalId);
+      src = canonical.worktree; projectRoot = canonical.projectRoot;
+      const dirty = await gitStdout(src, ['status', '--porcelain'], 'canonical_read_failed', 'canonical status');
+      if (dirty) throw new RuntimeError('canonical_dirty', 'snapshot canonical changes before preparing dependencies');
+      sha = await gitStdout(src, ['rev-parse', 'HEAD'], 'canonical_read_failed', 'canonical HEAD');
+      if ((p.projectRoot !== undefined && p.projectRoot !== projectRoot)
+        || (p.snapshotSha !== undefined && p.snapshotSha !== sha)) {
+        throw new RuntimeError('canonical_binding_mismatch', 'dependency source differs from registered canonical HEAD');
+      }
+    } else {
+      src = await projectSource(projectRoot);
+      sha = await verifyCommit(src, p.snapshotSha);
+    }
     // Lockfile bytes AT the snapshot — the dep set binds to exactly these.
     const lockParts = [];
     for (const lf of setup.lockfiles) {
@@ -978,7 +1166,7 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
       })).digest('hex').slice(0, 32);
     const existing = registry.depSets[depSetId];
     if (existing?.state === 'ready') {
-      return { ok: true, depSetId, cached: true, setupId, lockHash, controller: identity() };
+      return { ok: true, depSetId, cached: true, setupId, lockHash, snapshotSha: sha, canonicalId: p.canonicalId ?? null, controller: identity() };
     }
     // Materialize via a real setup worker — same constraints as a
     // participant worker plus a rw dep mount and the declared setup argv.
@@ -1030,7 +1218,7 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
       binds: binds.map(([source, target, mode]) => ({ source, target, mode })),
       containerName: `${envSec.workerNamePrefix}${workerId}`,
       netName: `${envSec.networkNamePrefix}${workerId}`.slice(0, 120),
-      project: { mode: 'setup', projectRoot: p.projectRoot, sha },
+      project: { mode: 'setup', projectRoot, sha },
       depSetId, depPath: depContainerPath,
       containerId: null, gone: false,
     };
@@ -1090,14 +1278,14 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     rec.state = 'consumed';
     const dsRec = {
       schemaVersion: 1, id: depSetId, setupId, lockHash,
-      projectRoot: p.projectRoot, snapshotSha: sha,
+      projectRoot, snapshotSha: sha, source: src, canonicalId: p.canonicalId ?? null,
       depPath: setup.depPath, createdAt: new Date().toISOString(),
       state: 'ready', setupLog: tailOf(res.stdout + '\n' + res.stderr, 4000),
     };
     registry.depSets[depSetId] = dsRec;
     await saveRegistry();
     await atomicWriteJson(path.join(finalView, '.depset-meta.json'), dsRec, 0o600);
-    return { ok: true, depSetId, cached: false, setupId, lockHash, controller: identity() };
+    return { ok: true, depSetId, cached: false, setupId, lockHash, snapshotSha: sha, canonicalId: p.canonicalId ?? null, controller: identity() };
   }
 
   async function depsStatus(p) {
@@ -1132,7 +1320,7 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     await atomicWriteJson(path.join(wv, 'conf', 'profile-flags.json'), [], 0o600);
     await atomicWriteJson(path.join(wv, 'conf', 'porch-config.json'), { agents: {} }, 0o600);
     await fs.writeFile(path.join(wv, 'conf', 'prompt.md'), '(check worker)', { mode: 0o600 });
-    const src = await projectSource(ds.projectRoot);
+    const src = ds.canonicalId ? (await registeredCanonical(ds.canonicalId)).worktree : await projectSource(ds.projectRoot);
     await gitArchiveExtract(src, ds.snapshotSha, path.join(wv, 'project'));
     // Pre-create the dep mountpoint — docker can't mkdir under the ro bind.
     await ensureDir(path.join(wv, 'project', setup.depPath));
@@ -1195,13 +1383,16 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     'worker.prepare': workerPrepare,
     'worker.status': workerStatus,
     'worker.list': workerList,
-    'worker.stop': workerStop,
-    'worker.remove': workerRemove,
+    'worker.freeze': p => exclusive(`worker:${p.workerId}`, () => workerFreeze(p)),
+    'worker.thaw': p => exclusive(`worker:${p.workerId}`, () => workerThaw(p)),
+    'worker.stop': p => exclusive(`worker:${p.workerId}`, () => workerStop(p)),
+    'worker.remove': p => exclusive(`worker:${p.workerId}`, () => workerRemove(p)),
     'worker.exec': workerExec,
     'canonical.prepare': canonicalPrepare,
     'canonical.status': canonicalStatus,
     'repo.import': repoImport,
-    'deps.prepare': depsPrepare,
+    'deps.prepare': p => exclusive(p.canonicalId ? `canonical:${p.canonicalId}` : `deps:${p.setupId}:${p.projectRoot}`, () => depsPrepare(p)),
+    'swarm.snapshot': p => exclusive(`canonical:${p.canonicalId}`, () => swarmSnapshot(p)),
     'deps.status': depsStatus,
     'deps.check': depsCheck,
     'registry.snapshot': async () => ({ ok: true, registry, controller: identity() }),
@@ -1213,7 +1404,14 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
   async function reconcileOnce() {
     for (const [wid, rec] of Object.entries(registry.workers)) {
       if (!rec.containerId) continue;
-      const { state, inspectError } = await inspectWorker(rec);
+      let { state, inspectError } = await inspectWorker(rec);
+      if (!inspectError && rec.freezeRequested && !rec.stopRequested && state === 'running') {
+        // A crash between durable freeze intent and Docker pause cannot
+        // admit writers on restart. Retry the physical barrier first.
+        await workerFreeze({ workerId: wid });
+        state = 'paused';
+      }
+      if (!inspectError) rec.frozen = state === 'paused';
       // A failed inspect carries no evidence about the container — keep the
       // last durable state untouched. A boot-time daemon error must never
       // mass-mark live workers gone.

@@ -202,7 +202,7 @@ export function createHandoffDriver(deps = {}) {
     ].join('\n');
   }
 
-  async function integratorInputs(card, run, wo, { fix = false } = {}) {
+  async function integratorInputs(card, run, wo, { fix = false, dependencies = null, sourceSnapshotSha = null } = {}) {
     const fz = run.fusion;
     const task = fz.snapshot?.task;
     const taskText = await docText(card.cardId, task);
@@ -224,15 +224,17 @@ export function createHandoffDriver(deps = {}) {
       hasPlan: planText !== null,
       hasDesign: designText !== null,
       fixContext: fix ? run.fixContext : null,
+      dependencies,
     });
     const materials = integratorMaterials({
       projectRoot: snap.projectRoot,
-      snapshotSha: snap.snapshotSha,
+      snapshotSha: sourceSnapshotSha ?? snap.snapshotSha,
       canonicalId: fz.integrate?.canonicalId ?? canonicalIdFor(run),
       taskText, workOrderText: woText,
       requirementsText, planText, designText,
       resultsBundle: results,
       fromCanonical: fix,
+      dependencies,
     });
     const inputs = [
       { name: 'task', sha256: task.sha256 },
@@ -257,6 +259,16 @@ export function createHandoffDriver(deps = {}) {
     if (inflight.has(att.id)) return 'launch_inflight';
     const p = (async () => {
       try {
+        // Durable stop/quiesce fence, including recovered launch attempts.
+        // A failed read cannot grant permission to spawn a worker.
+        const fresh = await getRun(run.id).catch(() => null);
+        const freshAtt = fresh?.attempts?.find((a) => a?.id === att.id);
+        if (!freshAtt || !owns(freshAtt.owner) || freshAtt.status !== 'launching'
+          || freshAtt.cancel || fresh.status === 'stopping'
+          || !RUN_NONTERMINAL.has(fresh.status) || !canLaunch()) {
+          return { held: true };
+        }
+
         return await runtime.start({
           attemptId: att.id,
           profileId: built.profileId,
@@ -267,13 +279,14 @@ export function createHandoffDriver(deps = {}) {
           launchTimeoutMs: (run.fusion.limits?.timeoutMin ?? 45) * 60 * 1000,
         });
       } catch (e) {
-        return { ok: false, phase: 'launch_failed', error: { code: 'start_threw', message: String(e?.message || e) } };
+        return { ok: false, phase: 'launch_uncertain', error: { code: 'start_threw', message: String(e?.message || e) } };
       } finally {
         inflight.delete(att.id);
       }
     })();
     inflight.set(att.id, p);
     const res = await p;
+    if (res?.held) return 'launch_held';
     if (!res?.ok) {
       if (res?.phase === 'launch_failed') {
         await send(card, 'resolve_attempt', {
@@ -307,14 +320,16 @@ export function createHandoffDriver(deps = {}) {
     }
     const wo = currentWo(run);
     if (!wo) return null;
-    const b = await integratorInputs(card, run, wo, { fix: att.fix !== undefined && att.fix !== null });
+    const b = await integratorInputs(card, run, wo, { fix: att.fix !== undefined && att.fix !== null, dependencies: att.launch?.dependencies ?? null, sourceSnapshotSha: att.launch?.snapshotSha ?? null });
     return { ...b, profileId: roleSpec.profileId, profile: roleSpec.profile };
   }
 
   async function reconcileLaunch(card, run, att, built) {
+    if (inflight.has(att.id)) return 'launch_inflight';
     const rec = await runtime.launchRecord(att.id).catch(() => null);
-    if (!rec || rec.missing) {
-      if (att.status === 'cancelling' || att.cancel) {
+    if (!rec || rec.corrupt) return 'launch_unreadable';
+    if (rec.missing === true) {
+      if (att.status === 'cancelling' || att.cancel || run.status === 'stopping') {
         await send(card, 'resolve_attempt', {
           runId: run.id, attemptId: att.id, outcome: 'cancelled',
           reason: att.cancel?.reason ?? 'cancelled before launch',
@@ -324,33 +339,35 @@ export function createHandoffDriver(deps = {}) {
       }
       return await startRuntime(card, run, att, built);
     }
-    if (rec.corrupt) return 'launch_unreadable';
-    const phase = rec.record?.phase ?? rec.phase ?? null;
-    if (phase === 'launched' && rec.record?.porchRunId) {
+    const evidence = rec.record ?? rec;
+    const phase = evidence.phase ?? null;
+    if (phase === 'launched' && evidence.porchRunId) {
       await send(card, 'bind_attempt', {
-        runId: run.id, attemptId: att.id, porchRunId: rec.record.porchRunId, ...self(),
+        runId: run.id, attemptId: att.id, porchRunId: evidence.porchRunId, ...self(),
       }, `bind-${att.id}-by-${instanceId}`);
       return 'bound';
     }
     if (phase === 'launch_failed') {
       await send(card, 'resolve_attempt', {
         runId: run.id, attemptId: att.id, outcome: 'failed',
-        reason: `${att.role} launch failed: ${rec.record?.error?.code ?? 'error'} — ${String(rec.record?.error?.message ?? '').slice(0, 300)}`,
+        reason: `${att.role} launch failed: ${evidence.error?.code ?? 'error'} — ${String(evidence.error?.message ?? '').slice(0, 300)}`,
         ...self(),
       }, `rs-${att.id}-launchfail-by-${instanceId}`);
       return 'launch_failed';
     }
     const scan = await runtime.reconcile({ attemptId: att.id }).catch(() => null);
-    const match = (scan?.matches || []).find((m) => m?.runId);
+    const matches = (scan?.matches || []).filter((m) => m?.runId);
+    if (matches.length > 1) return 'launch_reconcile';
+    const match = scan?.ok === true && matches.length === 1 ? matches[0] : null;
     if (match) {
       await send(card, 'bind_attempt', {
         runId: run.id, attemptId: att.id, porchRunId: match.runId, ...self(),
       }, `bind-${att.id}-by-${instanceId}`);
       return 'bound';
     }
-    const allGone = (scan?.workers || []).every((w) => w.gone === true)
+    const allGone = scan?.ok === true && (scan?.workers || []).every((w) => w.gone === true)
       && (scan?.workers || []).length > 0;
-    const recAt = Date.parse(rec.record?.launch?.startedAt ?? rec.record?.createdAt ?? '') || 0;
+    const recAt = Date.parse(evidence.launch?.startedAt ?? evidence.launchStartedAt ?? evidence.createdAt ?? '') || 0;
     if (allGone && recAt && now() - recAt > launchOrphanMs) {
       await send(card, 'resolve_attempt', {
         runId: run.id, attemptId: att.id, outcome: 'failed',
@@ -442,8 +459,8 @@ export function createHandoffDriver(deps = {}) {
     const timeoutMin = run.fusion.limits?.timeoutMin ?? 45;
     if (att.status === 'cancelling' || att.cancel || run.status === 'stopping') {
       if (!cancelIssued.has(att.id) && att.porchRunId) {
-        await runtime.cancel(att.porchRunId).catch(() => {});
-        cancelIssued.add(att.id);
+        const cancelled = await runtime.cancel(att.porchRunId).catch(() => null);
+        if (cancelled?.ok === true && cancelled.requested === true) cancelIssued.add(att.id);
       }
       const wt = await runtime.wait(att.porchRunId, { timeoutSec: 0 }).catch(() => null);
       if (wt?.outcome === 'terminal') {
@@ -455,7 +472,7 @@ export function createHandoffDriver(deps = {}) {
     }
     const wt = await runtime.wait(att.porchRunId, { timeoutSec: 0 }).catch(() => null);
     if (!wt || wt.outcome === 'error') return 'observe_retry';
-    if (wt.outcome === 'timeout') {
+    if (wt.outcome === 'timeout' || wt.outcome === 'observer_timeout') {
       const deadline = (att.startedAt ?? att.createdAt) + timeoutMin * 60 * 1000;
       if (now() > deadline) {
         await send(card, 'cancel_attempt', {
@@ -467,6 +484,7 @@ export function createHandoffDriver(deps = {}) {
       }
       return 'observing';
     }
+    if (wt.outcome !== 'terminal') return 'observe_retry';
     const code0 = (wt.runExitCode ?? wt.exitCode) === 0;
     const outcome = wt.status === 'cancelled' ? 'cancelled'
       : (wt.status === 'completed' && code0) ? 'completed'
@@ -522,10 +540,17 @@ export function createHandoffDriver(deps = {}) {
     const r = await git(ws.path, ['reset', '--hard', imp.import.commitSha]);
     if (r.code !== 0) return 'materialize_reset_failed';
     await git(ws.path, ['clean', '-fdq']);
+    // Dependency proof is committed with the imported result, so a changed
+    // lockfile cannot enter verification with the prior dependency set.
+    const prepared = await prepareDependencies(card, run, canonId);
+    if (!prepared.ok || (prepared.dependencies && prepared.dependencies.snapshotSha !== imp.import.commitSha)) {
+      return 'dependencies_unprepared';
+    }
     // 4) Durable record — after this the U5 gate sees the run exactly like
     //    a solo implementer's finished workspace.
     await send(card, 'record_integrate_result', {
       runId: run.id, attemptId: att.id,
+      ...(prepared.dependencies ? { dependencies: prepared.dependencies } : {}),
       import: {
         commitSha: imp.import.commitSha,
         treeSha: imp.import.treeSha ?? null,
@@ -572,6 +597,25 @@ export function createHandoffDriver(deps = {}) {
     });
   }
 
+  async function prepareDependencies(card, run, canonicalId) {
+    if (!run.fusion.setupId) return { ok: true, dependencies: null };
+    const result = typeof runtime.prepareDependencies === 'function'
+      ? await runtime.prepareDependencies({ setupId: run.fusion.setupId, canonicalId }).catch(() => null)
+      : null;
+    if (!result?.ok || result.setupId !== run.fusion.setupId
+      || !/^[0-9a-f]{32}$/.test(result.depSetId ?? '')
+      || !/^[0-9a-f]{64}$/.test(result.lockHash ?? '')
+      || !/^[0-9a-f]{40}$/.test(result.snapshotSha ?? '')
+      || result.canonicalId !== canonicalId) {
+      await recordEvent(card, run, 'dependency_preparation_blocked', {
+        setupId: run.fusion.setupId, canonicalId, code: result?.error?.code ?? 'dependencies_unproven',
+      }).catch(() => {});
+      return { ok: false };
+    }
+    return { ok: true, dependencies: { setupId: result.setupId, depSetId: result.depSetId,
+      lockHash: result.lockHash, snapshotSha: result.snapshotSha } };
+  }
+
   async function beginIntegrator(card, run, { fix = false } = {}) {
     const fz = run.fusion;
     const wo = currentWo(run);
@@ -592,7 +636,16 @@ export function createHandoffDriver(deps = {}) {
       }).catch((e) => ({ ok: false, error: { code: e.code ?? 'error', message: e.message } }));
       if (!cp?.ok) return 'canonical_unprepared';
     }
-    const built = await integratorInputs(card, run, wo, { fix });
+    const prepared = await prepareDependencies(card, run, canonId);
+    if (!prepared.ok) return 'dependencies_unprepared';
+    let sourceSnapshotSha = fz.snapshot.project.snapshotSha;
+    if (fix) {
+      const status = await runtime.canonicalStatus(canonId).catch(() => null);
+      if (!status?.ok || !/^[0-9a-f]{40}$/.test(status.canonical?.head ?? '')) return 'canonical_unreadable';
+      sourceSnapshotSha = status.canonical.head;
+    }
+    if (prepared.dependencies && prepared.dependencies.snapshotSha !== sourceSnapshotSha) return 'dependencies_unprepared';
+    const built = await integratorInputs(card, run, wo, { fix, dependencies: prepared.dependencies, sourceSnapshotSha });
     const spec = fz.integrator;
     const n = (run.attempts || []).filter((a) => a && a.role === 'integrator').length + 1;
     const attemptId = `ia-${run.id.slice(4)}-n${n}`;
@@ -607,6 +660,8 @@ export function createHandoffDriver(deps = {}) {
       inputs: built.inputs,
       workerId: `w-${attemptId}`,
       canonicalId: canonId,
+      snapshotSha: built.materials.snapshotSha,
+      ...(prepared.dependencies ? { dependencies: prepared.dependencies } : {}),
     };
     try {
       await send(card, 'integrate_begin', {
@@ -722,7 +777,8 @@ export function createHandoffDriver(deps = {}) {
       const r = await importAndMaterialize(card, run, integ);
       if (r === 'integrate_recorded') return r;
       if (r !== 'workspace_unresolved' && r !== 'workspace_foreign'
-        && r !== 'workspace_foreign_run' && r !== 'workspace_conflict') {
+        && r !== 'workspace_foreign_run' && r !== 'workspace_conflict'
+        && r !== 'dependencies_unprepared') {
         // The import is unrecoverable in this tick — a failed fix attempt
         // terminalizes; the initial integrate may retry via budget.
         if (integ.fix !== undefined && integ.fix !== null) {
