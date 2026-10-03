@@ -1497,6 +1497,9 @@ export async function cmdOrchGrant(D, ctx, aggregate, payload, now) {
   const oz = run.orchestrator;
   const task = taskById(oz, D.reqStr(payload.taskId, 'taskId'));
   if (!task) throw new D.CommandError(404, 'task_not_found', `task ${payload.taskId} unknown`);
+  if ((run.attempts ?? []).some(a => a.taskId === task.id && a.role === 'verifier' && D.ATTEMPT_NONTERMINAL.has(a.status))) {
+    throw new D.CommandError(409, 'grant_state', 'A live verifier must settle before its task can receive a grant');
+  }
   const verifierGrant = verifyBudgetExhausted(run, task);
   if (!verifierGrant && task.state.status !== 'blocked' && task.state.status !== 'waiting' && task.state.status !== 'failed') {
     throw new D.CommandError(409, 'grant_state',

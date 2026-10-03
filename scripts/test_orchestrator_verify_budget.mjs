@@ -50,7 +50,7 @@ test('blocked exhausted verifier grant resumes verification, ordinary worker gra
  }finally{await f.cleanup();}}
 });
 test('claim and grant do not expose or increase verifier budget while an attempt is live',async()=>{
- const f=await fixture();try{const a=await f.read();a.runs[0].attempts[1].status='running';await saveAggregate(join(a.projectPath,'state'),a);await f.internal('orch_claim');assert.deepEqual((await f.read()).runs[0].orchestrator.pendingActions,[]);assert.equal((await f.grant()).status,409);}finally{await f.cleanup();}
+ for(const status of ['verifying','blocked']){const f=await fixture(status);try{const a=await f.read();a.runs[0].attempts[1].status='running';await saveAggregate(join(a.projectPath,'state'),a);await f.internal('orch_claim');assert.equal((await f.read()).runs[0].orchestrator.pendingActions.some(x=>x.reason==='verify_attempts_exhausted'),false);assert.equal((await f.grant()).status,409);}finally{await f.cleanup();}}
 });
 
 test('a fix-budget grant retains ordinary worker semantics even with an old candidate',async()=>{
