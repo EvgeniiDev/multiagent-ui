@@ -44,7 +44,17 @@ export function createSwarmDriver(deps) {
  }
  async function drainWorker(card,run,att){
   if(att.namespace?.settledAt!==undefined)return true;const scoped=runtime.forAttempt?.(att.id);if(!scoped?.stopWorker||!scoped?.workerStatus)throw Object.assign(new Error('Worker namespace drain unavailable'),{code:'namespace_unwired'});
-  await scoped.stopWorker();const proof=await scoped.workerStatus();if(!['stopped','gone'].includes(proof?.state))return false;
+  let proof;
+  try {await scoped.stopWorker();proof=await scoped.workerStatus();}
+  catch(e){
+   if(e.code!=='unknown_worker')throw e;
+   const rec=await runtime.launchRecord?.(att.id);
+   if(rec?.attemptId!==att.id||rec.workerId!==workerId(att)||rec.phase!=='launch_failed'||rec.spawned!==false||rec.worker!==null)throw e;
+   // A missing controller registry entry alone never settles a namespace.
+   // Require its exact absence plus the durable pre-spawn failure record.
+   try {proof=await scoped.workerStatus();}catch(statusError){if(statusError.code!=='unknown_worker')throw statusError;proof={state:'gone'};}
+  }
+  if(!['stopped','gone'].includes(proof?.state))return false;
   await command(card,run,'swarm_worker_settled',{attemptId:att.id,workerId:workerId(att),state:proof.state},`namespace-${att.id}`);return true;
  }
  async function settle(card,run,att,wt,entry){
@@ -101,7 +111,7 @@ export function createSwarmDriver(deps) {
   if(!snapshot?.ok||!snapshot.materials?.snapshotId)return 'snapshot_unproven';
   if(readers.length){await physical(readers,false);await command(card,run,'swarm_freeze',{active:false,physicalConfirmed:true},`snapshot-release-${snapshotOperation}`);}
   const docs=await documents(card,run),prompt=buildSwarmPrompt({run,participant:p,...docs}),attemptId=`sp-${randomUUID()}`;
-  const materials={...snapshot.materials,inputs:{task:prompt,brief:JSON.stringify(run.inputs),messages:JSON.stringify(run.swarm.protocol.messages),decisions:JSON.stringify(run.swarm.protocol.decisions),ownership:JSON.stringify(run.swarm.protocol.files)},scratch:{id:attemptId,mount:'/work/scratch'}};
+  const materials={...snapshot.materials,inputs:Object.entries({task:prompt,brief:JSON.stringify(run.inputs),messages:JSON.stringify(run.swarm.protocol.messages),decisions:JSON.stringify(run.swarm.protocol.decisions),ownership:JSON.stringify(run.swarm.protocol.files)}).map(([name,content])=>({name,content})),scratch:{id:attemptId,mount:'/work/scratch'}};
   run=await fresh(run.id);if(!launchable(run))return 'launch_fenced';
   await command(card,run,'swarm_participant_begin',{participantId:p.participantId,attemptId,launch:{profileId:p.profileId,profileDigest:p.profileDigest,promptSha256:sha256(prompt),snapshotEpoch:snapshot.generation ?? run.swarm.epoch,prompt,materials,workerId:`w-${attemptId}`}},`begin-${attemptId}`);
   return 'turn_begun';
