@@ -101,6 +101,8 @@ export function createSwarmDriver(deps) {
   if(run.status==='stopping'||run.stopIntent||att.cancel||now()>=att.deadlineAt){
    if(!att.cancel)await command(card,run,'cancel_attempt',{attemptId:att.id,reason:'swarm stop or deadline'},`cancel-${att.id}`);
    if(entry){await entry.b.stop();} // rollback/publish and thaw before cancellation
+   const observed=await runtime.wait(att.porchRunId,{timeoutSec:0});
+   if(observed?.outcome==='terminal')return settle(card,await fresh(run.id),att,observed,entry);
    const cancelled=await runtime.cancel(att.porchRunId);if(cancelled?.ok===false)return 'cancel_unproven';
   }
   if(!att.cancel&&now()<att.deadlineAt&&!run.stopIntent&&run.status!=='stopping'&&typeof runtime.participantCommands==='function'){
