@@ -202,7 +202,7 @@ export function createHandoffDriver(deps = {}) {
     ].join('\n');
   }
 
-  async function integratorInputs(card, run, wo, { fix = false } = {}) {
+  async function integratorInputs(card, run, wo, { fix = false, dependencies = null } = {}) {
     const fz = run.fusion;
     const task = fz.snapshot?.task;
     const taskText = await docText(card.cardId, task);
@@ -224,6 +224,7 @@ export function createHandoffDriver(deps = {}) {
       hasPlan: planText !== null,
       hasDesign: designText !== null,
       fixContext: fix ? run.fixContext : null,
+      dependencies,
     });
     const materials = integratorMaterials({
       projectRoot: snap.projectRoot,
@@ -233,6 +234,7 @@ export function createHandoffDriver(deps = {}) {
       requirementsText, planText, designText,
       resultsBundle: results,
       fromCanonical: fix,
+      dependencies,
     });
     const inputs = [
       { name: 'task', sha256: task.sha256 },
@@ -318,7 +320,7 @@ export function createHandoffDriver(deps = {}) {
     }
     const wo = currentWo(run);
     if (!wo) return null;
-    const b = await integratorInputs(card, run, wo, { fix: att.fix !== undefined && att.fix !== null });
+    const b = await integratorInputs(card, run, wo, { fix: att.fix !== undefined && att.fix !== null, dependencies: att.launch?.dependencies ?? null });
     return { ...b, profileId: roleSpec.profileId, profile: roleSpec.profile };
   }
 
@@ -538,10 +540,17 @@ export function createHandoffDriver(deps = {}) {
     const r = await git(ws.path, ['reset', '--hard', imp.import.commitSha]);
     if (r.code !== 0) return 'materialize_reset_failed';
     await git(ws.path, ['clean', '-fdq']);
+    // Dependency proof is committed with the imported result, so a changed
+    // lockfile cannot enter verification with the prior dependency set.
+    const prepared = await prepareDependencies(card, run, canonId);
+    if (!prepared.ok || (prepared.dependencies && prepared.dependencies.snapshotSha !== imp.import.commitSha)) {
+      return 'dependencies_unprepared';
+    }
     // 4) Durable record — after this the U5 gate sees the run exactly like
     //    a solo implementer's finished workspace.
     await send(card, 'record_integrate_result', {
       runId: run.id, attemptId: att.id,
+      ...(prepared.dependencies ? { dependencies: prepared.dependencies } : {}),
       import: {
         commitSha: imp.import.commitSha,
         treeSha: imp.import.treeSha ?? null,
@@ -588,6 +597,25 @@ export function createHandoffDriver(deps = {}) {
     });
   }
 
+  async function prepareDependencies(card, run, canonicalId) {
+    if (!run.fusion.setupId) return { ok: true, dependencies: null };
+    const result = typeof runtime.prepareDependencies === 'function'
+      ? await runtime.prepareDependencies({ setupId: run.fusion.setupId, canonicalId }).catch(() => null)
+      : null;
+    if (!result?.ok || result.setupId !== run.fusion.setupId
+      || !/^[0-9a-f]{32}$/.test(result.depSetId ?? '')
+      || !/^[0-9a-f]{64}$/.test(result.lockHash ?? '')
+      || !/^[0-9a-f]{40}$/.test(result.snapshotSha ?? '')
+      || result.canonicalId !== canonicalId) {
+      await recordEvent(card, run, 'dependency_preparation_blocked', {
+        setupId: run.fusion.setupId, canonicalId, code: result?.error?.code ?? 'dependencies_unproven',
+      }).catch(() => {});
+      return { ok: false };
+    }
+    return { ok: true, dependencies: { setupId: result.setupId, depSetId: result.depSetId,
+      lockHash: result.lockHash, snapshotSha: result.snapshotSha } };
+  }
+
   async function beginIntegrator(card, run, { fix = false } = {}) {
     const fz = run.fusion;
     const wo = currentWo(run);
@@ -608,7 +636,9 @@ export function createHandoffDriver(deps = {}) {
       }).catch((e) => ({ ok: false, error: { code: e.code ?? 'error', message: e.message } }));
       if (!cp?.ok) return 'canonical_unprepared';
     }
-    const built = await integratorInputs(card, run, wo, { fix });
+    const prepared = await prepareDependencies(card, run, canonId);
+    if (!prepared.ok) return 'dependencies_unprepared';
+    const built = await integratorInputs(card, run, wo, { fix, dependencies: prepared.dependencies });
     const spec = fz.integrator;
     const n = (run.attempts || []).filter((a) => a && a.role === 'integrator').length + 1;
     const attemptId = `ia-${run.id.slice(4)}-n${n}`;
@@ -623,6 +653,7 @@ export function createHandoffDriver(deps = {}) {
       inputs: built.inputs,
       workerId: `w-${attemptId}`,
       canonicalId: canonId,
+      ...(prepared.dependencies ? { dependencies: prepared.dependencies } : {}),
     };
     try {
       await send(card, 'integrate_begin', {
@@ -738,7 +769,8 @@ export function createHandoffDriver(deps = {}) {
       const r = await importAndMaterialize(card, run, integ);
       if (r === 'integrate_recorded') return r;
       if (r !== 'workspace_unresolved' && r !== 'workspace_foreign'
-        && r !== 'workspace_foreign_run' && r !== 'workspace_conflict') {
+        && r !== 'workspace_foreign_run' && r !== 'workspace_conflict'
+        && r !== 'dependencies_unprepared') {
         // The import is unrecoverable in this tick — a failed fix attempt
         // terminalizes; the initial integrate may retry via budget.
         if (integ.fix !== undefined && integ.fix !== null) {

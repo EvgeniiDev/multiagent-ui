@@ -111,7 +111,7 @@ export function judgeMaterials({ projectRoot, snapshotSha, taskText, answersBund
 export function buildIntegratorPrompt({
   cardTitle = null, taskText = null, workOrderText, resultKind,
   hasRequirements = false, hasPlan = false, hasDesign = false,
-  fixContext = null,
+  fixContext = null, dependencies = null,
 }) {
   const docs = [];
   if (hasRequirements) docs.push('- requirements: /work/inputs/requirements');
@@ -128,6 +128,7 @@ export function buildIntegratorPrompt({
     '# Materials',
     '',
     '- the project (your private writable repository): /work/project',
+    dependencies ? `- prepared read-only dependencies: registered setup ${dependencies.setupId}` : null,
     '- task: /work/inputs/task',
     '- work order (the authoritative scope): /work/inputs/work-order',
     ...docs,
@@ -137,6 +138,7 @@ export function buildIntegratorPrompt({
     '# Rules',
     '',
     '- Implement the work order exactly — it is the accepted scope.',
+    dependencies ? '- Use the prepared dependencies; lockfile changes are prepared again before verification.' : null,
     '- Where the work order disagrees with the actual code, fix the',
     '  mismatch inside the already-accepted behavior and list EVERY such',
     '  mismatch under ## Mismatches in your report.',
@@ -177,7 +179,7 @@ export function buildIntegratorPrompt({
 export function integratorMaterials({
   projectRoot, snapshotSha, canonicalId, taskText, workOrderText,
   requirementsText = null, planText = null, designText = null,
-  resultsBundle = null, fromCanonical = false,
+  resultsBundle = null, fromCanonical = false, dependencies = null,
 }) {
   const inputs = [
     { name: 'task', content: taskText ?? '' },
@@ -191,6 +193,7 @@ export function integratorMaterials({
     projectRoot,
     snapshotSha,
     canonicalId,
+    ...(dependencies ? { setupId: dependencies.setupId, depSetId: dependencies.depSetId, lockHash: dependencies.lockHash } : {}),
     ...(fromCanonical ? { fromCanonical: true } : {}),
     inputs,
   };

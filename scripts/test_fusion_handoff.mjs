@@ -618,7 +618,7 @@ async function mkPanelists(...profiles) {
 async function startFusion(svc, cardId, {
   task, panelists, resultKind = 'document',
   judge = null, integrator = null, review = null,
-  search = false, maxAttempts = 2, timeoutMin = 45, baseRef,
+  search = false, maxAttempts = 2, timeoutMin = 45, baseRef, setupId = null,
 } = {}) {
   const c = await getCard(svc, cardId);
   const r = await cmd(svc, cardId, {
@@ -629,6 +629,7 @@ async function startFusion(svc, cardId, {
       ...(baseRef ? { baseRef } : {}),
       fusion: {
         resultKind, task, panelists,
+        ...(setupId ? { setupId } : {}),
         ...(judge ? { judge: { profile: judge } } : {}),
         ...(integrator ? { integrator: { profile: integrator } } : {}),
         ...(review ? { review } : {}),
@@ -1537,4 +1538,125 @@ test('contract: comparison-only outputs fail the work-order contract; reports pa
   assert.ok(bundle.includes('AAA') && bundle.includes('BBB'));
   assert.ok(bundle.includes('p3') && bundle.includes('kept failing'));
   assert.ok(!bundle.includes('## Participant p3'), 'excluded participants contribute no answer body');
+});
+
+async function dependencyScenario({ failPostImport = false, failPrelaunch = false, failFixPostImport = false, fix = false, lostBind = false } = {}) {
+  const env = await mkEnv(); const { svc, projectDir } = env;
+  await fs.writeFile(join(projectDir, 'package-lock.json'), '{"version":1}');
+  git(projectDir, 'add', '-A'); git(projectDir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'lockfile');
+  await seedBase(svc, projectDir); const { req1 } = await seedImplCard(svc);
+  const spec = implSpec(svc, req1);
+  spec.setupId = 'node-deps';
+  spec.panelists = await mkPanelists(fusionProfile('a'), fusionProfile('b'));
+  const runId = await mustStartFusion(svc, 'card-a', spec);
+  const initialSha = git(projectDir, 'rev-parse', 'HEAD');
+  const { sched, runtime, instanceId } = mkSched(env, { behaviors: {
+    'ja-': { runMs:4, finalText:makeWorkOrder('in_plan') },
+    'ia-': { lostBind, runMs:10, finalText:makeReport({}), edits: { write: {
+      'src/new-module.js':'export const x = 1;\n', 'package-lock.json':'{"version":2}',
+    } } }, default:{ runMs:4, finalText:makeAnswer('answer') },
+  }, roleDocs: {
+    'acp-reviewer': (_p, round) => ({ version:1, round, findings:fix && round === 1
+      ? [{ id:'dependency-fix', round, severity:'critical', status:'open', text:'fix edge case' }] : [] }),
+    'acp-checker': (_p, round) => ({ version:1, round, verdicts:fix && round === 1
+      ? [{ findingId:'dependency-fix', verdict:'confirmed', round }] : [] }),
+  } });
+  const prepared = []; let fail = failPostImport || failPrelaunch || failFixPostImport;
+  runtime.prepareDependencies = async params => {
+    const c = runtime._canonicals.get(params.canonicalId);
+    assert.ok(c, 'dependency setup uses the registered canonical binding');
+    const snapshotSha = git(c.worktree, 'rev-parse', 'HEAD');
+    prepared.push({ params, snapshotSha });
+    if (fail && ((failPostImport && snapshotSha !== initialSha)
+      || (failPrelaunch && snapshotSha === initialSha) || (failFixPostImport && prepared.length >= 4))) return { ok:false, error:{ code:'controller_unreachable' } };
+    const lock = git(c.worktree, 'show', `${snapshotSha}:package-lock.json`);
+    const lockHash = sha256Hex(lock);
+    return { ok:true, setupId:params.setupId, depSetId:lockHash.slice(0,32), lockHash, snapshotSha, canonicalId:c.id };
+  };
+  return { ...env, runId, sched, runtime, instanceId, prepared, initialSha, allowPreparation: () => { fail = false; } };
+}
+
+test('declared setup binds integrator launch and refreshes dependencies after changed lockfile import', async () => {
+  const f = await dependencyScenario({ lostBind:true });
+  let run = await driveUntil(f.svc, f.sched, f.runId, r => r.status === 'awaiting_acceptance', { maxTicks:100 });
+  assert.equal(run.status, 'awaiting_acceptance', J({ status:run.status, phase:run.phase, error:run.error }));
+  assert.equal(run.fusion.setupId, 'node-deps');
+  const att = run.attempts.find(a => a.role === 'integrator');
+  assert.equal(att.launch.dependencies.setupId, 'node-deps');
+  const start = startsCalls(f.runtime).find(c => c.params.attemptId === att.id);
+  assert.equal(start.params.materials.depSetId, att.launch.dependencies.depSetId);
+  assert.equal(start.params.materials.lockHash, att.launch.dependencies.lockHash);
+  assert.equal(f.prepared.filter(p => p.snapshotSha === f.initialSha).length, 1, 'lost binding recovery uses the immutable launch proof');
+  assert.notEqual(run.fusion.integrate.dependencies.lockHash, att.launch.dependencies.lockHash);
+  assert.equal(run.fusion.integrate.dependencies.snapshotSha, run.fusion.integrate.import.commitSha);
+  for (const c of startsCalls(f.runtime).filter(c => ['panelist','judge'].includes(c.params.role))) {
+    assert.equal(c.params.materials.depSetId, undefined, 'read-only roles retain deps:false');
+  }
+});
+
+test('failed post-import dependency refresh holds validation until matching preparation succeeds', async () => {
+  const f = await dependencyScenario({ failPostImport:true });
+  let run = await driveUntil(f.svc, f.sched, f.runId, () => f.prepared.some(p => p.snapshotSha !== f.initialSha));
+  assert.equal(f.prepared.some(p => p.snapshotSha !== f.initialSha), true, 'post-import setup was attempted');
+  assert.equal(run.phase, 'integrate'); assert.equal(run.status, 'active');
+  assert.equal((run.attempts || []).some(a => ['reviewer','checker'].includes(a.role)), false);
+  await f.sched.tick(); run = await runView(f.svc, f.runId); assert.equal(run.phase, 'integrate');
+  f.allowPreparation();
+  run = await driveUntil(f.svc, f.sched, f.runId, r => r.status === 'awaiting_acceptance', { maxTicks:100 });
+  assert.equal(run.status, 'awaiting_acceptance');
+  assert.equal(run.fusion.integrate.dependencies.snapshotSha, run.fusion.integrate.import.commitSha);
+});
+
+test('fusion setup selection rejects unsafe IDs before creating a run', async () => {
+  const env = await mkEnv(); await seedBase(env.svc, env.projectDir);
+  const { req1 } = await seedImplCard(env.svc); const spec = implSpec(env.svc, req1);
+  spec.panelists = await mkPanelists(fusionProfile('a'), fusionProfile('b')); spec.setupId = '../arbitrary';
+  const result = await startFusion(env.svc, 'card-a', spec);
+  assert.equal(result.status, 422); assert.equal(result.json.code, 'panel_invalid');
+});
+
+test('setup failure before integrator launch preserves the attempt budget', async () => {
+  const f = await dependencyScenario({ failPrelaunch:true });
+  let run = await driveUntil(f.svc, f.sched, f.runId, () => f.prepared.length > 0);
+  assert.equal(run.phase, 'integrate');
+  assert.equal(run.attempts.some(a => a.role === 'integrator'), false);
+  await f.sched.tick(); run = await runView(f.svc, f.runId);
+  assert.equal(run.attempts.some(a => a.role === 'integrator'), false);
+  f.allowPreparation();
+  run = await driveUntil(f.svc, f.sched, f.runId, r => r.status === 'awaiting_acceptance', { maxTicks:100 });
+  assert.equal(run.status, 'awaiting_acceptance');
+  assert.equal(run.attempts.filter(a => a.role === 'integrator').length, 1);
+});
+
+test('fix round cannot begin its next validation while dependency proof is pending', async () => {
+  const f = await dependencyScenario({ fix:true, failFixPostImport:true });
+  let run = await driveUntil(f.svc, f.sched, f.runId, () => f.prepared.length >= 4, { maxTicks:120 });
+  assert.equal(f.prepared.length >= 4, true);
+  const fixAtt = run.attempts.find(a => a.role === 'integrator' && a.fix === 1);
+  assert.equal(fixAtt?.status, 'completed'); assert.ok(run.fixContext, 'pending proof retains the fix gate');
+  assert.notEqual(run.fusion.integrate.import.attemptId, fixAtt.id);
+  await f.sched.tick(); run = await runView(f.svc, f.runId);
+  assert.equal(run.attempts.some(a => a.role === 'reviewer' && a.round === 2), false);
+  f.allowPreparation();
+  run = await driveUntil(f.svc, f.sched, f.runId, r => r.status === 'awaiting_acceptance', { maxTicks:120 });
+  assert.equal(run.status, 'awaiting_acceptance'); assert.equal(run.round, 2);
+  assert.equal(run.fusion.integrate.import.attemptId, fixAtt.id);
+  assert.equal(run.fusion.integrate.dependencies.snapshotSha, run.fusion.integrate.import.commitSha);
+});
+
+test('domain rejects missing or mismatched post-import dependency proof', async () => {
+  const f = await dependencyScenario({ failPostImport:true });
+  const run = await driveUntil(f.svc, f.sched, f.runId, () => f.prepared.some(p => p.snapshotSha !== f.initialSha));
+  const att = run.attempts.find(a => a.role === 'integrator');
+  const canonical = f.runtime._canonicals.get(att.launch.canonicalId);
+  const commitSha = git(canonical.worktree, 'rev-parse', 'HEAD');
+  for (const dependencies of [undefined, { ...att.launch.dependencies, snapshotSha:f.initialSha },
+    { ...att.launch.dependencies, setupId:'unapproved', snapshotSha:commitSha }]) {
+    const r = await internalCmd(f, 'card-a', { commandId:`proof-${randomUUID().slice(0,6)}`, type:'record_integrate_result', payload: {
+      runId:f.runId, attemptId:att.id, import:{ commitSha, treeSha:git(canonical.worktree,'rev-parse','HEAD^{tree}') },
+      ...(dependencies ? { dependencies } : {}), runnerId:'host-runner', instanceId:f.instanceId, pid:4242,
+    } });
+    assert.equal(r.status,409); assert.equal(r.json.code,'dependency_binding_mismatch');
+  }
+  assert.equal((await runView(f.svc,f.runId)).phase,'integrate');
 });

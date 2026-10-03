@@ -116,6 +116,10 @@ function validateRoleProfile(raw, name) {
 // drift from the recorded digest.
 export function validateFusionSpec(raw) {
   if (!isObj(raw)) fail('panel_invalid', 'payload.fusion must be an object');
+  const setupId = raw.setupId ?? null;
+  if (setupId !== null && (typeof setupId !== 'string' || !SAFE_ID_RE.test(setupId))) {
+    fail('panel_invalid', 'fusion.setupId must be a safe registered setup ID');
+  }
   const resultKind = raw.resultKind;
   if (typeof resultKind !== 'string' || !FUSION_RESULT_KINDS.has(resultKind)) {
     fail('panel_invalid',
@@ -186,9 +190,13 @@ export function validateFusionSpec(raw) {
     fail('panel_invalid',
       'a document run carries no integrator/review — its result is the work order only');
   }
+  if (setupId && resultKind !== 'implementation') {
+    fail('panel_invalid', 'fusion.setupId requires an implementation result');
+  }
   const limits = isObj(raw.limits) ? raw.limits : {};
   return {
     resultKind,
+    setupId,
     search: { enabled: searchEnabled },
     limits: {
       maxAttemptsPerParticipant: clampInt(

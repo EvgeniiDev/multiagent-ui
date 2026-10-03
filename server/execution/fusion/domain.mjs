@@ -160,6 +160,7 @@ function computeFingerprint({ inputsSha256 = null, task, project, spec }) {
     snapshotSha: project.snapshotSha,
     searchEnabled: spec.search.enabled === true,
     resultKind: spec.resultKind,
+    ...(spec.setupId ? { setupId: spec.setupId } : {}),
   }));
 }
 
@@ -220,6 +221,7 @@ export async function buildFusionRun(D, ctx, aggregate, payload, now) {
     workspaceId: null,
     fusion: {
       resultKind: spec.resultKind,
+      setupId: spec.setupId,
       owner: null,
       fingerprint,
       snapshot: {
@@ -295,7 +297,7 @@ export async function buildFusionContinuation(D, ctx, aggregate, payload, prev, 
     ? sha256(canonicalJson(inputs)) : null;
   const fingerprint = computeFingerprint({
     inputsSha256, task, project,
-    spec: { resultKind: fz.resultKind, search: fz.snapshot?.search ?? { enabled: false } },
+    spec: { resultKind: fz.resultKind, setupId: fz.setupId, search: fz.snapshot?.search ?? { enabled: false } },
   });
   // F3 handoff composition carries forward verbatim from the predecessor
   // (continue never re-specifies it); an implementation run re-validates
@@ -349,6 +351,7 @@ export async function buildFusionContinuation(D, ctx, aggregate, payload, prev, 
     workspaceId: null,
     fusion: {
       resultKind: fz.resultKind,
+      setupId: fz.setupId ?? null,
       owner: null,
       fingerprint,
       snapshot: {
@@ -658,7 +661,7 @@ export function onIntegratorResolved(D, run, att, outcome, report, parsed, now) 
   // A completed fix attempt consumed the recorded fixContext — same rule
   // as the solo implementer: the context stays only as evidence while the
   // run re-enters validation for the new round.
-  if (att.fix !== undefined && att.fix !== null) run.fixContext = null;
+  if (att.fix !== undefined && att.fix !== null && !fz.setupId) run.fixContext = null;
 }
 
 // The panel-evidence blocklist: sha256 of EVERY artifact committed by a
@@ -751,6 +754,23 @@ function checkHandoffLaunch(D, launch, spec, role) {
     && (typeof launch.workerId !== 'string' || !SAFE_ID_RE.test(launch.workerId))) {
     throw new D.CommandError(422, 'invalid_argument', `launch.workerId must match ${SAFE_ID_RE}`);
   }
+}
+
+function checkDependencyBinding(D, value, setupId, snapshotSha = null) {
+  if (!setupId) {
+    if (value !== undefined && value !== null) {
+      throw new D.CommandError(409, 'dependency_binding_mismatch', 'run declares no dependency setup');
+    }
+    return null;
+  }
+  if (!isObj(value) || value.setupId !== setupId
+    || typeof value.depSetId !== 'string' || !/^[0-9a-f]{32}$/.test(value.depSetId)
+    || typeof value.lockHash !== 'string' || !D.SHA256_RE.test(value.lockHash)
+    || typeof value.snapshotSha !== 'string' || !/^[0-9a-f]{40}$/.test(value.snapshotSha)
+    || (snapshotSha && value.snapshotSha !== snapshotSha)) {
+    throw new D.CommandError(409, 'dependency_binding_mismatch', 'dependency proof must bind the declared setup and exact source commit');
+  }
+  return { setupId, depSetId: value.depSetId, lockHash: value.lockHash, snapshotSha: value.snapshotSha };
 }
 
 // Declared launch inputs: every entry is {name, sha256} — the name must be
@@ -986,6 +1006,8 @@ export async function cmdIntegrateBegin(D, ctx, aggregate, payload, now) {
   await assertFreshAttemptId(D, ctx, aggregate, attemptId);
   const slots = await handoffSlotCheck(D, ctx, aggregate, run, 'integrator');
   checkHandoffLaunch(D, payload.launch, fz.integrator, 'integrator');
+  const dependencies = checkDependencyBinding(D, payload.launch.dependencies, fz.setupId);
+  if (dependencies) payload.launch.dependencies = dependencies;
   // Canonical binding: first mint wins, later attempts must match — the
   // private-repo ↔ canonical pairing survives restart without re-import.
   const cid = payload.launch.canonicalId;
@@ -1067,7 +1089,10 @@ export async function cmdRecordIntegrateResult(D, ctx, aggregate, payload, now) 
     && (typeof imp.treeSha !== 'string' || !imp.treeSha.length || imp.treeSha.length > 128)) {
     throw new D.CommandError(422, 'invalid_argument', 'import.treeSha must be a non-empty string');
   }
+  const dependencies = checkDependencyBinding(D, payload.dependencies, fz.setupId, imp.commitSha);
   fz.integrate ??= {};
+  if (dependencies) fz.integrate.dependencies = dependencies;
+  if (isFix) run.fixContext = null;
   fz.integrate.import = {
     attemptId: att.id,
     fix: isFix ? att.fix : null,
