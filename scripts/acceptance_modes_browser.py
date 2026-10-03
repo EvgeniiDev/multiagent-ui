@@ -116,6 +116,7 @@ import argparse
 import json
 import re
 import sys
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -338,7 +339,8 @@ def merge_fixture_live(tag, kinds, fixture_root):
     if any(p.get("id") == pid for p in projects):
         fail_closed(f"fixture collision {pid} — pass --existing-fixture-state instead of reseeding")
     now_ms = int(time.time() * 1000)
-    projects.append({"id": pid, "name": f"acceptance {tag} {ts}",
+    project_name = f"acceptance {tag} {ts}"
+    projects.append({"id": pid, "name": project_name,
                      "path": str(Path(fixture_root)),
                      "createdAt": now_ms})
     st, res = api("PUT", "/api/state/projects.json",
@@ -354,9 +356,9 @@ def merge_fixture_live(tag, kinds, fixture_root):
         if cid in have:
             fail_closed(f"fixture card collision {cid}")
         cards.append({
-            "id": cid, "title": f"acceptance {m} {ts}",
+            "id": cid, "title": f"{cid} acceptance {m}",
             "description": "production acceptance browser harness",
-            "project": pid,
+            "project": project_name,
             "agent": "", "priority": "normal", "acceptance": "",
             "verification": "", "links": [], "session": None,
             "blocked": False, "blockedReason": "", "cancelled": False,
@@ -452,6 +454,7 @@ def open_card_drawer(page, card_id):
     No TODO, no delegation: the exact panel testid differs per mode."""
     import re as _re
     page.goto(UI_URL, wait_until="domcontentloaded")
+    page.locator('select[aria-label="Project scope"]').select_option("all")
     sel = _re.compile(_re.escape(card_id) + r"(?![0-9a-z-])")
     deadline = time.time() + 120
     while True:
@@ -480,7 +483,8 @@ def open_card_drawer(page, card_id):
 
 
 def enable_card_ui(page):
-    page.locator('[data-testid="exec-enable"]').click()
+    if page.locator('[data-testid="exec-enable"]').count():
+        page.locator('[data-testid="exec-enable"]').click()
     page.locator('[data-testid="exec-status-line"]').wait_for(timeout=20000)
 
 
@@ -489,9 +493,10 @@ def read_compat_models(page):
     [data-testid="exec-composition"] option values + compat-error text.
     No window.__* globals are consulted (none exist)."""
     try:
-        models = page.locator(
-            '[data-testid="exec-composition"] select option').evaluate_all(
-            "els => els.map(e => e.value || e.textContent).filter(v => v && v !== 'model…' && v !== '')")
+        status, registry = api("GET", "/api/execution/presets")
+        if status != 200 or not isinstance(registry, dict):
+            return [], f"compatibility endpoint returned {status}"
+        models = ((registry.get("compatibility") or {}).get("pi") or {}).get("models") or []
         err = ""
         if page.locator('[data-testid="compat-error"]').count():
             err = page.locator('[data-testid="compat-error"]').first.inner_text(timeout=3000)
@@ -563,8 +568,7 @@ def check_run_evidence(mode, run, card_id, fixture_root):
     provider attempt + workspace diff inside the fixture root."""
     attempts = (run or {}).get("attempts") or []
     real_attempts = [a for a in attempts
-                     if isinstance(a, dict) and (a.get("porchRunId") or a.get("startedAt")
-                                                or a.get("status") not in (None, "pending"))]
+                     if isinstance(a, dict) and a.get("porchRunId")]
     check(f"{mode}-attempts-nonempty-real-provider", len(real_attempts) > 0,
           f"attempts={len(attempts)} real={len(real_attempts)}")
     acc = (run or {}).get("acceptance") or {}
@@ -576,15 +580,30 @@ def check_run_evidence(mode, run, card_id, fixture_root):
     ws_ok, ws_detail = False, ""
     if st == 200 and isinstance(view, dict):
         ws = (view.get("workspaces") or {})
-        rid = current_run_id(view)
-        for wid, w in ws.items():
-            if isinstance(w, dict) and w.get("runId") == rid and w.get("status") == "ready":
-                p = w.get("path") or ""
-                ws_ok = p.startswith(str(fixture_root))
-                ws_detail = f"{wid} path={p}"
-                break
-        ws_detail = ws_detail or f"workspaces={list(ws)[:4]}"
-    check(f"{mode}-workspace-diff-fixture-root", ws_ok, ws_detail)
+        w = ws.get((run or {}).get("workspaceId")) or {}
+        project_bound = Path((view.get("project") or {}).get("path") or "/").resolve() == Path(fixture_root).resolve()
+        if w.get("runId") == run.get("id") and w.get("status") == "ready" and project_bound:
+            path = Path(w.get("path") or "/").resolve()
+            workspace_root = Path("/home/hermes/projects/.acp-workspaces").resolve()
+            if path.is_relative_to(workspace_root) and path.is_dir():
+                baseline = w.get("baseCommit") or run.get("baseCommit")
+                diff = subprocess.run(["git", "diff", "--name-only", baseline, "HEAD"], cwd=path,
+                                      capture_output=True, text=True, timeout=30) if baseline else None
+                changed = set(diff.stdout.splitlines()) if diff and diff.returncode == 0 else set()
+                probe = subprocess.run(["node", "--input-type=module", "-e",
+                    "import {clamp} from './clamp.js'; import assert from 'node:assert/strict'; "
+                    "assert.equal(clamp(5,0,10),5); assert.equal(clamp(-1,0,10),0); assert.equal(clamp(99,0,10),10)"],
+                    cwd=path, capture_output=True, text=True, timeout=30)
+                tests = subprocess.run(["node", "--test"], cwd=path, capture_output=True, text=True, timeout=60)
+                ws_ok = ("clamp.js" in changed and "clamp.test.js" in changed
+                         and probe.returncode == 0 and tests.returncode == 0
+                         and re.search(r"# tests [1-9]", tests.stdout) is not None)
+                ws_detail = f"{w.get('id')} path={path} changes={sorted(changed)} probe={probe.returncode} tests={tests.returncode}"
+            else:
+                ws_detail = f"unconfined or absent workspace: {path}"
+        else:
+            ws_detail = f"workspace binding mismatch project={project_bound} run={w.get('runId')}"
+    check(f"{mode}-workspace-real-clamp-diff-and-tests", ws_ok, ws_detail)
     return (len(real_attempts) > 0 and bool(acc.get("resultSha256"))
             and validation_passes(run) and ws_ok)
 
@@ -618,6 +637,10 @@ def mode_preparation(pw, args, outdir, card_id, exec_ctx):
     track_page(page)
     try:
         open_card_drawer(page, card_id)
+        enable_card_ui(page)
+        if not ensure_preset_ui(page, "preparation"):
+            return False
+        page.locator('[data-testid="prep-panel"]').wait_for(timeout=20000)
         if page.locator('[data-testid="prep-panel"]').count() == 0:
             check("prep-panel-mounted-correct-card", False, "prep panel absent after drawer open")
             shot(page, outdir, "preparation-no-panel")
@@ -636,7 +659,11 @@ def mode_preparation(pw, args, outdir, card_id, exec_ctx):
                 return False
         else:
             page.locator('[data-testid="prep-intent"]').fill(
-                "Acceptance clamp feature: " + README_TASK)
+                "Acceptance clamp feature: " + README_TASK +
+                ' The generated development plan must include an acp-checks fenced JSON block '
+                'with {"checks":[{"run":"node --test","timeoutSec":60}]} and require actual tests.')
+            page.locator('[data-testid="prep-bindings-start"] summary').click()
+            page.locator('[data-testid="prep-start-bind-intent"]').select_option("grill-me-intent")
             page.locator('[data-testid="prep-start"]').click()
         v = wait_prep(card_id, lambda s: s.get("status") == "active", timeout_s=30)
         check("prep-session-active", v is not None, str((v or {}).get("sessionId")))
@@ -650,7 +677,16 @@ def mode_preparation(pw, args, outdir, card_id, exec_ctx):
         while time.time() < deadline:
             rows = page.locator('[data-testid^="prep-q-"].prep-q-open')
             if rows.count() == 0:
-                break
+                _, current_prep = prep_view(card_id)
+                current_prep = current_prep.get("preparation") or current_prep
+                kickoff = [a for a in current_prep.get("attempts", []) if a.get("kind") == "kickoff"]
+                if kickoff and kickoff[-1].get("status") == "completed":
+                    break
+                if kickoff and kickoff[-1].get("status") in ("failed", "cancelled"):
+                    check("prep-kickoff-real-completion", False, str(kickoff[-1]))
+                    return False
+                page.wait_for_timeout(2000)
+                continue
             row = rows.first
             qid = (row.get_attribute("data-testid") or "").removeprefix("prep-q-")
             if not qid:
@@ -694,8 +730,8 @@ def mode_preparation(pw, args, outdir, card_id, exec_ctx):
                 shot(page, outdir, f"preparation-no-{kind}")
                 return False
             prep = got
-        # Approve the EXACT generated versions via the panel doc viewer.
-        for kind in ("requirements", "plan"):
+            # Approval of requirements precedes plan generation; the plan
+            # binds the accepted requirements version, not an unapproved draft.
             ver = ((prep.get("presented") or {}).get(kind) or {}).get("versionId")
             page.locator(".exec-doc-tabs").locator(
                 "button", has_text=re.compile(kind[:4], re.I)).first.click()
@@ -705,9 +741,9 @@ def mode_preparation(pw, args, outdir, card_id, exec_ctx):
             page.locator('[data-testid="doc-approve"]').click()
             page.wait_for_timeout(2000)
             st, view = card_view(card_id)
-            appr = ((view.get("documents") or {}).get(kind) or {}) if st == 200 else {}
-            ok_appr = (appr.get("current") == ver)
-            check(f"prep-approved-exact-{kind}", ok_appr, f"current={appr.get('current')} want={ver}")
+            appr = ((view.get("approvals") or {}).get(kind) or {}) if st == 200 else {}
+            ok_appr = appr.get("versionId") == ver and bool(appr.get("sha256"))
+            check(f"prep-approved-exact-{kind}", ok_appr, f"approved={appr.get('versionId')} want={ver}")
             if not ok_appr:
                 return False
         # Confirm every pending gate through the real Confirm buttons.
@@ -749,15 +785,11 @@ def ensure_preset_ui(page, mode):
               "no registry endpoint exists — parent must confirm prod compat")
         return False
     check(f"{mode}-profiles-available", True, f"{len(models)} compat model(s)")
-    if page.locator('[data-testid="preset-pick"] option').count() > 1:
-        page.locator('[data-testid="preset-pick"]').select_option(index=1)
-        page.locator('[data-testid="preset-apply"]').click()
-        page.wait_for_timeout(2000)
-        return page.locator('[data-testid="composition-line"]').count() > 0
     page.locator('[data-testid="preset-new"]').click()
     page.locator('[data-testid="preset-name"]').fill(f"acc-{mode}-preset")
     page.locator('[data-testid="preset-editor"]').wait_for(timeout=10000)
     for role in ("implementer", "reviewer", "checker"):
+        page.locator(f'[aria-label="{role} cli"]').select_option("pi")
         sel = page.locator(f'[aria-label="{role} model"]')
         if sel.count():
             sel.select_option(models[0])
@@ -778,9 +810,6 @@ def attach_transfer_docs(page, mode, req_text, plan_text):
         page.locator('[data-testid="doc-draft"]').fill(text)
         page.locator('[data-testid="doc-attach"]').click()
         page.wait_for_timeout(2000)
-    for kind in ("requirements", "plan"):
-        page.locator(".exec-doc-tabs").locator(
-            "button", has_text=re.compile(kind[:4], re.I)).first.click()
         page.locator('[data-testid="doc-view"]').click()
         page.wait_for_timeout(1500)
         page.locator('[data-testid="doc-approve"]').click()
@@ -824,6 +853,8 @@ def configure_mode_editor(page, mode):
             for i in (0, 1):
                 page.locator(f'[data-testid="swarm-profile-{i}"]').select_option(
                     a if i == 0 else b)
+            page.locator('[data-testid="swarm-paths-0"]').fill("clamp.js")
+            page.locator('[data-testid="swarm-paths-1"]').fill("clamp.test.js, README.md")
             page.locator('[data-testid="swarm-turns"]').fill("8")
             page.locator('[data-testid="swarm-rounds"]').fill("4")
         problems = ""
@@ -1093,6 +1124,22 @@ def merge_shape_cards(data, new_card):
     return {**data, "cards": cards}
 
 
+def load_approved_documents(card_id):
+    status, view = card_view(card_id)
+    if status != 200 or not isinstance(view, dict):
+        return {"requirements": "", "plan": ""}
+    content = {"requirements": "", "plan": ""}
+    for kind in content:
+        approved = (view.get("approvals") or {}).get(kind) or {}
+        version = approved.get("versionId")
+        if not version or not approved.get("sha256"):
+            continue
+        st, document = api("GET", f"/api/execution/cards/{card_id}/documents/{version}")
+        if st == 200 and isinstance(document, dict) and document.get("sha256") == approved["sha256"]:
+            content[kind] = document.get("content") or ""
+    return content
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if not args.live:
@@ -1122,6 +1169,7 @@ def main(argv=None):
         fixture = parse_fixture_state(args.existing_fixture_state)
     else:
         fixture = merge_fixture_live("modes", modes, args.fixture_root)
+    (outdir / "fixture-state.json").write_text(json.dumps(fixture, indent=2) + "\n")
     print(f"fixture: {json.dumps(fixture)}", flush=True)
     card_ids = fixture["cardIds"]
     missing = [m for m in modes if m not in card_ids]
@@ -1129,7 +1177,7 @@ def main(argv=None):
         fail_closed(f"fixture lacks cards for modes {missing} — reseed or fix --existing-fixture-state")
     from playwright.sync_api import sync_playwright
     results = {}
-    transfer_docs = {"requirements": "", "plan": ""}
+    transfer_docs = load_approved_documents(card_ids["preparation"]) if "preparation" in card_ids else {"requirements": "", "plan": ""}
     with sync_playwright() as pw:
         exec_ctx = {"chrome": args.chrome}
         for m in modes:
@@ -1140,21 +1188,7 @@ def main(argv=None):
                     if results[m] is True:
                         # Transfer the ACCEPTED generated req/plan for mode
                         # setup (read-only reuse, never handwritten).
-                        st, view = card_view(card_ids[m])
-                        if st == 200 and isinstance(view, dict):
-                            for kind in ("requirements", "plan"):
-                                docs = (view.get("documents") or {}).get(kind) or {}
-                                for v in docs.get("versions") or []:
-                                    if v.get("versionId") == docs.get("current"):
-                                        try:
-                                            _st, dv = api(
-                                                "GET",
-                                                f"/api/execution/cards/{card_ids[m]}/documents/"
-                                                f"{v['versionId']}")
-                                            if isinstance(dv, dict) and dv.get("content"):
-                                                transfer_docs[kind] = dv["content"]
-                                        except Exception:
-                                            pass
+                        transfer_docs = load_approved_documents(card_ids[m])
                         if not transfer_docs["requirements"] or not transfer_docs["plan"]:
                             check("prep-transfer-docs-present", False,
                                   "accepted generated req/plan unreadable — modes cannot set up")
