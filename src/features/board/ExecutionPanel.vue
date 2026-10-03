@@ -781,6 +781,7 @@ const fusionTaskVersionId = ref<string | null>(null);
 const fusionAttempts = ref('2');
 const fusionTimeoutMin = ref('45');
 const fusionBaseRef = ref('');
+const fusionSetupId = ref('');
 
 /** Provider-qualified models the F1 container runtime can serve — the pi
  * compat entry is the only surface that maps onto worker profiles. */
@@ -846,6 +847,7 @@ const fusionDraft = computed<FusionDraft>(() => {
       timeoutMin: Number(fusionTimeoutMin.value) || undefined,
     },
     baseRef: fusionBaseRef.value,
+    setupId: fusionSetupId.value.trim() || undefined,
   };
 });
 
@@ -1477,6 +1479,11 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
                   <option v-for="m in fusionModels" :key="m" :value="m">{{ m }}</option>
                 </select>
               </div>
+              <label class="exec-member">
+                Dependency setup (optional)
+                <input v-model="fusionSetupId" class="f-input mono" data-testid="fusion-setup-id"
+                  placeholder="registered setup ID, e.g. node-deps" aria-label="dependency setup ID" />
+              </label>
               <div class="exec-member" data-testid="fusion-reviewer-row">
                 <span class="exec-role mono">reviewer *</span>
                 <select v-model="fusionReviewer.cli" class="f-input" data-testid="fusion-reviewer-cli" aria-label="reviewer cli">

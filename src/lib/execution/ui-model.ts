@@ -735,6 +735,8 @@ export interface FusionDraft {
     integratorAttempts?: number;
     reviewAttemptsPerRole?: number;
   };
+  /** Optional controller-registered dependency setup for implementation. */
+  setupId?: string;
   baseRef?: string;
 }
 
@@ -769,6 +771,9 @@ export function fusionDraftProblems(view: ExecCardView, d: FusionDraft): string[
     if (!d.review?.reviewer || !d.review?.checker) {
       problems.push('implementation requires reviewer + checker members');
     }
+  }
+  if (d.setupId && !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(d.setupId)) {
+    problems.push('dependency setup must be a registered setup ID');
   }
   const live = inflightRuns(view);
   if (live.length) {
@@ -816,6 +821,7 @@ export function fusionStartPayload(d: FusionDraft): Record<string, unknown> {
   const judge = role(d.judgeModel, 'judge');
   if (judge) fusion.judge = judge;
   if (d.resultKind === 'implementation') {
+    if (d.setupId) fusion.setupId = d.setupId;
     const integrator = role(d.integratorModel, 'integrator');
     if (integrator) fusion.integrator = integrator;
     if (d.review?.reviewer && d.review?.checker) {
