@@ -4212,19 +4212,28 @@ async function cmdRecordEvent(ctx, aggregate, payload, now) {
     //   1. the CURRENT validation reservation owner — after a dead-owner
     //      adoption it holds the run's execution duty even while stale
     //      attempt/workspace records still name the predecessor;
-    //   2. the last attempt's owner;
-    //   3. the bound workspace's env authority;
+    //   2. the current Orchestrator/Swarm coordinator owner;
+    //   3. the last attempt's owner;
+    //   4. the bound workspace's env authority;
     //   (a run with no established authority accepts diagnostics from any
     //   authenticated internal caller).
     const v = run.validation;
     const vOwner = v && (v.status === 'active' || v.status === 'unproven')
       ? v.owner : null;
+    const modeOwner = run.mode === 'swarm' ? run.swarm?.owner
+      : run.mode === 'orchestrator' ? run.orchestrator?.owner : null;
     refAtt = run.attempts[run.attempts.length - 1] ?? null;
     if (vOwner) {
       if (!ownsResource(vOwner, payload)) {
         throw new CommandError(409, 'not_validation_owner',
           'run-level events during an open validation require its owner instance');
       }
+    } else if (modeOwner) {
+      if (!ownsResource(modeOwner, payload)) {
+        throw new CommandError(409, 'not_mode_owner',
+          'run-level mode events require the current coordinator owner instance');
+      }
+      refAtt = null;
     } else if (refAtt) {
       if (!ownsResource(refAtt.owner, payload)) {
         throw new CommandError(409, 'not_attempt_owner',
