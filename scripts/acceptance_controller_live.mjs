@@ -31,6 +31,12 @@ try {
  await fs.writeFile(path.join(dir,'extra.txt'),'changed');await assert.rejects(client.swarmSnapshot({canonicalId:id,generation:1}));await fs.unlink(path.join(dir,'extra.txt'));record('same generation rejects changed current tree');
  await client.workerThaw(workers[0]);assert.equal((await client.workerStatus(workers[0])).state,'running');record('real Docker unpause verified');
  await client.workerStop(workers[0]);assert(['stopped','gone'].includes((await client.workerStatus(workers[0])).state));
+ const stoppedRecord=(await client.registrySnapshot()).registry.workers[workers[0]];
+ assert(stoppedRecord.resourcesReleasedAt && stoppedRecord.state==='gone');
+ assert((await fs.stat(stoppedRecord.workerDir)).isDirectory());
+ const netGone=(()=>{try{execFileSync('docker',['network','inspect',stoppedRecord.netName],{stdio:'pipe'});return false;}catch(e){return e.status===1;}})();
+ assert(netGone,'terminal worker network must be physically absent');
+ record('terminal worker releases Docker network and preserves artifact directory and identity record');
  await prepare('two',{...changed.materials,scratch:{id:`${id}-two`,mount:'/work/scratch'}});
  const check=await client.exec({workerId:workers[1],template:'debug',cwdKey:'home',args:["node -e \"const fs=require('fs');if(fs.existsSync('/work/project/README.md'))throw Error('deleted file');if(fs.readFileSync('/work/project/binary.dat').toString('hex')!=='00ff8004')throw Error('binary');if((fs.statSync('/work/project/executable.sh').mode&73)!==73)throw Error('mode');fs.writeFileSync('/work/scratch/own','ok');try{fs.writeFileSync('/work/project/forbidden','bad');process.exit(3)}catch(e){if(e.code!=='EROFS'&&e.code!=='EACCES')throw e}console.log('SNAPSHOT-AND-SCRATCH-OK')\""],timeoutMs:30000});assert.equal(check.exitCode,0,JSON.stringify(check));assert(check.stdout.includes('SNAPSHOT-AND-SCRATCH-OK'));record('actual new worker gets byte-exact readonly snapshot and private writable scratch');
  await client.workerFreeze(workers[1]);await client.workerStop(workers[1]);assert.equal((await client.workerStatus(workers[1])).state,'gone');await assert.rejects(client.workerThaw(workers[1]));record('paused worker cancellation proves gone and never resurrects');

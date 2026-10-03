@@ -3320,6 +3320,11 @@ export function createManagedScheduler({
           { validationId: valId, error: String(e?.message || e).slice(0, 300) }).catch(() => {});
         return;
       }
+      console.error(`validation ${valId} faulted: ${e?.code ?? 'unknown'}: ${String(e?.message || e)}`);
+      await recordEvent(card, run, 'validation_task_fault', {
+        validationId: valId, code: e?.code ?? 'unknown',
+        error: String(e?.message || e).slice(0, 500),
+      }).catch(() => {});
       await endValidation(card, run, valId, 'unproven',
         `validation task faulted: ${String(e?.message || e)}`).catch(() => {});
     } finally {
