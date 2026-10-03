@@ -189,7 +189,7 @@ export function createSwarmDriver(deps) {
   if(run.status==='stopping'||run.stopIntent){await entry.b.stop();if(run.attempts.some(a=>LIVE.has(a.status)))return 'observer_timeout';if(['active','unproven'].includes(run.validation?.status))return 'core_validation_draining';await command(card,run,'complete_run',{status:'cancelled',reason:'All Swarm workers and broker settled'},'stop-complete');return 'stopped_drained';}
   if(!launchable(run))return 'launch_fenced';
   if(run.fixContext&&run.swarm.fixRound!==run.fixContext.round&&['awaiting_fix','catch_up','awaiting_validation','awaiting_acceptance'].includes(run.phase)&&!['active','unproven'].includes(run.validation?.status)){await command(card,run,'swarm_phase',{phase:'catch_up'},`catch-up-${run.fixContext.round}`);await command(card,await fresh(run.id),'swarm_freeze',{active:false,physicalConfirmed:true},`catch-up-thaw-${run.fixContext.round}`);return 'catch_up';}
-  if(['awaiting_validation','awaiting_acceptance'].includes(run.phase))return 'core_validation';
+  if(run.swarm.phase==='verify'||['active','unproven'].includes(run.validation?.status)||['verify','review','check_review','awaiting_validation','awaiting_acceptance'].includes(run.phase))return 'core_validation';
   const s=run.swarm;
   const coordinationReady=s.phase==='coordinate'&&s.participants.every(p=>p.declaration)&&Object.values(s.protocol.decisions).some(d=>d.scope?.kind==='global'&&d.status==='agreed')&&Object.values(s.protocol.decisions).every(d=>['agreed','superseded'].includes(d.status));
   if(coordinationReady){if(run.attempts.some(a=>a.role===SWARM_ROLE&&LIVE.has(a.status)))return 'coordination_draining';await command(card,run,'swarm_phase',{phase:'implement'},`implement`);return 'implement';}
