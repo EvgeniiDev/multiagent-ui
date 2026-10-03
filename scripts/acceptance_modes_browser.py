@@ -594,7 +594,7 @@ def check_run_evidence(mode, run, card_id, fixture_root):
                     "import {clamp} from './clamp.js'; import assert from 'node:assert/strict'; "
                     "assert.equal(clamp(5,0,10),5); assert.equal(clamp(-1,0,10),0); assert.equal(clamp(99,0,10),10)"],
                     cwd=path, capture_output=True, text=True, timeout=30)
-                tests = subprocess.run(["node", "--test"], cwd=path, capture_output=True, text=True, timeout=60)
+                tests = subprocess.run(["node", "--test", "--test-reporter=tap"], cwd=path, capture_output=True, text=True, timeout=60)
                 ws_ok = ("clamp.js" in changed and "clamp.test.js" in changed
                          and probe.returncode == 0 and tests.returncode == 0
                          and re.search(r"# tests [1-9]", tests.stdout) is not None)
