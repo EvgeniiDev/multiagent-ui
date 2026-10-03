@@ -31,11 +31,11 @@ test('UUID run recovery passes shared command validation and replays durably',as
   f.run.id='run_411bf852-84cf-4ffe-8845-e3d211a30934';f.run.swarm.owner=identity;f.att.owner=identity;
   Object.assign(f.aggregate,{cardId:'card',commands:{},internalRevision:0,controlRevision:0});
   const ids=[];const ctx={features:{swarm:true},loadAggregate:async()=>f.aggregate,saveAggregate:async()=>{},putRun:()=>{},pendingIntents:()=>[],flushStaged:async()=>{}};
-  const driver=createSwarmDriver({runtime:{canonicalPrepare:async()=>({ok:true,canonical:{hostDir:f.root}}),wait:async()=>({outcome:'timeout'})},self:()=>identity,getRun:async()=>f.run,stateDir:join(f.root,'state'),canLaunch:()=>false,now:()=>1,
+  const driver=createSwarmDriver({runtime:{canonicalPrepare:async()=>({ok:true,canonical:{hostDir:f.root}}),wait:async()=>({outcome:'timeout'})},self:()=>identity,getRun:async()=>f.run,stateDir:join(f.root,'state'),canLaunch:()=>false,now:()=>1,brokerFactory:options=>({recover:async()=>{await options.hooks.onFreeze([]);return{blocked:[],recovered:[]};}}),
    send:async(card,type,payload,commandId)=>{ids.push(commandId);return applyCardCommand(ctx,'card',{type,payload,commandId,expectedInternalRevision:f.aggregate.internalRevision},{channel:'internal'});}});
   assert.equal(await driver.drive({id:'card'},f.run),'launch_fenced');assert.equal(f.run.swarm.broker.recovered,true);
-  assert.equal(f.aggregate.internalRevision,1);assert.ok(ids[0].length<=128);assert.ok(f.aggregate.commands['i:'+ids[0]]);
-  assert.equal(await driver.drive({id:'card'},f.run),'launch_fenced');assert.equal(ids[1],ids[0]);assert.equal(f.aggregate.internalRevision,1);
+  assert.equal(f.aggregate.internalRevision,2);assert.ok(ids[0].length<=128);assert.ok(f.aggregate.commands['i:'+ids[0]]);
+  assert.equal(await driver.drive({id:'card'},f.run),'launch_fenced');assert.equal(ids[2],ids[0]);assert.equal(f.aggregate.internalRevision,2);identity.instanceId='be35a680-7794-4651-871b-12ec17a0c6dc';assert.equal(await driver.drive({id:'card'},f.run),'launch_fenced');assert.notEqual(ids[4],ids[0]);assert.equal(f.aggregate.internalRevision,4);
  }finally{await f.cleanup();}
 });
 
