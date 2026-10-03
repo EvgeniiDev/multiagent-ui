@@ -131,8 +131,36 @@ function affectedForScope(state, scope) {
   return out;
 }
 
-function revHashFor(text, affected) {
-  return sha256Hex(canonicalJson({ text, affected: [...affected].sort() }));
+function scopeBinding(state, scope) {
+  if (scope.kind === 'global') return { kind: 'global', participants: [...state.order].sort() };
+  const paths = scope.kind === 'file' ? [scope.path] : scope.path ?? scope.paths;
+  return { kind: scope.kind, paths: paths.map(assertSafePath).sort().map(path => {
+    const file = state.files[path];
+    return { path, owner: file.owner, version: file.version, consumers: [...(file.consumers ?? [])].sort() };
+  }) };
+}
+function revHashFor(text, affected, binding) {
+  return sha256Hex(canonicalJson({ text, affected: [...affected].sort(), scopeBinding: binding }));
+}
+
+// Ownership/consumer/registration changes create an immutable new revision.
+// Old acknowledgments stay in history and never count for the new binding.
+function refreshDecisionBindings(state, now, emit, events) {
+  for (const decision of Object.values(state.decisions)) {
+    const affected = affectedForScope(state, decision.scope);
+    const binding = scopeBinding(state, decision.scope);
+    const latest = decision.revisions.at(-1);
+    const revHash = revHashFor(latest.text, affected, binding);
+    if (revHash === latest.revHash) continue;
+    const rev = latest.rev + 1;
+    decision.affected = [...affected];
+    decision.revisions.push({ rev, text: latest.text, textHash: latest.textHash, revHash,
+      affected: [...affected], scopeBinding: binding, by: 'broker', at: now });
+    decision.acks[rev] = {};
+    decision.status = 'pending';
+    decision.agreedRev = null;
+    events.push(emit('decision_readiness_cancelled', { decisionId: decision.id, rev, revHash, affected }));
+  }
 }
 
 // ---- lease fencing ----------------------------------------------------------
@@ -204,6 +232,7 @@ function applyCommand(state, cmd, ctx) {
         generation: 0, activeTurn: null, addedAt: now,
       };
       state.order.push(pid);
+      refreshDecisionBindings(state, now, emit, events);
       events.push(emit('participant_registered', { participantId: pid, callsign: cmd.callsign }));
       return { events };
     }
@@ -300,20 +329,7 @@ function applyCommand(state, cmd, ctx) {
       if (!state.participants[who]) throw bad(404, 'unknown_participant', `unknown participant ${who}`);
       if (who !== f.owner && !(f.consumers ?? []).includes(who)) {
         f.consumers.push(who);
-        // Expanding the circle cancels prior readiness: every non-terminal
-        // decision scoped to this file goes back to pending until the new
-        // circle confirms.
-        for (const d of Object.values(state.decisions)) {
-          if (!d.scopePaths?.includes(path)) continue;
-          if (!d.affected.includes(who)) d.affected.push(who);
-          if (d.status === 'agreed') {
-            d.status = 'pending';
-            d.agreedRev = null;
-            events.push(emit('decision_readiness_cancelled', { decisionId: d.id, added: who, path }));
-          } else if (d.status === 'pending') {
-            events.push(emit('decision_circle_expanded', { decisionId: d.id, added: who, path }));
-          }
-        }
+        refreshDecisionBindings(state, now, emit, events);
         events.push(emit('consumer_declared', { path, participantId: who }));
       }
       return { events };
@@ -373,6 +389,7 @@ function applyCommand(state, cmd, ctx) {
         f.owner = t.to;
         f.version += 1;
         f.pendingTransfer = null;
+        refreshDecisionBindings(state, now, emit, events);
         events.push(emit('transfer_completed', { path, from, to: t.to, version: f.version }));
       } else {
         events.push(emit('transfer_consented', { path, by: p.participantId }));
@@ -401,6 +418,7 @@ function applyCommand(state, cmd, ctx) {
       f.owner = to;
       f.version += 1;
       f.pendingTransfer = null;
+      refreshDecisionBindings(state, now, emit, events);
       events.push(emit('transfer_forced', { path, from, to, version: f.version }));
       return { events };
     }
@@ -432,10 +450,11 @@ function applyCommand(state, cmd, ctx) {
       const id = cmd.id ?? randomUUID();
       if (state.decisions[id]) throw bad(409, 'duplicate_id', `decision ${id} already exists`);
       const textHash = sha256Hex(cmd.text);
-      const revHash = revHashFor(cmd.text, affected);
+      const binding = scopeBinding(state, cmd.scope);
+      const revHash = revHashFor(cmd.text, affected, binding);
       state.decisions[id] = {
         id, proposalId: cmd.proposalId ?? null, scope: cmd.scope, scopePaths, affected,
-        revisions: [{ rev: 1, text: cmd.text, textHash, revHash, affected, by: p.participantId, at: now }],
+        revisions: [{ rev: 1, text: cmd.text, textHash, revHash, affected: [...affected], scopeBinding: binding, by: p.participantId, at: now }],
         acks: { 1: {} }, ackHistory: [],
         status: 'pending', agreedRev: null, openedBy: p.participantId,
         turnRef: { turnId: lease.turnId, generation: lease.generation },
@@ -460,11 +479,12 @@ function applyCommand(state, cmd, ctx) {
       const scopePaths = scope.kind === 'global' ? null
         : (Array.isArray(scope.paths) ? scope.paths : [scope.path]).map(assertSafePath);
       const rev = d.revisions.length + 1;
-      const revHash = revHashFor(text, affected);
+      const binding = scopeBinding(state, scope);
+      const revHash = revHashFor(text, affected, binding);
       d.scope = scope;
       d.scopePaths = scopePaths;
       d.affected = affected;
-      d.revisions.push({ rev, text, textHash: sha256Hex(text), revHash, affected, by: p.participantId, at: now });
+      d.revisions.push({ rev, text, textHash: sha256Hex(text), revHash, affected: [...affected], scopeBinding: binding, by: p.participantId, at: now });
       d.acks[rev] = {};
       d.status = 'pending';
       d.agreedRev = null;
@@ -519,11 +539,12 @@ function applyCommand(state, cmd, ctx) {
       const affected = affectedForScope(state, cmd.scope);
       const id = cmd.id ?? randomUUID();
       if (state.decisions[id]) throw bad(409, 'duplicate_id', `decision ${id} already exists`);
-      const revHash = revHashFor(cmd.text, affected);
+      const binding = scopeBinding(state, cmd.scope);
+      const revHash = revHashFor(cmd.text, affected, binding);
       const needsGate = cmd.scope?.touchesDocuments === true;
       state.decisions[id] = {
         id, proposalId: null, scope: cmd.scope, scopePaths: null, affected,
-        revisions: [{ rev: 1, text: cmd.text, textHash: sha256Hex(cmd.text), revHash, affected, by: 'user', at: now }],
+        revisions: [{ rev: 1, text: cmd.text, textHash: sha256Hex(cmd.text), revHash, affected: [...affected], scopeBinding: binding, by: 'user', at: now }],
         acks: { 1: {} }, ackHistory: [],
         status: needsGate ? 'pending' : 'agreed', agreedRev: needsGate ? null : 1,
         byUser: true, options: cmd.options ?? [], consequences: cmd.consequences ?? '',
