@@ -383,7 +383,8 @@ export function checkCompatible(a, b) {
   if (shared.length && (a.resultTree !== b.resultTree || a.resultCommit !== b.resultCommit)) {
     const supA = new Set(a.supersedes ?? []);
     const supB = new Set(b.supersedes ?? []);
-    if (!(supA.has(b.key) || supB.has(a.key))) {
+    const covers = (outer, inner) => [...inner].every(([taskId, commit]) => outer.get(taskId) === commit);
+    if (!((supA.has(b.key) && covers(ca, cb)) || (supB.has(a.key) && covers(cb, ca)))) {
       throw conflict('incompatible_overlap',
         `artifacts ${a.key} and ${b.key} resolve the same inputs differently`,
         { keys: [a.key, b.key] });

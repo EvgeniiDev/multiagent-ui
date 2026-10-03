@@ -1217,13 +1217,13 @@ def main(argv=None):
             if results[m] is False:
                 dump_forensics(card_ids)
     print("\n=== ledger ===", flush=True)
-    for n, ok, d in checks:
+    for ok, n, d in checks:
         print(f"{'PASS' if ok else 'FAIL'}  {n}" + (f"  ({d})" if d else ""), flush=True)
     failed = [m for m, r in results.items() if r is not True]
     if page_errors:
         print(f"pageerrors: {page_errors[:10]}", flush=True)
     print(f"modes: {results} pageerrors={len(page_errors)}", flush=True)
-    return 1 if failed or page_errors else 0
+    return 1 if failed or page_errors or any(not ok for ok, _, _ in checks) else 0
 
 
 if __name__ == "__main__":
