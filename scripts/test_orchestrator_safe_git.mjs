@@ -43,3 +43,12 @@ test('archive output is bounded during capture before accepting oversized bytes'
   const archive=await safeGit(repo,['archive',tree.stdout.trim()],{binary:true,maxStdout:256*1024});assert.equal(archive.code,0);assert(archive.stdout.length>128*1024);
  }finally{await fs.rm(root,{recursive:true,force:true});}
 });
+test('exact-tree archive ignores worker export-ignore and export-subst attributes',async()=>{
+ const {root,repo}=await basic();try{
+  await fs.writeFile(path.join(repo,'.gitattributes'),'file export-ignore\nversion export-subst\n');await fs.writeFile(path.join(repo,'version'),'$Format:%H$\n');
+  await safeGit(repo,['add','-A']);await safeGit(repo,['-c','user.name=test','-c','user.email=test@local','commit','-qm','attributes']);
+  const head=(await safeGit(repo,['rev-parse','HEAD'])).stdout.trim();const archive=await safeGit(repo,['archive',head],{binary:true});assert.equal(archive.code,0);
+  const {extractTarBuffer}=await import('../deploy/execution/tarx.mjs');const dest=path.join(root,'export');await fs.mkdir(dest);await extractTarBuffer(archive.stdout,dest);
+  assert.equal(await fs.readFile(path.join(dest,'file'),'utf8'),'base');assert.equal(await fs.readFile(path.join(dest,'version'),'utf8'),'$Format:%H$\n');
+ }finally{await fs.rm(root,{recursive:true,force:true});}
+});
