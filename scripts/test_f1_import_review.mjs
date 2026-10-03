@@ -102,3 +102,19 @@ test('import preserves export-ignore files and literal export-subst bytes',async
   assert.equal(await fs.readFile(path.join(canonical.worktree,'substitution.txt'),'utf8'),literal);
   assert.equal(git(canonical.worktree,'rev-parse','HEAD^{tree}'),result.import.treeSha);
 });
+
+test('planted worker index temporary symlink cannot overwrite a controller host file',async()=>{
+  const f=await fixture(), canonical=await f.canonical();
+  f.config.roles.integrator={name:'integrator',projectMode:'private-repo',inputs:[],canonical:true};
+  const {worker}=await f.prepare('w-tmp-symlink',{canonicalId:canonical.id},'integrator');
+  const priv=path.join(worker.workerDir,'project');
+  const marker=path.join(f.root,'host-marker-outside-worker');
+  const sentinel='HOST FILE MUST NOT CHANGE';
+  await fs.writeFile(marker,sentinel);
+  await fs.symlink(marker,path.join(priv,'.git',`index.safe-${process.pid}`));
+  await fs.writeFile(path.join(priv,'new.txt'),'new content');
+  const result=await f.controller.handle('repo.import',{workerId:worker.workerId});
+  assert.equal(result.ok,true,'safe publication also preserves successful normal import');
+  assert.equal(await fs.readFile(marker,'utf8'),sentinel);
+  assert.equal(await fs.readFile(path.join(canonical.worktree,'new.txt'),'utf8'),'new content');
+});
