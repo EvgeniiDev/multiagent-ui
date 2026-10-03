@@ -55,7 +55,7 @@ test('prompt supplies executable coordination commands and exact current ack',as
   protocol.dispatch({...examples.openDecision,auth:lease});assert.equal(protocol.getState().decisions[examples.openDecision.id].scope.kind,'global');
   protocol.dispatch({...examples.ackCurrent,auth:lease});assert.ok(protocol.getState().decisions.allocation.acks[1].a);
   assert.equal(examples.create.ops[0].mode,0o100644);assert.deepEqual(examples.create.ops[0].expected,{absent:true});
-  assert.match(prompt,/UTF-8 text/);assert.match(prompt,/next turn/);assert.match(prompt,/question.*user/);
+  const frame=JSON.parse(prompt.split('Result JSON example (replace values with your actual work):\n')[1].split('\n')[0]);assert.equal(parseSwarmResult('```acp-swarm\n'+JSON.stringify(frame)+'\n```').ok,true);assert.ok(Array.isArray(frame.declaration.files));for(const key of ['contracts','approach','risks'])assert.equal(typeof frame.declaration[key],'string');assert.match(prompt,/UTF-8 text/);assert.match(prompt,/next turn/);assert.match(prompt,/question.*user/);
  }finally{await f.cleanup();}
 });
 
