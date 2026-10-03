@@ -358,7 +358,7 @@ async function stopAndDrain(svc, sched, runId, cardId, maxTicks = 120) {
 }
 
 
-for (const mode of ['orchestrator']) for (const lostBind of [false, true]) {
+for (const mode of ['orchestrator', 'swarm']) for (const lostBind of [false, true]) {
   test(`${mode}: shared roles settle/import evidence${lostBind ? " after lost durable bind" : ""}`, async () => {
     const env = await mkEnv();
     await seedBase(env.svc, env.projectDir);
