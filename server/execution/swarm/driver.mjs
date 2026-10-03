@@ -26,7 +26,7 @@ export function createSwarmDriver(deps) {
    readerIdentities:async()=>{const r=await fresh(run.id);return r.attempts.filter(a=>LIVE.has(a.status)&&a.role===SWARM_ROLE).map(a=>({workerId:workerId(a),attemptId:a.id,runId:a.porchRunId}));},
    onFreeze:async ids=>{await physical(ids,true);const r=await fresh(run.id);await command(card,r,'swarm_freeze',{active:true,physicalConfirmed:true,identities:ids,reason:'broker'},`freeze-${r.swarm.epoch}-${sha256(JSON.stringify(ids)).slice(0,12)}`);},
    onThaw:async ids=>{await physical(ids,false);const r=await fresh(run.id);await command(card,r,'swarm_freeze',{active:false,physicalConfirmed:true},`thaw-${r.swarm.epoch}-${sha256(JSON.stringify(ids)).slice(0,12)}`);},
-   onEvent:async e=>{const r=await fresh(run.id);if(!e.eventId||!(r.events??[]).some(old=>old.eventId===e.eventId||old.data?.eventId===e.eventId))await deps.recordEvent?.(card,r,e.type,{...e,eventId:e.eventId},e.attemptId);},
+   onEvent:async e=>{const r=await fresh(run.id);if(!e.eventId||!(r.events??[]).some(old=>old.eventId===e.eventId||old.data?.eventId===e.eventId))await deps.recordEvent?.(card,r,`swarm_broker_${e.kind}`,{...e,eventId:e.eventId},e.attemptId);},
   }});
   const entry={b,canonicalId,treeDir};brokers.set(run.id,entry);return entry;
  }
