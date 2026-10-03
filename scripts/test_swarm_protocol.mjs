@@ -199,14 +199,14 @@ test('force transfer needs confirmed-terminal owner with no active turn', () => 
   assert.equal(p.getState().files['src/a.js'].owner, 'b');
 });
 
-test('revision hashes are exact: text+sorted-affected canonical sha256', () => {
+test('revision hashes bind text, sorted affected identities and exact ownership scope', () => {
   const p = setup();
   const la = turn(p, 'a');
   p.dispatch({ type: 'claim_file', auth: la, path: 'src/a.js' });
   const d = p.dispatch({ type: 'open_decision', auth: la, text: 'hello', scope: { kind: 'file', path: 'src/a.js' } });
   const { canonicalJson } = { canonicalJson: (v) => JSON.stringify(v) };
   void canonicalJson;
-  const expected = sha256Hex(`{"affected":["a"],"text":"hello"}`);
+  const expected = sha256Hex(`{"affected":["a"],"scopeBinding":{"kind":"file","paths":[{"consumers":[],"owner":"a","path":"src/a.js","version":1}]},"text":"hello"}`);
   assert.equal(d.revHash, expected);
 });
 
@@ -219,4 +219,26 @@ test('state survives toJSON/loadJSON round-trip', () => {
   q.loadJSON(snap);
   assert.equal(q.getState().files['src/a.js'].owner, 'a');
   expectCode(() => q.loadJSON(JSON.stringify({ version: 999, runId: 'run1' })), undefined);
+});
+
+test('circle changes require a new exact revision and fresh acknowledgments from everybody',()=>{
+ const p=setup(),a=turn(p,'a');p.dispatch({type:'claim_file',auth:a,path:'src/a.js'});
+ const d=p.dispatch({type:'open_decision',auth:a,text:'contract',scope:{kind:'file',path:'src/a.js'}});
+ p.dispatch({type:'ack_decision',auth:a,decisionId:d.decisionId,rev:1,revHash:d.revHash});
+ p.dispatch({type:'declare_consumer',auth:a,path:'src/a.js',participantId:'b'});
+ const b=turn(p,'b'),row=p.getState().decisions[d.decisionId],latest=row.revisions.at(-1);
+ assert.equal(latest.rev,2);assert.notEqual(latest.revHash,d.revHash);assert.deepEqual(row.acks[2],{});
+ expectCode(()=>p.dispatch({type:'ack_decision',auth:b,decisionId:d.decisionId,rev:1,revHash:d.revHash}),'stale_revision');
+ assert.equal(p.dispatch({type:'ack_decision',auth:b,decisionId:d.decisionId,rev:2,revHash:latest.revHash}).agreed,false);
+ assert.equal(p.dispatch({type:'ack_decision',auth:a,decisionId:d.decisionId,rev:2,revHash:latest.revHash}).agreed,true);
+});
+test('owner transfer and global registration invalidate exact decision bindings',()=>{
+ const p=setup(),a=turn(p,'a');p.dispatch({type:'claim_file',auth:a,path:'src/a.js'});
+ const d=p.dispatch({type:'open_decision',auth:a,text:'contract',scope:{kind:'file',path:'src/a.js'}});
+ p.dispatch({type:'ack_decision',auth:a,decisionId:d.decisionId,rev:1,revHash:d.revHash});p.dispatch({type:'end_turn',auth:a});
+ p.dispatch({type:'transfer_force',auth:{role:'user'},path:'src/a.js',to:'b',ownerTerminal:true});
+ const latest=p.getState().decisions[d.decisionId].revisions.at(-1);assert.equal(latest.rev,2);assert.deepEqual(latest.affected,['b']);assert.notEqual(latest.revHash,d.revHash);
+ const b=turn(p,'b');const global=p.dispatch({type:'open_decision',auth:b,text:'all',scope:{kind:'global'}});
+ p.dispatch({type:'register_participant',participantId:'c',callsign:'gamma'});
+ const g=p.getState().decisions[global.decisionId];assert.equal(g.revisions.at(-1).rev,2);assert.deepEqual(g.acks[2],{});assert.ok(g.affected.includes('c'));
 });

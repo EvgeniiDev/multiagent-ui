@@ -55,6 +55,13 @@ function mkBroker(treeDir, extra = {}) {
     },
     fsFail: extra.fsFail,
   });
+  const originalSubmit = broker.submit;
+  broker.submit = (cmd, override = {}) => originalSubmit(cmd, {
+    currentLease: () => ({ ...LEASE, terminal: false, phase: cmd.phase,
+      ...(override.currentLease ? override.currentLease(cmd.lease.participantId,cmd.lease.attemptId) : {}) }),
+    ownershipFor: path => cmd.ownership[path], decisionsAgreed: true,
+    ...Object.fromEntries(Object.entries(override).filter(([key]) => key !== 'currentLease')),
+  });
   return { broker, events, frozenLog, rootDir };
 }
 
@@ -171,7 +178,7 @@ test('create/delete/rename + rename collision + chmod-only/executable/mode kept'
   await broker.submit({
     commandId: 'rn2', lease: LEASE, phase: 'implement',
     ops: [{ path: 'src/a.js', kind: 'rename', to: 'src/c.js' }],
-    ownership: { 'src/a.js': { owner: 'a', version: 1 }, 'src/c.js': { reservedBy: 'a' } }, ownerId: 'a',
+    ownership: { 'src/a.js': { owner: 'a', version: 1 }, 'src/c.js': { reservedBy: 'a', version: 1 } }, ownerId: 'a',
   });
   assert.equal(await fs.readFile(join(tree, 'src/c.js'), 'utf8'), 'a\n');
   await broker.submit({
@@ -205,7 +212,7 @@ test('crash before any op applied recovers as rolled_back_noop; replay applies o
     const tree = await mkTree();
     const { broker } = mkBroker(tree, { fsFail: { at: new Set([point]) } });
     await assert.rejects(broker.submit(writeCmd('ck', 'src/a.js', 'changed\n')), /injected crash/);
-    assert.equal(broker.isFrozen(), false);
+    assert.equal(broker.isFrozen(), point === 'after_freeze');
     const rec = await broker.recover();
     assert.equal(rec.blocked.length, 0, `${point}: ${JSON.stringify(rec.blocked)}`);
     assert.equal(rec.recovered[0]?.outcome, 'rolled_back_noop');
@@ -218,33 +225,20 @@ test('crash before any op applied recovers as rolled_back_noop; replay applies o
   }
 });
 
-test('crash after first op of multi-file apply blocks with diagnostics, never claims success', async () => {
+test('crash after first op automatically restores all beforeimages before readers resume', async () => {
   const tree = await mkTree({ 'src/a.js': 'a\n', 'src/b.js': 'b\n' });
-  const paths = () => [join(tree, 'src/a.js'), join(tree, 'src/b.js')];
-  const { broker, rootDir } = mkBroker(tree, { fsFail: { at: new Set(['after_op_0']) } });
-  const cmd = {
-    commandId: 'multi1', lease: LEASE, phase: 'implement',
-    ops: [
-      { path: 'src/a.js', kind: 'write', bytes: 'A2\n' },
-      { path: 'src/b.js', kind: 'write', bytes: 'B2\n' },
-    ],
-    ownership: { 'src/a.js': { owner: 'a', version: 1 }, 'src/b.js': { owner: 'a', version: 1 } },
-    ownerId: 'a',
-  };
+  const { broker } = mkBroker(tree, { fsFail: { at: new Set(['after_op_0']) } });
+  const cmd = { commandId:'multi1',lease:LEASE,phase:'implement',ops:[
+    {path:'src/a.js',kind:'write',bytes:'A2\n'},{path:'src/b.js',kind:'write',bytes:'B2\n'}],
+    ownership:{...own('src/a.js'),...own('src/b.js')},ownerId:'a' };
   await assert.rejects(broker.submit(cmd), /injected crash/);
+  assert.equal(broker.isFrozen(),true);
   const rec = await broker.recover();
-  assert.equal(rec.blocked.length, 1);
-  assert.equal(rec.blocked[0].reason, 'crash_mid_apply');
-  // barrier stays closed: blocked journal exists on disk
-  const { readdir } = await import('node:fs/promises');
-  void readdir;
-  const txns = await fs.readdir(join(rootDir, 'journal'));
-  let sawBlocked = false;
-  for (const t of txns) {
-    sawBlocked ||= await fs.access(join(rootDir, 'journal', t, 'blocked.json')).then(() => true, () => false);
-  }
-  assert.equal(sawBlocked, true);
-  void paths;
+  assert.equal(rec.blocked.length,0);
+  assert.equal(rec.recovered[0].outcome,'rolled_back');
+  assert.equal(await fs.readFile(join(tree,'src/a.js'),'utf8'),'a\n');
+  assert.equal(await fs.readFile(join(tree,'src/b.js'),'utf8'),'b\n');
+  assert.equal(broker.isFrozen(),false);
 });
 
 test('in-flight failure rolls back applied ops: no partial success reported', async () => {
