@@ -10,13 +10,13 @@ function environment(extra={}) {
  for(const [k,v] of Object.entries(extra))if(!k.startsWith('GIT_')||/^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL|DATE)$/.test(k))env[k]=v;
  return {...env,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null',GIT_TERMINAL_PROMPT:'0'};
 }
-function run(cwd,args,{env,input,binary=false,objectFd}={}){
+function run(cwd,args,{env,input,binary=false,objectFd,maxStdout=64*1024*1024,maxStderr=256*1024}={}){
  return new Promise((resolve,reject)=>{
-  const child=spawn('git',args,{cwd,env,shell:false,stdio:objectFd===undefined?['pipe','pipe','pipe']:['pipe','pipe','pipe',objectFd]});const out=[],err=[];
+  const child=spawn('git',args,{cwd,env,shell:false,stdio:objectFd===undefined?['pipe','pipe','pipe']:['pipe','pipe','pipe',objectFd]});const out=[],err=[];let captured=0,stderrBytes=0,overflow=false;
   const timer=setTimeout(()=>child.kill('SIGKILL'),60000);
-  child.stdout.on('data',b=>out.push(b));child.stderr.on('data',b=>err.push(b));
+  child.stdout.on('data',b=>{if(overflow)return;if(captured+b.length>maxStdout){overflow=true;child.kill('SIGKILL');return;}captured+=b.length;out.push(b);});child.stderr.on('data',b=>{const room=maxStderr-stderrBytes;if(room>0){const piece=b.subarray(0,room);err.push(piece);stderrBytes+=piece.length;}});
   child.on('error',e=>{clearTimeout(timer);reject(e);});
-  child.on('close',code=>{clearTimeout(timer);const b=Buffer.concat(out);resolve({code,stdout:binary?b:b.toString('utf8'),stderr:Buffer.concat(err).toString('utf8')});});
+  child.on('close',code=>{clearTimeout(timer);if(overflow){const e=new Error(`Git output exceeded ${maxStdout} bytes`);e.code='git_output_limit';e.capturedBytes=captured;reject(e);return;}const b=Buffer.concat(out);resolve({code,stdout:binary?b:b.toString('utf8'),stderr:Buffer.concat(err).toString('utf8')});});
   child.stdin.on('error',()=>{});child.stdin.end(input);
  });
 }
