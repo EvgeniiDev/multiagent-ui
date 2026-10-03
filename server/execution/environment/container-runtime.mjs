@@ -373,11 +373,13 @@ export function createContainerRuntime({
         materials: {
           projectRoot: materials.projectRoot ?? null,
           snapshotSha: materials.snapshotSha ?? materials.baseSha ?? null,
+          ...(materials.snapshotId !== undefined ? { snapshotId: materials.snapshotId } : {}),
           inputs: materials.inputs ?? [],
           canonicalId: materials.canonicalId ?? null,
           fromCanonical: materials.fromCanonical === true,
           depSetId: materials.depSetId ?? null,
           setupId: materials.setupId ?? null,
+          ...(materials.scratch !== undefined ? { scratch: materials.scratch } : {}),
         },
       };
       record.role = role;
@@ -741,11 +743,27 @@ export function createContainerRuntime({
       // fail closed. Only a 'running' worker can host a porch list anyway.
       const state = st?.state ?? 'unknown';
       const gone = state === 'gone' || state === 'stopped';
-      workers.push({ workerId: wid, state, gone });
+      const wrow = { workerId: wid, state, gone, registryReadable: false };
+      workers.push(wrow);
       if (state !== 'running') continue;
       const listed = await porchCtl(wid, wrec?.attemptId ?? '',
         ['list', '--all', '--limit', '0', '--json']);
-      if (listed.failure || !Array.isArray(listed.parsed)) continue;
+      // A failed/unparseable porch list is unverifiable, never absence:
+      // registryReadable:false + the error, so a consumers' allGone gate
+      // cannot misread a live worker's scan failure as "nothing runs".
+      // True ONLY on a successful complete parse of the list output.
+      if (listed.failure || !Array.isArray(listed.parsed)) {
+        wrow.registryReadable = false;
+        // Preserve the porch-classified stderr code (unknown_run,
+        // corrupt_registry, cli_error, …): a consumer distinguishing
+        // "registry says absent" from "registry unreadable" needs it.
+        wrow.registryError = listed.failure?.error?.code
+          || (listed.parseError ? 'parse_error'
+            : (listed.res?.code === 0 ? 'parse_error'
+              : classifyCliError(listed.res?.stderr)));
+        continue;
+      }
+      wrow.registryReadable = true;
       for (const m of listed.parsed) {
         const row = {
           runId: m.run_id ?? null, workerId: wid,
@@ -1015,16 +1033,40 @@ export function createContainerRuntime({
     };
   }
 
+  // Physical worker barriers + Swarm admission — thin dispatches to the
+  // controller's authenticated RPCs (native-owned). Exact registered
+  // workerId only; the controller verifies Docker pause/unpause state and
+  // persists frozen/freezeRequested. Return shape is the controller's:
+  // {ok,workerId,state,frozen,controller}.
+  async function freezeWorker(workerId) {
+    return call('worker.freeze', { workerId });
+  }
+  async function thawWorker(workerId) {
+    return call('worker.thaw', { workerId });
+  }
+  // Immutable Swarm snapshot admission for a registered canonical.
+  // Returns the controller result incl. materials {projectRoot,
+  // snapshotSha, snapshotId}; worker.prepare resolves snapshotId without
+  // caller host paths.
+  async function swarmSnapshot(spec = {}) {
+    return call('swarm.snapshot', spec);
+  }
   // Shared dependency preparation — validates setupId against the
   // deployment config (no arbitrary setup commands) and delegates to the
   // controller's content-derived depSet cache (changed lockfiles → new set).
-  // Drivers persist depSetId + setupId on the attempt launch binding.
-  async function prepareDependencies({ projectRoot, snapshotSha, setupId } = {}) {
+  // Accepts the registered-canonical form {setupId, canonicalId} as well
+  // as the snapshot form {setupId, projectRoot, snapshotSha}. Drivers
+  // persist depSetId + setupId on the attempt launch binding.
+  async function prepareDependencies({ projectRoot, snapshotSha, setupId, canonicalId } = {}) {
     const setup = config.setups?.[setupId];
     if (!setup) {
       throw new RuntimeError('setup_not_registered', `no such setup: ${setupId}`);
     }
-    return call('deps.prepare', { projectRoot, snapshotSha, setupId });
+    const spec = canonicalId !== undefined
+      ? { setupId, canonicalId, ...(projectRoot !== undefined ? { projectRoot } : {}),
+          ...(snapshotSha !== undefined ? { snapshotSha } : {}) }
+      : { setupId, projectRoot, snapshotSha };
+    return call('deps.prepare', spec);
   }
 
   return {
@@ -1035,7 +1077,7 @@ export function createContainerRuntime({
     processIdentityFor, activity: activityFor, attemptDirState, sessionLog,
     listAttempts, registryRunsFor, readReap, writeReap,
     forAttempt, workerIdForAttempt,
-    prepareDependencies,
+    freezeWorker, thawWorker, swarmSnapshot, prepareDependencies,
     // F3 integrator surface: canonical worktree prepare/status and the
     // private-repo → canonical import — same controller channel, same
     // identity rules as worker.prepare.
