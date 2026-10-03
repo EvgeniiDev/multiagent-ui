@@ -230,9 +230,10 @@ export async function cmdSwarmApplyResult(D, ctx, aggregate, payload, now) {
   const run = runFor(D, aggregate, payload); owned(D, run, payload);
   const s = run.swarm, edit = s.edits[payload.editId];
   if (!edit) fail('edit_not_found', 'No durable edit intent');
-  if (edit.status !== 'pending') return save(D, ctx, aggregate, run, {edit, idempotent: true});
+  const committed=payload.result?.status==='applied'&&payload.result.commandId===edit.command.commandId;
+  if (edit.status !== 'pending' && !(edit.status==='rejected'&&committed)) return save(D, ctx, aggregate, run, {edit, idempotent: true});
   if (payload.result?.status === 'applied' && payload.result.commandId === edit.command.commandId) {
-    edit.status = 'applied'; edit.result = structuredClone(payload.result); s.epoch++;
+    edit.status = 'applied'; delete edit.error; edit.result = structuredClone(payload.result); s.epoch++;
     for (const p of s.participants) p.ready = s.phase==='catch_up'&&!s.fixParticipants.includes(p.participantId);
     for (const op of edit.command.ops) {
       if (op.kind==='delete'){const f=s.protocol.files[op.path];f.owner=null;f.reservedBy=null;f.version++;}

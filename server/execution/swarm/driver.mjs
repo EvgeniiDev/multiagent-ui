@@ -14,7 +14,7 @@ export function createSwarmDriver(deps) {
  const ours=o=>o?.runnerId===self().runnerId && (!o.instanceId||o.instanceId===self().instanceId);
  const launchable=r=>!closed&&canLaunch()&&!r.stopIntent&&['queued','active'].includes(r.status);
  const workerId=a=>a.launch?.workerId??runtime.workerIdForAttempt?.(a.id)??`w-${a.id}`;
- async function physical(ids,freeze){for(const id of ids){const fn=freeze?runtime.freezeWorker:runtime.thawWorker;if(typeof fn!=='function')throw Object.assign(new Error('Physical worker barrier unavailable'),{code:'barrier_unwired'});const x=await fn.call(runtime,id.workerId);if(x?.ok!==true)throw Object.assign(new Error('Physical worker barrier unproven'),{code:'barrier_unproven'});}}
+ async function physical(ids,freeze,run=null){for(const id of ids){if(run?.attempts.some(a=>a.id===id.attemptId&&a.namespace?.workerId===id.workerId&&a.namespace.settledAt!==undefined&&['stopped','gone'].includes(a.namespace.state)))continue;const fn=freeze?runtime.freezeWorker:runtime.thawWorker;if(typeof fn!=='function')throw Object.assign(new Error('Physical worker barrier unavailable'),{code:'barrier_unwired'});const x=await fn.call(runtime,id.workerId);if(x?.ok!==true)throw Object.assign(new Error('Physical worker barrier unproven'),{code:'barrier_unproven'});}}
  async function broker(card,run){
   if(brokers.has(run.id))return brokers.get(run.id);
   if(!stateDir||typeof runtime.canonicalPrepare!=='function')throw Object.assign(new Error('Canonical/broker persistence unavailable'),{code:'swarm_unwired'});
@@ -24,13 +24,25 @@ export function createSwarmDriver(deps) {
   const treeDir=join(cp.canonical.hostDir,'worktree');
   const b=brokerFactory({rootDir:join(stateDir,'swarm',run.id),treeDir,clock:now,hooks:{
    readerIdentities:async()=>{const r=await fresh(run.id);return r.attempts.filter(a=>LIVE.has(a.status)&&a.role===SWARM_ROLE).map(a=>({workerId:workerId(a),attemptId:a.id,runId:a.porchRunId}));},
-   onFreeze:async ids=>{await physical(ids,true);const r=await fresh(run.id);await command(card,r,'swarm_freeze',{active:true,physicalConfirmed:true,identities:ids,reason:'broker'},`freeze-${r.swarm.epoch}-${sha256(JSON.stringify(ids)).slice(0,12)}`);},
-   onThaw:async ids=>{await physical(ids,false);const r=await fresh(run.id);await command(card,r,'swarm_freeze',{active:false,physicalConfirmed:true},`thaw-${r.swarm.epoch}-${sha256(JSON.stringify(ids)).slice(0,12)}`);},
+   onFreeze:async ids=>{const r=await fresh(run.id);await physical(ids,true,r);await command(card,r,'swarm_freeze',{active:true,physicalConfirmed:true,identities:ids,reason:'broker'},`freeze-${r.swarm.epoch}-${sha256(JSON.stringify(ids)).slice(0,12)}`);},
+   onThaw:async ids=>{const r=await fresh(run.id);await physical(ids,false,r);await command(card,r,'swarm_freeze',{active:false,physicalConfirmed:true},`thaw-${r.swarm.epoch}-${sha256(JSON.stringify(ids)).slice(0,12)}`);},
    onEvent:async e=>{const r=await fresh(run.id);if(!e.eventId||!(r.events??[]).some(old=>old.eventId===e.eventId||old.data?.eventId===e.eventId))await deps.recordEvent?.(card,r,`swarm_broker_${e.kind}`,{...e,eventId:e.eventId},e.attemptId);},
   }});
   const entry={b,canonicalId,treeDir};brokers.set(run.id,entry);return entry;
  }
- async function recover(card,run,entry){const recovery=await entry.b.recover();await command(card,run,'swarm_freeze',{recovery},`recovery-${sha256(JSON.stringify(recovery))}-${self().instanceId??''}`);return !recovery.blocked?.length;}
+ async function recover(card,run,entry){
+  const recovery=await entry.b.recover();
+  if(!recovery.blocked?.length)for(const receipt of recovery.recovered??[]){
+   if(receipt.outcome!=='already_applied')continue;
+   run=await fresh(run.id);const edit=Object.values(run.swarm.edits).find(e=>e.command.commandId===receipt.commandId&&e.status!=='applied');
+   if(!edit)continue;
+   // Only an existing committed journal entry reaches this replay. submit
+   // verifies the complete payload against its durable idempotency hash.
+   const result=await entry.b.submit(edit.command,{});
+   await command(card,run,'swarm_apply_result',{editId:edit.id,result},`recovered-applied-${edit.id}`);
+  }
+  run=await fresh(run.id);await command(card,run,'swarm_freeze',{recovery},`recovery-${sha256(JSON.stringify(recovery))}-${self().instanceId??''}`);return !recovery.blocked?.length;
+ }
  async function apply(card,run,att,id,ops,entry){
   if(!run.swarm.edits[id])await command(card,run,'swarm_apply_intent',{attemptId:att.id,editId:id,ops},`intent-${id}`);
   run=await fresh(run.id);const edit=run.swarm.edits[id];if(edit.status!=='pending')return;

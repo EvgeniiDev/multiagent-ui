@@ -80,3 +80,15 @@ test('agreed coordination drains existing turns before admitting implementation'
   assert.equal(await d.drive({},f.run),'coordination_draining');assert.equal(snapshots,0);assert.equal(f.run.attempts.length,1);
  }finally{await f.cleanup();}
 });
+
+test('postcommit event outage recovers rejected receipt from exact broker journal once',async()=>{
+ const f=await fixture();try{
+  const ops=[{kind:'write',path:'a.txt',bytes:'committed',expected:{hash:sha256('old'),type:'file',mode:0o100644}}];
+  const finalText='```acp-swarm\n'+JSON.stringify({goal:'edit',commands:[{type:'apply',ops}],outcome:'done'})+'\n```';let outage=true;
+  const runtime={canonicalPrepare:async()=>({ok:true,canonical:{hostDir:f.root}}),freezeWorker:async()=>({ok:true}),thawWorker:async()=>{if(f.att.namespace?.state==='gone')throw Object.assign(new Error('removed worker'),{code:'unknown_worker'});return{ok:true};},forAttempt:()=>({stopWorker:async()=>({ok:true}),workerStatus:async()=>({state:'gone'})}),wait:async()=>({outcome:'terminal',status:'completed',runExitCode:0,finalText})};
+  const deps={runtime,send:f.send,self:()=>({runnerId:'me'}),getRun:async()=>f.run,stateDir:join(f.root,'state'),canLaunch:()=>false,now:()=>1,recordEvent:async()=>{if(outage)throw Object.assign(new Error('event store unavailable'),{code:'event_outage'});}};
+  await createSwarmDriver(deps).drive({},f.run);assert.equal(await readFile(join(f.root,'worktree','a.txt'),'utf8'),'committed');assert.equal(f.run.swarm.epoch,0);assert.equal(Object.values(f.run.swarm.edits)[0].status,'rejected');
+  outage=false;const recovered=createSwarmDriver(deps);await recovered.drive({},f.run);assert.equal(Object.values(f.run.swarm.edits)[0].status,'applied');assert.equal(f.run.swarm.epoch,1);
+  await recovered.drive({},f.run);assert.equal(f.run.swarm.epoch,1);
+ }finally{await f.cleanup();}
+});
