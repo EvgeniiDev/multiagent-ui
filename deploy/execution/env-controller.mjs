@@ -1015,7 +1015,7 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     const tree = await safeGit(priv, ['write-tree']);
     if (tree.code !== 0) throw new RuntimeError('import_tree_failed', tree.stderr.slice(0, 300));
     const treeSha = tree.stdout.trim();
-    const archive = await safeGit(priv, ['archive', '--format=tar', treeSha], { binary: true });
+    const archive = await safeGit(priv, ['archive', '--format=tar', treeSha], { binary: true, maxStdout: 512 * 1024 * 1024 });
     if (archive.code !== 0) throw new RuntimeError('import_archive_failed', archive.stderr.slice(0, 300));
     if (archive.stdout.length > 512 * 1024 * 1024) throw new RuntimeError('import_archive_too_large', 'Worker archive exceeds limit');
     const wt = canon.worktree;
