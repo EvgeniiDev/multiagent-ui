@@ -14,7 +14,31 @@ export function createSwarmDriver(deps) {
  const ours=o=>o?.runnerId===self().runnerId && (!o.instanceId||o.instanceId===self().instanceId);
  const launchable=r=>!closed&&canLaunch()&&!r.stopIntent&&['queued','active'].includes(r.status);
  const workerId=a=>a.launch?.workerId??runtime.workerIdForAttempt?.(a.id)??`w-${a.id}`;
- async function physical(ids,freeze,run=null){for(const id of ids){if(run?.attempts.some(a=>a.id===id.attemptId&&a.namespace?.workerId===id.workerId&&a.namespace.settledAt!==undefined&&['stopped','gone'].includes(a.namespace.state)))continue;const fn=freeze?runtime.freezeWorker:runtime.thawWorker;if(typeof fn!=='function')throw Object.assign(new Error('Physical worker barrier unavailable'),{code:'barrier_unwired'});const x=await fn.call(runtime,id.workerId);if(x?.ok!==true)throw Object.assign(new Error('Physical worker barrier unproven'),{code:'barrier_unproven'});}}
+ async function physical(ids,freeze,run=null){
+  for(const id of ids){
+   const att=run?.attempts.find(a=>a.id===id.attemptId&&workerId(a)===id.workerId);
+   if(att?.namespace?.workerId===id.workerId&&att.namespace.settledAt!==undefined&&['stopped','gone'].includes(att.namespace.state))continue;
+   const fn=freeze?runtime.freezeWorker:runtime.thawWorker;
+   if(typeof fn!=='function')throw Object.assign(new Error('Physical worker barrier unavailable'),{code:'barrier_unwired'});
+   let proof;
+   try {proof=await fn.call(runtime,id.workerId);}
+   catch(e){
+    // A prior recovery may have recorded a reader before its admission.
+    // Exclude it only when this owner has not started the exact attempt,
+    // the durable launch record is absent, and the controller confirms
+    // the exact worker is absent too. Unknown workers alone fail closed.
+    if(e.code!=='unknown_worker'||att?.status!=='launching'||att.porchRunId||!ours(att.owner))throw e;
+    const rec=await runtime.launchRecord?.(att.id),scoped=runtime.forAttempt?.(att.id);
+    if(rec?.attemptId!==att.id||rec.missing!==true||typeof scoped?.workerStatus!=='function')throw e;
+    let absent=false;
+    try {absent=(await scoped.workerStatus())?.state==='gone';}
+    catch(statusError){if(statusError.code!=='unknown_worker')throw statusError;absent=true;}
+    if(!absent)throw e;
+    continue;
+   }
+   if(proof?.ok!==true)throw Object.assign(new Error('Physical worker barrier unproven'),{code:'barrier_unproven'});
+  }
+ }
  async function broker(card,run){
   if(brokers.has(run.id))return brokers.get(run.id);
   if(!stateDir||typeof runtime.canonicalPrepare!=='function')throw Object.assign(new Error('Canonical/broker persistence unavailable'),{code:'swarm_unwired'});

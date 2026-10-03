@@ -314,3 +314,10 @@ test('readOnly boundary: tree files are untouched except through broker apply', 
   assert.equal(await fs.readFile(join(tree, 'src/a.js'), 'utf8'), before);
   assert.equal(await fs.access(join(tree, 'out.js')).then(() => true, () => false), false);
 });
+
+test('fully finalized journal does not freeze a newly admitted unprepared reader',async()=>{
+ const tree=await mkTree();let admitting=false,freezes=0;
+ const {broker}=mkBroker(tree,{hooks:{readerIdentities:async()=>admitting?['new-unprepared-worker']:[],onFreeze:async()=>{freezes++;if(admitting)throw Object.assign(new Error('unknown worker'),{code:'unknown_worker'});}}});
+ await broker.submit(writeCmd('completed','src/a.js','committed'));assert.equal(freezes,1);admitting=true;broker.dropMemory();
+ const recovery=await broker.recover();assert.deepEqual(recovery.blocked,[]);assert.equal(recovery.recovered[0].outcome,'already_applied');assert.equal(freezes,1);assert.equal(broker.isFrozen(),false);
+});

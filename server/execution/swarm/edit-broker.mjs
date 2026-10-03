@@ -435,11 +435,18 @@ export function createEditBroker(opts) {
                 const result = await optionalJson(join(txnDir, 'result.json'));
                 if (result) {
                     await syncDir(txnDir);
-                    await freezeReaders();
+                    const delivered = await optionalJson(join(txnDir, 'event-delivered.json'));
+                    const published = await optionalJson(resultPath(intent.commandId));
+                    const indexed = seen[intent.commandId];
+                    const finalized = delivered?.eventId === result.eventId && indexed?.status === 'applied'
+                        && indexed.payloadHash === intent.payloadHash && published && canonicalJson(published) === canonicalJson(result);
+                    // Completed transactions need no tree mutation or outbox repair.
+                    // Do not freeze new readers merely to inspect old receipts.
+                    if (!finalized) await freezeReaders();
                     const anchors = await anchorTree(treeDir, intent.before.map(image => image.path));
                     try { await assertTreeIdentity(treeDir, anchors, intent.identities); }
                     finally { await anchors.close(); }
-                    await finalize(txnDir, intent, result);
+                    if (!finalized) await finalize(txnDir, intent, result);
                     recovered.push({ txnId: name, commandId: intent.commandId, outcome: 'already_applied' });
                     continue;
                 }

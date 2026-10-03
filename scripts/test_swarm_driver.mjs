@@ -108,3 +108,14 @@ test('fresh cancellation intent wins over a stale completed observation at deadl
   assert.equal(await d.drive({},structuredClone(f.run)),'resolved');assert.equal(f.att.status,'cancelled');assert.equal(f.att.frameApplied,undefined);assert.equal(f.run.swarm.participants[0].ready,false);
  }finally{await f.cleanup();}
 });
+
+test('stale barrier excludes unprepared launch only with exact missing record and registry proof',async()=>{
+ const f=await fixture();try{
+  f.att.status='launching';delete f.att.porchRunId;let missing=false,starts=0;
+  const absent=()=>{throw Object.assign(new Error('unknown worker'),{code:'unknown_worker'});};
+  const runtime={canonicalPrepare:async()=>({ok:true,canonical:{hostDir:f.root}}),freezeWorker:async()=>absent(),thawWorker:async()=>absent(),launchRecord:async id=>({attemptId:id,missing}),forAttempt:()=>({workerStatus:async()=>absent()}),start:async()=>{starts++;return{porchRunId:'fresh'};}};
+  const d=createSwarmDriver({runtime,send:f.send,self:()=>({runnerId:'me'}),getRun:async()=>f.run,stateDir:join(f.root,'state'),now:()=>1,brokerFactory:options=>({recover:async()=>{const ids=[{attemptId:'att',workerId:'w-att'}];await options.hooks.onFreeze(ids);await options.hooks.onThaw(ids);return{recovered:[],blocked:[]};}})});
+  await assert.rejects(d.drive({},f.run),{code:'unknown_worker'});assert.equal(starts,0);missing=true;
+  assert.equal(await d.drive({},f.run),'bound');assert.equal(starts,1);assert.equal(f.att.porchRunId,'fresh');
+ }finally{await f.cleanup();}
+});
