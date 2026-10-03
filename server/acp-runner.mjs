@@ -1390,9 +1390,14 @@ export async function createManagedDriver(deps = {}) {
   // controller client and capability store are REQUIRED — a missing/invalid
   // F1 deployment fails the driver build, never falls back.
   const fusionEnabled = deps.fusionEnabled ?? env.ACP_EXEC_FUSION === '1';
+  // O-unit + S-unit share the SAME F1 constrained container runtime — every
+  // orchestrator/swarm role launch goes through it (disjoint roles, one
+  // deployment). Their gates are independent of fusion's.
+  const orchEnabled = deps.orchestratorEnabled ?? truthyEnv(env.ACP_EXEC_ORCHESTRATOR);
+  const swarmEnabled = deps.swarmEnabled ?? truthyEnv(env.ACP_EXEC_SWARM);
   const fusion = deps.fusion !== undefined ? deps.fusion : null;
   let fusionCfg = fusion;
-  if (fusionEnabled && fusionCfg === null) {
+  if ((fusionEnabled || orchEnabled || swarmEnabled) && fusionCfg === null) {
     const f1ConfigFile = deps.f1ConfigFile
       ?? env.ACP_F1_CONFIG ?? '/run/f1/environment.config.json';
     const f1Config = await loadEnvironmentConfig(f1ConfigFile, { env, view: 'client' });
@@ -1408,6 +1413,16 @@ export async function createManagedDriver(deps = {}) {
         config: f1Config, client: f1Client, env, capabilityStore,
       }),
       capabilityStore,
+      // The controller's registered projects root — orchestrator dependency
+      // snapshots are assembled INTO it so their names resolve as
+      // projectRoot bindings (the mount is read-only controller-side).
+      projectsDir: f1Config.roots?.projects?.hostPath ?? null,
+      // U5 dep supply: controller-owned materialized dep sets live under
+      // <env>/depsets/<depSetId> (host view); each declared setup binds its
+      // depPath for injection into validation copies.
+      depsDir: `${f1Config.pathFor('env')}/depsets`,
+      setupDepPaths: Object.fromEntries(Object.entries(f1Config.setups ?? {})
+        .map(([id, s]) => [id, s.depPath])),
     };
   }
   const scheduler = deps.scheduler
@@ -1422,7 +1437,16 @@ export async function createManagedDriver(deps = {}) {
       validationEnabled: validation,
       now: deps.now,
       hooks: deps.hooks,
-      fusion: fusionCfg,
+      fusion: fusionEnabled ? fusionCfg : null,
+      orchestrator: orchEnabled
+        ? {
+            runtime: fusionCfg?.runtime ?? null,
+            projectsDir: fusionCfg?.projectsDir ?? null,
+            depsDir: fusionCfg?.depsDir ?? null,
+            setupDepPaths: fusionCfg?.setupDepPaths ?? null,
+          }
+        : null,
+      swarm: swarmEnabled ? { runtime: fusionCfg?.runtime ?? null } : null,
     });
   // P5: the durable idea-preparation lead lives HERE — the runner owns its
   // CLI processes and drives it on its own serial pump via the authenticated
