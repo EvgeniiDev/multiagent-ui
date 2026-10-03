@@ -115,7 +115,9 @@ export function uiResponseFor(answer, method) {
 // The lead's final text may carry one fenced ```acp-prep JSON result block
 // — the same data-not-code pattern as ```acp-checks. At most one block;
 // malformed JSON is evidence left in the note, not a turn result.
-const PREP_FENCE_RE = /```acp-prep[^\n]*\n([\s\S]*?)```/g;
+// JSON strings may contain Markdown fences (especially acp-checks in a
+// development plan). Only standalone fence lines delimit the result.
+const PREP_FENCE_RE = /^[ \t]*```acp-prep[^\n]*\n([\s\S]*?)^[ \t]*```[ \t]*\r?$/gm;
 export function extractLeadResult(text) {
   const blocks = [...String(text ?? '').matchAll(PREP_FENCE_RE)].map((m) => m[1]);
   if (!blocks.length) return { present: false };
