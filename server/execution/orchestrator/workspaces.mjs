@@ -20,6 +20,7 @@
 // input, 409 conflict_* for state conflicts. No secrets are ever accepted.
 
 import { promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -71,6 +72,95 @@ async function mustClean(cwd, args, what) {
       `${what}: git ${args[0]} exited ${res.code}: ${res.stderr.trim().slice(0, 300)}`);
   }
   return res.stdout.trim();
+}
+
+// Raw-bytes git runner (blobs may be binary; string collection would mangle
+// them). Rejects on spawn failure or nonzero exit.
+function gitBytes(cwd, args) {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn('git', args, { cwd, shell: false });
+    const chunks = [];
+    child.stdout.on('data', (d) => chunks.push(d));
+    child.stderr.on('data', () => {});
+    child.on('error', (e) => reject(new RuntimeError('git_unavailable',
+      `git binary unavailable: ${e.message}`)));
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new RuntimeError('git_failed', `git ${args[0]} exited ${code}`));
+      } else resolvePromise(Buffer.concat(chunks));
+    });
+  });
+}
+
+const NULL_SHA = '0000000000000000000000000000000000000000';
+
+async function hashBlobSha(repoPath, sha) {
+  if (sha === NULL_SHA) return { hash: null, bytes: null };
+  const bytes = await gitBytes(repoPath, ['cat-file', '-p', sha]);
+  return { hash: createHash('sha256').update(bytes).digest('hex'), bytes };
+}
+
+// Op-aware per-file content proof for a diff range: one entry per changed
+// path — {path, op, before, after, modeBefore, modeAfter, binary}.
+// before/after are sha256 of the raw blob BYTES (null when the side does
+// not exist); binary is true when either existing side contains a NUL byte.
+// Renames are disabled so a rename surfaces as delete+add (explicit proof,
+// no similarity guessing).
+export async function diffFileEntries(repoPath, fromCommit, toCommit) {
+  assertCommitSha(fromCommit, 'fromCommit');
+  assertCommitSha(toCommit, 'toCommit');
+  const raw = await mustClean(repoPath,
+    ['diff', '--no-renames', '--no-abbrev', '--raw', '-z', `${fromCommit}..${toCommit}`], 'raw diff');
+  const files = [];
+  if (!raw) return files;
+  const parts = raw.split('\0');
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const meta = parts[i];
+    const p = parts[i + 1];
+    if (!meta || !p) continue;
+    // :oldmode newmode oldsha newsha STATUS
+    const m = /^:(\d+) (\d+) ([0-9a-f]{40}) ([0-9a-f]{40}) ([A-Z])$/.exec(meta);
+    if (!m) {
+      throw new RuntimeError('git_failed',
+        `unparseable raw diff entry: ${meta.slice(0, 80)}`);
+    }
+    const [, modeBefore, modeAfter, oldSha, newSha, status] = m;
+    const b = await hashBlobSha(repoPath, oldSha);
+    const a = await hashBlobSha(repoPath, newSha);
+    let op;
+    if (status === 'A') op = 'added';
+    else if (status === 'D') op = 'deleted';
+    else if (b.hash !== null && a.hash !== null && b.hash === a.hash
+      && modeBefore !== modeAfter) op = 'modechange';
+    else op = 'modified';
+    const probe = b.bytes ?? a.bytes;
+    files.push({
+      path: p,
+      op,
+      before: b.hash,
+      after: a.hash,
+      modeBefore,
+      modeAfter,
+      binary: probe !== null && probe.includes(0),
+    });
+  }
+  return files.sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0));
+}
+
+// Read one path's bytes-hash + mode at a commit: null when absent. The
+// resolution-content check in integration-artifacts.mjs builds on this.
+export async function blobAt(repoPath, commitSha, filePath) {
+  assertCommitSha(commitSha, 'commitSha');
+  if (typeof filePath !== 'string' || !filePath || filePath.startsWith('/')
+    || filePath.includes('\0')) {
+    throw invalid('invalid_argument', `bad path: ${JSON.stringify(filePath)}`);
+  }
+  const exists = await runGit(repoPath, ['cat-file', '-e', `${commitSha}:${filePath}`]);
+  if (exists.code !== 0) return null;
+  const bytes = await gitBytes(repoPath, ['cat-file', '-p', `${commitSha}:${filePath}`]);
+  const ls = await runGit(repoPath, ['ls-tree', commitSha, '--', filePath]);
+  const mode = /^\d+/.exec(ls.stdout)?.[0] ?? null;
+  return { hash: createHash('sha256').update(bytes).digest('hex'), mode };
 }
 
 function assertRepoName(name) {
@@ -244,20 +334,22 @@ export async function exportWorkerDiff({ repoPath, inputCommit, resultCommit = n
   const stat = await mustClean(real,
     ['diff', '--stat', `${inputCommit}..${head}`], 'diffstat');
   const patchRes = await runGit(real,
-    ['diff', '--full-index', `${inputCommit}..${head}`]);
+    ['diff', '--binary', '--full-index', `${inputCommit}..${head}`]);
   if (patchRes.code !== 0) {
     throw new RuntimeError('git_failed', `diff patch failed: ${patchRes.stderr.slice(0, 200)}`);
   }
+  const files = await diffFileEntries(real, inputCommit, head);
   const patchSha256 = sha256(patchRes.stdout);
   return {
     version: PRIVATE_REPO_VERSION,
     repoPath: real,
     inputCommit,
     resultCommit: head,
-    changed,
+    changed: files.map((f) => f.path),
     diffStat: stat,
     formatPatch: patchRes.stdout,
     patchSha256,
+    files,
   };
 }
 

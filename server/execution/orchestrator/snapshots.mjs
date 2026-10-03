@@ -24,7 +24,7 @@ import { invalid, conflict } from './errors.mjs';
 import { sha256, canonicalJson } from './canonical.mjs';
 import { topoOrder } from './subtask.mjs';
 import {
-  createPrivateRepo, verifyPrivateRepo, treeHashFor, COMMIT_RE,
+  createPrivateRepo, verifyPrivateRepo, treeHashFor, COMMIT_RE, diffFileEntries,
 } from './workspaces.mjs';
 
 export const SNAPSHOT_VERSION = 1;
@@ -107,8 +107,23 @@ export async function assembleDependencySnapshot({
     const parents = [];
     for (const id of order) {
       const diff = diffByTask.get(id);
-      if (typeof diff.formatPatch !== 'string' || !diff.formatPatch.length) {
+      if (typeof diff.formatPatch !== 'string') {
         throw invalid('invalid_argument', `parent "${id}" carries no formatPatch`);
+      }
+      if (!diff.formatPatch.length) {
+        // Empty own diff = accepted no-op: the parent changed nothing, so
+        // there is nothing to apply — still one allow-empty parent commit
+        // + provenance entry, keeping order and parents[] exact.
+        await mustGit(repoPath,
+          ['-c', 'user.name=acp-orchestrator', '-c', 'user.email=acp-orchestrator@localhost',
+            'commit', '-q', '--allow-empty', '-m', `parent ${id} ${diff.resultCommit ?? ''} no-op`.trim()],
+          `commit parent ${id}`);
+        parents.push({
+          taskId: id,
+          resultCommit: diff.resultCommit ?? null,
+          patchSha256: diff.patchSha256 ?? sha256(''),
+        });
+        continue;
       }
       // `git apply --check` first: a patch that does not apply is a
       // snapshot_conflict thrown BEFORE any worker launches.
@@ -197,6 +212,20 @@ export async function freezeResult({
   const real = await fs.realpath(repoPath).catch(() => {
     throw invalid('invalid_argument', `repoPath does not resolve: ${repoPath}`);
   });
+  // Validate the input SHA BEFORE touching the repo: it must resolve and
+  // be an ancestor of (or equal to) HEAD. A nonexistent inputCommit with
+  // an empty diff previously froze successfully — fail closed instead, and
+  // leave the repo untouched (no staging happened yet).
+  const resolves = await gitArgs(real, ['cat-file', '-e', `${inputCommit}^{commit}`]);
+  if (resolves.code !== 0) {
+    throw invalid('commit_invalid', `inputCommit ${inputCommit} does not resolve in this repo`);
+  }
+  const headPre = await mustGit(real, ['rev-parse', 'HEAD'], 'read HEAD');
+  const ancestor = await gitArgs(real, ['merge-base', '--is-ancestor', inputCommit, headPre]);
+  if (ancestor.code !== 0) {
+    throw conflict('diff_not_ancestor',
+      `inputCommit ${inputCommit} is not an ancestor of ${headPre} — freeze undefined`);
+  }
   const status = await mustGit(real, ['status', '--porcelain', '--untracked-files=all'], 'read status');
   const dirtyPaths = status.split('\n').filter(Boolean);
   await mustGit(real, ['add', '-A'], 'stage result');
@@ -214,6 +243,12 @@ export async function freezeResult({
   const treeHash = await treeHashFor(real, resultCommit);
   const changedRes = await gitArgs(real, ['diff', '--name-only', '-z', `${inputCommit}..${resultCommit}`]);
   const changed = changedRes.code === 0 ? changedRes.stdout.split('\0').filter(Boolean).sort() : [];
+  // Op-aware detail per changed path (modes/deletions/binary visible) —
+  // the report consumer sees WHAT changed, not just which names.
+  const entries = await diffFileEntries(real, inputCommit, resultCommit);
+  const fileDetails = entries.map((e) => ({
+    path: e.path, op: e.op, modeBefore: e.modeBefore, modeAfter: e.modeAfter, binary: e.binary,
+  }));
   const report = {
     version: SNAPSHOT_VERSION,
     kind: 'worker-result',
@@ -224,10 +259,28 @@ export async function freezeResult({
     parentCommits: { ...parentCommits },
     dirtyPaths,
     changed,
+    fileDetails,
     treeHash,
     note: typeof note === 'string' ? note.slice(0, 500) : null,
   };
-  const resultHash = sha256(canonicalJson(report));
+  // Acceptance binding over STABLE fields only: dirtyPaths is transient
+  // `git status` output (ordering/wording varies run to run) and note is
+  // free text — hashing them made identical re-freezes hash differently.
+  // fileDetails (op/mode/binary, no hashes of content — treeHash binds
+  // content) + changed + treeHash carry the acceptance signal.
+  const stable = {
+    version: report.version,
+    kind: report.kind,
+    taskId: report.taskId,
+    inputCommit: report.inputCommit,
+    resultCommit: report.resultCommit,
+    generation: report.generation,
+    parentCommits: report.parentCommits,
+    changed: report.changed,
+    fileDetails: report.fileDetails,
+    treeHash: report.treeHash,
+  };
+  const resultHash = sha256(canonicalJson(stable));
   return { resultCommit, resultHash, report: { ...report, resultHash } };
 }
 
@@ -247,8 +300,25 @@ export function assertProvenanceCurrent(record, { generation, parentCommits = {}
       `"${record.taskId ?? '?'}": record generation ${record.generation} != current ${generation}`,
       { taskId: record.taskId ?? null });
   }
+  // Full-set equality: a parent REMOVED since the record (present in the
+  // record, missing now) or ADDED since (present now, missing in the
+  // record) both invalidate — the dependency set the verdict was computed
+  // against no longer exists.
+  const recorded = record.parentCommits ?? {};
+  for (const task of Object.keys(recorded)) {
+    if (!(task in parentCommits)) {
+      throw conflict('stale_input',
+        `"${record.taskId ?? '?'}": parent "${task}" removed since this record`,
+        { taskId: record.taskId ?? null, parent: task });
+    }
+  }
   for (const [task, commit] of Object.entries(parentCommits)) {
-    if ((record.parentCommits ?? {})[task] !== commit) {
+    if (!(task in recorded)) {
+      throw conflict('stale_input',
+        `"${record.taskId ?? '?'}": parent "${task}" added since this record`,
+        { taskId: record.taskId ?? null, parent: task });
+    }
+    if (recorded[task] !== commit) {
       throw conflict('stale_input',
         `"${record.taskId ?? '?'}": parent "${task}" moved since this record`,
         { taskId: record.taskId ?? null, parent: task });

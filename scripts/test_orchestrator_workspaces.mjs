@@ -198,12 +198,15 @@ test('canonical artifact reused by two consumers + final integration', async (t)
   G(ir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'parent a');
   const pb = spawnSync('git', ['apply', '--check', '-'], { cwd: ir, input: diffs[1].formatPatch, encoding: 'utf8' });
   assert.notEqual(pb.status, 0); // conflicts, as expected — worker never launches
+  // Hand-merge: NEITHER side verbatim (copying one side is rejected — the
+  // resolution must differ from every side on a true-conflict path).
   await fs.writeFile(path.join(ir, 'shared.txt'), 'resolved by integrator\n');
   G(ir, 'add', '-A');
   G(ir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'resolve a+b');
-  const parentDiffs = diffs.map((d) => ({ taskId: d.taskId, changed: d.changed }));
+  const parentDiffs = diffs.map((d) => ({ taskId: d.taskId, changed: d.changed, files: d.files }));
   const rec = await recordResolution({
     storeDir, inputs, order, baseTree, repoPath: ir, parentDiffs,
+    resolvedPaths: ['shared.txt'],
     resolutionNote: 'kept both intents: shared.txt merged by hand',
   });
   assert.ok(/^ia_[0-9a-f]{64}$/.test(rec.key));
@@ -217,6 +220,7 @@ test('canonical artifact reused by two consumers + final integration', async (t)
   // re-recording the same resolution is idempotent; a different one refuses
   const same = await recordResolution({
     storeDir, inputs, order, baseTree, repoPath: ir, parentDiffs,
+    resolvedPaths: ['shared.txt'],
   });
   assert.equal(same.resultCommit, rec.resultCommit);
   t.diagnostic(`artifact ${rec.key} -> ${rec.resultCommit}`);
