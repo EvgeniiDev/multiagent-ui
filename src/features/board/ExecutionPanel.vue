@@ -1713,7 +1713,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
             class="btn"
             data-testid="exec-continue"
             :disabled="gated(continueGate).disabled"
-            :title="gated(continueGate).title || 'Continue with a new run carrying the workspace forward'"
+            :title="gated(continueGate).title || 'Continue with the approved inputs in a new run'"
             @click="onContinue"
           >Continue</button>
           <button
