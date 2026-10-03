@@ -14,6 +14,12 @@ export function createSwarmDriver(deps) {
  const ours=o=>o?.runnerId===self().runnerId && (!o.instanceId||o.instanceId===self().instanceId);
  const launchable=r=>!closed&&canLaunch()&&!r.stopIntent&&['queued','active'].includes(r.status);
  const workerId=a=>a.launch?.workerId??runtime.workerIdForAttempt?.(a.id)??`w-${a.id}`;
+ async function unpreparedAbsent(att){
+  const rec=await runtime.launchRecord?.(att.id),scoped=runtime.forAttempt?.(att.id);
+  if(rec?.attemptId!==att.id||rec.missing!==true||typeof scoped?.workerStatus!=='function')return false;
+  try {return (await scoped.workerStatus())?.state==='gone';}
+  catch(e){if(e.code!=='unknown_worker')throw e;return true;}
+ }
  async function physical(ids,freeze,run=null){
   for(const id of ids){
    const att=run?.attempts.find(a=>a.id===id.attemptId&&workerId(a)===id.workerId);
@@ -29,12 +35,7 @@ export function createSwarmDriver(deps) {
     // the exact worker is absent too. Unknown workers alone fail closed.
     if(e.code!=='unknown_worker'||att?.status!=='launching'||att.porchRunId)throw e;
     if(!ours(att.owner)&&!await adoptionProofFor(att.owner))throw e;
-    const rec=await runtime.launchRecord?.(att.id),scoped=runtime.forAttempt?.(att.id);
-    if(rec?.attemptId!==att.id||rec.missing!==true||typeof scoped?.workerStatus!=='function')throw e;
-    let absent=false;
-    try {absent=(await scoped.workerStatus())?.state==='gone';}
-    catch(statusError){if(statusError.code!=='unknown_worker')throw statusError;absent=true;}
-    if(!absent)throw e;
+    if(!await unpreparedAbsent(att))throw e;
     continue;
    }
    if(proof?.ok!==true)throw Object.assign(new Error('Physical worker barrier unproven'),{code:'barrier_unproven'});
@@ -119,7 +120,14 @@ export function createSwarmDriver(deps) {
    if(rec?.porchRunId&&rec.phase==='launched'){await command(card,run,'bind_attempt',{attemptId:att.id,porchRunId:rec.porchRunId},`bind-${att.id}`);return 'bound';}
    if(rec?.phase==='launch_failed'&&rec.spawned===false){await command(card,run,'resolve_attempt',{attemptId:att.id,outcome:'failed',reason:rec.error?.message??'launch_failed'},`launch-failed-${att.id}`);return 'launch_failed';}
    if(!rec?.missing){const reconciled=await runtime.reconcile?.({attemptId:att.id});const match=reconciled?.matches?.find(m=>m.runId);if(match){await command(card,run,'bind_attempt',{attemptId:att.id,porchRunId:match.runId},`bind-${att.id}`);return 'bound';}if(reconciled?.workers?.length&&reconciled.workers.every(w=>w.gone===true)&&now()-att.createdAt>(deps.launchOrphanMs??600000)){await command(card,run,'resolve_attempt',{attemptId:att.id,outcome:'failed',reason:'Exact launch workers positively absent'},`orphan-${att.id}`);return 'launch_orphaned';}return 'launch_uncertain';}
-   run=await fresh(run.id);if(!launchable(run)||att.cancel){if(run.stopIntent||run.status==='stopping'||att.cancel){const proof=await runtime.reconcile?.({attemptId:att.id});if(!proof?.workers?.length||!proof.workers.every(w=>w.gone===true)||proof.matches?.some(m=>!m.terminal))return 'launch_uncertain';await command(card,run,'resolve_attempt',{attemptId:att.id,outcome:'cancelled',reason:'No runtime launch record; launch admission fenced'},`cancel-unlaunched-${att.id}`);return 'cancelled';}return 'launch_fenced';}
+   run=await fresh(run.id);att=run.attempts.find(a=>a.id===att.id);const expired=now()>=att.deadlineAt;
+   if(!launchable(run)||att.cancel||expired){if(run.stopIntent||run.status==='stopping'||att.cancel||expired){
+    if(expired&&!att.cancel)await command(card,run,'cancel_attempt',{attemptId:att.id,reason:'Swarm launch deadline expired'},`cancel-${att.id}`);
+    if(await unpreparedAbsent(att)){
+     await command(card,run,'swarm_worker_settled',{attemptId:att.id,workerId:workerId(att),state:'gone'},`namespace-${att.id}`);
+     await command(card,run,'resolve_attempt',{attemptId:att.id,outcome:'cancelled',reason:'Exact launch record and worker absent; admission fenced'},`cancel-unlaunched-${att.id}`);return 'cancelled';
+    }
+    const proof=await runtime.reconcile?.({attemptId:att.id});if(!proof?.workers?.length||!proof.workers.every(w=>w.gone===true)||proof.matches?.some(m=>!m.terminal))return 'launch_uncertain';await command(card,run,'resolve_attempt',{attemptId:att.id,outcome:'cancelled',reason:'No runtime launch record; launch admission fenced'},`cancel-unlaunched-${att.id}`);return 'cancelled';}return 'launch_fenced';}
    const x=await runtime.start({attemptId:att.id,profileId:att.launch.profileId,profile:run.swarm.participants.find(p=>p.participantId===att.participantId).profile,role:'swarm-participant',prompt:att.launch.prompt,materials:att.launch.materials,launchTimeoutMs:60_000});
    if(!x?.porchRunId&&!x?.runId)return 'launch_uncertain';await command(card,run,'bind_attempt',{attemptId:att.id,porchRunId:x.porchRunId??x.runId},`bind-${att.id}`);return 'bound';
   }

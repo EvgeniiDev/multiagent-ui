@@ -119,3 +119,11 @@ test('stale barrier excludes unprepared launch only with exact missing record an
   assert.equal(await d.drive({},f.run),'bound');assert.equal(starts,1);assert.equal(f.att.porchRunId,'fresh');
  }finally{await f.cleanup();}
 });
+
+test('expired unprepared launch settles with paired absence proof without starting a model',async()=>{
+ const f=await fixture();try{
+  f.att.status='launching';delete f.att.porchRunId;let starts=0;
+  const d=createSwarmDriver({runtime:{canonicalPrepare:async()=>({ok:true,canonical:{hostDir:f.root}}),launchRecord:async id=>({attemptId:id,missing:true}),forAttempt:()=>({workerStatus:async()=>{throw Object.assign(new Error('unknown worker'),{code:'unknown_worker'});}}),start:async()=>{starts++;return{porchRunId:'must-not-start'};}},send:f.send,self:()=>({runnerId:'me'}),getRun:async()=>f.run,stateDir:join(f.root,'state'),now:()=>600001});
+  assert.equal(await d.drive({},f.run),'cancelled');assert.equal(starts,0);assert.equal(f.att.namespace.state,'gone');assert.equal(f.att.status,'cancelled');assert.equal(f.run.swarm.protocol.participants.a.activeTurn,null);
+ }finally{await f.cleanup();}
+});
