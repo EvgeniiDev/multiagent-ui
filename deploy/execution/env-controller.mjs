@@ -1018,6 +1018,25 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     const archive = await safeGit(priv, ['archive', '--format=tar', treeSha], { binary: true, maxStdout: 512 * 1024 * 1024 });
     if (archive.code !== 0) throw new RuntimeError('import_archive_failed', archive.stderr.slice(0, 300));
     if (archive.stdout.length > 512 * 1024 * 1024) throw new RuntimeError('import_archive_too_large', 'Worker archive exceeds limit');
+    // Validate the extractor's actual tree BEFORE touching the canonical.
+    // Unsupported entries (for example escaping symlinks) and archive
+    // attribute transformations must never turn a failed import into a
+    // destructive canonical write. This temp repo is controller-owned;
+    // safeGit keeps imported .gitattributes from invoking host filters.
+    const staged = await fs.mkdtemp(path.join(os.tmpdir(), 'acp-import-preflight-'));
+    try {
+      await extractTarBuffer(archive.stdout, staged);
+      const init = await safeGit(staged, ['init', '-q']);
+      if (init.code !== 0) throw new RuntimeError('import_preflight_failed', init.stderr.slice(0, 300));
+      const stagedAdd = await safeGit(staged, ['add', '-A']);
+      if (stagedAdd.code !== 0) throw new RuntimeError('import_preflight_failed', stagedAdd.stderr.slice(0, 300));
+      const stagedTree = await safeGit(staged, ['write-tree']);
+      if (stagedTree.code !== 0 || stagedTree.stdout.trim() !== treeSha) {
+        throw new RuntimeError('import_preflight_failed', 'Extracted archive differs from worker index tree');
+      }
+    } finally {
+      await fs.rm(staged, { recursive: true, force: true });
+    }
     const wt = canon.worktree;
     // Replace worktree content with exactly the tree: clear all entries
     // except .git, extract the archive, stage, commit.
