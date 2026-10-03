@@ -78,7 +78,10 @@ export async function extractTarBuffer(buf, destDir) {
 // the whole tar lands in memory — callers bound project size via maxBytes.
 export function gitArchiveExtract(repoDir, sha, destDir, { timeoutMs = 120_000, maxBytes = 512 * 1024 * 1024 } = {}) {
   return new Promise((resolveP, rejectP) => {
-    const child = spawn('git', ['-C', repoDir, 'archive', '--format=tar', sha],
+    // Git archive defaults to tar.umask=0002, which exposes 0664/0775
+    // even though Git records 0644/0755. Snapshot consumers must observe
+    // the same modes as canonical broker preconditions, independent of config.
+    const child = spawn('git', ['-C', repoDir, '-c', 'tar.umask=0022', 'archive', '--format=tar', sha],
       { stdio: ['ignore', 'pipe', 'pipe'] });
     const chunks = [];
     let size = 0, err = '';
