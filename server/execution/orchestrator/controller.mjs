@@ -282,10 +282,21 @@ export function createOrchDriver(deps = {}) {
     const docs = await runDocTexts(card, run);
     const kind = att.kind ?? att.role;
     if (att.role === 'decomposer') {
+      let rejections = (oz.specHistory ?? []).filter((r) => r.rejected === true).slice(-3);
+      // A fresh continuation resets graph evidence, but its predecessor's
+      // diagnostic still explains why the same output contract was refused.
+      if (!rejections.length && run.continuation?.fromRunId) {
+        const prior = await getRun(run.continuation.fromRunId).catch(() => null);
+        if (prior?.mode === 'orchestrator' && prior.cardId === card.cardId) {
+          rejections = (prior.orchestrator?.specHistory ?? [])
+            .filter((r) => r.rejected === true).slice(-3);
+        }
+      }
       return {
         prompt: buildDecomposerPrompt({
           cardTitle: titleOf(card), baseCommit: inputs.baseCommit,
           workers: oz.workers, limits: oz.limits,
+          rejections,
         }),
         materials: decomposerMaterials({
           projectRoot: oz.project.projectRoot, snapshotSha: inputs.baseCommit,

@@ -435,3 +435,61 @@ test('driver: restarted owner adopts completed graph only with authenticated mat
   assert.equal(assembler.owner.instanceId,replacement.instanceId);assert.equal(f.starts.length,launches+1);
   await tickWith(restarted);assert.equal(f.starts.length,launches+1,'next tick supervises existing assembler');
 });
+
+test('driver: decomposition retry carries actual committed-spec rejection and can repair it', async () => {
+  const f = await driverFixture();
+  await f.tick(); await f.tick();
+  let run = await f.run();
+  const first = run.attempts.find(a => a.role === 'decomposer');
+  const invalid = taskSpec('a'); invalid.boundary.paths = [];
+  await f.complete(first, J({ decomposition: { subtasks: [invalid] } }));
+  await f.tick(); await f.tick();
+  run = await f.run();
+  const rejection = run.orchestrator.specHistory.find(r => r.attemptId === first.id);
+  assert.equal(rejection.code, 'boundary_missing');
+  assert.equal(rejection.message, 'subtasks[0].boundary.paths must be a non-empty array');
+  const retry = run.attempts.findLast(a => a.role === 'decomposer');
+  assert.notEqual(retry.id, first.id);
+  const prompt = f.jobs.get(retry.porchRunId).params.prompt;
+  assert.ok(prompt.includes(rejection.message), 'retry sees the actual durable validation diagnostic');
+  assert.ok(prompt.includes(rejection.sha256), 'diagnostic binds the rejected committed artifact');
+  assert.ok(prompt.includes('verification-only tasks'), 'even read-only tasks require a non-empty declared scope');
+  const example = /```json\n([\s\S]*?)\n```/.exec(prompt)[1];
+  assert.doesNotThrow(() => JSON.parse(example), 'the illustrative output itself is valid JSON');
+  await f.complete(retry, J({ decomposition: { subtasks: [taskSpec('a')] } }));
+  await f.tick(); await f.tick();
+  run = await f.run();
+  assert.equal(run.orchestrator.spec.status, 'approved');
+  assert.equal(run.orchestrator.graph.status, 'active');
+  assert.equal(run.orchestrator.tasks.length, 1);
+  assert.equal(run.orchestrator.specHistory.filter(r => r.rejected).length, 1);
+});
+
+test('driver: fresh continuation carries prior rejection diagnostics without importing old graph evidence', async () => {
+  const f = await driverFixture();
+  await f.tick(); await f.tick();
+  for (let n = 0; n < 2; n++) {
+    const run = await f.run();
+    const att = run.attempts.findLast(a => a.role === 'decomposer');
+    const invalid = taskSpec('a'); invalid.boundary.paths = [];
+    await f.complete(att, J({ decomposition: { subtasks: [invalid] } }));
+    await f.tick(); await f.tick();
+  }
+  const predecessor = await f.run();
+  assert.equal(predecessor.status, 'failed');
+  const card = await f.client.getCard('card-a');
+  const continued = await cmd(f.svc, 'card-a', {commandId:'continue-rejected-decomposition',type:'continue',expectedControlRevision:card.controlRevision,payload:{note:'Correct the rejected scope'}});
+  assert.equal(continued.status,200,J(continued.json));
+  const id = continued.json.result.runId;
+  const next = await f.client.getRun(id);
+  assert.equal(next.orchestrator.specHistory.length,0);
+  assert.deepEqual(next.orchestrator.tasks,[]);
+  await f.driver.drive(await f.client.getCard('card-a'),next);
+  await f.driver.drive(await f.client.getCard('card-a'),await f.client.getRun(id));
+  const fresh = await f.client.getRun(id);
+  const attempt = fresh.attempts.find(a=>a.role==='decomposer');
+  const prompt = f.jobs.get(attempt.porchRunId).params.prompt;
+  assert.ok(prompt.includes(predecessor.orchestrator.specHistory.at(-1).message));
+  assert.ok(prompt.includes(predecessor.orchestrator.specHistory.at(-1).sha256));
+  assert.equal(fresh.orchestrator.specHistory.length,0,'context never becomes current spec approval/proof');
+});

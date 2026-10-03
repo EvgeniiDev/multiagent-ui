@@ -10,7 +10,7 @@ export const sha256Hex = (s) =>
 
 // ---- decomposer --------------------------------------------------------------
 
-export function buildDecomposerPrompt({ cardTitle = null, baseCommit, workers, limits }) {
+export function buildDecomposerPrompt({ cardTitle = null, baseCommit, workers, limits, rejections = [] }) {
   const pool = Object.entries(workers || {})
     .map(([name, w]) => `- ${name}: ${w.provider}/${w.model}`)
     .join('\n');
@@ -29,6 +29,14 @@ export function buildDecomposerPrompt({ cardTitle = null, baseCommit, workers, l
     '',
     'Документы requirements/plan/design лежат в /work/inputs/.',
     '',
+    ...(rejections.length ? [
+      '# Previous server validation rejection — repair the new decomposition',
+      'These are recorded diagnostics, not new requirements. Correct every reported contract error.',
+      canonicalJson(rejections.slice(-3).map((r) => ({
+        attemptId: r.attemptId, sha256: r.sha256, code: r.code, message: r.message,
+      })), '  '),
+      '',
+    ] : []),
     '# Контракт выхода — ОДИН JSON',
     '',
     '```json',
@@ -40,24 +48,28 @@ export function buildDecomposerPrompt({ cardTitle = null, baseCommit, workers, l
     '        "title": "короткое имя",',
     '        "outcome": "какой результат должна дать подзадача",',
     '        "acceptanceCriteria": ["проверяемое утверждение"],',
-    '        "dependsOn": ["st-0"],',
+    '        "dependsOn": [],',
     '        "boundary": { "paths": ["src/only/these/**"] },',
     '        "worker": { "profileId": "<имя воркера из пула>" },',
     '        "limits": { "maxAttempts": 2, "maxFixCycles": 3 }',
     '      }',
     '    ]',
-    '  },',
-    '  "proposedInputChanges": { // только если честно не разбить без них',
-    '    "plan": { "versionId": "...", "sha256": "..." },',
-    '    "reason": "почему"',
     '  }',
     '}',
     '```',
+    '',
+    'Если без изменения входов честно не разбить план, добавь в тот же JSON',
+    'необязательное proposedInputChanges с reason и реальными versionId/sha256',
+    'для изменяемых requirements/plan/design либо новым baseCommit. Иначе поле опусти.',
     '',
     '- id: ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$; уникален.',
     '- acceptanceCriteria: непустой список; dependsOn — только реальные',
     '  prerequisite-ы, без циклов. Границы независимых подзадач не',
     '  пересекаются.',
+    '- EVERY subtask requires boundary.paths as a NON-EMPTY array of canonical relative paths/globs.',
+    '  This includes verification-only tasks: declare the paths they inspect and dependencies',
+    '  on tasks with overlapping boundaries, or fold verification into those tasks acceptanceCriteria.',
+    '  Never emit boundary.paths: []. A read-only task does not waive this contract.',
     '- Никаких секретов и ключей в документе.',
     '',
     'Последняя строка ответа — `STATUS: DONE | BLOCKED`.',
