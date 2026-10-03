@@ -974,36 +974,45 @@ def mode_run(pw, args, outdir, mode, card_id, exec_ctx, transfer_docs):
         open_card_drawer(page, card_id)
         shot(page, outdir, f"{mode}-panel-open")
         enable_card_ui(page)
-        attach_transfer_docs(page, mode, transfer_docs["requirements"],
-                             transfer_docs["plan"])
-        if not ensure_preset_ui(page, mode):
-            shot(page, outdir, f"{mode}-no-composition")
-            return False
-        if configure_mode_editor(page, mode) is None:
-            shot(page, outdir, f"{mode}-no-editor")
-            return False
-        # Start via the MODE start button — fusion NEVER uses exec-start.
-        start_sel = {"fusion": "fusion-start", "orchestrator": "orch-start",
-                     "swarm": "swarm-start"}[mode]
-        try:
-            page.wait_for_selector(f'[data-testid="{start_sel}"]:enabled', timeout=30000)
-        except Exception:
-            prob_sel = {"fusion": "fusion-problems", "orchestrator": "orch-problems",
-                        "swarm": "swarm-problems"}[mode]
-            problems = page.locator(f'[data-testid="{prob_sel}"]').first.inner_text(timeout=3000) \
-                if page.locator(f'[data-testid="{prob_sel}"]').count() else "start never enabled"
-            check(f"{mode}-start-gate-opens", False, problems[:200])
-            shot(page, outdir, f"{mode}-start-blocked")
-            return False
-        page.locator(f'[data-testid="{start_sel}"]').click()
-        try:
-            page.locator('[data-testid="run-status"]').wait_for(timeout=30000)
-        except Exception:
-            err = page.locator('[data-testid="exec-command-error"]')
-            check(f"{mode}-start-created-run", False,
-                  err.first.inner_text()[:200] if err.count() else "no run-status rendered")
-            return False
-        check(f"{mode}-start-created-run", True, "")
+        if args.resume_run:
+            st, existing = card_view(card_id)
+            rid = current_run_id(existing) if st == 200 else None
+            rst, bound = run_view(rid) if rid else (404, None)
+            if rst != 200 or bound.get("mode") != mode:
+                check(f"{mode}-resume-bound-run", False, str(rid))
+                return False
+            check(f"{mode}-resume-bound-run", True, rid)
+        else:
+            attach_transfer_docs(page, mode, transfer_docs["requirements"],
+                                 transfer_docs["plan"])
+            if not ensure_preset_ui(page, mode):
+                shot(page, outdir, f"{mode}-no-composition")
+                return False
+            if configure_mode_editor(page, mode) is None:
+                shot(page, outdir, f"{mode}-no-editor")
+                return False
+            # Start via the MODE start button — fusion NEVER uses exec-start.
+            start_sel = {"fusion": "fusion-start", "orchestrator": "orch-start",
+                         "swarm": "swarm-start"}[mode]
+            try:
+                page.wait_for_selector(f'[data-testid="{start_sel}"]:enabled', timeout=30000)
+            except Exception:
+                prob_sel = {"fusion": "fusion-problems", "orchestrator": "orch-problems",
+                            "swarm": "swarm-problems"}[mode]
+                problems = page.locator(f'[data-testid="{prob_sel}"]').first.inner_text(timeout=3000) \
+                    if page.locator(f'[data-testid="{prob_sel}"]').count() else "start never enabled"
+                check(f"{mode}-start-gate-opens", False, problems[:200])
+                shot(page, outdir, f"{mode}-start-blocked")
+                return False
+            page.locator(f'[data-testid="{start_sel}"]').click()
+            try:
+                page.locator('[data-testid="run-status"]').wait_for(timeout=30000)
+            except Exception:
+                err = page.locator('[data-testid="exec-command-error"]')
+                check(f"{mode}-start-created-run", False,
+                      err.first.inner_text()[:200] if err.count() else "no run-status rendered")
+                return False
+            check(f"{mode}-start-created-run", True, "")
         deadline = time.time() + max(args.timeout_s, MIN_TIMEOUT_S)
         if not advance_pending_actions(page, mode, card_id, deadline):
             check(f"{mode}-reaches-terminal", False, f"budget {args.timeout_s}s exhausted")
@@ -1051,6 +1060,7 @@ def build_parser():
                    help="subset rerun, e.g. --modes fusion,swarm")
     p.add_argument("--existing-fixture-state", default=None,
                    help="JSON {projectId, cardIds:{...}} to reuse a prior fixture (no reseed)")
+    p.add_argument("--resume-run", action="store_true", help="Resume UI approvals and verification of the existing card run without restarting or replacing documents")
     p.add_argument("--timeout-s", type=int, default=MIN_TIMEOUT_S,
                    help=f"per-mode budget seconds (min {MIN_TIMEOUT_S})")
     p.add_argument("--chrome", default="/home/hermes/.cache/ms-playwright/"
