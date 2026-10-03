@@ -818,10 +818,32 @@ sect('container-runtime');
   const stu = await rt.status('run_not-mine');
   check('status unowned run refused', stu.ok === false);
 
-  // launch record durable
+  // launch record durable — flattened lifecycle seam (Fusion7):
+  // porchRunId + error + createdAt + launchStartedAt on the top level.
   const lr = await rt.launchRecord('att-run1');
   check('launch record persisted', lr.phase === 'launched' && lr.porchRunId === r.porchRunId
     && lr.workerId === 'w-att-run1');
+  check('launch record exposes lifecycle timestamps',
+    typeof lr.createdAt === 'string' && Date.parse(lr.createdAt) > 0
+    && typeof lr.launchStartedAt === 'string' && Date.parse(lr.launchStartedAt) > 0);
+
+  // prepareDependencies: setup allowlist enforced runtime-side, then
+  // delegated to controller deps.prepare (content-derived depSet cache).
+  {
+    let threw = null;
+    try { await rt.prepareDependencies({ projectRoot: 'x', snapshotSha: 'y', setupId: 'nope' }); }
+    catch (e) { threw = e; }
+    check('prepareDependencies rejects unregistered setup', threw?.code === 'setup_not_registered');
+    const before = calls.length;
+    const depRes = await rt.prepareDependencies(
+      { projectRoot: 'acp-ui-agent-modes', snapshotSha: 'ab'.repeat(20), setupId: 'node-deps' })
+      .catch((e) => e);
+    const depCall = calls.slice(before).find(([m]) => m === 'deps.prepare');
+    check('prepareDependencies delegates to controller deps.prepare',
+      !!depCall && depCall[1].setupId === 'node-deps'
+      && depCall[1].projectRoot === 'acp-ui-agent-modes',
+      depRes?.code ? `stub:${depRes.code}` : 'delegated');
+  }
 
   // reconcile: match by runIds; gone worker -> no matches
   const rec = await rt.reconcile({ runIds: [r.porchRunId] });

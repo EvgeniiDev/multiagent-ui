@@ -796,6 +796,8 @@ export function createContainerRuntime({
       workerId: rec.workerId ?? null,
       worker: rec.worker ?? null,
       profileDigest: rec.profileDigest ?? null,
+      createdAt: rec.createdAt ?? null,
+      launchStartedAt: rec.launch?.startedAt ?? null,
       diagnostics: rec.launch?.diagnostics ?? null,
       error: rec.error ?? null,
       environment: rec.environment ?? null,
