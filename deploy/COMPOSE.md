@@ -51,16 +51,25 @@ Env: `ACP_STATE_URL=http://127.0.0.1:25900`, `STATE_URL=...`,
 
 ## Host provisioning (run BEFORE enabling managed execution)
 
+Preflight runs INSIDE the state/runner containers, where /tmp is
+container-private — a host /tmp dir is invisible there. Provisioning is
+therefore per-container, in `compose.prod-env.yaml` (runner boot wrapper:
+`install -d -m 0700 /tmp/compound-engineering-1001` before exec; service
+user is 1001 so the dir is uid-owned 0700). Keep the HOST dir too for
+local probes (`preparation_binding_probe.mjs` on the host resolves
+TMPDIR to the host /tmp):
+
 ```bash
-# Per-uid ce-* skill scratch dir (preparation preflight fs-gate). The
-# runner runs uid 1001 and ce-skills document
-# <tmp>/compound-engineering-<uid> as their writable scratch root;
-# preflightBinding(fsCheck) refuses with root_missing when it is absent
-# (proven 2026-10-03: probe fails closed without it; restored 23/23 with
-# it). Provisioning — never bypass the preflight:
+# Host probes only — never reaches container preflight:
 install -d -m 0700 -o 1001 -g 1001 /tmp/compound-engineering-1001
 # Verify: ls -ld /tmp/compound-engineering-1001  # drwx------ hermes hermes
 ```
+
+Background: the runner runs uid 1001 and ce-skills document
+`<tmp>/compound-engineering-<uid>` as their writable scratch root;
+`preflightBinding(fsCheck)` refuses with `root_missing` when it is absent
+(proven 2026-10-03: probe fails closed without it; restored 23/23 with
+it). Provisioning satisfies the gate — never bypass the preflight.
 
 The prod ops token (`/home/hermes/.acp-ops/ops-token`, provision per the
 `ACP_OPS_TOKEN_FILE` comment in `compose.yaml`) is likewise required on
