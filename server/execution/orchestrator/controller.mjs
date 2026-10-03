@@ -32,6 +32,7 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { safeGit } from './safe-git.mjs';
 import { gitRepo } from '../workspaces.mjs';
 import {
@@ -46,7 +47,7 @@ import {
   buildVerifierPrompt, verifierMaterials,
   buildAssemblerPrompt, assemblerMaterials,
   taskBriefText, boundaryTextOf, criteriaTextOf, resultsBundleText,
-  sha256Hex,
+  sha256Hex, parseIntegrationDeclarations,
 } from './prompt.mjs';
 
 const LIVE_ATTEMPT = ATTEMPT_NONTERMINAL;
@@ -94,7 +95,7 @@ export function extractJsonDoc(finalText) {
 export function createOrchDriver(deps = {}) {
   const {
     runtime,               // REQUIRED — the F1 constrained container runtime
-    send,                  // (card, type, payload, idem) => result
+    send: sendRaw,         // (card, type, payload, idem) => result
     recordEvent,           // (card, run, type, data, attemptId?) => ...
     self,                  // () => owner identity fields
     getRun,                // (runId) => run record | null
@@ -111,9 +112,12 @@ export function createOrchDriver(deps = {}) {
     projectsDir = null,    // controller's registered projects root (snapshot binding)
   } = deps;
   if (!runtime) throw new Error('orchestrator driver requires the F1 constrained runtime');
-  if (typeof send !== 'function' || typeof getRun !== 'function') {
+  if (typeof sendRaw !== 'function' || typeof getRun !== 'function') {
     throw new Error('orchestrator driver requires send + getRun');
   }
+
+  const send = (card, command, payload, id, options) => sendRaw(card, command, payload,
+    typeof id === 'string' && id.length > 120 ? `orch-${sha256Hex(id)}` : id, options);
 
   const inflight = new Map();
   const cancelIssued = new Set();
@@ -219,7 +223,6 @@ export function createOrchDriver(deps = {}) {
   const runShort = (run) => SAFE_PART(run.id.slice(4), 16);
   const taskCanonicalId = (run, taskId) => `ocan-${runShort(run)}-${SAFE_PART(taskId, 48)}`;
   const integrateCanonicalId = (run) => `ocan-${runShort(run)}-integrate`;
-  const snapName = (run, taskId) => `osnap-${runShort(run)}-${SAFE_PART(taskId, 48)}`;
   const attemptIdOf = (run, role, taskId, n) =>
     `oa-${runShort(run)}-${taskId ? `${SAFE_PART(taskId, 24)}-` : ''}${role}-n${n}`;
 
@@ -292,7 +295,7 @@ export function createOrchDriver(deps = {}) {
       };
     }
     const task = taskById(oz, att.taskId);
-    if (!task) throw new Error(`attempt ${att.id} binds task ${att.taskId} that is gone`);
+    if (!task && att.role !== 'assembler') throw new Error(`attempt ${att.id} binds task ${att.taskId} that is gone`);
     if (att.role === 'worker') {
       const isFix = att.kind === 'fix';
       const depsText = task.dependsOn.length
@@ -305,16 +308,11 @@ export function createOrchDriver(deps = {}) {
           findings: isFix ? (task.state.evidence?.findings ?? []) : null,
         }),
         materials: workerMaterials({
-          // Fix rounds build fromCanonical — snapshotSha is only the
-          // project-source binding and must resolve there (the controller
-          // verifies it BEFORE honoring fromCanonical): the run baseCommit,
-          // never a private-repo/canonical sha.
-          projectRoot: isFix ? oz.project.projectRoot
-            : (task.dependsOn.length ? snapName(run, task.id) : oz.project.projectRoot),
-          snapshotSha: isFix ? inputs.baseCommit
-            : (att.launch?.inputCommit ?? task.state.inputCommit ?? inputs.baseCommit),
+          projectRoot: att.launch?.projectRoot ?? oz.project.projectRoot,
+          snapshotSha: att.launch?.snapshotSha ?? att.launch?.inputCommit ?? inputs.baseCommit,
+          snapshotId: att.launch?.snapshotId,
           canonicalId: att.launch?.canonicalId ?? taskCanonicalId(run, task.id),
-          fromCanonical: isFix,
+          fromCanonical: isFix && !att.launch?.snapshotId,
           taskText: taskBriefText(task),
           briefText: `Subtask ${task.id}: ${task.outcome}`,
           boundaryText: boundaryTextOf(task),
@@ -459,7 +457,7 @@ export function createOrchDriver(deps = {}) {
   // terminal resolve — a live container can keep writing while the host
   // reads. Positive proof = worker.status 'stopped'/'gone' after
   // worker.stop; the durable record lands via orch_worker_settled. Retried
-  // calls are idempotent; an unknown worker IS positive absence ('gone').
+  // calls are idempotent; a missing registry row never proves physical absence.
   async function settleWorkerNamespace(card, run, att) {
     if (att.namespace
       && (att.namespace.state === 'stopped' || att.namespace.state === 'gone')) {
@@ -474,10 +472,7 @@ export function createOrchDriver(deps = {}) {
     }
     let st = await scoped.workerStatus()
       .catch((e) => ({ ok: false, error: e }));
-    if (st?.error?.code === 'unknown_worker' || st?.code === 'unknown_worker') {
-      st = { ok: true, state: 'gone' };
-    }
-    let state = st?.state ?? null;
+    let state = st?.ok === true ? (st?.state ?? null) : null;
     if (state !== 'gone' && state !== 'stopped' && state !== 'removed') {
       const stop = await scoped.stopWorker().catch((e) => ({ ok: false, error: e }));
       if (stop?.ok !== true && stop?.state !== 'stopped') {
@@ -486,8 +481,7 @@ export function createOrchDriver(deps = {}) {
       }
       const after = await scoped.workerStatus()
         .catch((e) => ({ ok: false, error: e }));
-      state = after?.error?.code === 'unknown_worker' || after?.code === 'unknown_worker'
-        ? 'gone' : (after?.state ?? null);
+      state = after?.ok === true ? (after?.state ?? null) : null;
     }
     if (state !== 'stopped' && state !== 'gone' && state !== 'removed') {
       return { settled: false, code: 'worker_state_unproven',
@@ -793,10 +787,10 @@ export function createOrchDriver(deps = {}) {
     const oz = run.orchestrator;
     for (const task of oz.tasks || []) {
       if (task.state?.status !== 'running' && task.state?.status !== 'verifying') continue;
-      if (task.state.resultCandidate) continue; // already settled, awaiting verdict
-      const doneAtt = (run.attempts || []).find(
-        (a) => a && a.taskId === task.id && a.role === 'worker' && a.status === 'completed');
-      if (!doneAtt) continue;
+      const doneAtt = (run.attempts || []).filter(
+        (a) => a && a.taskId === task.id && a.role === 'worker').at(-1);
+      if (!doneAtt || doneAtt.status !== 'completed'
+        || task.state.resultCandidate?.attemptId === doneAtt.id) continue;
       const s = doneAtt._settle ?? await (async () => {
         // Recover the settle descriptor by re-running the import step —
         // freeze/import/export are all idempotent on identical content.
@@ -805,7 +799,7 @@ export function createOrchDriver(deps = {}) {
       })();
       if (!s) continue;
       try {
-        await send(card, 'orch_task_settle', s, `os-${doneAtt.id}-by-${instanceId}`);
+        await send(card, 'orch_task_settle', { ...s, runId: run.id, ...self() }, `os-${doneAtt.id}-by-${instanceId}`);
         run = await refresh(run);
       } catch (e) {
         await recordEvent(card, run, 'task_settle_blocked', {
@@ -858,18 +852,16 @@ export function createOrchDriver(deps = {}) {
     // causal-graph supersession itself; the driver never filters proof
     // arrays or drops parents to bypass a storage rejection.
     const order = accepted.map((t) => t.id);
-    // APIv2: the resolution repo's full base→result diff is re-derived by
-    // the storage helper; assembler-only mutations (paths no parent proof
-    // covers) must be declared in additionalPaths — parent-owned paths can
-    // never bypass proof. derivedFiles come from the actual repo diff, not
-    // caller claims.
-    const resDiff = await s.exportWorkerDiff({ repoPath, inputCommit: root })
-      .catch((e) => ({ err: e }));
-    if (resDiff?.err) return { code: 'diff_unproven', detail: String(resDiff.err.message).slice(0, 300) };
-    const parentPaths = new Set();
-    for (const p of parentDiffs) for (const f of p.files || []) parentPaths.add(f.path);
-    const additionalPaths = (resDiff.files || [])
-      .map((f) => f.path).filter((p) => !parentPaths.has(p));
+    // Only the assembler's committed explicit declaration authorizes
+    // additional edits and semantic overlap resolution. Never infer consent
+    // from the changes we are about to accept.
+    const declarationArtifacts = Object.values(run.artifacts ?? {}).filter(
+      (a) => a.attemptId === att.id && a.kind === 'integration-declarations');
+    if (declarationArtifacts.length !== 1) return { code: 'declarations_unrecorded' };
+    let declarations;
+    try {
+      declarations = parseIntegrationDeclarations(await artifactText(run, declarationArtifacts[0].id));
+    } catch (e) { return { code: 'declarations_invalid', detail: e.message }; }
     let record;
     try {
       const baseTree = await s.treeHashFor(repoPath, root);
@@ -893,7 +885,8 @@ export function createOrchDriver(deps = {}) {
         baseTree,
         repoPath,
         parentDiffs,
-        additionalPaths,
+        additionalPaths: declarations.additionalPaths,
+        resolvedPaths: declarations.resolvedPaths,
         resolutionNote: `orchestrator run ${run.id} assembler attempt ${att.id}`,
       });
     } catch (e) {
@@ -925,7 +918,19 @@ export function createOrchDriver(deps = {}) {
 
   async function resolveAssembler(card, run, att, { outcome, reason, wt }) {
     if (outcome === 'completed') {
-      const integ = await integrateAssembler(card, run, att);
+      try {
+        const declarations = parseIntegrationDeclarations(wt?.finalText);
+        await commitArtifact(card, run, att, {
+          kind: 'integration-declarations', name: 'integration-declarations.json',
+          text: canonicalJson(declarations),
+        });
+        run = await refresh(run);
+      } catch (e) {
+        outcome = 'failed';
+        reason = `integration declarations invalid: ${String(e.message).slice(0, 200)}`;
+      }
+      const integ = outcome === 'completed' ? await integrateAssembler(card, run, att)
+        : { code: 'declarations_invalid', detail: reason };
       if (integ.code !== 'ok') {
         outcome = 'failed';
         reason = `integration failed (${integ.code}): ${integ.detail ?? ''}`;
@@ -1118,28 +1123,36 @@ export function createOrchDriver(deps = {}) {
     }
     const s = await stor();
     const parentDiffs = await parentDiffsFor(card, run, task);
-    const name = snapName(run, task.id);
-    // The snapshot must land INSIDE the controller's registered projects
-    // root or `projectRoot: name` can never resolve as a materials binding
-    // (the mount is read-only controller-side; the runner writes on host).
     const baseDir = projectsDir ?? path.dirname(oz.project.sourcePath);
-    let snap;
+    const identity = {
+      runId: run.id, taskId: task.id, dependsOn: task.dependsOn, sourcePath: path.resolve(oz.project.sourcePath),
+      baseCommit: inputs.baseCommit,
+      order: parentDiffs.map((p) => p.taskId),
+      parents: parentDiffs.map((p) => ({ taskId: p.taskId, inputCommit: p.inputCommit,
+        resultCommit: p.resultCommit, patchSha256: p.patchSha256,
+        dependsOn: taskById(oz, p.taskId)?.dependsOn ?? [] })),
+    };
+    let basis;
     try {
-      snap = await s.assembleDependencySnapshot({
-        sourcePath: oz.project.sourcePath,
-        baseCommit: inputs.baseCommit,
-        taskId: task.id, tasks: oz.tasks,
-        parentDiffs, name, baseDir,
+      basis = await immutableDependencyBasis({ identity, baseDir,
+        cacheDir: path.join(stateDir, 'orch-dependency-bases'), storage: s,
+        assemble: (name) => s.assembleDependencySnapshot({
+          sourcePath: oz.project.sourcePath, baseCommit: inputs.baseCommit,
+          taskId: task.id, tasks: oz.tasks, parentDiffs, name, baseDir,
+        }),
       });
     } catch (e) {
-      return { code: 'snapshot_failed', detail: String(e?.code ? `${e.code}: ` : '') + String(e?.message || e).slice(0, 300) };
+      return { code: 'snapshot_failed', detail: String(e.message).slice(0, 300) };
     }
+    const name = basis.projectRoot;
+    const snap = basis;
+    const dependencyCanonicalId = `${canonicalId.slice(0, 55)}-${basis.key.slice(0, 16)}`;
     const cp = await runtime.canonicalPrepare({
-      canonicalId, projectRoot: name,
+      canonicalId: dependencyCanonicalId, projectRoot: name,
       snapshotSha: snap.inputCommit, branch: `acp/orch/${run.id}`,
     }).catch((e) => ({ ok: false, error: { message: String(e?.message || e) } }));
     if (!cp?.ok) return { code: 'canonical_unprepared', detail: cp?.error?.message };
-    return { code: 'ok', projectRoot: name, inputCommit: snap.inputCommit, canonicalId };
+    return { code: 'ok', projectRoot: name, inputCommit: snap.inputCommit, canonicalId: dependencyCanonicalId };
   }
 
   // Prepare the verifier's candidate binding: the task canonical's head
@@ -1149,20 +1162,20 @@ export function createOrchDriver(deps = {}) {
   // materials — projectRoot/snapshotSha/snapshotId — never a caller path.
   async function prepareCandidateBasis(card, run, task, generation) {
     const oz = run.orchestrator;
-    const canonicalId = taskCanonicalId(run, task.id);
     const cand = task.state?.resultCandidate;
-    if (!cand?.resultCommit) return { code: 'candidate_unrecorded' };
+    const canonicalId = cand?.canonicalId ?? taskCanonicalId(run, task.id);
+    if (!cand?.commit) return { code: 'candidate_unrecorded' };
     const cst = await runtime.canonicalStatus(canonicalId).catch(() => null);
     const head = cst?.canonical?.head ?? null;
     if (!head) return { code: 'canonical_unreadable' };
-    if (head !== cand.resultCommit) {
+    if (head !== cand.commit) {
       return { code: 'candidate_unbound',
-        detail: `canonical head ${String(head).slice(0, 12)} != recorded candidate ${String(cand.resultCommit).slice(0, 12)}` };
+        detail: `canonical head ${String(head).slice(0, 12)} != recorded candidate ${String(cand.commit).slice(0, 12)}` };
     }
     if (typeof runtime.swarmSnapshot !== 'function') return { code: 'snapshot_unwired' };
     const snap = await runtime.swarmSnapshot({ canonicalId, generation })
       .catch((e) => ({ ok: false, error: e }));
-    if (!snap?.ok || !snap.materials?.snapshotSha) {
+    if (!snap?.ok || snap.materials?.snapshotSha !== cand.commit || !snap.materials?.snapshotId) {
       return { code: 'snapshot_failed',
         detail: String(snap?.error?.message ?? 'swarm.snapshot rejected').slice(0, 300) };
     }
@@ -1185,12 +1198,9 @@ export function createOrchDriver(deps = {}) {
       : isFix ? (task.state.fixesUsed ?? 0) + 1 : (task.state.attemptsUsed ?? 0) + 1;
     let basis = null;
     if (isFix) {
-      // Fix rounds seed from the task canonical (the returned result) —
-      // the canonical head IS the fix basis.
-      const canonicalId = taskCanonicalId(run, task.id);
-      const cst = await runtime.canonicalStatus(canonicalId).catch(() => null);
-      if (!cst?.canonical?.head) return 'canonical_unreadable';
-      basis = { code: 'ok', projectRoot: oz.project.projectRoot, inputCommit: cst.canonical.head, canonicalId };
+      basis = await prepareCandidateBasis(card, run, task,
+        (task.state.attemptsUsed ?? 0) + (task.state.fixesUsed ?? 0) + (task.state.verifyUsed ?? 0) + 1);
+      if (basis.code !== 'ok') return basis.code;
     } else if (isWork) {
       basis = await prepareTaskBasis(card, run, task);
       if (basis.code !== 'ok') {
@@ -1202,7 +1212,8 @@ export function createOrchDriver(deps = {}) {
     } else {
       // verify — the registered immutable candidate snapshot, bound to the
       // exact canonical head == recorded candidate commit.
-      basis = await prepareCandidateBasis(card, run, task, n);
+      basis = await prepareCandidateBasis(card, run, task,
+        (task.state.attemptsUsed ?? 0) + (task.state.fixesUsed ?? 0) + (task.state.verifyUsed ?? 0) + 1);
       if (basis.code !== 'ok') {
         await recordEvent(card, run, 'candidate_basis_blocked', {
           taskId: task.id, code: basis.code, detail: String(basis.detail ?? '').slice(0, 300),
@@ -1210,7 +1221,7 @@ export function createOrchDriver(deps = {}) {
         return basis.code;
       }
     }
-    const attemptId = attemptIdOf(run, kind === 'verify' ? 'v' : 'w', task.id, n);
+    const attemptId = attemptIdOf(run, kind === 'verify' ? 'v' : isFix ? 'f' : 'w', task.id, n);
     const att = {
       id: attemptId, role: kind === 'verify' ? 'verifier' : 'worker', kind,
       taskId: task.id, n,
@@ -1221,7 +1232,7 @@ export function createOrchDriver(deps = {}) {
         snapshotId: basis?.snapshotId ?? undefined,
         snapshotOf: isFix || isWork ? oz.order.filter((id) => task.dependsOn.includes(id)) : [],
         canonicalId: basis?.canonicalId,
-        fromCanonical: isFix || undefined,
+        fromCanonical: isFix && !basis?.snapshotId || undefined,
       },
     };
     const built = await builtFor(card, run, att).catch((e) => {
@@ -1240,7 +1251,7 @@ export function createOrchDriver(deps = {}) {
           ...(basis.snapshotSha ? { snapshotSha: basis.snapshotSha } : {}),
           ...(basis.snapshotId ? { snapshotId: basis.snapshotId } : {}),
         } : {}),
-        ...(isFix ? { inputCommit: basis.inputCommit, canonicalId: basis.canonicalId, fromCanonical: true } : {}),
+        ...(isFix && !basis.snapshotId ? { inputCommit: basis.inputCommit, canonicalId: basis.canonicalId, fromCanonical: true } : {}),
         ...(isWork || isFix
           ? { snapshotOf: oz.order.filter((id) => task.dependsOn.includes(id)) }
           : {}),
@@ -1324,7 +1335,7 @@ export function createOrchDriver(deps = {}) {
   async function drive(card, run0) {
     let run = run0;
     if (!run.orchestrator || typeof run.orchestrator !== 'object') return 'not_orchestrator';
-    const oz = run.orchestrator;
+    let oz = run.orchestrator;
 
     // 1) Supervise every live orch attempt — observation beats issuance.
     let acted = null;
@@ -1355,11 +1366,13 @@ export function createOrchDriver(deps = {}) {
     for (const att of (run.attempts || []).filter(
       (a) => a && ORCH_ROLES.has(a.role) && ATTEMPT_TERMINAL.has(a.status)
         && !(a.namespace && (a.namespace.state === 'stopped' || a.namespace.state === 'gone')))) {
-      await settleWorkerNamespace(card, run, att);
+      const settled = await settleWorkerNamespace(card, run, att);
+      if (!settled.settled) return 'namespace_settlement_pending';
       run = await refresh(run);
     }
     run = await settlePendingWorkers(card, run);
     run = await recordPendingIntegrate(card, run);
+    oz = run.orchestrator;
 
     // 2) Stopping — durable cancel intent on every surviving owned attempt,
     //    drain to positive terminal, then complete the run.
@@ -1449,4 +1462,63 @@ export function createOrchDriver(deps = {}) {
   }
 
   return { drive, _inflight: inflight };
+}
+
+// The immutable receipt is the publication point. Builds use unique private
+// names, so concurrent creators and a crash before publication cannot expose
+// a partial repository to a retry. Published receipts never get overwritten.
+export async function immutableDependencyBasis({ identity, baseDir, cacheDir, storage, assemble }) {
+  const identityText = canonicalJson(identity);
+  const key = sha256Hex(identityText);
+  await fs.mkdir(cacheDir, { recursive: true, mode: 0o700 });
+  const receiptPath = path.join(cacheDir, `${key}.json`);
+  async function validated() {
+    const stat = await fs.lstat(receiptPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('dependency receipt is not a regular file');
+    const rec = JSON.parse(await fs.readFile(receiptPath, 'utf8'));
+    if (canonicalJson(rec.identity) !== identityText || rec.key !== key
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/.test(rec.projectRoot)
+      || rec.repoPath !== path.join(path.resolve(baseDir), rec.projectRoot)) {
+      throw new Error('dependency receipt identity mismatch');
+    }
+    const repoStat = await fs.lstat(rec.repoPath);
+    if (!repoStat.isDirectory() || repoStat.isSymbolicLink()
+      || await fs.realpath(rec.repoPath) !== rec.repoPath) throw new Error('dependency repo path mismatch');
+    const iso = await storage.verifyPrivateRepo(rec.repoPath);
+    const head = await git(rec.repoPath, ['rev-parse', 'HEAD']);
+    const dirty = await git(rec.repoPath, ['status', '--porcelain', '--untracked-files=all']);
+    if (!iso.ok || head.code !== 0 || head.stdout.trim() !== rec.inputCommit
+      || dirty.code !== 0 || dirty.stdout.trim()
+      || await storage.treeHashFor(rec.repoPath, rec.inputCommit) !== rec.treeHash) {
+      throw new Error('immutable dependency basis was changed');
+    }
+    return rec;
+  }
+  try { return await validated(); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  const name = `osnap-${key.slice(0, 24)}-${randomUUID().slice(0, 18)}`;
+  const snap = await assemble(name);
+  const repoPath = path.join(path.resolve(baseDir), name);
+  if (snap.repoPath !== repoPath) throw new Error('assembled dependency repo escaped registered projects');
+  const rec = { key, identity, projectRoot: name, repoPath,
+    inputCommit: snap.inputCommit, treeHash: await storage.treeHashFor(repoPath, snap.inputCommit) };
+  // Persist git objects/index and tree before publishing the receipt.
+  async function syncTree(dir) {
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      const child = path.join(dir, entry.name);
+      if (entry.isDirectory()) await syncTree(child);
+      else if (entry.isFile()) { const file = await fs.open(child, 'r'); try { await file.sync(); } finally { await file.close(); } }
+    }
+    const handle = await fs.open(dir, 'r'); try { await handle.sync(); } finally { await handle.close(); }
+  }
+  await syncTree(repoPath);
+  const projectsHandle = await fs.open(path.dirname(repoPath), 'r');
+  try { await projectsHandle.sync(); } finally { await projectsHandle.close(); }
+  const tmp = `${receiptPath}.${randomUUID()}.tmp`;
+  const fh = await fs.open(tmp, 'wx', 0o600);
+  try { await fh.writeFile(canonicalJson(rec)); await fh.sync(); } finally { await fh.close(); }
+  try { await fs.link(tmp, receiptPath); } catch (e) { if (e.code !== 'EEXIST') throw e; }
+  finally { await fs.unlink(tmp); }
+  const dirHandle = await fs.open(cacheDir, 'r');
+  try { await dirHandle.sync(); } finally { await dirHandle.close(); }
+  return validated();
 }
