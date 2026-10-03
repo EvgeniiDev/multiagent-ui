@@ -73,3 +73,5 @@ CONTINUE.md
 .acp/pm/
 # researcher runs + collector state (digests, seen-sets — runtime, not source)
 .acp/research/
+# per-Porch-run transient scratch; durable deliverables belong in tracked paths
+/.agent-tmp/
