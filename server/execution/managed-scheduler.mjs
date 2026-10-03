@@ -528,10 +528,22 @@ export function createManagedScheduler({
   // would be a command_conflict). Same-instance replays still dedup safely;
   // a new instance never impersonates the former owner.
 
+  const cardCommandQueues = new Map();
+  const cardCommandRevisions = new Map();
+  function rememberCardRevision(card, revision = card.internalRevision) {
+    const revisions = [cardCommandRevisions.get(card.cardId), card.internalRevision, revision]
+      .filter((r) => Number.isInteger(r));
+    if (revisions.length) {
+      const latest = Math.max(...revisions);
+      cardCommandRevisions.set(card.cardId, latest);
+      card.internalRevision = latest;
+    }
+  }
+
   async function refreshCard(card) {
     const fresh = await client.getCard(card.cardId);
     if (fresh) {
-      card.internalRevision = fresh.internalRevision;
+      rememberCardRevision(card, fresh.internalRevision);
       card.workspaces = fresh.workspaces || {};
     }
     return card;
@@ -546,6 +558,22 @@ export function createManagedScheduler({
   ]);
   async function send(card, type, payload, idem, { journal = true } = {}) {
     const commandId = idem || `sc-${instanceId.slice(0, 8)}-${type}-${crypto.randomUUID()}`;
+    // Validation polling and ticks can hold different card objects. Queue
+    // the complete CAS/retry operation, then use the newest local revision.
+    // One failed operation releases its turn without changing another's
+    // original command ID, payload, or journal duty.
+    const prior = cardCommandQueues.get(card.cardId) ?? Promise.resolve();
+    const turn = prior.catch(() => {}).then(() => {
+      rememberCardRevision(card);
+      return sendCardCommand(card, type, payload, commandId, { journal });
+    });
+    cardCommandQueues.set(card.cardId, turn);
+    try { return await turn; } finally {
+      if (cardCommandQueues.get(card.cardId) === turn) cardCommandQueues.delete(card.cardId);
+    }
+  }
+
+  async function sendCardCommand(card, type, payload, commandId, { journal }) {
     // Durable-exactly-once journal append: the ORIGINAL commandId+payload
     // land in the journal at most once, whatever later retry produced the
     // final error. A failed durable append degrades the journal (fail
@@ -574,16 +602,15 @@ export function createManagedScheduler({
           expectedInternalRevision: card.internalRevision,
         });
         if (res && typeof res.internalRevision === 'number') {
-          card.internalRevision = res.internalRevision;
+          rememberCardRevision(card, res.internalRevision);
         }
         return res?.result ?? res;
       } catch (e) {
         if (e && e.status === 409 && e.code === 'revision_conflict' && tries < 8) {
           // The CAS refresh read is itself an API call — an outage there
           // loses the mutation exactly like a lost command response.
-          // Jittered backoff: co-channel writers (the 300ms validation
-          // heartbeat is one) retry through this same path, and an
-          // immediate refresh+resend holds both loops in lockstep — each
+          // Other scheduler instances may still write this card. An
+          // immediate refresh+resend can hold competing loops in lockstep — each
           // retry lands in the other's CAS window and retries starve.
           // A randomized delay lands the next attempt at an unrelated
           // phase of the competing writer's cycle.
@@ -596,7 +623,7 @@ export function createManagedScheduler({
           }
           continue;
         }
-        if (isOutageError(e)) await journalOnce();
+        if (isOutageError(e) || e?.code === 'revision_conflict') await journalOnce();
         throw e;
       }
     }
@@ -3313,10 +3340,10 @@ export function createManagedScheduler({
         await endValidation(card, run, valId, cancelFlag ? 'cancelled' : 'settled');
       }
     } catch (e) {
-      if (isOutageError(e)) {
-        // API loss mid-pipeline — the reservation stays; the next tick
+      if (isOutageError(e) || e?.code === 'revision_conflict') {
+        // API loss or revision contention — the reservation stays; the next tick
         // reconciles from the durable records.
-        await recordEvent(card, run, 'validation_outage',
+        await recordEvent(card, run, e?.code === 'revision_conflict' ? 'validation_contention' : 'validation_outage',
           { validationId: valId, error: String(e?.message || e).slice(0, 300) }).catch(() => {});
         return;
       }

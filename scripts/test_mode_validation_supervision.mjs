@@ -138,6 +138,7 @@ function mkClient(svc, stateDir, sw = null) {
     stateDir,
     transport: async ({ method, path, body, headers }) => {
       const cid = body && typeof body === 'object' ? body.commandId ?? null : null;
+      await sw?.beforeRequest?.({method, path, body});
       if (sw?.dropGet && method === 'GET' && /\/artifacts\//.test(path)) {
         (sw.getTries ??= []).push(path);
         return Promise.reject(new Error('connect ECONNREFUSED — simulated artifact-plane outage'));
@@ -184,6 +185,7 @@ function mkClient(svc, stateDir, sw = null) {
         method, path: u.pathname, query: u.searchParams,
         bodyText: body === undefined ? undefined : JSON.stringify(body), headers,
       });
+      await sw?.afterRequest?.({method, path, body, response: r});
       if (sw && method === 'GET' && r.status >= 200 && r.status < 300) {
         sw.gets = (sw.gets || 0) + 1; // landed read — proves live transport
       }
@@ -432,3 +434,39 @@ for (const mode of ['orchestrator', 'swarm']) for (const recovery of ['none', 'l
     }
   });
 }
+
+
+test('shared validation serializes real local heartbeat contention at the copy receipt CAS', async () => {
+  const env = await mkEnv(); await seedBase(env.svc, env.projectDir);
+  const runId = await mkValidationRun(env.svc, 'card-a', [{run:'true', timeoutSec:5}]);
+  let pending = 0, maxPending = 0, conflicts = 0, receiptRequests = 0, heartbeats = 0;
+  const sw = {
+    beforeRequest: async ({body}) => {
+      if (!body?.type) return;
+      pending++; maxPending = Math.max(maxPending, pending);
+      if (body.type === 'validation_progress' && body.payload?.copiesReady) {
+        receiptRequests++;
+        // Real 300ms validation lease polling runs while this transport
+        // request is held. Without a local queue it changes the revision
+        // between the receipt envelope and its real service CAS each time.
+        await sleep(450);
+      }
+    },
+    afterRequest: async ({body,response}) => {
+      if (!body?.type) return;
+      pending--;
+      if (body.type === 'heartbeat' && response.status === 200) heartbeats++;
+      if (response.json?.code === 'revision_conflict') conflicts++;
+    },
+  };
+  const {sched} = mkSched(env, {sw});
+  try {
+    const run = await drive(env.svc, sched, runId, r => r.validation?.phase === 'review' || r.status === 'failed', {maxTicks:400,delayMs:20});
+    assert.equal(run.status, 'active'); assert.equal(run.validation.phase, 'review');
+    assert.equal(receiptRequests, 1); assert.equal(conflicts, 0);
+    assert.equal(maxPending, 1, 'one same-card command occupies transport at a time');
+    assert.ok(heartbeats > 0, 'real lease polling still lands');
+    assert.equal(Object.values(run.validation.procs).length, 1);
+    assert.equal(Object.values(run.validation.procs)[0].state, 'settled');
+  } finally { await stopAndDrain(env.svc, sched, runId, 'card-a'); }
+});

@@ -830,35 +830,59 @@ for (const [name, match, label] of [
   });
 }
 
-// CAS starvation: revision_conflict is retried 8× inside send(); a sustained
-// conflict storm beyond that bound is a NON-outage error → same convergence.
-// Injecting at copiesReady (post-snapshot) produces THE signature; at
-// record_snapshot it dies at 'prepare' — both asserted.
-test('U5-0501 mechanism: CAS storm beyond the retry bound → failed/verify', async () => {
+// External CAS contention may exhaust a turn, but retains the exact duty
+// for journal replay rather than failing a valid reservation.
+test('U5 CAS contention retains and replays the original receipt without repeated checks', async () => {
   const env = await mkEnv();
-  const { svc, projectDir } = env;
+  const { svc, projectDir, stateDir } = env;
   await seedBase(svc, projectDir);
-  const runId = await mkValidationRun(svc, 'card-a', [{ run: 'sleep 60', timeoutSec: 90 }]);
-  const sw = { reject: [{
-    when: (b) => b?.type === 'validation_progress' && b.payload?.copiesReady === true,
-    status: 409, code: 'revision_conflict', note: 'injected CAS storm', times: 12,
-  }] };
-  const { sched } = mkSched(env, { sw });
+  const runId = await mkValidationRun(svc, 'card-a', [{ run: 'echo hit >> hits.txt', timeoutSec: 5 }]);
+  const attempts = [];
+  const sw = {};
+  sw.reject = [{
+    when: b => {
+      if (b?.type !== 'validation_progress' || b.payload?.copiesReady !== true) return false;
+      attempts.push(structuredClone(b));
+      if (attempts.length === 9) sw.down = true;
+      return true;
+    },
+    status: 409, code: 'revision_conflict', note: 'external CAS contention', times: 9,
+  }];
+  const { sched, instanceId } = mkSched(env, { sw });
   try {
-    const run = await drive(svc, sched, runId, (r) => r.status === 'failed', { maxTicks: 160 });
-    const val = run.validation || {};
-    assert.equal(run.phase, 'verify');
-    assert.equal(val.status, 'failed');
-    assert.equal(val.phase, 'verify');
-    assert.ok(!Object.values(val.procs || {}).some((p) => p?.leader?.pgid > 0));
-    assert.equal(run.diagnostic?.type, 'validation_unproven');
-    assert.match(run.diagnostic?.detail ?? '', /validation task faulted: injected CAS storm/);
-    // The send retried to exhaustion: 9 conflicts total (tries 0..8).
-    assert.equal(sw.rejected.length, 9, `conflicts absorbed then thrown: ${J(sw.rejected)}`);
-  } finally {
-    await dumpU5051Case('cas-storm', env, runId, { rejected: sw.rejected }).catch(() => {});
-    await stopAndDrain(svc, sched, runId, 'card-a').catch(() => {});
-  }
+    let run = await drive(svc, sched, runId, () => attempts.length === 9, { maxTicks: 160, delayMs: 20 });
+    assert.equal(run.status, 'active'); assert.equal(run.validation.status, 'active');
+    assert.equal(Object.keys(run.validation.procs || {}).length, 0, 'no check intent or process yet');
+    let duty;
+    for (let i = 0; i < 100 && !duty; i++) {
+      const raw = await fs.readFile(sched._journalFile, 'utf8').catch(() => '');
+      duty = raw.split('\n').filter(Boolean).map(JSON.parse).find(e => e.commandId === attempts[0].commandId);
+      if (!duty) await sleep(10);
+    }
+    assert.ok(duty, 'original receipt duty persisted during contention');
+    assert.equal(duty.type, attempts[0].type);
+    assert.deepEqual(duty.payload, attempts[0].payload);
+    for (const retry of attempts) {
+      assert.equal(retry.commandId, duty.commandId);
+      assert.deepEqual(retry.payload, duty.payload);
+    }
+    const unlanded = await loadAggregate(stateDir, 'card-a');
+    assert.equal(unlanded.commands[`i:${duty.commandId}`], undefined, 'contention did not apply receipt');
+    sw.down = false;
+    run = await drive(svc, sched, runId, r => r.validation?.phase === 'review');
+    assert.equal(run.status, 'active');
+    const replayKey = `jr-${sha256(JSON.stringify({i: instanceId, s: duty.srcInstance ?? instanceId,
+      c: duty.commandId, t: duty.type, p: duty.payload})).slice(0,40)}`;
+    assert.ok((await loadAggregate(stateDir, 'card-a')).commands[`i:${replayKey}`], 'existing deterministic replay identity applied');
+    const receipt = await mkClient(svc, stateDir).command('card-a', {
+      commandId: `lookup-${randomUUID()}`, type: 'command_receipt',
+      payload: {commandId: replayKey, type: duty.type, payload: duty.payload},
+    });
+    assert.equal(receipt.result.matched, true, 'replay applied the original exact payload');
+    assert.equal(Object.keys(run.validation.procs).length, 1);
+    assert.equal(Object.values(run.validation.procs)[0].state, 'settled');
+    assert.equal(await fs.readFile(join(run.validation.dirs.verify, 'hits.txt'), 'utf8'), 'hit\n', 'approved check executes once');
+  } finally { sw.down = false; await stopAndDrain(svc, sched, runId, 'card-a'); }
 });
 
 // Control: an OUTAGE-class failure at the identical boundary does NOT
