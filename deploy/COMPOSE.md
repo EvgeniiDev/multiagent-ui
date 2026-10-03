@@ -83,7 +83,7 @@ surface — core start/validation + F1 fusion environment + preparation —
 against the REAL production `STATE_DIR` (no isolated `-u7` tree):
 
 ```bash
-cd /home/hermes/projects/acp-ui   # parent deploys unified branch source here
+cd /home/hermes/projects/acp-ui-lead-integration   # parent deploy checkout (integration branch worktree)
 # precondition: acp-ui-agent-modes f1 profile up (env-controller+egress-gw)
 docker compose -p acp-ui -f compose.yaml -f compose.prod-env.yaml \
   config   # render check only — services, mounts, env resolve
@@ -92,7 +92,9 @@ docker compose -p acp-ui -f compose.yaml -f compose.prod-env.yaml \
   up -d --no-deps state runner
 ```
 
-Rollback (explicit, logged): `docker compose -p acp-ui -f compose.yaml
+Rollback (explicit, logged, parent-captured private
+`.agent-tmp/autonomous/rollback/restore.yaml`):
+`docker compose -p acp-ui -f compose.yaml
 up -d --no-deps state runner` — flags unset, managed surface 501-gated
 again, prod board/claims/state untouched (managed aggregates persist but
 are inert without the flags).

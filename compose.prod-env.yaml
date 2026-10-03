@@ -3,8 +3,16 @@
 #
 #   docker compose -p acp-ui -f compose.yaml -f compose.prod-env.yaml up -d --no-deps state runner
 #
+# Run from the parent DEPLOY checkout — the integration branch worktree:
+#   cd /home/hermes/projects/acp-ui-lead-integration
+# (compose relative paths — `.` → /repo, `./dist-web` → web — resolve
+# against THIS worktree; never repoint them at /home/hermes/projects/acp-ui
+# or overwrite that original dirty/prod checkout. The web bind serves this
+# worktree's host-built dist-web/.)
+#
 # Preconditions (parent deploys; this file changes nothing by itself):
-#   * unified branch source checked out at /home/hermes/projects/acp-ui so
+#   * unified branch source checked out at
+#     /home/hermes/projects/acp-ui-lead-integration so
 #     /repo/deploy/execution/environment.config.json exists in BOTH
 #     containers (prod /repo mount is that checkout, read-only).
 #   * real production STATE_DIR is kept: /home/hermes/.hermes/acp-ui-state
@@ -26,6 +34,13 @@ services:
       ACP_EXEC_VALIDATION: "1"
       ACP_EXEC_FUSION: "1"
       ACP_EXEC_PREPARATION: "1"
+      # Accepted final rollout: backend declares these actual contract
+      # flags (state-service features.orchestrator/swarm); runtime drivers
+      # in progress — flags on, drivers land independently. Availability /
+      # seeding of backend (override 1.2 / seed 1.3) is parent-owned;
+      # shared defaults update later, never here.
+      ACP_EXEC_ORCHESTRATOR: "1"
+      ACP_EXEC_SWARM: "1"
     volumes:
       # Pinned ce-* bindings keep skill resources under the ~/.codex plugin
       # cache. Base state has no .codex entry — without this mount
@@ -40,6 +55,8 @@ services:
       ACP_EXEC_VALIDATION: "1"
       ACP_EXEC_FUSION: "1"
       ACP_EXEC_PREPARATION: "1"
+      ACP_EXEC_ORCHESTRATOR: "1"
+      ACP_EXEC_SWARM: "1"
       # F1 client view: socket + token resolve to host paths reachable
       # through the runner's existing ~/.hermes mount. No new mount needed.
       ACP_F1_CONFIG: /repo/deploy/execution/environment.config.json
