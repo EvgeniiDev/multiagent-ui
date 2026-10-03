@@ -298,7 +298,13 @@ function createFakeContainerRuntime({ behaviors = {}, canonRoot = null, projectD
     calls.push({ m: 'launchRecord', attemptId });
     const rec = records.get(attemptId);
     if (rec === undefined) return { attemptId, missing: true, corrupt: false };
-    return { attemptId, missing: false, corrupt: false, record: structuredClone(rec) };
+    return {
+      attemptId, missing: false, corrupt: false,
+      phase: rec.phase ?? null, porchRunId: rec.porchRunId ?? null,
+      workerId: rec.workerId ?? null, spawned: rec.spawned ?? null,
+      error: rec.error ?? null, createdAt: rec.createdAt ?? null,
+      launchStartedAt: rec.launch?.startedAt ?? null,
+    };
   }
 
   const runFor = (runId) => runs.get(runId) ?? null;

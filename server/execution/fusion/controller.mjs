@@ -173,6 +173,16 @@ export function createPanelDriver(deps = {}) {
     if (inflight.has(att.id)) return 'launch_inflight';
     const p = (async () => {
       try {
+        // Durable stop/quiesce fence, including recovered launch attempts.
+        // A failed read cannot grant permission to spawn a worker.
+        const fresh = await getRun(run.id).catch(() => null);
+        const freshAtt = fresh?.attempts?.find((a) => a?.id === att.id);
+        if (!freshAtt || !owns(freshAtt.owner) || freshAtt.status !== 'launching'
+          || freshAtt.cancel || fresh.status === 'stopping'
+          || !RUN_NONTERMINAL.has(fresh.status) || !canLaunch()) {
+          return { held: true };
+        }
+
         return await runtime.start({
           attemptId: att.id,
           profileId: participant.profileId,
@@ -183,13 +193,14 @@ export function createPanelDriver(deps = {}) {
           launchTimeoutMs: (run.fusion.limits?.timeoutMin ?? 45) * 60 * 1000,
         });
       } catch (e) {
-        return { ok: false, phase: 'launch_failed', error: { code: 'start_threw', message: String(e?.message || e) } };
+        return { ok: false, phase: 'launch_uncertain', error: { code: 'start_threw', message: String(e?.message || e) } };
       } finally {
         inflight.delete(att.id);
       }
     })();
     inflight.set(att.id, p);
     const res = await p;
+    if (res?.held) return 'launch_held';
     if (!res?.ok) {
       if (res?.phase === 'launch_failed') {
         // Durable runtime evidence of a failed launch — resolve the attempt.
@@ -215,9 +226,11 @@ export function createPanelDriver(deps = {}) {
   // Reconcile a 'launching' attempt — the window where the durable row
   // exists but bind evidence may not.
   async function reconcileLaunch(card, run, att, participant, built) {
+    if (inflight.has(att.id)) return 'launch_inflight';
     const rec = await runtime.launchRecord(att.id).catch(() => null);
-    if (!rec || rec.missing) {
-      if (att.status === 'cancelling' || att.cancel) {
+    if (!rec || rec.corrupt) return 'launch_unreadable';
+    if (rec.missing === true) {
+      if (att.status === 'cancelling' || att.cancel || run.status === 'stopping') {
         // Cancelled before any runtime evidence — nothing exists to kill;
         // resolving 'cancelled' is the positive terminal state.
         await send(card, 'resolve_attempt', {
@@ -232,18 +245,18 @@ export function createPanelDriver(deps = {}) {
       // was already consumed by panel_begin.
       return await startRuntime(card, run, att, participant, built);
     }
-    if (rec.corrupt) return 'launch_unreadable'; // evidence exists but is unreadable — never guess
-    const phase = rec.record?.phase ?? rec.phase ?? null;
-    if (phase === 'launched' && rec.record?.porchRunId) {
+    const evidence = rec.record ?? rec;
+    const phase = evidence.phase ?? null;
+    if (phase === 'launched' && evidence.porchRunId) {
       await send(card, 'bind_attempt', {
-        runId: run.id, attemptId: att.id, porchRunId: rec.record.porchRunId, ...self(),
+        runId: run.id, attemptId: att.id, porchRunId: evidence.porchRunId, ...self(),
       }, `bind-${att.id}-by-${instanceId}`);
       return 'bound';
     }
     if (phase === 'launch_failed') {
       await send(card, 'resolve_attempt', {
         runId: run.id, attemptId: att.id, outcome: 'failed',
-        reason: `panelist launch failed: ${rec.record?.error?.code ?? 'error'} — ${String(rec.record?.error?.message ?? '').slice(0, 300)}`,
+        reason: `panelist launch failed: ${evidence.error?.code ?? 'error'} — ${String(evidence.error?.message ?? '').slice(0, 300)}`,
         ...self(),
       }, `rs-${att.id}-launchfail-by-${instanceId}`);
       return 'launch_failed';
@@ -251,7 +264,9 @@ export function createPanelDriver(deps = {}) {
     // 'launching'/'launch_uncertain'/'prepared': scan the worker's porch
     // registry for a run a completed handshake left behind.
     const scan = await runtime.reconcile({ attemptId: att.id }).catch(() => null);
-    const match = (scan?.matches || []).find((m) => m?.runId);
+    const matches = (scan?.matches || []).filter((m) => m?.runId);
+    if (matches.length > 1) return 'launch_reconcile';
+    const match = scan?.ok === true && matches.length === 1 ? matches[0] : null;
     if (match) {
       await send(card, 'bind_attempt', {
         runId: run.id, attemptId: att.id, porchRunId: match.runId, ...self(),
@@ -261,9 +276,9 @@ export function createPanelDriver(deps = {}) {
     // Positive proof of "nothing can still launch": the worker is gone AND
     // the record is older than the handshake bound — only then is the
     // attempt a launch failure rather than an unresolved handshake.
-    const allGone = (scan?.workers || []).every((w) => w.gone === true)
+    const allGone = scan?.ok === true && (scan?.workers || []).every((w) => w.gone === true)
       && (scan?.workers || []).length > 0;
-    const recAt = Date.parse(rec.record?.launch?.startedAt ?? rec.record?.createdAt ?? '') || 0;
+    const recAt = Date.parse(evidence.launch?.startedAt ?? evidence.launchStartedAt ?? evidence.createdAt ?? '') || 0;
     if (allGone && recAt && now() - recAt > launchOrphanMs) {
       await send(card, 'resolve_attempt', {
         runId: run.id, attemptId: att.id, outcome: 'failed',
@@ -331,8 +346,8 @@ export function createPanelDriver(deps = {}) {
     const timeoutMin = run.fusion.limits?.timeoutMin ?? 45;
     if (att.status === 'cancelling' || att.cancel || run.status === 'stopping') {
       if (!cancelIssued.has(att.id) && att.porchRunId) {
-        await runtime.cancel(att.porchRunId).catch(() => {});
-        cancelIssued.add(att.id);
+        const cancelled = await runtime.cancel(att.porchRunId).catch(() => null);
+        if (cancelled?.ok === true && cancelled.requested === true) cancelIssued.add(att.id);
       }
       const wt = await runtime.wait(att.porchRunId, { timeoutSec: 0 }).catch(() => null);
       if (wt?.outcome === 'terminal') {
@@ -346,7 +361,7 @@ export function createPanelDriver(deps = {}) {
     }
     const wt = await runtime.wait(att.porchRunId, { timeoutSec: 0 }).catch(() => null);
     if (!wt || wt.outcome === 'error') return 'observe_retry';
-    if (wt.outcome === 'timeout') {
+    if (wt.outcome === 'timeout' || wt.outcome === 'observer_timeout') {
       // Per-participant timeout — a live attempt past its bound is cancelled
       // through the durable intent path first (same as stop).
       const deadline = (att.startedAt ?? att.createdAt) + timeoutMin * 60 * 1000;
@@ -363,6 +378,7 @@ export function createPanelDriver(deps = {}) {
     // Terminal observation: 'completed' with run/exit code 0 is the only
     // candidate for an answer — everything else is a failed/cancelled
     // participant attempt.
+    if (wt.outcome !== 'terminal') return 'observe_retry';
     const code0 = (wt.runExitCode ?? wt.exitCode) === 0;
     const outcome = wt.status === 'cancelled' ? 'cancelled'
       : (wt.status === 'completed' && code0) ? 'completed'
