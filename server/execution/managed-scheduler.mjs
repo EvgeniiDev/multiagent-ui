@@ -4620,6 +4620,7 @@ export function createManagedScheduler({
           }
           out.errors = out.errors || [];
           out.errors.push({ cardId: card.cardId, runId: rs.id, error: String(e?.message || e) });
+          console.error(`managed run ${rs.id}: ${e?.code ?? 'drive_error'}: ${String(e?.message || e).slice(0, 500)}`);
         }
       }
     }

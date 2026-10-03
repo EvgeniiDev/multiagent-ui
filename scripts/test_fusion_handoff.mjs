@@ -536,7 +536,7 @@ function mkSched(env, {
       ACP_EXEC_VALIDATION: '1',
     },
     now,
-    fusion: { runtime: contRuntime },
+    fusion: { runtime: contRuntime, depsDir: join(env.root, "depsets"), setupDepPaths: { "node-deps": "node_modules" } },
   });
   return { sched, runtime: contRuntime, procRuntime, instanceId, instPid };
 }
@@ -1572,9 +1572,10 @@ async function dependencyScenario({ failPostImport = false, failPrelaunch = fals
     const snapshotSha = git(c.worktree, 'rev-parse', 'HEAD');
     prepared.push({ params, snapshotSha });
     if (fail && ((failPostImport && snapshotSha !== initialSha)
-      || (failPrelaunch && snapshotSha === initialSha) || (failFixPostImport && prepared.length >= 4))) return { ok:false, error:{ code:'controller_unreachable' } };
+      || (failPrelaunch && snapshotSha === initialSha) || (failFixPostImport && runtime._calls.filter(c => c.m === 'repoImport').length >= 2))) return { ok:false, error:{ code:'controller_unreachable' } };
     const lock = git(c.worktree, 'show', `${snapshotSha}:package-lock.json`);
     const lockHash = sha256Hex(lock);
+    await fs.mkdir(join(env.root, "depsets", lockHash.slice(0,32)), { recursive:true });
     return { ok:true, setupId:params.setupId, depSetId:lockHash.slice(0,32), lockHash, snapshotSha, canonicalId:c.id };
   };
   return { ...env, runId, sched, runtime, instanceId, prepared, initialSha, allowPreparation: () => { fail = false; } };
@@ -1634,7 +1635,7 @@ test('setup failure before integrator launch preserves the attempt budget', asyn
 
 test('fix round cannot begin its next validation while dependency proof is pending', async () => {
   const f = await dependencyScenario({ fix:true, failFixPostImport:true });
-  let run = await driveUntil(f.svc, f.sched, f.runId, () => f.prepared.length >= 4, { maxTicks:120 });
+  let run = await driveUntil(f.svc, f.sched, f.runId, r => r.attempts.some(a => a.role === 'integrator' && a.fix === 1 && a.status === 'completed') && f.runtime._calls.filter(c => c.m === 'repoImport').length >= 2, { maxTicks:120 });
   assert.equal(f.prepared.length >= 4, true);
   const fixAtt = run.attempts.find(a => a.role === 'integrator' && a.fix === 1);
   assert.equal(fixAtt?.status, 'completed'); assert.ok(run.fixContext, 'pending proof retains the fix gate');
