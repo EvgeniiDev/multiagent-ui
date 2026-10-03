@@ -253,6 +253,10 @@ def http_json(method, url, body=None, timeout=10.0):
             return e.code, json.loads(raw)
         except json.JSONDecodeError:
             return e.code, raw.decode("utf-8", "replace")
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        # A deployment restart is an observation gap, never success or a
+        # reason to reissue a write. Read polls may observe the same run later.
+        return 0, {"error": "transport_unavailable", "detail": str(e)}
 
 
 def api(method, path, body=None):
