@@ -476,3 +476,64 @@ describe('execution store — preparation', () => {
     exec.unwatchCard('card_1');
   });
 });
+
+// ============================================================================
+// ui-model — downstream mode selection + completeness (first UI slice)
+//
+// Conservative gating: orchestrator/swarm handoff offers are durable data,
+// but no start path exists for them server-side (execution-domain accepts
+// only solo|fusion). The UI must refuse a start in those modes without a
+// POST — never a frontend-only illusion of execution. Completeness comes
+// from the server's per-kind state strings, not from client derivation.
+// ============================================================================
+
+describe('ui-model — downstream modes + completeness', () => {
+  test('canStartInMode: solo/fusion pass, orchestrator/swarm refuse, unknown refused', () => {
+    assert.equal(ui.canStartInMode('solo').ok, true);
+    assert.equal(ui.canStartInMode('fusion').ok, true);
+    const o = ui.canStartInMode('orchestrator');
+    assert.equal(o.ok, false);
+    assert.match(o.reason, /no run backend exists/);
+    const s = ui.canStartInMode('swarm');
+    assert.equal(s.ok, false);
+    assert.match(s.reason, /no run backend exists/);
+    const u = ui.canStartInMode('fleet');
+    assert.equal(u.ok, false);
+    assert.match(u.reason, /unknown downstream mode/);
+  });
+
+  test('prepCompletenessState reads the server state string verbatim', () => {
+    const v = prepView({
+      completeness: { requirements: 'approved', design: 'absent', plan: 'draft' },
+    });
+    assert.equal(ui.prepCompletenessState(v, 'requirements'), 'approved');
+    assert.equal(ui.prepCompletenessState(v, 'design'), 'absent');
+    assert.equal(ui.prepCompletenessState(v, 'plan'), 'draft');
+    assert.equal(ui.prepCompletenessState(prepView({ completeness: {} }), 'plan'), null);
+    assert.equal(ui.prepCompletenessState(null, 'plan'), null);
+    // A counts-shaped entry is not a kind state — fall back to null, never
+    // coerce it into a label.
+    const odd = prepView({ completeness: { plan: { open: 2 } } });
+    assert.equal(ui.prepCompletenessState(odd, 'plan'), null);
+  });
+
+  test('prepOpenQuestionCounts prefers the server counters, falls back to questions', () => {
+    const v = prepView({
+      completeness: { openQuestions: { open: 3, blocking: 2, answered: 5, deferred: 1 } },
+    });
+    assert.deepEqual(ui.prepOpenQuestionCounts(v), { open: 3, blocking: 2, answered: 5, deferred: 1 });
+    const fallback = prepView({ completeness: {} });
+    const c = ui.prepOpenQuestionCounts(fallback);
+    assert.equal(c.open, 1, 'one open fixture question');
+    assert.equal(c.blocking, 1);
+    assert.equal(c.answered, 0);
+  });
+
+  test('sibling-run start stays refused while another run is live (no solo bypass)', () => {
+    const v = cardView({
+      runs: [{ id: 'run_live', status: 'active', reserved: true }],
+    });
+    assert.equal(ui.canStart(v).ok, false);
+    assert.match(ui.canStart(v).reason, /still live/);
+  });
+});

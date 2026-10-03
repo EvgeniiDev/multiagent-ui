@@ -15,6 +15,7 @@ import {
   canChangePrepBinding,
   canConfirmGate,
   canPrepHandoff,
+  canStartInMode,
   canStartPrep,
   canStopPrep,
   canTalkPrep,
@@ -24,11 +25,13 @@ import {
   prepBindingProblem,
   prepBindingsForStage,
   prepBlockerText,
+  prepCompletenessState,
   prepContinuePayload,
   prepDraftPayload,
   prepGateLabel,
   prepGatePayload,
   prepHandoffPayload,
+  prepOpenQuestionCounts,
   prepPhaseLabel,
   prepStageLabel,
   prepStartPayload,
@@ -215,13 +218,33 @@ const draftGate = computed(() => talkGate.value);
 function presentedLine(kind: ExecDocKind): string {
   const p = session.value?.presented?.[kind];
   if (!p) return '—';
-  const c = session.value?.completeness?.[kind];
   const bits = [shortId(p.versionId)];
   if (p.draft) bits.push('draft');
-  if (c?.stale) bits.push('stale — newer version exists');
-  if (c?.approved) bits.push('approved');
+  // The server's completeness state is authoritative for staleness and
+  // approval — the presented pointer alone cannot say whether a newer
+  // version exists or the user approved this one.
+  const state = prepCompletenessState(session.value, kind);
+  if (state && state !== 'presented') bits.push(state);
   return bits.join(' · ');
 }
+
+/** Server-derived completeness line: kind states + discussion counters.
+ * Rendered verbatim from the polled view — never a model claim. */
+const completenessLine = computed(() => {
+  const s = session.value;
+  if (!s) return '';
+  const kinds: ExecDocKind[] = ['requirements', 'design', 'plan'];
+  const states = kinds.map((k) => `${k}: ${prepCompletenessState(s, k) ?? 'absent'}`);
+  const q = prepOpenQuestionCounts(s);
+  return `${states.join(' · ')} · questions open ${q.open} (blocking ${q.blocking}) · answered ${q.answered}`;
+});
+
+/** Handoff target picker: unimplemented modes stay selectable for the
+ * durable offer, with the reason visible; starting a run in one is
+ * refused by canStartInMode without a POST. */
+const handoffModeStartGate = computed(() =>
+  view.value ? canStartInMode(handoffMode.value) : { ok: false, reason: 'loading…' },
+);
 
 async function onRequestDraft(kind: ExecDocKind) {
   await send('request_draft', prepDraftPayload(kind));
@@ -482,6 +505,7 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
         <!-- documents + drafts -->
         <div class="exec-detail" data-testid="prep-docs">
           <div class="exec-subtitle">Documents</div>
+          <p class="exec-line mono" data-testid="prep-completeness">{{ completenessLine }}</p>
           <div v-for="k in DOC_KINDS" :key="k" class="exec-actionrow">
             <span class="exec-role">{{ docKindLabel(k) }}</span>
             <span class="exec-line exec-grow mono" :data-testid="`prep-doc-${k}`">{{ presentedLine(k) }}</span>
@@ -577,6 +601,9 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
           <div v-for="h in session.handoffs" :key="h.handoffId" class="exec-line" :data-testid="`prep-handoff-${h.handoffId}`">
             → {{ h.mode }} @ {{ fmtTs(h.at) }}{{ h.stale ? ' — stale (inputs changed)' : '' }}{{ h.implemented === false ? ' — mode not implemented' : '' }}
           </div>
+          <p v-if="!handoffModeStartGate.ok" class="exec-line exec-warn" data-testid="prep-handoff-start-note">
+            {{ handoffModeStartGate.reason }}
+          </p>
         </div>
 
         <div class="exec-btnrow">

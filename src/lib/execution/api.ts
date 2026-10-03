@@ -333,6 +333,29 @@ export interface PrepHandoff {
   stale?: boolean;
 }
 
+export type PrepCompletenessState =
+  | 'absent'
+  | 'draft'
+  | 'presented'
+  | 'confirmed'
+  | 'approved';
+
+export interface PrepCompletenessCounters {
+  open: number;
+  blocking: number;
+  answered: number;
+  deferred: number;
+}
+
+/** Per-kind value from completenessView(): a state string for
+ * requirements/design/plan, a count for assumptions/decisions, an object
+ * for openQuestions. Unknown future shapes stay readable via `unknown`. */
+export type PrepCompletenessValue =
+  | PrepCompletenessState
+  | number
+  | PrepCompletenessCounters
+  | unknown;
+
 export interface PrepCompletenessItem {
   present?: boolean;
   currentVersionId?: string | null;
@@ -378,7 +401,7 @@ export interface ExecPrepView {
     droppedLog?: number;
     log: { event?: string; at?: number; [k: string]: unknown }[];
   };
-  completeness: Record<string, PrepCompletenessItem>;
+  completeness: Record<string, PrepCompletenessValue>;
   handoffTargets: { mode: string; implemented: boolean }[];
   handoffs: PrepHandoff[];
   /** The handoff package — present only while readiness holds. */
