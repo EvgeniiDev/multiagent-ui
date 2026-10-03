@@ -1472,7 +1472,7 @@ export function createOrchDriver(deps = {}) {
         if (live) continue;
         let kind = null;
         if (st === 'verifying' && task.state.resultCandidate
-          && (task.state.verifyUsed ?? 0) < (oz.limits?.verifyAttempts ?? 2)) kind = 'verify';
+          && (task.state.verifyUsed ?? 0) < (oz.limits?.verifyAttempts ?? 2) + (task.state.extraVerifyAttempts ?? 0)) kind = 'verify';
         else if (st === 'ready') kind = 'work';
         else if (st === 'returned') kind = 'fix';
         if (!kind) continue;

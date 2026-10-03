@@ -339,6 +339,10 @@ export function syncOrchPendingActions(run) {
     out.push({ type: 'decision', proposalId: p.proposalId, kind: p.kind, fields: [...(p.fields || [])] });
   }
   for (const t of oz.tasks || []) {
+    if (verifyBudgetExhausted(run, t)) {
+      out.push({ type: 'grant', taskId: t.id, reason: 'verify_attempts_exhausted' });
+      continue;
+    }
     const w = t.state?.waiting;
     if (!w) continue;
     if (w.reason === 'question') {
@@ -350,7 +354,7 @@ export function syncOrchPendingActions(run) {
     }
   }
   for (const t of oz.tasks || []) {
-    if (t.state?.status === 'blocked' && !t.state.waiting) {
+    if (t.state?.status === 'blocked' && !t.state.waiting && !verifyBudgetExhausted(run, t)) {
       out.push({ type: 'grant', taskId: t.id, reason: 'attempts_exhausted' });
     }
   }
@@ -378,6 +382,17 @@ export function promoteReady(ctx, run, cause, now) {
 const taskAttemptBudget = (task) =>
   task.limits.maxAttempts + (task.state.extraAttempts ?? 0);
 const taskFixBudget = (task) => task.limits.maxFixCycles + (task.state.extraFixes ?? 0);
+export const taskVerifyBudget = (oz, task) =>
+  (oz.limits?.verifyAttempts ?? 2) + (task.state.extraVerifyAttempts ?? 0);
+function verifyBudgetExhausted(run, task) {
+  const s = task.state;
+  if (!s?.resultCandidate || (s.verifyUsed ?? 0) < taskVerifyBudget(run.orchestrator, task)
+    || (run.attempts ?? []).some(a => a.taskId === task.id && ['launching','running','cancelling'].includes(a.status))) return false;
+  if (s.status === 'verifying') return true;
+  if (s.status !== 'blocked') return false;
+  const failedVerifier = (run.attempts ?? []).find(a => a.id === s.lastError?.attemptId && a.taskId === task.id && a.role === 'verifier');
+  return s.waiting?.budget === 'verify' || !!failedVerifier;
+}
 
 // Register a validated subtask set as durable task records. Contract fields
 // are deep-frozen; mutable execution state lives under `state`.
@@ -399,6 +414,7 @@ export function registerTasks(ctx, run, set, now) {
         fixesUsed: 0,
         verifyUsed: 0,
         extraAttempts: 0,
+        extraVerifyAttempts: 0,
         extraFixes: 0,
         attempts: [],
         inputCommit: null,
@@ -442,11 +458,13 @@ export async function cmdOrchClaim(D, ctx, aggregate, payload, now) {
   if (!oz.owner) {
     oz.owner = D.newOwner(payload, now, leaseMs);
     emit(ctx, run, 'orch_claimed', { runnerId: payload.runnerId, instanceId: payload.instanceId }, now);
+    syncOrchPendingActions(run);
     D.stageRun(aggregate, run, ctx);
     return { aggregate, result: { runId: run.id, claimed: true } };
   }
   if (D.ownsResource(oz.owner, payload)) {
     oz.owner.leaseUntil = now + leaseMs;
+    syncOrchPendingActions(run);
     D.stageRun(aggregate, run, ctx);
     return { aggregate, result: { runId: run.id, claimed: true, renewed: true } };
   }
@@ -455,6 +473,7 @@ export async function cmdOrchClaim(D, ctx, aggregate, payload, now) {
   const prev = { runnerId: oz.owner.runnerId, instanceId: oz.owner.instanceId };
   oz.owner = D.newOwner(payload, now, leaseMs, oz.owner);
   emit(ctx, run, 'orch_adopted', { from: prev, runnerId: payload.runnerId, instanceId: payload.instanceId }, now);
+  syncOrchPendingActions(run);
   D.stageRun(aggregate, run, ctx);
   return { aggregate, result: { runId: run.id, claimed: true, adoptedFrom: prev } };
 }
@@ -838,9 +857,9 @@ export async function cmdOrchTaskBegin(D, ctx, aggregate, payload, now) {
         `task ${taskId} has no imported result candidate — settle the work attempt first`);
     }
     n = (task.state.verifyUsed ?? 0) + 1;
-    if (n > (oz.limits?.verifyAttempts ?? 2)) {
+    if (n > taskVerifyBudget(oz, task)) {
       throw new D.CommandError(409, 'attempts_exhausted',
-        `task ${taskId} used ${task.state.verifyUsed}/${oz.limits?.verifyAttempts ?? 2} verifier attempts`);
+        `task ${taskId} used ${task.state.verifyUsed}/${taskVerifyBudget(oz, task)} verifier attempts`);
     }
     task.state.verifyUsed = n;
   } else {
@@ -1287,10 +1306,11 @@ export function onVerifierResolved(D, aggregate, run, att, outcome, verdict, now
   } else {
     // Verifier attempt failed/cancelled — the task stays 'verifying' while
     // the verify budget lasts; exhausted verify budget blocks the task.
-    if ((task.state.verifyUsed ?? 0) < (oz.limits?.verifyAttempts ?? 2)) {
+    if ((task.state.verifyUsed ?? 0) < taskVerifyBudget(oz, task)) {
       // still 'verifying' — the driver re-launches the verifier
     } else {
       task.state.waiting = { reason: 'grant', since: now };
+      task.state.waiting.budget = 'verify';
       setTaskStatus(ctx, run, task, 'blocked', 'verify_budget_exhausted', now);
       task.state.lastError = {
         reason: att.error ?? `verifier ${outcome}`, attemptId: att.id, at: now,
@@ -1452,7 +1472,7 @@ export async function cmdOrchDecide(D, ctx, aggregate, payload, now) {
         setTaskStatus(ctx, run, t, 'pending', 'inputs_changed', now);
       }
       Object.assign(t.state, {
-        attemptsUsed: 0, fixesUsed: 0, verifyUsed: 0, extraAttempts: 0, extraFixes: 0,
+        attemptsUsed: 0, fixesUsed: 0, verifyUsed: 0, extraAttempts: 0, extraVerifyAttempts: 0, extraFixes: 0,
         attempts: [], inputCommit: null, snapshotOf: [], resultCommit: null,
         resultSha256: null, patchSha256: null, diffArtifactId: null,
         canonicalId: null, canonicalCommit: null,
@@ -1477,7 +1497,8 @@ export async function cmdOrchGrant(D, ctx, aggregate, payload, now) {
   const oz = run.orchestrator;
   const task = taskById(oz, D.reqStr(payload.taskId, 'taskId'));
   if (!task) throw new D.CommandError(404, 'task_not_found', `task ${payload.taskId} unknown`);
-  if (task.state.status !== 'blocked' && task.state.status !== 'waiting' && task.state.status !== 'failed') {
+  const verifierGrant = verifyBudgetExhausted(run, task);
+  if (!verifierGrant && task.state.status !== 'blocked' && task.state.status !== 'waiting' && task.state.status !== 'failed') {
     throw new D.CommandError(409, 'grant_state',
       `task ${task.id} is ${task.state.status} — grants apply to blocked/waiting/failed tasks`);
   }
@@ -1489,11 +1510,14 @@ export async function cmdOrchGrant(D, ctx, aggregate, payload, now) {
   if (fixes < 0 || fixes > 10) {
     throw new D.CommandError(422, 'invalid_argument', 'fixCycles must be an integer in [0,10]');
   }
-  task.state.extraAttempts = (task.state.extraAttempts ?? 0) + grant;
+  if (verifierGrant) task.state.extraVerifyAttempts = (task.state.extraVerifyAttempts ?? 0) + grant;
+  else task.state.extraAttempts = (task.state.extraAttempts ?? 0) + grant;
   task.state.extraFixes = (task.state.extraFixes ?? 0) + fixes;
   task.state.waiting = null;
-  emit(ctx, run, 'task_granted', { taskId: task.id, attempts: grant, fixCycles: fixes }, now);
-  if (depsAccepted(oz, task)) {
+  emit(ctx, run, 'task_granted', { taskId: task.id, attempts: grant, fixCycles: fixes, ...(verifierGrant ? { budget: 'verify' } : {}) }, now);
+  if (verifierGrant) {
+    setTaskStatus(ctx, run, task, 'verifying', 'verify_granted', now);
+  } else if (depsAccepted(oz, task)) {
     setTaskStatus(ctx, run, task, 'ready', 'granted', now);
   } else {
     setTaskStatus(ctx, run, task, 'pending', 'granted', now);
@@ -1502,7 +1526,7 @@ export async function cmdOrchGrant(D, ctx, aggregate, payload, now) {
   syncStats(run);
   D.stageRun(aggregate, run, ctx);
   D.bumpControl(aggregate, now);
-  return { aggregate, refreshProjection: true, result: { taskId: task.id, status: task.state.status, budget: taskAttemptBudget(task) } };
+  return { aggregate, refreshProjection: true, result: { taskId: task.id, status: task.state.status, budget: verifierGrant ? taskVerifyBudget(oz, task) : taskAttemptBudget(task) } };
 }
 
 // orch_retry — re-queue a failed/returned task that still has budget.
