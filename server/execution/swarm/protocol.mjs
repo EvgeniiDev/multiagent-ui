@@ -105,7 +105,7 @@ function nextSeq(state) {
 
 // ---- server derivation ------------------------------------------------------
 
-function affectedForScope(state, scope) {
+function affectedForScope(state, scope, allowMissing = false) {
   if (!isObj(scope) || typeof scope.kind !== 'string') {
     throw bad(422, 'bad_scope', `decision scope must be an object with kind, got ${JSON.stringify(scope)}`);
   }
@@ -122,12 +122,15 @@ function affectedForScope(state, scope) {
   for (const raw of paths) {
     const p = assertSafePath(raw);
     const f = state.files[p];
-    if (!f || !f.owner) throw bad(422, 'unowned_scope', `decision scope path has no owner: ${JSON.stringify(p)}`);
+    if (!f || !f.owner) {
+      if (allowMissing) continue;
+      throw bad(422, 'unowned_scope', `decision scope path has no owner: ${JSON.stringify(p)}`);
+    }
     for (const pid of [f.owner, ...(f.consumers ?? [])]) {
       if (!out.includes(pid)) out.push(pid);
     }
   }
-  if (out.length === 0) throw bad(422, 'empty_affected', 'decision affects nobody');
+  if (out.length === 0 && !allowMissing) throw bad(422, 'empty_affected', 'decision affects nobody');
   return out;
 }
 
@@ -136,7 +139,7 @@ function scopeBinding(state, scope) {
   const paths = scope.kind === 'file' ? [scope.path] : scope.path ?? scope.paths;
   return { kind: scope.kind, paths: paths.map(assertSafePath).sort().map(path => {
     const file = state.files[path];
-    return { path, owner: file.owner, version: file.version, consumers: [...(file.consumers ?? [])].sort() };
+    return { path, owner: file?.owner ?? null, version: file?.version ?? 0, consumers: [...(file?.consumers ?? [])].sort() };
   }) };
 }
 function revHashFor(text, affected, binding) {
@@ -147,7 +150,7 @@ function revHashFor(text, affected, binding) {
 // Old acknowledgments stay in history and never count for the new binding.
 function refreshDecisionBindings(state, now, emit, events) {
   for (const decision of Object.values(state.decisions)) {
-    const affected = affectedForScope(state, decision.scope);
+    const affected = affectedForScope(state, decision.scope, true);
     const binding = scopeBinding(state, decision.scope);
     const latest = decision.revisions.at(-1);
     const revHash = revHashFor(latest.text, affected, binding);
@@ -157,10 +160,21 @@ function refreshDecisionBindings(state, now, emit, events) {
     decision.revisions.push({ rev, text: latest.text, textHash: latest.textHash, revHash,
       affected: [...affected], scopeBinding: binding, by: 'broker', at: now });
     decision.acks[rev] = {};
-    decision.status = 'pending';
+    decision.status = affected.length ? 'pending' : 'superseded';
     decision.agreedRev = null;
     events.push(emit('decision_readiness_cancelled', { decisionId: decision.id, rev, revHash, affected }));
   }
+}
+
+/** Trusted controller hook after durable broker ownership changes. Never accepts participant auth. */
+export function refreshSwarmDecisionBindings(initialState, now = Date.now()) {
+  const state = structuredClone(initialState);
+  if (state.version !== PROTOCOL_VERSION) throw new Error('unsupported protocol state version');
+  const at = typeof now === 'function' ? now() : now;
+  const events = [];
+  const emit = (type, payload) => ({ type, seq: nextSeq(state), at, ...payload });
+  refreshDecisionBindings(state, at, emit, events);
+  return { state, events };
 }
 
 // ---- lease fencing ----------------------------------------------------------
