@@ -696,6 +696,9 @@ sect('worker-reaper');
         await fs.mkdir(path.join(runsDir, r.runId), { recursive: true });
         await fs.writeFile(path.join(runsDir, r.runId, 'meta.json'),
           r.metaRaw !== undefined ? r.metaRaw : JSON.stringify(r.meta));
+        if (r.state !== undefined) {
+          await fs.writeFile(path.join(runsDir, r.runId, 'state.json'), JSON.stringify(r.state));
+        }
       }
       const stub = {
         calls: [], workerState, unknownWorker, rpcFail, stopFails, removeFails,
@@ -930,8 +933,74 @@ sect('worker-reaper');
       check('terminal meta + nonterminal state defers inconsistent',
         r3.action === 'deferred' && r3.code === 'registry_inconsistent' && noMutations(w3.stub));
     }
-
-    // -- positive path ---------------------------------------------------------
+    {
+      // P1 follow-up: the directory name is not identity — the bound row's
+      // meta.json run_id must exist and equal the bound porchRunId exactly.
+      const att = mkAttempt('att-mismid');
+      const w = await mkWorld('att-mismid', { runMeta: { run_id: 'run_other' } });
+      const r = await mkReaper(w.rt).reapAttempt({ card: mkCard(), run: mkRun(att), att });
+      check('bound row meta run_id mismatch defers',
+        r.action === 'deferred' && r.code === 'registry_identity_mismatch' && noMutations(w.stub),
+        JSON.stringify(r));
+    }
+    {
+      const att = mkAttempt('att-nomid');
+      const w = await mkWorld('att-nomid', { runMeta: { run_id: null } });
+      const r = await mkReaper(w.rt).reapAttempt({ card: mkCard(), run: mkRun(att), att });
+      check('bound row meta run_id missing defers',
+        r.action === 'deferred' && r.code === 'registry_identity_unproven' && noMutations(w.stub),
+        JSON.stringify(r));
+    }
+    {
+      // P1: meta 'completed' vs state 'failed' — both terminal but not the
+      // same verdict; the two durable records must agree EXACTLY, not just
+      // both-be-terminal.
+      const att = mkAttempt('att-statdiff');
+      const w = await mkWorld('att-statdiff', { runState: { run_id: BOUND, status: 'failed' } });
+      const r = await mkReaper(w.rt).reapAttempt({ card: mkCard(), run: mkRun(att), att });
+      check('terminal meta + different terminal state defers inconsistent',
+        r.action === 'deferred' && r.code === 'registry_inconsistent' && noMutations(w.stub),
+        JSON.stringify(r));
+    }
+    {
+      // every drain-contributing row — not just the bound one — must prove
+      // the same agreement: an extra row without state.json cannot finish
+      // the drain proof.
+      const att = mkAttempt('att-xnostate');
+      const w = await mkWorld('att-xnostate', {
+        extraRows: [{ runId: 'run_extra', meta: {
+          run_id: 'run_extra', status: 'completed',
+          finished_at: '2026-01-01T00:05:00Z', pid: 5001 } }] });
+      const r = await mkReaper(w.rt).reapAttempt({ card: mkCard(), run: mkRun(att), att });
+      check('extra row without state.json defers inconsistent',
+        r.action === 'deferred' && r.code === 'registry_inconsistent' && noMutations(w.stub),
+        JSON.stringify(r));
+    }
+    {
+      // an extra row whose meta.run_id lies about its own directory — the
+      // same self-identity rule as the bound row.
+      const att = mkAttempt('att-xmisid');
+      const w = await mkWorld('att-xmisid', {
+        extraRows: [{ runId: 'run_extra', meta: {
+          run_id: 'run_other', status: 'completed',
+          finished_at: '2026-01-01T00:05:00Z', pid: 5001 } }] });
+      const r = await mkReaper(w.rt).reapAttempt({ card: mkCard(), run: mkRun(att), att });
+      check('extra row meta run_id mismatch defers',
+        r.action === 'deferred' && r.code === 'registry_identity_mismatch' && noMutations(w.stub),
+        JSON.stringify(r));
+    }
+    {
+      // an extra terminal row without finished_at — incomplete, defers
+      const att = mkAttempt('att-xnofin');
+      const w = await mkWorld('att-xnofin', {
+        extraRows: [{ runId: 'run_extra', meta: {
+          run_id: 'run_extra', status: 'completed', finished_at: null, pid: 5001 },
+          state: { run_id: 'run_extra', status: 'completed' } }] });
+      const r = await mkReaper(w.rt).reapAttempt({ card: mkCard(), run: mkRun(att), att });
+      check('extra row terminal without finished_at defers',
+        r.action === 'deferred' && r.code === 'registry_extra_run_unproven' && noMutations(w.stub),
+        JSON.stringify(r));
+    }
     {
       const att = mkAttempt('att-ok');
       const w = await mkWorld('att-ok'); // both pids absent by default
@@ -956,6 +1025,29 @@ sect('worker-reaper');
       check('repeated reaper pass is a recorded no-op',
         r2.action === 'reaped' && r2.recorded === true
         && !w.stub.calls.slice(callsBefore).some((c) => c.method === 'worker.stop' || c.method === 'worker.remove'));
+    }
+    {
+      // a well-formed terminal extra row keeps its OWN runId — it need not
+      // equal the bound run — as long as meta.run_id self-matches, meta and
+      // state agree on the same terminal verdict, finished_at exists, and
+      // its recorded pids drain like every other row's.
+      const att = mkAttempt('att-xok');
+      const w = await mkWorld('att-xok', {
+        extraRows: [{ runId: 'run_extra', meta: {
+          run_id: 'run_extra', status: 'completed',
+          finished_at: '2026-01-01T00:05:00Z', pid: 5001 },
+          state: { run_id: 'run_extra', status: 'completed' } }] });
+      const reaper = mkReaper(w.rt);
+      const r = await reaper.reapAttempt({ card: mkCard(), run: mkRun(att), att });
+      check('exact-identity terminal rows (bound + extra) still reap',
+        r.action === 'reaped'
+        && calls(w.stub, 'worker.stop').length === 1 && calls(w.stub, 'worker.remove').length === 1,
+        JSON.stringify(r));
+      const rec = JSON.parse(await fs.readFile(
+        path.join(w.envRoot, 'runtime', 'attempts', 'att-xok', 'reap.json'), 'utf8'));
+      check('drain proof covers bound + extra row pids',
+        rec.terminalProof?.drained?.length === 3
+        && rec.terminalProof.drained.some((d) => d.runId === 'run_extra' && d.pid === 5001));
     }
     {
       // stopped container: remove only after proofs — stop must NOT be called

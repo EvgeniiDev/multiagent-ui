@@ -15,8 +15,11 @@
 //      drivers, never reap candidates, no record written.
 //   3. RUN TERMINAL — the bound run's own porch registry record (meta.json
 //      + state.json on the worker's host bind mount — the same bytes porch
-//      status reads) must agree on a terminal status with finished_at. A
-//      registry scan that is incomplete, inconsistent, or missing the
+//      status reads) must bind meta.run_id exactly to the bound porchRunId
+//      and agree meta vs state on ONE terminal verdict with finished_at.
+//      Directory naming alone is not identity. Every other registry row
+//      whose pids enter the drain proof is held to the same bar on its own
+//      runId. A scan that is incomplete, inconsistent, or missing the
 //      bound row defers.
 //   4. DRAIN — every worker-scoped pid the registry recorded (supervisor +
 //      child, all rows) must probe positively dead via proc-probe inside
@@ -202,27 +205,50 @@ export function createWorkerReaper({
       return defer('registry_incomplete', 'porch registry scan incomplete or unreadable');
     }
     const rows = (reg.rows || []).filter((r) => r && !r.corrupt);
+    // Exact identity per row, bound or not: meta.run_id must exist and
+    // equal the row's own directory name (the directory only addresses the
+    // row — meta.json is the record), meta status and state status must
+    // both exist, be terminal, and be EXACTLY equal, and a terminal row
+    // must carry finished_at. Extra rows keep their own runId — they are
+    // not required to equal the bound run — but their pids enter the
+    // drain proof, so they are held to the same bar.
+    const rowDefect = (r) => {
+      const extra = r.runId !== boundRun;
+      if (!r.metaRunId) {
+        return ['registry_identity_unproven', `run ${r.runId} meta.json carries no run_id`];
+      }
+      if (r.metaRunId !== r.runId) {
+        return ['registry_identity_mismatch', `run ${r.runId} meta run_id ${r.metaRunId}`];
+      }
+      if (!RUN_DONE.has(r.status)) {
+        return extra
+          ? ['registry_extra_run_live', `unbound run ${r.runId} is ${r.status ?? 'unknown'}`]
+          : ['run_nonterminal', `porch run ${boundRun} is ${r.status ?? 'unknown'}`];
+      }
+      if (r.stateStatus !== r.status) {
+        return ['registry_inconsistent',
+          `run ${r.runId} meta ${r.status} vs state ${r.stateStatus ?? 'missing'}`];
+      }
+      if (!r.finishedAt) {
+        return extra
+          ? ['registry_extra_run_unproven', `unbound run ${r.runId} terminal without finished_at`]
+          : ['run_terminal_unproven', `porch run ${boundRun} terminal without finished_at`];
+      }
+      return null;
+    };
     let row = null;
     if (boundRun) {
       row = rows.find((r) => r.runId === boundRun) ?? null;
       if (!row) return defer('registry_run_missing', `bound run ${boundRun} absent from registry`);
-      if (!RUN_DONE.has(row.status)) {
-        return defer('run_nonterminal', `porch run ${boundRun} is ${row.status ?? 'unknown'}`);
-      }
-      if (!row.finishedAt) {
-        return defer('run_terminal_unproven', `porch run ${boundRun} terminal without finished_at`);
-      }
-      if (!row.stateStatus || !RUN_DONE.has(row.stateStatus)) {
-        return defer('registry_inconsistent',
-          `meta ${row.status} vs state ${row.stateStatus ?? 'missing'}`);
-      }
     } else if (rows.length) {
       return defer('registry_ambiguous', 'registry holds runs but none is bound to the attempt');
     }
-    for (const r of rows) {
-      if (r.runId !== boundRun && !RUN_DONE.has(r.status)) {
-        return defer('registry_extra_run_live', `unbound run ${r.runId} is ${r.status ?? 'unknown'}`);
-      }
+    // Bound row first — it is the record this attempt is bound to — then
+    // every other drain-contributing row, in scan order.
+    const ordered = row ? [row, ...rows.filter((r) => r !== row)] : rows;
+    for (const r of ordered) {
+      const d = rowDefect(r);
+      if (d) return defer(d[0], d[1]);
     }
 
     // ---- already-absent: needs the prior durable proof + 'gone' --------------
