@@ -9,7 +9,8 @@
 // Requires: the f1 profile running; acp-f1-worker image built; the host
 // project repo (default acp-ui-agent-modes) committed at HEAD.
 //
-// Usage: node scripts/execution_environment_smoke.mjs [--keep]
+// Usage: node scripts/execution_environment_smoke.mjs [--keep] [--search-only]
+// --search-only runs only fresh search proof/gating; no controller restart.
 
 import { promises as fs, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -32,6 +33,8 @@ const { spawnBounded } =
 
 const CONFIG_FILE = path.join(ROOT, 'deploy/execution/environment.config.json');
 const KEEP = process.argv.includes('--keep');
+const SEARCH_ONLY = process.argv.includes('--search-only');
+const SEARCH_QUERY = process.env.F1_SEARCH_QUERY || 'Debian trixie';
 const PROJECT_ROOT_NAME = 'acp-ui-agent-modes';
 // Attempt ids are durable — every invocation needs a fresh tag so reruns do
 // not collide with recorded attempts from a previous smoke.
@@ -130,6 +133,18 @@ sect('prelude: controller + gateway live');
   const ps = await compose(['ps', '--format', '{{.Name}} {{.Status}}']);
   check('f1 services up', /env-controller-1\s+.*Up/.test(ps.stdout) && /egress-gw-1\s+.*Up/.test(ps.stdout));
   note(`snapshot ${PROJECT_ROOT_NAME}@${snapshotSha.slice(0, 12)}`);
+}
+
+if (SEARCH_ONLY) {
+  await runSearchProbe();
+  if (!KEEP) {
+    for (const att of [`f1-smoke-probe2-${TAG}`, `f1-smoke-search-${TAG}`]) {
+      await client.workerRemove(workerOf(att)).catch(() => {});
+    }
+  }
+  const failed = results.filter(([, ok]) => !ok);
+  console.log(`SEARCH SMOKE: ${results.length - failed.length}/${results.length} checks passed`);
+  process.exit(failed.length ? 1 : 0);
 }
 
 // ---- A: launch a real pi run inside a worker (role: panelist) ----------------
@@ -332,130 +347,8 @@ sect('D: payload cannot smuggle mounts/images/paths');
   check('forged digest rejected', e5?.code === 'profile_digest_mismatch');
 }
 
-// ---- E: search capability gating ----------------------------------------------
-sect('E: search capability — real probe, then gated launch');
-{
-  const digest = profileDigest(PROFILES.searcher);
-  // Unprobed combination rejected: use a per-run profile variant (search
-  // params are part of the digest) so reruns can't see a stale probe record.
-  const unprobed = { ...PROFILES.searcher,
-    search: { ...PROFILES.searcher.search, params: { probeTag: TAG } } };
-  const rejected = await runtime.start({
-    attemptId: `f1-smoke-search-unprobed-${TAG}`, profileId: 'f1-searcher', role: 'probe',
-    profile: unprobed, prompt: 'x', materials: {},
-  }).catch((e) => ({ ok: false, error: e }));
-  check('unprobed search profile rejected pre-launch',
-    rejected.ok === false && rejected.error?.code === 'search_unproven',
-    `code=${rejected.error?.code}`);
-
-  // tool-removed variant has a DIFFERENT digest → still unprobed
-  const noTool = { ...unprobed, tools: ['read'] };
-  const rej2 = await runtime.start({
-    attemptId: `f1-smoke-search-unprobed2-${TAG}`, profileId: 'f1-searcher', role: 'probe',
-    profile: noTool, prompt: 'x', materials: {},
-  }).catch((e) => ({ ok: false, error: e }));
-  check('tool-removed same-image/model digest unprobed → rejected',
-    rej2.ok === false && rej2.error?.code === 'search_unproven');
-
-  // Real probe: a probe-role worker prepared with the EXACT searcher profile
-  // runs porch delegate with a search prompt; the pi session log inside the
-  // worker is the evidence (tool call + public-source result). The runtime
-  // search gate lives in runtime.start — worker.prepare has no gate, which is
-  // exactly what the probe role is for.
-}
-{
-  const ATT_P2 = `f1-smoke-probe2-${TAG}`;
-  const digest = profileDigest(PROFILES.searcher);
-  const prep = await client.call('worker.prepare', {
-    workerId: workerOf(ATT_P2), attemptId: ATT_P2, role: 'probe',
-    profileId: 'f1-searcher', profile: PROFILES.searcher,
-    profileDigest: digest,
-    prompt: 'Call the web_search tool once with query "Debian trixie". Then reply with just the first result title.',
-    materials: {},
-  });
-  check('probe worker #2 prepared with search prompt', prep.ok === true);
-  const ex = await client.exec({
-    workerId: workerOf(ATT_P2), template: 'porch',
-    args: ['-a', 'f1-searcher', '--detach', '--prompt-file', '/work/conf/prompt.md'],
-    cwdKey: 'home',
-    env: {
-      PORCH_STEER_DIR: '/work/attempt/steer',
-      PORCH_OUTPUT_DIR: '/work/attempt/out',
-      PORCH_SAVE_OUTPUTS: '1',
-      PORCH_CONFIG: '/work/conf/porch-config.json',
-      PORCH_RUN_DIR: `/work/attempt/run-${ATT_P2}`,
-      PORCH_PI_SESSION_ID: `acp-${ATT_P2}`,
-      PI_CODING_AGENT_SESSION_DIR: '/work/attempt/pi-sessions',
-    },
-    timeoutMs: 30_000,
-  });
-  const runId = (ex.stdout.match(/run_[A-Za-z0-9_-]+/) || [])[0];
-  check('probe run launched inside worker', !!runId, `run=${runId}`);
-  // wait via porch in the worker
-  const deadline = Date.now() + 240_000;
-  let term = null;
-  while (Date.now() < deadline) {
-    const w = await client.exec({
-      workerId: workerOf(ATT_P2), template: 'porch',
-      args: ['wait', runId, '--timeout', '15', '--json'], cwdKey: 'home',
-      env: {
-        PORCH_STEER_DIR: '/work/attempt/steer',
-        PORCH_OUTPUT_DIR: '/work/attempt/out',
-        PORCH_CONFIG: '/work/conf/porch-config.json',
-      },
-      timeoutMs: 25_000,
-    });
-    try {
-      const p = JSON.parse(w.stdout.trim());
-      if (p && !p.timed_out) { term = p; break; }
-    } catch { /* keep polling */ }
-  }
-  check('probe run terminal', !!term, `status=${term?.status} exit=${term?.exit_code}`);
-  // Evidence: the pi session log inside the worker shows a real web_search call.
-  const sessDir = path.join(envRoot, 'workers', workerOf(ATT_P2), 'attempt', 'pi-sessions');
-  let files = [];
-  try { files = await fs.readdir(sessDir); } catch { /* none */ }
-  const sessFile = files.find((f) => f.endsWith(`_acp-${ATT_P2}.jsonl`));
-  let sawSearch = false, sawResults = false, searchErr = null;
-  if (sessFile) {
-    const text = await fs.readFile(path.join(sessDir, sessFile), 'utf8');
-    const proof = searchProbeEvidence(text, term);
-    sawSearch = proof.invoked;
-    sawResults = proof.capable;
-    searchErr = proof.error;
-  }
-  check('web_search tool actually invoked (session evidence)', sawSearch,
-    `file=${sessFile || 'none'}`);
-  check('search returned real public-source content', sawResults,
-    searchErr ? `err=${searchErr}` : '');
-  // Record the capability for this exact digest.
-  const freshProof = term?.status === 'completed' && term?.exit_code === 0 && sawSearch && sawResults;
-  if (freshProof) {
-    await capStore.record({
-      digest, profileId: 'f1-searcher', capable: true,
-      enablement: { tool: 'web_search', provider: 'duckduckgo', extension: 'pi-web-access@0.30.0' },
-      probe: { ok: true, at: new Date().toISOString(), runId,
-        attemptId: ATT_P2, source: 'duckduckgo (public)', evidence: `session:${sessFile}` },
-    });
-    check('probe recorded for exact digest', true, `digest=${digest.slice(0, 12)}`);
-  } else {
-    check('probe recorded for exact digest', false, 'no terminal+evidence');
-  }
-  // Now the SAME profile passes the gate and launches through runtime.start
-  const ATT_S = `f1-smoke-search-${TAG}`;
-  const rs = freshProof ? await runtime.start({
-    attemptId: ATT_S, profileId: 'f1-searcher', role: 'panelist',
-    profile: PROFILES.searcher,
-    prompt: 'Reply with exactly: SEARCH-OK',
-    materials: { projectRoot: PROJECT_ROOT_NAME, snapshotSha, inputs: [] },
-  }) : {ok:false, phase:'fresh_search_unproven'};
-  check('probed search profile launches via runtime', rs.ok === true && rs.phase === 'launched',
-    `run=${rs.porchRunId}`);
-  if (rs.porchRunId) {
-    const w = await waitTerminal(rs.porchRunId, { timeoutSec: 240 });
-    check('search-profile run terminal', w.outcome === 'terminal', `status=${w.status}`);
-  }
-}
+// ---- E: search capability gating
+await runSearchProbe();
 
 // ---- F: deps set --------------------------------------------------------------
 sect('F: dep-set (setup in constrained env + dependency-backed check)');
@@ -641,3 +534,133 @@ const fail = results.length - pass;
 console.log(`\n========== SMOKE: ${pass}/${results.length} checks passed${fail ? `, ${fail} FAILED` : ''}`);
 for (const [n, ok] of results.filter(([, ok]) => !ok)) console.log(`  FAILED: ${n}`);
 process.exit(fail ? 1 : 0);
+// ---- E: search capability gating ----------------------------------------------
+async function runSearchProbe() {
+sect('E: search capability — real probe, then gated launch');
+{
+  const digest = profileDigest(PROFILES.searcher);
+  // Unprobed combination rejected: use a per-run profile variant (search
+  // params are part of the digest) so reruns can't see a stale probe record.
+  const unprobed = { ...PROFILES.searcher,
+    search: { ...PROFILES.searcher.search, params: { probeTag: TAG } } };
+  const rejected = await runtime.start({
+    attemptId: `f1-smoke-search-unprobed-${TAG}`, profileId: 'f1-searcher', role: 'probe',
+    profile: unprobed, prompt: 'x', materials: {},
+  }).catch((e) => ({ ok: false, error: e }));
+  check('unprobed search profile rejected pre-launch',
+    rejected.ok === false && rejected.error?.code === 'search_unproven',
+    `code=${rejected.error?.code}`);
+
+  // tool-removed variant has a DIFFERENT digest → still unprobed
+  const noTool = { ...unprobed, tools: ['read'] };
+  const rej2 = await runtime.start({
+    attemptId: `f1-smoke-search-unprobed2-${TAG}`, profileId: 'f1-searcher', role: 'probe',
+    profile: noTool, prompt: 'x', materials: {},
+  }).catch((e) => ({ ok: false, error: e }));
+  check('tool-removed same-image/model digest unprobed → rejected',
+    rej2.ok === false && rej2.error?.code === 'search_unproven');
+
+  // Real probe: a probe-role worker prepared with the EXACT searcher profile
+  // runs porch delegate with a search prompt; the pi session log inside the
+  // worker is the evidence (tool call + public-source result). The runtime
+  // search gate lives in runtime.start — worker.prepare has no gate, which is
+  // exactly what the probe role is for.
+}
+{
+  const ATT_P2 = `f1-smoke-probe2-${TAG}`;
+  const digest = profileDigest(PROFILES.searcher);
+  const prep = await client.call('worker.prepare', {
+    workerId: workerOf(ATT_P2), attemptId: ATT_P2, role: 'probe',
+    profileId: 'f1-searcher', profile: PROFILES.searcher,
+    profileDigest: digest,
+    prompt: `Call the web_search tool exactly once with query ${JSON.stringify(SEARCH_QUERY)}. Then reply with just the first result title. Do not substitute a tool or claim success without real results.`,
+    materials: {},
+  });
+  check('probe worker #2 prepared with search prompt', prep.ok === true);
+  const ex = await client.exec({
+    workerId: workerOf(ATT_P2), template: 'porch',
+    args: ['-a', 'f1-searcher', '--detach', '--prompt-file', '/work/conf/prompt.md'],
+    cwdKey: 'home',
+    env: {
+      PORCH_STEER_DIR: '/work/attempt/steer',
+      PORCH_OUTPUT_DIR: '/work/attempt/out',
+      PORCH_SAVE_OUTPUTS: '1',
+      PORCH_CONFIG: '/work/conf/porch-config.json',
+      PORCH_RUN_DIR: `/work/attempt/run-${ATT_P2}`,
+      PORCH_PI_SESSION_ID: `acp-${ATT_P2}`,
+      PI_CODING_AGENT_SESSION_DIR: '/work/attempt/pi-sessions',
+    },
+    timeoutMs: 30_000,
+  });
+  const runId = (ex.stdout.match(/run_[A-Za-z0-9_-]+/) || [])[0];
+  check('probe run launched inside worker', !!runId, `run=${runId}`);
+  // wait via porch in the worker
+  const deadline = Date.now() + 240_000;
+  let term = null;
+  while (Date.now() < deadline) {
+    const w = await client.exec({
+      workerId: workerOf(ATT_P2), template: 'porch',
+      args: ['wait', runId, '--timeout', '15', '--json'], cwdKey: 'home',
+      env: {
+        PORCH_STEER_DIR: '/work/attempt/steer',
+        PORCH_OUTPUT_DIR: '/work/attempt/out',
+        PORCH_CONFIG: '/work/conf/porch-config.json',
+      },
+      timeoutMs: 25_000,
+    });
+    try {
+      const p = JSON.parse(w.stdout.trim());
+      if (p && !p.timed_out) { term = p; break; }
+    } catch { /* keep polling */ }
+  }
+  check('probe run terminal', !!term, `status=${term?.status} exit=${term?.exit_code}`);
+  // Evidence: the pi session log inside the worker shows a real web_search call.
+  const sessDir = path.join(envRoot, 'workers', workerOf(ATT_P2), 'attempt', 'pi-sessions');
+  let files = [];
+  try { files = await fs.readdir(sessDir); } catch { /* none */ }
+  const sessFile = files.find((f) => f.endsWith(`_acp-${ATT_P2}.jsonl`));
+  let sawSearch = false, sawResults = false, searchErr = null;
+  if (sessFile) {
+    const text = await fs.readFile(path.join(sessDir, sessFile), 'utf8');
+    const proof = searchProbeEvidence(text, term);
+    sawSearch = proof.invoked;
+    sawResults = proof.capable;
+    searchErr = proof.error;
+  }
+  check('web_search tool actually invoked (session evidence)', sawSearch,
+    `file=${sessFile || 'none'}`);
+  check('search returned real public-source content', sawResults,
+    searchErr ? `err=${searchErr}` : '');
+  // Record the capability for this exact digest.
+  const freshProof = term?.status === 'completed' && term?.exit_code === 0 && sawSearch && sawResults;
+  if (freshProof) {
+    await capStore.record({
+      digest, profileId: 'f1-searcher', capable: true,
+      enablement: { tool: 'web_search', provider: 'duckduckgo', extension: 'pi-web-access@0.30.0' },
+      probe: { ok: true, at: new Date().toISOString(), runId,
+        attemptId: ATT_P2, source: 'duckduckgo (public)', evidence: `session:${sessFile}` },
+    });
+    check('probe recorded for exact digest', true, `digest=${digest.slice(0, 12)}`);
+  } else {
+    await capStore.record({digest, profileId:'f1-searcher', capable:false,
+      probe:{ok:false, at:new Date().toISOString(), runId, attemptId:ATT_P2,
+        error:searchErr || 'fresh probe lacked completed matched search content'}});
+    check('probe recorded for exact digest', false, 'no terminal+evidence');
+  }
+  // Now the SAME profile passes the gate and launches through runtime.start
+  const ATT_S = `f1-smoke-search-${TAG}`;
+  const rs = freshProof ? await runtime.start({
+    attemptId: ATT_S, profileId: 'f1-searcher', role: 'panelist',
+    profile: PROFILES.searcher,
+    prompt: 'Reply with exactly: SEARCH-OK',
+    materials: { projectRoot: PROJECT_ROOT_NAME, snapshotSha, inputs: [] },
+  }) : {ok:false, phase:'fresh_search_unproven'};
+  check('probed search profile launches via runtime', rs.ok === true && rs.phase === 'launched',
+    `run=${rs.porchRunId}`);
+  if (rs.porchRunId) {
+    const w = await waitTerminal(rs.porchRunId, { timeoutSec: 240 });
+    check('search-profile run terminal', w.outcome === 'terminal', `status=${w.status}`);
+  }
+}
+
+}

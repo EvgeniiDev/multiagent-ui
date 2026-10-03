@@ -21,7 +21,7 @@ export function searchProbeEvidence(text, terminal) {
       error = content.slice(0, 180); continue;
     }
     const urls = [...content.matchAll(/https?:\/\/[^\s<>"')\]]+/g)].map(m => m[0]);
-    if (urls.length && /title|url|\[[^\]]+\]\(https?:|Source:/i.test(content)) {
+    if (urls.length && /title|url|\[[^\]]+\]\(https?:|Source:|(?:^|\n)\s*\d+\.\s+[^\n]+\n\s*https?:\/\//i.test(content)) {
       results.push({urls, content});
     }
   }
