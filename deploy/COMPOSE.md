@@ -49,6 +49,45 @@ Env: `ACP_STATE_URL=http://127.0.0.1:25900`, `STATE_URL=...`,
 `ROOT_DIR=/home/hermes/projects`, `RUNNER_ID=host-runner`,
 `PORT/STT_WINDOW_S/STT_HOP_S` для stt.
 
+## Host provisioning (run BEFORE enabling managed execution)
+
+```bash
+# Per-uid ce-* skill scratch dir (preparation preflight fs-gate). The
+# runner runs uid 1001 and ce-skills document
+# <tmp>/compound-engineering-<uid> as their writable scratch root;
+# preflightBinding(fsCheck) refuses with root_missing when it is absent
+# (proven 2026-10-03: probe fails closed without it; restored 23/23 with
+# it). Provisioning — never bypass the preflight:
+install -d -m 0700 -o 1001 -g 1001 /tmp/compound-engineering-1001
+# Verify: ls -ld /tmp/compound-engineering-1001  # drwx------ hermes hermes
+```
+
+The prod ops token (`/home/hermes/.acp-ops/ops-token`, provision per the
+`ACP_OPS_TOKEN_FILE` comment in `compose.yaml`) is likewise required on
+the host before the managed stack can serve `retire` — it binds
+read-only into the state container alone.
+
+## Managed execution enablement (parent deploys, prod state kept)
+
+`compose.prod-env.yaml` stacks on `compose.yaml` and turns on the proved
+surface — core start/validation + F1 fusion environment + preparation —
+against the REAL production `STATE_DIR` (no isolated `-u7` tree):
+
+```bash
+cd /home/hermes/projects/acp-ui   # parent deploys unified branch source here
+# precondition: acp-ui-agent-modes f1 profile up (env-controller+egress-gw)
+docker compose -p acp-ui -f compose.yaml -f compose.prod-env.yaml \
+  config   # render check only — services, mounts, env resolve
+# then (manager clearance only; state+runner recreated, rest untouched):
+docker compose -p acp-ui -f compose.yaml -f compose.prod-env.yaml \
+  up -d --no-deps state runner
+```
+
+Rollback (explicit, logged): `docker compose -p acp-ui -f compose.yaml
+up -d --no-deps state runner` — flags unset, managed surface 501-gated
+again, prod board/claims/state untouched (managed aggregates persist but
+are inert without the flags).
+
 ## Туда (systemd → compose)
 
 ```bash
