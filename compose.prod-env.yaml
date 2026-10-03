@@ -53,7 +53,12 @@ services:
       # Route porch pi-cli spawns through the repo-owned RPC boundary
       # wrapper (same as the U7 ON stack).
       ACP_PORCH_CLI: /repo/deploy/porch-pi-boundary.sh
+    command: ["sh", "-c", "install -d -m 0700 /tmp/compound-engineering-1001 && exec node /repo/server/acp-runner.mjs --serve"]
     volumes:
       # Lead turns materialize runs under the plugin cache tree; the runner
       # needs write access. State gets ro (above) — never rw.
       - /home/hermes/.codex:/home/hermes/.codex:rw
+      # NOTE: no /tmp mount — /tmp is container-private, so the ce scratch
+      # dir is provisioned at boot by the command wrapper above (service
+      # runs as uid 1001; install creates uid-owned 0700). A host-side
+      # /tmp/compound-engineering-1001 would never reach preflight.

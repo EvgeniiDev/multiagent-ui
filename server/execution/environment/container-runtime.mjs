@@ -86,7 +86,9 @@ export const CONTAINER_PATHS = {
   ext: '/work/node_modules',
 };
 
-const ROLES = new Set(['panelist', 'judge', 'integrator', 'setup', 'probe']);
+const ROLES = new Set(['panelist', 'judge', 'integrator', 'setup', 'probe',
+  'orch-decomposer', 'orch-worker', 'orch-verifier', 'orch-integrator',
+  'swarm-participant']);
 
 export function workerIdForAttempt(attemptId) {
   return `w-${attemptId}`;

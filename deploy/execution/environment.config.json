@@ -67,7 +67,12 @@
     "judge":      { "projectMode": "snapshot-ro",   "inputs": ["task", "answers", "rubric"], "deps": false, "canonical": false },
     "integrator": { "projectMode": "private-repo",  "inputs": ["task", "work-order", "requirements", "plan", "design", "results"], "deps": true,  "canonical": true },
     "setup":      { "projectMode": "workdir-rw",    "inputs": [], "deps": false, "canonical": false, "setup": true },
-    "probe":      { "projectMode": "none",          "inputs": ["task"], "deps": false, "canonical": false }
+    "probe":      { "projectMode": "none",          "inputs": ["task"], "deps": false, "canonical": false },
+    "orch-decomposer":  { "projectMode": "snapshot-ro",  "inputs": ["requirements", "plan", "design", "workers"], "deps": false, "canonical": false },
+    "orch-worker":      { "projectMode": "private-repo", "inputs": ["task", "brief", "boundary", "criteria", "deps", "requirements", "plan", "context"], "deps": true, "canonical": true },
+    "orch-verifier":    { "projectMode": "snapshot-ro",  "inputs": ["task", "diff", "criteria", "boundary", "context", "report"], "deps": false, "canonical": false },
+    "orch-integrator":  { "projectMode": "private-repo", "inputs": ["task", "work-order", "requirements", "plan", "design", "results"], "deps": true, "canonical": true },
+    "swarm-participant": { "projectMode": "snapshot-ro", "inputs": ["task", "brief", "messages", "decisions", "ownership", "scratch"], "deps": false, "canonical": false }
   },
   "execPolicy": {
     "envKeys": [
