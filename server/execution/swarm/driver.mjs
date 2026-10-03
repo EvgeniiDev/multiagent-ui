@@ -27,7 +27,8 @@ export function createSwarmDriver(deps) {
     // Exclude it only when this owner has not started the exact attempt,
     // the durable launch record is absent, and the controller confirms
     // the exact worker is absent too. Unknown workers alone fail closed.
-    if(e.code!=='unknown_worker'||att?.status!=='launching'||att.porchRunId||!ours(att.owner))throw e;
+    if(e.code!=='unknown_worker'||att?.status!=='launching'||att.porchRunId)throw e;
+    if(!ours(att.owner)&&!await adoptionProofFor(att.owner))throw e;
     const rec=await runtime.launchRecord?.(att.id),scoped=runtime.forAttempt?.(att.id);
     if(rec?.attemptId!==att.id||rec.missing!==true||typeof scoped?.workerStatus!=='function')throw e;
     let absent=false;

@@ -111,11 +111,11 @@ test('fresh cancellation intent wins over a stale completed observation at deadl
 
 test('stale barrier excludes unprepared launch only with exact missing record and registry proof',async()=>{
  const f=await fixture();try{
-  f.att.status='launching';delete f.att.porchRunId;let missing=false,starts=0;
+  f.att.status='launching';delete f.att.porchRunId;let missing=false,starts=0,ownerDead=false;
   const absent=()=>{throw Object.assign(new Error('unknown worker'),{code:'unknown_worker'});};
   const runtime={canonicalPrepare:async()=>({ok:true,canonical:{hostDir:f.root}}),freezeWorker:async()=>absent(),thawWorker:async()=>absent(),launchRecord:async id=>({attemptId:id,missing}),forAttempt:()=>({workerStatus:async()=>absent()}),start:async()=>{starts++;return{porchRunId:'fresh'};}};
-  const d=createSwarmDriver({runtime,send:f.send,self:()=>({runnerId:'me'}),getRun:async()=>f.run,stateDir:join(f.root,'state'),now:()=>1,brokerFactory:options=>({recover:async()=>{const ids=[{attemptId:'att',workerId:'w-att'}];await options.hooks.onFreeze(ids);await options.hooks.onThaw(ids);return{recovered:[],blocked:[]};}})});
-  await assert.rejects(d.drive({},f.run),{code:'unknown_worker'});assert.equal(starts,0);missing=true;
+  const d=createSwarmDriver({runtime,send:async(card,type,payload)=>{if(type==='adopt_attempt'){assert.equal(payload.proof.kind,'dead');f.att.owner={runnerId:'me'};return;}return f.send(card,type,payload);},adoptionProofFor:async()=>ownerDead?{kind:'dead'}:null,self:()=>({runnerId:'me'}),getRun:async()=>f.run,stateDir:join(f.root,'state'),now:()=>1,brokerFactory:options=>({recover:async()=>{const ids=[{attemptId:'att',workerId:'w-att'}];await options.hooks.onFreeze(ids);await options.hooks.onThaw(ids);return{recovered:[],blocked:[]};}})});
+  await assert.rejects(d.drive({},f.run),{code:'unknown_worker'});assert.equal(starts,0);missing=true;f.att.owner={runnerId:'previous'};await assert.rejects(d.drive({},f.run),{code:'unknown_worker'});assert.equal(starts,0);ownerDead=true;
   assert.equal(await d.drive({},f.run),'bound');assert.equal(starts,1);assert.equal(f.att.porchRunId,'fresh');
  }finally{await f.cleanup();}
 });
