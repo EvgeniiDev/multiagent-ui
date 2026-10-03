@@ -1779,3 +1779,493 @@ describe('real state-service handler — user flow contract', () => {
     assert.equal(st().commandError, null);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 6c. Orchestrator + swarm surface — gates/payloads on the durable
+//     run.orchestrator / run.swarm records (backend-ui-contract §§4–7),
+//     plus SSR render of editors + run detail. The backend for these modes
+//     does not exist yet server-side: every gate test pins the
+//     server-controlled `features` flag behavior (absent = refused, never
+//     a frontend-only execution).
+// ---------------------------------------------------------------------------
+
+const {
+  isOrchestrator, orchestrator: orchState, orchTasks, orchTask,
+  orchPendingActions, orchTaskStatusLabel, orchPhaseLabel,
+  orchPendingActionText, canOrchApprove, canOrchAnswer, canOrchGrant,
+  canOrchRetry, orchApprovePayload, orchAnswerPayload, orchGrantPayload,
+  orchRetryPayload, orchDraftProblems, canStartOrchestrator, orchStartPayload,
+  isSwarm, swarm: swarmState, swarmParticipants, swarmMessages,
+  swarmDecisions, swarmPendingActions, swarmPhaseLabel, swarmStatusLabel,
+  swarmFrozen, swarmPendingActionText, canSwarmInput, canSwarmExtend,
+  canSwarmDecide, swarmInputPayload, swarmExtendPayload, swarmDecidePayload,
+  swarmDraftProblems, canStartSwarm, swarmStartPayload, startableModes,
+} = await import('../src/lib/execution/ui-model.ts');
+
+function orchRun(over = {}) {
+  const oz = {
+    spec: {
+      version: 1, sha256: SHA, status: 'pending', approvedAt: null,
+      by: null, artifactId: 'art_spec',
+    },
+    phase: 'approval',
+    tasks: [
+      {
+        taskId: 'st-1', title: 'scaffold', status: 'accepted',
+        deps: [], profile: 'default', boundary: ['src/a/**'],
+        inputCommit: 'c'.repeat(40), snapshotOf: [],
+        attempts: [{ id: 'att_1', n: 1, kind: 'work', status: 'completed', resultCommit: 'c'.repeat(40) }],
+        resultCommit: 'c'.repeat(40), resultSha256: SHA,
+        evidence: { verifyArtifactId: 'art_ver', verdict: 'accept', findingsArtifactId: null },
+        waiting: null, budget: { used: 1, limit: 3 },
+      },
+      {
+        taskId: 'st-2', title: 'wire up', status: 'waiting',
+        deps: ['st-1'], profile: 'default', boundary: ['src/b/**'],
+        inputCommit: 'c'.repeat(40), snapshotOf: ['st-1'],
+        attempts: [{ id: 'att_2', n: 1, kind: 'work', status: 'completed' }],
+        resultCommit: null, resultSha256: null, evidence: null,
+        waiting: { reason: 'question', question: 'which store?', since: now() - 1000 },
+        budget: { used: 1, limit: 3 },
+      },
+      {
+        taskId: 'st-3', title: 'broken', status: 'failed',
+        deps: [], profile: 'default', boundary: ['src/c/**'],
+        inputCommit: 'c'.repeat(40), snapshotOf: [],
+        attempts: [
+          { id: 'att_3', n: 1, kind: 'work', status: 'failed', error: 'boom' },
+          { id: 'att_4', n: 2, kind: 'fix', status: 'failed', error: 'boom again' },
+          { id: 'att_5', n: 3, kind: 'fix', status: 'failed', error: 'boom x3' },
+        ],
+        resultCommit: null, resultSha256: null, evidence: null,
+        waiting: null, budget: { used: 3, limit: 3 },
+      },
+    ],
+    integrate: null,
+    pendingActions: [
+      { type: 'spec_approval', specSha256: SHA },
+      { type: 'question', taskId: 'st-2', question: 'which store?' },
+      { type: 'grant', taskId: 'st-3', reason: 'attempts_exhausted' },
+    ],
+    stats: { tasks: 3, accepted: 1, running: 0, failed: 1 },
+    owner: { runnerId: 'r1', instanceId: null },
+    ...(over.orchestrator ?? {}),
+  };
+  return {
+    id: 'run_o1',
+    cardId: 'card_1',
+    mode: 'orchestrator',
+    status: 'active',
+    phase: 'work',
+    createdAt: now() - 30_000,
+    finishedAt: null,
+    inputs: {
+      requirements: { versionId: 'dv_req1', sha256: SHA },
+      plan: { versionId: 'dv_plan1', sha256: SHA2, requirementsVersionId: 'dv_req1', checks: [] },
+      design: null,
+    },
+    composition: null,
+    baseRef: 'main',
+    baseCommit: 'a'.repeat(64),
+    workspaceId: null,
+    attempts: [],
+    result: null,
+    acceptance: { resultSha256: SHA, round: 1, at: now() - 1000 },
+    events: [],
+    eventsCursor: 0,
+    ...over,
+    orchestrator: oz,
+  };
+}
+
+function swarmRun(over = {}) {
+  const sw = {
+    phase: 'implement',
+    round: 2,
+    participants: [
+      {
+        participantId: 'p1', callsign: 'A', profileId: 'zen-relay/m-a',
+        status: 'active', ownedPaths: ['src/a/**'],
+        attempt: { id: 'att_p1', status: 'running', porchRunId: 'porch_1' },
+        budget: { turnsUsed: 3, turnsLimit: 8 },
+        waiting: null, cursor: { lastSeenSeq: 41 },
+      },
+      {
+        participantId: 'p2', callsign: 'B', profileId: 'zen-relay/m-b',
+        status: 'exhausted', ownedPaths: ['src/b/**'],
+        attempt: null,
+        budget: { turnsUsed: 8, turnsLimit: 8 },
+        waiting: { reason: 'turn', detail: 'turns_exhausted' },
+        cursor: { lastSeenSeq: 40 },
+      },
+    ],
+    ownership: [
+      { path: 'src/a/**', owner: 'p1', since: now() - 9000, contested: false },
+      { path: 'src/shared/**', owner: 'p1', since: now() - 8000, contested: true },
+    ],
+    decisions: [
+      {
+        id: 'd1', kind: 'contested', proposer: 'p1', paths: ['src/shared/**'],
+        status: 'pending', at: now() - 5000, rationale: 'shared helper lives here',
+      },
+      { id: 'd0', kind: 'apply', proposer: 'p2', paths: ['src/b/**'], status: 'approved', at: now() - 9000 },
+    ],
+    messages: [
+      { id: 'm1', seq: 1, from: 'p1', to: 'all', kind: 'proposal', text: 'i take shared', at: now() - 7000 },
+      { id: 'm2', seq: 2, from: 'broker', to: 'user', kind: 'notice', text: 'd1 escalated', at: now() - 6000 },
+    ],
+    freeze: { active: false, reason: null, since: null },
+    findings: [{ id: 'f1', owner: 'p1', text: 'racy helper', severity: 'major', status: 'open' }],
+    limits: { turnsUsed: 11, turnsLimit: 16, round: 2, maxRounds: 4, messagesUsed: 2, maxMessages: 200 },
+    pendingActions: [
+      { type: 'decision', decisionId: 'd1' },
+      { type: 'extend', participantId: 'p2', reason: 'turns_exhausted' },
+    ],
+    owner: { runnerId: 'r1', instanceId: 'i1' },
+    ...(over.swarm ?? {}),
+  };
+  return {
+    id: 'run_s1',
+    cardId: 'card_1',
+    mode: 'swarm',
+    status: 'active',
+    phase: 'implement',
+    createdAt: now() - 30_000,
+    finishedAt: null,
+    inputs: {
+      requirements: { versionId: 'dv_req1', sha256: SHA },
+      plan: { versionId: 'dv_plan1', sha256: SHA2, requirementsVersionId: 'dv_req1', checks: [] },
+      design: null,
+    },
+    composition: null,
+    baseRef: 'main',
+    baseCommit: 'a'.repeat(64),
+    workspaceId: null,
+    attempts: [],
+    result: null,
+    acceptance: null,
+    events: [],
+    eventsCursor: 0,
+    ...over,
+    swarm: sw,
+  };
+}
+
+describe('orchestrator ui-model gates + payloads', () => {
+  test('isOrchestrator requires mode + slice; labels are verbatim', () => {
+    assert.equal(isOrchestrator(orchRun()), true);
+    assert.equal(isOrchestrator(swarmRun()), false);
+    assert.equal(isOrchestrator(null), false);
+    assert.equal(orchTaskStatusLabel('waiting'), 'waiting on you');
+    assert.equal(orchPhaseLabel('approval'), 'awaiting spec approval');
+    assert.equal(orchTasks(orchRun()).length, 3);
+    assert.equal(orchTask(orchRun(), 'st-2').title, 'wire up');
+    assert.equal(orchPendingActions(orchRun()).length, 3);
+    assert.match(orchPendingActionText({ type: 'spec_approval', specSha256: SHA }), /awaits your approval/);
+    assert.match(orchPendingActionText({ type: 'question', taskId: 'st-2', question: 'which store?' }), /st-2.*which store/);
+    assert.match(orchPendingActionText({ type: 'grant', taskId: 'st-3' }), /exhausted/);
+  });
+
+  test('canOrchApprove binds the pending spec sha; stale spec refused', () => {
+    const r = orchRun();
+    assert.equal(canOrchApprove(r).ok, true);
+    assert.equal(canOrchApprove(r, SHA).ok, true);
+    assert.equal(canOrchApprove(r, SHA2).ok, false, 'a stale sha never approves');
+    const done = orchRun({ orchestrator: { spec: { version: 1, sha256: SHA, status: 'approved' }, pendingActions: [] } });
+    assert.equal(canOrchApprove(done).ok, false, 'no pending action → nothing to approve');
+    const term = orchRun({ status: 'failed' });
+    assert.equal(canOrchApprove(term).ok, false, 'terminal run takes no decisions');
+  });
+
+  test('answer/grant/retry address waiting/failed tasks only', () => {
+    const r = orchRun();
+    assert.equal(canOrchAnswer(r, 'st-2').ok, true, 'waiting-on-question is answerable');
+    assert.equal(canOrchAnswer(r, 'st-1').ok, false, 'an accepted task is not answerable');
+    assert.equal(canOrchAnswer(r, 'st-x').ok, false, 'unknown task refused');
+    assert.equal(canOrchGrant(r, 'st-3').ok, true, 'exhausted failed task takes a grant');
+    assert.equal(canOrchGrant(r, 'st-1').ok, false, 'accepted task takes no grant');
+    assert.equal(canOrchRetry(r, 'st-3').ok, false, 'budget exhausted → grant first, not retry');
+    const retryable = orchRun({
+      orchestrator: {
+        tasks: [{ taskId: 'st-9', title: 'flaky', status: 'failed', deps: [], attempts: [], budget: { used: 1, limit: 3 } }],
+        pendingActions: [],
+      },
+    });
+    assert.equal(canOrchRetry(retryable, 'st-9').ok, true);
+    assert.deepEqual(orchRetryPayload(retryable, 'st-9'), { runId: 'run_o1', taskId: 'st-9' });
+    assert.deepEqual(orchGrantPayload(retryable, 'st-9', 2), { runId: 'run_o1', taskId: 'st-9', attempts: 2 });
+    assert.deepEqual(orchAnswerPayload(retryable, 'st-9', 'pg'), { runId: 'run_o1', taskId: 'st-9', answer: 'pg' });
+    assert.deepEqual(orchApprovePayload(retryable, SHA), { runId: 'run_o1', specSha256: SHA });
+  });
+
+  test('orchestrator start composition: flag-gated, shape-checked, payload exact', () => {
+    const draft = {
+      decomposer: 'zen-relay/d', verifier: 'zen-relay/v', integrator: 'zen-relay/i',
+      workers: [{ name: 'default', profileId: 'zen-relay/w' }],
+      limits: { maxAttemptsPerTask: 3, maxIntegratorAttempts: 2, maxSubtasks: 16, requireSpecApproval: true },
+      baseRef: 'main',
+    };
+    const off = cardView({ features: {} });
+    assert.equal(canStartOrchestrator(off, draft).ok, false);
+    assert.match(canStartOrchestrator(off, draft).reason, /not enabled/);
+    const on = cardView({ features: { orchestrator: true } });
+    assert.equal(canStartOrchestrator(on, draft).ok, true, 'flag on + valid draft starts');
+    assert.ok(orchDraftProblems(on, { ...draft, decomposer: '' }).some((s) => /decomposer/i.test(s)));
+    assert.ok(orchDraftProblems(on, { ...draft, workers: [] }).some((s) => /worker pool/i.test(s)));
+    assert.ok(orchDraftProblems(on, {
+      ...draft, workers: [{ name: 'd', profileId: 'x' }, { name: 'd', profileId: 'y' }],
+    }).some((s) => /duplicate/i.test(s)));
+    const p = orchStartPayload(draft);
+    assert.equal(p.mode, 'orchestrator');
+    assert.deepEqual(p.orchestrator.workers, { default: 'zen-relay/w' });
+    assert.equal(p.orchestrator.decomposer, 'zen-relay/d');
+    assert.equal(p.baseRef, 'main');
+  });
+
+  test('startableModes: server flags open orchestrator/swarm; absent stays shut', () => {
+    assert.deepEqual(startableModes(cardView({ features: {} })), ['solo', 'fusion']);
+    assert.deepEqual(
+      startableModes(cardView({ features: { orchestrator: true, swarm: true } })),
+      ['solo', 'fusion', 'orchestrator', 'swarm'],
+    );
+  });
+});
+
+describe('swarm ui-model gates + payloads', () => {
+  test('isSwarm requires mode + slice; freeze is explicit', () => {
+    assert.equal(isSwarm(swarmRun()), true);
+    assert.equal(isSwarm(orchRun()), false);
+    assert.equal(swarmParticipants(swarmRun()).length, 2);
+    assert.equal(swarmMessages(swarmRun())[0].id, 'm1', 'messages sort by seq');
+    assert.equal(swarmDecisions(swarmRun()).length, 2);
+    assert.equal(swarmPhaseLabel('implement'), 'implementing');
+    assert.equal(swarmStatusLabel('exhausted'), 'turns exhausted');
+    assert.equal(swarmFrozen(swarmRun()).frozen, false);
+    const frozen = swarmRun({ swarm: { phase: 'verify', freeze: { active: true, reason: 'verify' } } });
+    assert.equal(swarmFrozen(frozen).frozen, true);
+    assert.match(swarmFrozen(frozen).reason, /verify/);
+    assert.match(swarmPendingActionText({ type: 'decision', decisionId: 'd1' }, swarmRun()), /contested/);
+    assert.match(swarmPendingActionText({ type: 'extend', participantId: 'p2' }, swarmRun()), /exhausted/);
+  });
+
+  test('input refused while frozen; extend/decide need escalation', () => {
+    const r = swarmRun();
+    assert.equal(canSwarmInput(r, 'p1', 'go').ok, true);
+    assert.equal(canSwarmInput(r, 'all', 'go team').ok, true);
+    assert.equal(canSwarmInput(r, 'px', 'go').ok, false, 'unknown participant refused');
+    assert.equal(canSwarmInput(r, 'p1', '  ').ok, false, 'empty steer refused');
+    const frozen = swarmRun({ swarm: { phase: 'review', freeze: { active: true, reason: 'review' } } });
+    assert.equal(canSwarmInput(frozen, 'p1', 'go').ok, false, 'frozen runs refuse input');
+    assert.equal(canSwarmExtend(r, 'p2').ok, true, 'exhausted participant takes an extension');
+    assert.equal(canSwarmExtend(r, 'p1').ok, false, 'an active participant takes no extension');
+    assert.equal(canSwarmExtend(r, 'px').ok, false, 'unknown participant refused');
+    assert.equal(canSwarmDecide(r, 'd1').ok, true, 'escalated pending decision settles');
+    assert.equal(canSwarmDecide(r, 'd0').ok, false, 'an approved decision never re-settles');
+    assert.equal(canSwarmDecide(r, 'dx').ok, false, 'unknown decision refused');
+    assert.deepEqual(swarmInputPayload(r, 'p1', 'go'), { runId: 'run_s1', participantId: 'p1', text: 'go' });
+    assert.deepEqual(swarmInputPayload(r, 'all', 'go'), { runId: 'run_s1', to: 'all', text: 'go' });
+    assert.deepEqual(swarmExtendPayload(r, 4, 'p2'), { runId: 'run_s1', turns: 4, participantId: 'p2' });
+    assert.deepEqual(
+      swarmDecidePayload(r, 'd1', 'approve', 'lgtm'),
+      { runId: 'run_s1', decisionId: 'd1', outcome: 'approve', note: 'lgtm' },
+    );
+  });
+
+  test('swarm start composition: 2..3 participants, flag-gated, payload exact', () => {
+    const draft = {
+      participants: [
+        { participantId: 'p1', callsign: 'A', profileId: 'zen-relay/a', ownedPaths: 'src/a/**' },
+        { participantId: 'p2', callsign: 'B', profileId: 'zen-relay/b', ownedPaths: 'src/b/**' },
+      ],
+      limits: { maxTurnsPerParticipant: 8, maxRounds: 4, maxMessages: 200, verifyRequired: true },
+      baseRef: '',
+    };
+    const off = cardView({ features: {} });
+    assert.equal(canStartSwarm(off, draft).ok, false);
+    assert.match(canStartSwarm(off, draft).reason, /not enabled/);
+    const on = cardView({ features: { swarm: true } });
+    assert.equal(canStartSwarm(on, draft).ok, true);
+    assert.ok(swarmDraftProblems(on, { participants: [draft.participants[0]] }).some((s) => /at least 2/i.test(s)));
+    assert.ok(swarmDraftProblems(on, {
+      participants: [...draft.participants, { participantId: 'p3', callsign: 'C', profileId: 'z', ownedPaths: 'x' },
+        { participantId: 'p4', callsign: 'D', profileId: 'z', ownedPaths: 'x' }],
+    }).some((s) => /at most 3/i.test(s)));
+    assert.ok(swarmDraftProblems(on, {
+      participants: [{ ...draft.participants[0], ownedPaths: '  ' }, draft.participants[1]],
+    }).some((s) => /owned paths/i.test(s)));
+    const p = swarmStartPayload(draft);
+    assert.equal(p.mode, 'swarm');
+    assert.equal(p.swarm.participants.length, 2);
+    assert.deepEqual(p.swarm.participants[0].ownedPaths, ['src/a/**']);
+    assert.equal(p.swarm.limits.maxRounds, 4);
+  });
+});
+
+describe('orchestrator/swarm SSR render — drawer editors + run detail', () => {
+  beforeEach(async () => {
+    installFetchRouter({ doc: { name: 'board.json', rev: 1, updatedAt: 1, data: { version: 2, cards: [] } }, missing: false, putGate: null });
+    await __resetWebKvForTests();
+    if (typeof localStorage !== 'undefined') localStorage.clear();
+    setActivePinia(createPinia());
+  });
+  afterEach(async () => {
+    releaseExec();
+    await __resetWebKvForTests();
+  });
+
+  test('orchestrator editor renders only behind the flag; hidden otherwise', async () => {
+    const { createSSRApp } = await import('vue');
+    const { renderToString } = await import('@vue/server-renderer');
+    const exec = useExecutionStore();
+    setExecutionClient(new FakeExec());
+    const CardDrawer = (await import('../src/features/board/CardDrawer.vue')).default;
+    const board = useBoardStore();
+    board.cards = [mkCard({ id: 'co1', title: 'orch card', execution: managedMarker() })];
+    const st = exec.stateFor('co1');
+    st.phase = 'ready';
+    st.view = cardView({ cardId: 'co1', features: { start: true, orchestrator: true } });
+    let html = await renderToString(createSSRApp(CardDrawer, { cardId: 'co1' }));
+    assert.ok(html.includes('exec-orchestrator'), 'orchestrator block renders when the gate is on');
+    assert.ok(html.includes('orch-configure'), 'configure affordance renders');
+    assert.ok(!html.includes('exec-swarm'), 'swarm block stays hidden without its flag');
+    releaseExec();
+    setActivePinia(createPinia());
+    setExecutionClient(new FakeExec());
+    const exec2 = useExecutionStore();
+    const board2 = useBoardStore();
+    board2.cards = [mkCard({ id: 'co2', title: 'gated card', execution: managedMarker() })];
+    const st2 = exec2.stateFor('co2');
+    st2.phase = 'ready';
+    st2.view = cardView({ cardId: 'co2', features: {} });
+    html = await renderToString(createSSRApp(CardDrawer, { cardId: 'co2' }));
+    assert.ok(!html.includes('exec-orchestrator'), 'orchestrator block hidden when the gate is off');
+    assert.ok(!html.includes('orch-configure'), 'no configure affordance when gated off');
+  });
+
+  test('orchestrator run detail renders spec, tasks, attempts, hash, pending actions + controls', async () => {
+    const { createSSRApp } = await import('vue');
+    const { renderToString } = await import('@vue/server-renderer');
+    const exec = useExecutionStore();
+    setExecutionClient(new FakeExec());
+    const CardDrawer = (await import('../src/features/board/CardDrawer.vue')).default;
+    const board = useBoardStore();
+    board.cards = [mkCard({ id: 'co3', title: 'orch run card', execution: managedMarker() })];
+    const st = exec.stateFor('co3');
+    st.phase = 'ready';
+    st.view = cardView({
+      cardId: 'co3',
+      features: { start: true, orchestrator: true },
+      currentRunId: 'run_o1',
+      runs: [{ id: 'run_o1', status: 'active', mode: 'orchestrator', reserved: false, pending: 3 }],
+    });
+    st.selectedRunId = 'run_o1';
+    st.run = orchRun({ cardId: 'co3' });
+    const html = await renderToString(createSSRApp(CardDrawer, { cardId: 'co3' }));
+    assert.ok(html.includes('orch-actions'), 'required-action banner renders');
+    assert.ok(html.includes('orch-pending-spec_approval'), 'spec approval pending renders');
+    assert.ok(html.includes('orch-approve-spec'), 'approve control renders');
+    assert.ok(html.includes('orch-task-st-1'), 'accepted task renders');
+    assert.ok(html.includes('orch-task-st-2'), 'waiting task renders');
+    assert.ok(html.includes('orch-waiting-st-2'), 'waiting reason renders');
+    assert.ok(html.includes('orch-answer-send-st-2'), 'answer control renders');
+    assert.ok(html.includes('orch-grant-st-3'), 'grant control renders');
+    assert.ok(!html.includes('orch-retry-st-3'), 'budget-exhausted task shows grant, not retry');
+    assert.ok(html.includes('orch-attempt-att_3'), 'task attempts render');
+    assert.ok(html.includes('orch-result-st-1'), 'accepted result commit + hash render');
+    assert.ok(html.includes('orch-acceptance'), 'acceptance hash renders');
+    assert.ok(html.includes('orchestrator · '), 'run line marks the mode');
+  });
+
+  test('orchestrator commands POST the exact user-channel envelope via the store', async () => {
+    const { exec, client } = freshPinia();
+    client.on('getCard', () => cardView({ features: { orchestrator: true } }));
+    const posted = [];
+    client.on('sendCommand', (id, env) => {
+      posted.push(env);
+      return { ok: true, cardId: id, controlRevision: 8, result: {} };
+    });
+    exec.watchCard('card_1');
+    await sleep(0);
+    const r = await exec.sendCommand('card_1', 'orch_retry', { runId: 'run_o1', taskId: 'st-9' });
+    assert.equal(r.ok, true);
+    assert.equal(posted.length, 1);
+    assert.equal(posted[0].type, 'orch_retry');
+    assert.equal(posted[0].expectedControlRevision, 7, 'CAS revision from the fresh read');
+    assert.deepEqual(posted[0].payload, { runId: 'run_o1', taskId: 'st-9' });
+    exec.unwatchCard('card_1');
+  });
+
+  test('swarm editor renders only behind the flag; run detail shows claims/messages/decisions/limits', async () => {
+    const { createSSRApp } = await import('vue');
+    const { renderToString } = await import('@vue/server-renderer');
+    const exec = useExecutionStore();
+    setExecutionClient(new FakeExec());
+    const CardDrawer = (await import('../src/features/board/CardDrawer.vue')).default;
+    const board = useBoardStore();
+    board.cards = [mkCard({ id: 'cs1', title: 'swarm card', execution: managedMarker() })];
+    const st = exec.stateFor('cs1');
+    st.phase = 'ready';
+    st.view = cardView({
+      cardId: 'cs1',
+      features: { start: true, swarm: true },
+      currentRunId: 'run_s1',
+      runs: [{ id: 'run_s1', status: 'active', mode: 'swarm', reserved: false, pending: 2 }],
+    });
+    st.selectedRunId = 'run_s1';
+    st.run = swarmRun({ cardId: 'cs1' });
+    const html = await renderToString(createSSRApp(CardDrawer, { cardId: 'cs1' }));
+    assert.ok(html.includes('exec-swarm'), 'swarm block renders when the gate is on');
+    assert.ok(html.includes('swarm-actions'), 'required-action banner renders');
+    assert.ok(html.includes('swarm-pending-decision'), 'decision pending renders');
+    assert.ok(html.includes('swarm-participant-p1'), 'participant claims render');
+    assert.ok(html.includes('swarm-limits'), 'limits line renders');
+    assert.ok(html.includes('swarm-ownership'), 'ownership claims render');
+    assert.ok(html.includes('swarm-decision-d1'), 'contested decision renders');
+    assert.ok(html.includes('swarm-decide-approve-d1'), 'approve control renders');
+    assert.ok(html.includes('swarm-decide-reject-d1'), 'reject control renders');
+    assert.ok(html.includes('swarm-msg-m1'), 'message bus renders');
+    assert.ok(html.includes('swarm-broadcast'), 'broadcast affordance renders');
+    assert.ok(html.includes('swarm-extend-btn-p2'), 'extend control renders on the exhausted participant');
+    assert.ok(html.includes('swarm · '), 'run line marks the mode');
+  });
+
+  test('swarm commands POST the exact user-channel envelope via the store', async () => {
+    const { exec, client } = freshPinia();
+    client.on('getCard', () => cardView({ features: { swarm: true } }));
+    const posted = [];
+    client.on('sendCommand', (id, env) => {
+      posted.push(env);
+      return { ok: true, cardId: id, controlRevision: 8, result: {} };
+    });
+    exec.watchCard('card_1');
+    await sleep(0);
+    const r = await exec.sendCommand('card_1', 'swarm_decide', { runId: 'run_s1', decisionId: 'd1', outcome: 'approve' });
+    assert.equal(r.ok, true);
+    assert.equal(posted.length, 1);
+    assert.equal(posted[0].type, 'swarm_decide');
+    assert.equal(posted[0].expectedControlRevision, 7, 'CAS revision from the fresh read');
+    exec.unwatchCard('card_1');
+  });
+
+  test('frozen swarm shows the freeze banner and refuses input client-side', async () => {
+    const { createSSRApp } = await import('vue');
+    const { renderToString } = await import('@vue/server-renderer');
+    const exec = useExecutionStore();
+    setExecutionClient(new FakeExec());
+    const CardDrawer = (await import('../src/features/board/CardDrawer.vue')).default;
+    const board = useBoardStore();
+    board.cards = [mkCard({ id: 'cs2', title: 'frozen swarm', execution: managedMarker() })];
+    const st = exec.stateFor('cs2');
+    st.phase = 'ready';
+    st.view = cardView({
+      cardId: 'cs2',
+      features: { swarm: true },
+      currentRunId: 'run_s1',
+      runs: [{ id: 'run_s1', status: 'active', mode: 'swarm', reserved: false }],
+    });
+    st.selectedRunId = 'run_s1';
+    st.run = swarmRun({ cardId: 'cs2', swarm: { phase: 'verify', freeze: { active: true, reason: 'verify' } } });
+    const html = await renderToString(createSSRApp(CardDrawer, { cardId: 'cs2' }));
+    assert.ok(html.includes('swarm-freeze'), 'freeze banner renders with the reason');
+  });
+});

@@ -38,8 +38,10 @@ import {
   prepStatusLabel,
   prepStopPayload,
   prepBindPayload,
+  PREP_DOWNSTREAM_MODES,
   PREP_STAGES,
   shortId,
+  startableModes,
   type GateResult,
 } from '../../lib/execution/ui-model';
 import type {
@@ -101,6 +103,14 @@ const lastAttempt = computed(() => {
 });
 const handoffMode = ref('solo');
 const handoffTargets = computed(() => session.value?.handoffTargets ?? []);
+// Modes whose run backend the card view's `features` advertises — a
+// handoff offer for a flagged mode names a real downstream target.
+// The options render from `startableModes(view)` so the picker can never
+// offer a start the server would refuse; the durability note below stays
+// honest about what each mode means on this deployment.
+const availableModes = computed(() =>
+  view.value ? startableModes(view.value) : [...PREP_DOWNSTREAM_MODES],
+);
 
 let uiSeq = 0;
 const stillCurrent = (cardId: string, seq: number) => props.cardId === cardId && seq === uiSeq;
@@ -243,7 +253,7 @@ const completenessLine = computed(() => {
  * durable offer, with the reason visible; starting a run in one is
  * refused by canStartInMode without a POST. */
 const handoffModeStartGate = computed(() =>
-  view.value ? canStartInMode(handoffMode.value) : { ok: false, reason: 'loading…' },
+  view.value ? canStartInMode(handoffMode.value, view.value) : { ok: false, reason: 'loading…' },
 );
 
 async function onRequestDraft(kind: ExecDocKind) {
@@ -598,6 +608,9 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
               @click="onHandoff"
             >Record handoff offer</button>
           </div>
+          <p class="exec-line mono" data-testid="prep-modes-available">
+            startable on this deployment: {{ availableModes.join(', ') || '—' }}
+          </p>
           <div v-for="h in session.handoffs" :key="h.handoffId" class="exec-line" :data-testid="`prep-handoff-${h.handoffId}`">
             → {{ h.mode }} @ {{ fmtTs(h.at) }}{{ h.stale ? ' — stale (inputs changed)' : '' }}{{ h.implemented === false ? ' — mode not implemented' : '' }}
           </div>
