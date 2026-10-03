@@ -13,6 +13,7 @@
 
 import { promises as fs, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { searchProbeEvidence } from './search_probe_evidence.mjs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -49,7 +50,7 @@ const sh = (argv, opts = {}) =>
   spawnBounded(argv, { timeoutMs: 60_000, ...opts });
 const docker = (args, opts = {}) => sh(['docker', ...args], opts);
 const compose = (args, opts = {}) =>
-  sh(['docker', 'compose', '--profile', 'f1', ...args], { cwd: ROOT, ...opts });
+  sh(['docker', 'compose', '-p', PROJECT_ROOT_NAME, '--profile', 'f1', ...args], { cwd: ROOT, ...opts });
 
 // --- context ------------------------------------------------------------------
 const cfg = await loadEnvironmentConfig(CONFIG_FILE, { env: process.env, view: 'client' });
@@ -414,33 +415,22 @@ sect('E: search capability — real probe, then gated launch');
   const sessDir = path.join(envRoot, 'workers', workerOf(ATT_P2), 'attempt', 'pi-sessions');
   let files = [];
   try { files = await fs.readdir(sessDir); } catch { /* none */ }
-  const sessFile = files.find((f) => f.endsWith('.jsonl'));
+  const sessFile = files.find((f) => f.endsWith(`_acp-${ATT_P2}.jsonl`));
   let sawSearch = false, sawResults = false, searchErr = null;
   if (sessFile) {
     const text = await fs.readFile(path.join(sessDir, sessFile), 'utf8');
-    sawSearch = /"web_search"|web_search/.test(text) && /toolCall|tool_call|tool_use/.test(text);
-    // Find the web_search tool result — must NOT be an error and must carry
-    // real result URLs. ("Results stored" alone appears on failures too.)
-    for (const line of text.split('\n')) {
-      if (!line.includes('web_search') || !/toolResult|tool_result/.test(line)) continue;
-      let msg = null;
-      try { msg = JSON.parse(line); } catch { continue; }
-      const content = msg?.message?.content ?? msg?.content;
-      const blockText = Array.isArray(content)
-        ? content.map((b) => b?.text || '').join('\n') : String(content ?? '');
-      if (!blockText) continue;
-      if (/Error:|failed/i.test(blockText)) { searchErr = blockText.slice(0, 160); continue; }
-      if (/https?:\/\//.test(blockText) && /title|url|responseId/i.test(blockText)) {
-        sawResults = true;
-      }
-    }
+    const proof = searchProbeEvidence(text, term);
+    sawSearch = proof.invoked;
+    sawResults = proof.capable;
+    searchErr = proof.error;
   }
   check('web_search tool actually invoked (session evidence)', sawSearch,
     `file=${sessFile || 'none'}`);
   check('search returned real public-source content', sawResults,
     searchErr ? `err=${searchErr}` : '');
   // Record the capability for this exact digest.
-  if (term && sawSearch && sawResults) {
+  const freshProof = term?.status === 'completed' && term?.exit_code === 0 && sawSearch && sawResults;
+  if (freshProof) {
     await capStore.record({
       digest, profileId: 'f1-searcher', capable: true,
       enablement: { tool: 'web_search', provider: 'duckduckgo', extension: 'pi-web-access@0.30.0' },
@@ -453,12 +443,12 @@ sect('E: search capability — real probe, then gated launch');
   }
   // Now the SAME profile passes the gate and launches through runtime.start
   const ATT_S = `f1-smoke-search-${TAG}`;
-  const rs = await runtime.start({
+  const rs = freshProof ? await runtime.start({
     attemptId: ATT_S, profileId: 'f1-searcher', role: 'panelist',
     profile: PROFILES.searcher,
     prompt: 'Reply with exactly: SEARCH-OK',
     materials: { projectRoot: PROJECT_ROOT_NAME, snapshotSha, inputs: [] },
-  });
+  }) : {ok:false, phase:'fresh_search_unproven'};
   check('probed search profile launches via runtime', rs.ok === true && rs.phase === 'launched',
     `run=${rs.porchRunId}`);
   if (rs.porchRunId) {

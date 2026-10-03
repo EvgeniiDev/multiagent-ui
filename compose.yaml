@@ -255,3 +255,6 @@ networks:
   f1-egress:
     name: acp-f1-egress
     driver: bridge
+    # Host egress crosses WireGuard (MTU 1420); avoid TLS PMTU blackholes.
+    driver_opts:
+      com.docker.network.driver.mtu: "1400"
