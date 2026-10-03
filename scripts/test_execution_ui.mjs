@@ -2202,6 +2202,30 @@ describe('orchestrator/swarm SSR render — drawer editors + run detail', () => 
     assert.ok(html.includes('orchestrator · '), 'run line marks the mode');
   });
 
+  test('candidate awaiting verifier budget renders an enabled grant while still verifying', async () => {
+    const { createSSRApp } = await import('vue');
+    const { renderToString } = await import('@vue/server-renderer');
+    const exec = useExecutionStore();
+    setExecutionClient(new FakeExec());
+    const CardDrawer = (await import('../src/features/board/CardDrawer.vue')).default;
+    useBoardStore().cards = [mkCard({ id: 'co-verify', title: 'verifier budget', execution: managedMarker() })];
+    const st = exec.stateFor('co-verify');
+    st.phase = 'ready';
+    st.view = cardView({cardId:'co-verify',features:{start:true,orchestrator:true},currentRunId:'run_o1',runs:[{id:'run_o1',status:'active',mode:'orchestrator'}]});
+    st.selectedRunId = 'run_o1';
+    st.run = orchRun({cardId:'co-verify',orchestrator:{graph:{status:'active',pendingApproval:null},pendingActions:[{type:'grant',taskId:'st-3',reason:'verify_attempts_exhausted'}]}});
+    const task = st.run.orchestrator.tasks.find(t => t.id === 'st-3');
+    task.state.status = 'verifying';
+    task.state.verifyUsed = 2;
+    task.state.resultCandidate = {commit:SHA,attemptId:'worker-1'};
+    assert.equal(canOrchGrant(st.run,'st-3').ok,true);
+    const html = await renderToString(createSSRApp(CardDrawer,{cardId:'co-verify'}));
+    const button = html.match(/<button[^>]*data-testid="orch-grant-st-3"[^>]*>/)?.[0];
+    assert.ok(button,'pending verifier grant must be actionable from the real panel');
+    assert.ok(!button.includes('disabled'),'valid pending grant is enabled');
+    assert.ok(!html.includes('orch-retry-st-3'),'imported candidate must not be queued as new worker');
+  });
+
   test('orchestrator commands POST the exact user-channel envelope via the store', async () => {
     const { exec, client } = freshPinia();
     client.on('getCard', () => cardView({ features: { orchestrator: true } }));

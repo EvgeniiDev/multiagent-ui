@@ -2029,7 +2029,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
                     >answer</button>
                   </div>
                 </template>
-                <template v-if="t.status === 'failed' || t.status === 'waiting' || t.status === 'blocked' || t.status === 'returned'">
+                <template v-if="t.status === 'failed' || t.status === 'waiting' || t.status === 'blocked' || t.status === 'returned' || orchGrantFor(t.taskId).ok">
                   <button
                     class="exec-artlink"
                     :data-testid="`orch-grant-${t.taskId}`"
