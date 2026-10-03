@@ -876,6 +876,60 @@ sect('worker-reaper');
       check('nonterminal extra registry run defers',
         r.action === 'deferred' && r.code === 'registry_extra_run_live' && noMutations(w.stub));
     }
+    {
+      // P1: running worker + terminal attempt/run but ZERO recorded
+      // supervisor/child pids — absence of process evidence is NOT drain
+      // proof; the drain set must be non-empty before stop/remove.
+      const att = mkAttempt('att-nopids');
+      const w = await mkWorld('att-nopids', { runMeta: { pid: null, child_pid: null } });
+      const r = await mkReaper(w.rt).reapAttempt({ card: mkCard(), run: mkRun(att), att });
+      check('running worker + zero recorded pids defers process_identity_missing',
+        r.action === 'deferred' && r.code === 'process_identity_missing' && noMutations(w.stub),
+        JSON.stringify(r));
+    }
+    {
+      // run binding must be proven on BOTH sides — a missing porchRunId on
+      // either the attempt row or the launch record is unproven, even when
+      // the registry is empty (an empty registry is not a bound terminal run).
+      const att = mkAttempt('att-norunid', { porchRunId: null });
+      const w = await mkWorld('att-norunid', { runMeta: null });
+      const r = await mkReaper(w.rt).reapAttempt({ card: mkCard(), run: mkRun(att), att });
+      check('missing attempt porchRunId defers run_binding_unproven',
+        r.action === 'deferred' && r.code === 'run_binding_unproven' && noMutations(w.stub));
+      const att2 = mkAttempt('att-norunid2');
+      const w2 = await mkWorld('att-norunid2', { runMeta: null, launch: { porchRunId: null } });
+      const r2 = await mkReaper(w2.rt).reapAttempt({ card: mkCard(), run: mkRun(att2), att: att2 });
+      check('missing launch-record porchRunId defers run_binding_unproven',
+        r2.action === 'deferred' && r2.code === 'run_binding_unproven' && noMutations(w2.stub));
+    }
+    {
+      // launch record without workerId — the worker binding is unproven,
+      // never inferred from the deterministic id alone
+      const att = mkAttempt('att-nowid');
+      const w = await mkWorld('att-nowid', { launch: { workerId: null } });
+      const r = await mkReaper(w.rt).reapAttempt({ card: mkCard(), run: mkRun(att), att });
+      check('missing launch-record workerId defers worker_binding_unproven',
+        r.action === 'deferred' && r.code === 'worker_binding_unproven' && noMutations(w.stub));
+    }
+    {
+      // terminal meta.json but state.json missing/null/nonterminal — the two
+      // durable records must BOTH be terminal; disagreement is inconsistent
+      const att = mkAttempt('att-nostate');
+      const w = await mkWorld('att-nostate', { runState: false });
+      const r = await mkReaper(w.rt).reapAttempt({ card: mkCard(), run: mkRun(att), att });
+      check('terminal meta + missing state.json defers inconsistent',
+        r.action === 'deferred' && r.code === 'registry_inconsistent' && noMutations(w.stub));
+      const w2 = await mkWorld('att-nullstate', { runState: { run_id: BOUND, status: null } });
+      const r2 = await mkReaper(w2.rt).reapAttempt({
+        card: mkCard(), run: mkRun(mkAttempt('att-nullstate')), att: mkAttempt('att-nullstate') });
+      check('terminal meta + null state status defers inconsistent',
+        r2.action === 'deferred' && r2.code === 'registry_inconsistent' && noMutations(w2.stub));
+      const w3 = await mkWorld('att-runstate', { runState: { run_id: BOUND, status: 'running' } });
+      const r3 = await mkReaper(w3.rt).reapAttempt({
+        card: mkCard(), run: mkRun(mkAttempt('att-runstate')), att: mkAttempt('att-runstate') });
+      check('terminal meta + nonterminal state defers inconsistent',
+        r3.action === 'deferred' && r3.code === 'registry_inconsistent' && noMutations(w3.stub));
+    }
 
     // -- positive path ---------------------------------------------------------
     {
@@ -911,6 +965,17 @@ sect('worker-reaper');
       check('stopped worker reaps via remove only (no stop call)',
         r.action === 'reaped' && calls(w.stub, 'worker.stop').length === 0
         && calls(w.stub, 'worker.remove').length === 1);
+    }
+    {
+      // stopped container needs NO pid evidence — the controller-confirmed
+      // stopped state already proves the pid namespace is down
+      const att = mkAttempt('att-stopped0');
+      const w = await mkWorld('att-stopped0', {
+        workerState: 'stopped', runMeta: { pid: null, child_pid: null } });
+      const r = await mkReaper(w.rt).reapAttempt({ card: mkCard(), run: mkRun(att), att });
+      check('stopped worker reaps with zero recorded pids (namespace down)',
+        r.action === 'reaped' && calls(w.stub, 'worker.stop').length === 0
+        && calls(w.stub, 'worker.remove').length === 1, JSON.stringify(r));
     }
     {
       // crash between proof and remove: a NEW runtime+reaper over the same

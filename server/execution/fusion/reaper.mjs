@@ -7,21 +7,24 @@
 //
 //   1. BINDING — the durable attempt row must exist inside a listed fusion
 //      run (the state service is the only attempt authority); the launch
-//      record's workerId must equal the deterministic w-<attemptId>, and a
-//      porchRunId recorded on both sides must agree exactly.
+//      record's workerId must exist and equal the deterministic
+//      w-<attemptId>, and the porchRunId must be recorded on BOTH the
+//      attempt row and the launch record and agree exactly.
 //   2. ATTEMPT TERMINAL — the persisted attempt status must be in
 //      ATTEMPT_TERMINAL. Nonterminal attempts are 'live': supervised by the
 //      drivers, never reap candidates, no record written.
 //   3. RUN TERMINAL — the bound run's own porch registry record (meta.json
 //      + state.json on the worker's host bind mount — the same bytes porch
-//      status reads) must be terminal with finished_at. A registry scan
-//      that is incomplete, inconsistent, or missing the bound row defers.
+//      status reads) must agree on a terminal status with finished_at. A
+//      registry scan that is incomplete, inconsistent, or missing the
+//      bound row defers.
 //   4. DRAIN — every worker-scoped pid the registry recorded (supervisor +
 //      child, all rows) must probe positively dead via proc-probe inside
 //      the worker's own pid namespace: exists===false (ENOENT) or zombie.
 //      'alive', unreadable, or unverifiable probes defer — never "probably
-//      dead". A container the controller reports 'stopped' needs no probes:
-//      its pid namespace is already down.
+//      dead". A RUNNING container with ZERO recorded pids defers too: an
+//      empty drain set proves nothing. A container the controller reports
+//      'stopped' needs no probes: its pid namespace is already down.
 //   5. ACT — only then, and only after the proof is persisted to reap.json:
 //      worker.stop (skip when already stopped), verify the stopped state
 //      through worker.status, then worker.remove, then verify 'gone'.
@@ -166,7 +169,10 @@ export function createWorkerReaper({
     if (!rec || rec.missing) return defer('launch_record_missing', 'no durable launch record');
     if (rec.corrupt) return defer('launch_record_corrupt', 'launch record unreadable');
     const recWorker = field(rec, 'workerId');
-    if (recWorker && recWorker !== workerId) {
+    if (!recWorker) {
+      return defer('worker_binding_unproven', 'launch record carries no workerId');
+    }
+    if (recWorker !== workerId) {
       return defer('worker_binding_mismatch', `launch record worker ${recWorker} != ${workerId}`);
     }
     const attWorker = att.launch?.workerId ?? null;
@@ -175,10 +181,15 @@ export function createWorkerReaper({
     }
     const attRun = att.porchRunId ?? null;
     const recRun = field(rec, 'porchRunId');
-    if (attRun && recRun && attRun !== recRun) {
+    if (!attRun || !recRun) {
+      return defer('run_binding_unproven',
+        `porchRunId missing on ${!attRun && !recRun ? 'attempt and launch record'
+          : !attRun ? 'attempt' : 'launch record'}`);
+    }
+    if (attRun !== recRun) {
       return defer('run_binding_mismatch', `attempt bound ${attRun} != launch record ${recRun}`);
     }
-    boundRun = attRun ?? recRun;
+    boundRun = attRun;
 
     // ---- worker state (authenticated controller answer only) ------------------
     const ws = await workerState(A);
@@ -201,8 +212,9 @@ export function createWorkerReaper({
       if (!row.finishedAt) {
         return defer('run_terminal_unproven', `porch run ${boundRun} terminal without finished_at`);
       }
-      if (row.stateStatus && !RUN_DONE.has(row.stateStatus)) {
-        return defer('registry_inconsistent', `meta ${row.status} vs state ${row.stateStatus}`);
+      if (!row.stateStatus || !RUN_DONE.has(row.stateStatus)) {
+        return defer('registry_inconsistent',
+          `meta ${row.status} vs state ${row.stateStatus ?? 'missing'}`);
       }
     } else if (rows.length) {
       return defer('registry_ambiguous', 'registry holds runs but none is bound to the attempt');
@@ -246,6 +258,13 @@ export function createWorkerReaper({
       // no probes exist to run.
       for (const p of pids) drained.push({ ...p, evidence: 'container_stopped' });
     } else {
+      // A RUNNING container needs a non-empty positive drain proof: zero
+      // recorded pids means zero processes were verified dead — absence of
+      // process evidence is not process-drain proof.
+      if (!pids.length) {
+        return defer('process_identity_missing',
+          'worker running but the registry recorded no supervisor/child pid — drain unproven');
+      }
       for (const p of pids) {
         const probe = await A.processIdentity(p.pid).catch(() => null);
         const cls = classifyProbe(probe);
