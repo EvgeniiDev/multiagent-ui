@@ -26,6 +26,11 @@ browser ──HTTP──▶ acp-ui-web (:25808, static dist-web/)
 | Bridge → OpenCode (`opencode acp`) | 25902 | `acp-bridge-opencode.service` |
 | Bridge → Devin (`devin acp`) | 25903 | `acp-bridge-devin.service` |
 | Bridge → Pi (`pi-acp` adapter) | 25904 | `acp-bridge-pi.service` |
+| Bridge → Codex (`codex-acp` adapter) | 25907 | `acp-bridge-codex.service` |
+
+Codex needs its own auth on the box (`codex login` or `OPENAI_API_KEY` in
+the bridge environment) — without it the bridge starts but every session
+fails.
 
 Ports are arbitrary; if you change them, update `BRIDGE_PORTS` in
 `src/lib/host/index.ts` so the seeded default agents point at the right sockets.

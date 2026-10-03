@@ -20,6 +20,9 @@ export interface KVStore {
   get<T>(key: string): Promise<T | null>;
   set(key: string, value: unknown): Promise<void>;
   save(): Promise<void>;
+  /** Present only on stores that own resources (the remote store's poll
+   * timer). Called by the test teardown seam; production never does. */
+  dispose?(): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +166,17 @@ class RemoteKVStore implements KVStore {
   private dirty = false;   // local edits not yet confirmed by the server
   private down = false;    // server unreachable — localStorage-only mode
   private queue: Promise<unknown> = Promise.resolve();
+  private poll: ReturnType<typeof setInterval> | null = null;
+
+  /** Stop the remote poll. The browser keeps one store for the page
+   * lifetime so production never calls this; tests dispose cached stores
+   * through __resetWebKvForTests so no interval outlives its case. */
+  dispose(): void {
+    if (this.poll !== null) {
+      clearInterval(this.poll);
+      this.poll = null;
+    }
+  }
 
   private constructor(name: string, base: string) {
     this.name = name;
@@ -190,7 +204,7 @@ class RemoteKVStore implements KVStore {
     } else {
       store.adopt(remote);
     }
-    setInterval(() => void store.reload(), POLL_INTERVAL_MS);
+    store.poll = setInterval(() => void store.reload(), POLL_INTERVAL_MS);
     return store;
   }
 
@@ -401,9 +415,172 @@ export async function mutateRemoteDoc(
   return false;
 }
 
+/** Result of a bounded JSON request — the abort timer covers the WHOLE
+ * exchange (headers AND body read), unlike fetchWithTimeout which stops
+ * at headers and could leave a stalled body hanging the managed save /
+ * sync paths forever. `body` is null when the response had no parseable
+ * JSON; `null` overall means transport failure / timeout. */
+async function requestRemoteJson(
+  url: string,
+  init: RequestInit,
+  ms: number,
+): Promise<{ status: number; ok: boolean; body: unknown } | null> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, { ...init, signal: ctrl.signal });
+    const body = await res.json().catch(() => null);
+    return { status: res.status, ok: res.ok, body };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Read a shared state document verbatim (the `{data, rev, updatedAt}`
+ * envelope). `'missing'` on 404, `'error'` on transport/parse failure.
+ */
+export async function fetchRemoteDoc(
+  name: string,
+): Promise<RemoteDoc | 'missing' | 'error'> {
+  if (isTauriHost() || !(await probeStateServer())) return 'error';
+  const base = stateServerBase();
+  const url = `${base}/api/state/${encodeURIComponent(name)}`;
+  const r = await requestRemoteJson(url, {}, REQUEST_TIMEOUT_MS);
+  if (!r) return 'error';
+  if (r.status === 404) return 'missing';
+  if (!r.ok) return 'error';
+  const body = r.body as Partial<RemoteDoc> | null;
+  if (!body || typeof body !== 'object') return 'error';
+  return {
+    rev: typeof body.rev === 'number' ? body.rev : 0,
+    updatedAt: typeof body.updatedAt === 'number' ? body.updatedAt : 0,
+    data: body.data && typeof body.data === 'object' ? (body.data as Record<string, unknown>) : {},
+  };
+}
+
+export type CheckedMutationResult =
+  | { ok: true; aborted: boolean }
+  /** Server unreachable / Tauri / transport failure — nothing was written
+   * and no conclusion about remote state may be drawn. */
+  | { ok: false; reason: 'unavailable'; error: string }
+  /** Bona-fide stale rev: every retry found a newer remote document. The
+   * caller should adopt the fresh document and retry deliberately. */
+  | { ok: false; reason: 'rev_conflict'; error: string; rev: number | null }
+  /** The server REFUSED the write for a reason retrying cannot fix —
+   * e.g. a managed-lifecycle protection code (managed_card_deleted,
+   * managed_claim_protected, duplicate_card_id) or any non-409 failure.
+   * The code/error are the server's own; the caller must surface them and
+   * refresh authoritative state. */
+  | { ok: false; reason: 'rejected'; code: string; error: string };
+
+/**
+ * Managed-aware sibling of mutateRemoteDoc(): the same GET → mutate →
+ * PUT-with-rev CAS, but 409 responses are classified by the server's own
+ * `code`: only `rev_conflict` retries; protected-field refusals surface
+ * instead of being retried or force-written. `fn` receives a structured
+ * clone of the FRESH remote document each attempt — merges must always be
+ * computed from that, never from cached state. `fn` returning null aborts.
+ */
+export async function mutateRemoteDocChecked(
+  name: string,
+  fn: (data: Record<string, unknown>) => Record<string, unknown> | null,
+  tries = 4,
+): Promise<CheckedMutationResult> {
+  if (isTauriHost() || !(await probeStateServer())) {
+    return { ok: false, reason: 'unavailable', error: 'state server unreachable' };
+  }
+  const base = stateServerBase();
+  const url = `${base}/api/state/${encodeURIComponent(name)}`;
+  let lastRev: number | null = null;
+  for (let i = 0; i < tries; i++) {
+    let data: Record<string, unknown> = {};
+    let rev = 0;
+    const got = await requestRemoteJson(url, {}, REQUEST_TIMEOUT_MS);
+    if (!got) {
+      return { ok: false, reason: 'unavailable', error: 'state server unreachable' };
+    }
+    if (got.status === 404) {
+      data = {};
+      rev = 0;
+    } else if (got.ok) {
+      const body = got.body as { data?: Record<string, unknown>; rev?: number } | null;
+      if (!body || typeof body !== 'object') {
+        return { ok: false, reason: 'unavailable', error: 'could not read the shared document' };
+      }
+      data = body.data && typeof body.data === 'object' ? body.data : {};
+      rev = typeof body.rev === 'number' ? body.rev : 0;
+      lastRev = rev;
+    } else {
+      return { ok: false, reason: 'unavailable', error: `state server answered ${got.status}` };
+    }
+    const next = fn(structuredClone(data));
+    if (next === null) return { ok: true, aborted: true };
+    const put = await requestRemoteJson(
+      url,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        // The rev is ALWAYS sent — a managed board never takes the
+        // legacy no-rev overwrite path.
+        body: JSON.stringify({ data: next, rev }),
+      },
+      REQUEST_TIMEOUT_MS,
+    );
+    if (!put) {
+      return { ok: false, reason: 'unavailable', error: 'state server unreachable' };
+    }
+    if (put.ok) return { ok: true, aborted: false };
+    const errBody = put.body as { error?: string; code?: string; rev?: number } | null;
+    const code = typeof errBody?.code === 'string' ? errBody.code : '';
+    if (put.status === 409 && code === 'rev_conflict') {
+      lastRev = typeof errBody?.rev === 'number' ? errBody.rev : lastRev;
+      await new Promise((r) => setTimeout(r, 250));
+      continue;
+    }
+    return {
+      ok: false,
+      reason: 'rejected',
+      code: code || `http_${put.status}`,
+      error:
+        typeof errBody?.error === 'string'
+          ? errBody.error
+          : `the state server refused the save (HTTP ${put.status})`,
+    };
+  }
+  return {
+    ok: false,
+    reason: 'rev_conflict',
+    rev: lastRev,
+    error: 'the board kept changing under this save — reload and retry',
+  };
+}
+
+/** Write only the localStorage mirror of a document — no remote push.
+ * Used by the managed-board save path so local edits survive a reload
+ * even while the authoritative write goes through checked CAS. */
+export function mirrorLocalDoc(name: string, data: Record<string, unknown>): void {
+  writeLocalData(localKey(name), data);
+}
+
 // Web stores are cached per document name so every call site shares one
 // in-memory view (and one poll timer) for e.g. `preferences.json`.
 const webStores = new Map<string, Promise<KVStore>>();
+
+/** Test-only seam: tear down the cached stores (their poll timers included)
+ * and the session health probe so each case makes a clean backend decision
+ * and no interval outlives the harness. Production code never calls it. */
+export async function __resetWebKvForTests(): Promise<void> {
+  const pending = [...webStores.values()];
+  webStores.clear();
+  healthProbe = null;
+  for (const p of pending) {
+    const store = await p.catch(() => null);
+    store?.dispose?.();
+  }
+}
 
 /**
  * Open (or create) a persistent KV store. Returns an interface that matches

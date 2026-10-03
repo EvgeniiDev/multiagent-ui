@@ -15,6 +15,8 @@ import TimelineTab from '../features/board/TimelineTab.vue';
 import EventsTab from '../features/board/EventsTab.vue';
 import LinksTab from '../features/board/LinksTab.vue';
 import CardDrawer from '../features/board/CardDrawer.vue';
+import { useExecutionStore } from '../stores/execution';
+import { useWorkflowStore } from '../stores/workflow';
 
 type BoardTab = 'tasks' | 'links' | 'agents' | 'locks' | 'timeline' | 'events';
 
@@ -32,6 +34,8 @@ const rolesStore = useRolesStore();
 const activity = useActivityStore();
 const sessionStore = useSessionStore();
 const uiStore = useUiStore();
+const execStore = useExecutionStore();
+const wfStore = useWorkflowStore();
 
 const activeTab = ref<BoardTab>('tasks');
 const openCardId = ref<string | null>(null);
@@ -97,6 +101,14 @@ async function onOpenSession(session: { agentName: string; sessionId: string }) 
     // entry; stay on the board so the user sees both.
   }
 }
+
+/** "Show in Workflow panel" on a managed run: the chat view's workflow
+ * side panel, pinned to that exact run via the execution store. */
+function onOpenWorkflow(target: { cardId: string; runId: string }) {
+  wfStore.setChatMode('workflow');
+  execStore.openManagedRun(target.cardId, target.runId);
+  void uiStore.setView('chat');
+}
 </script>
 
 <template>
@@ -134,6 +146,7 @@ async function onOpenSession(session: { agentName: string; sessionId: string }) 
         @close="openCardId = null"
         @open-session="onOpenSession"
         @open-card="onOpenCard"
+        @open-workflow="onOpenWorkflow"
       />
     </div>
   </div>

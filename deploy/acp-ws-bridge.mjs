@@ -109,6 +109,8 @@ const AGENT_NAME_BY_CMD = {
   pi: 'Pi',
   hermes: 'Hermes Agent',
   opencode: 'OpenCode',
+  'codex-acp': 'Codex',
+  codex: 'Codex',
 };
 const METER_AGENT_NAME = String(
   argValue('--agent-name', AGENT_NAME_BY_CMD[command.split(/\s+/)[0]] ?? command.split(/\s+/)[0])

@@ -1,0 +1,43 @@
+# compose.u7-fusion.yaml — U7 FUSION-phase flags, stacked AFTER
+# compose.u7.yaml + compose.u7-on.yaml.
+#
+# Enables the fusion panel surface on BOTH sides of the contract:
+#   state  — fusion user commands (retry_participant, exclude_panelist,
+#            approve_work_order, mode:'fusion' start) leave 501-gated
+#            territory (ACP_EXEC_FUSION).
+#   runner — the managed driver wires the F1 constrained container runtime:
+#            the environment config (client view), the controller client on
+#            the host-mounted unix socket, and the capability store. Panel,
+#            judge and integrator attempts launch ONLY through the F1
+#            environment — never the process runtime. A missing/invalid F1
+#            deployment fails the driver build, never falls back.
+#
+# The F1 environment itself (env-controller + egress-gw, project
+# `acp-ui-agent-modes`, compose profile f1) is the shared managed
+# substrate — already up independently of this stack. The runner reaches
+# its control socket through the mounted ~/.hermes tree at the IDENTICAL
+# host path the client-view config resolves to. Fusion card state, run
+# aggregates, artifacts and workspaces stay inside the isolated test dirs;
+# only worker launch records land in the F1 env root (they carry no card
+# state).
+#
+# Transition to FUSION (manager clearance only; state+runner recreated,
+# every other service untouched):
+#   docker compose -p acp-ui -f compose.yaml -f compose.u7.yaml \
+#     -f compose.u7-on.yaml -f compose.u7-fusion.yaml \
+#     up -d --no-deps state runner
+#
+# Toggling back is `up -d` without this file (the ON stack) — each
+# direction is an explicit, logged transition step.
+
+services:
+  state:
+    environment:
+      ACP_EXEC_FUSION: "1"
+  runner:
+    environment:
+      ACP_EXEC_FUSION: "1"
+      # The repo-mounted deployment config (client view): socket + token
+      # resolve to host paths reachable through the runner's existing
+      # ~/.hermes mount. No separate config file is introduced.
+      ACP_F1_CONFIG: /repo/deploy/execution/environment.config.json

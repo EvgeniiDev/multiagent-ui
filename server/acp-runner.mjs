@@ -48,7 +48,17 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { promises as fs, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { basename, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { isManagedCard } from './execution/legacy-guard.mjs';
+import { createManagedScheduler } from './execution/managed-scheduler.mjs';
+import { createInternalClient } from './execution/internal-transport.mjs';
+import { createPreparationSupervisor } from './execution/preparation/supervisor.mjs';
+import { createPorchRuntime } from './execution/porch-runtime.mjs';
+import { loadEnvironmentConfig } from './execution/environment/env-config.mjs';
+import { createControllerClient } from './execution/environment/controller-client.mjs';
+import { createContainerRuntime } from './execution/environment/container-runtime.mjs';
+import { createCapabilityStore } from './execution/environment/capability-store.mjs';
 
 const STATE_URL = (process.env.STATE_URL || 'http://127.0.0.1:25900').replace(/\/+$/, '');
 const ROOT_DIR = resolve(process.env.ROOT_DIR || join(homedir(), 'projects'));
@@ -956,6 +966,10 @@ async function passOnce() {
     const stage = card?.stage;
     if (stage === 'done' || stage === 'backlog') continue;
     if (card?.blocked || card?.cancelled) continue;
+    // Cards managed by the execution core (U2+) are dispatched through the
+    // managed lifecycle — the legacy runner must never claim them, even if a
+    // stale row somehow advertises a dispatchable stage.
+    if (isManagedCard(card)) continue;
     const roleId = (roles.stageRoles || {})[stage];
     if (!roleId) continue;
     const role = roleById.get(roleId);
@@ -1198,54 +1212,480 @@ async function cancelCard(ref) {
 }
 
 // ---------------------------------------------------------------------------
-// Entry.
+// Managed execution driver (U5, default OFF).
+//
+// Gate: ACP_EXEC_START=1. When unset this file behaves exactly as before —
+// no client, no runtime, no timers are created. The pump is an INDEPENDENT
+// serial tick source that runs CONCURRENTLY with the legacy pass: passOnce()
+// may sit inside runCard for hours, and managed heartbeats / observation /
+// cancel / check settlement / journal replay still happen on every tick.
+//
+//   * Timer chaining (never setInterval) makes overlapping ticks impossible:
+//     the next tick is scheduled only after the in-flight one settles.
+//   * A tick failure is logged and retried at the next interval — it never
+//     kills legacy dispatch, and a legacy failure never stops the pump.
+//   * API outages are handled INSIDE the scheduler (snapshot + local
+//     supervision only); the pump needs no outage logic of its own.
+//   * stop() drops the pending timer and waits a bounded time for the
+//     in-flight tick. It NEVER marks managed work terminal — durable
+//     reservations live on the server and a successor adopts them after a
+//     positive death/environment proof (U4). SIGTERM is not a resolve.
+//   * stop-all / release-all / cancel act on claims.json + liveProcs only —
+//     managed runs hold no legacy claims, so legacy cranks can never
+//     impersonate a managed lifecycle stop.
 // ---------------------------------------------------------------------------
 
-const mode = process.argv[2];
-if (mode === 'stop-all' || mode === '--stop-all') {
-  await stopAll({ kill: true });
-} else if (mode === 'release-all' || mode === '--release-all') {
-  await stopAll({ kill: false });
-} else if (mode === 'cancel' || mode === '--cancel') {
-  const ref = process.argv[3];
-  if (!ref) {
-    console.error('usage: node server/acp-runner.mjs cancel <cardId>');
-    process.exitCode = 2;
-  } else {
-    await cancelCard(ref);
+const MANAGED_DEFAULT_TICK_MS = 5_000;
+const MANAGED_STOP_DRAIN_MS = 15_000;
+
+function truthyEnv(v) {
+  return /^(1|true|yes|on)$/i.test(String(v ?? ''));
+}
+
+// Serial bounded tick pump. Exported + timer-injectable for tests.
+export function createManagedPump({
+  tick,
+  intervalMs = MANAGED_DEFAULT_TICK_MS,
+  onError = (e) => console.error(`managed tick: ${e?.message || e}`),
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
+} = {}) {
+  if (typeof tick !== 'function') throw new Error('managed pump requires a tick');
+  let timer = null;
+  let running = false;
+  let inFlight = null;
+  let ticks = 0;
+  let errors = 0;
+
+  function schedule() {
+    if (!running || timer || inFlight) return;
+    timer = setTimeoutFn(fire, intervalMs);
+    // Never let the pump alone keep the process alive — the serve loop or an
+    // in-flight legacy pass decides liveness.
+    if (timer && typeof timer.unref === 'function') timer.unref();
   }
-} else if (mode === '--once') {
+
+  function fire(manual = false) {
+    if (timer) { clearTimeoutFn(timer); timer = null; }
+    if (inFlight) return inFlight; // serialization: no overlap, ever
+    // Deferred start: a synchronously-throwing (or synchronously-settling)
+    // tick still lands INSIDE this promise — assigning inFlight before the
+    // body runs keeps a completed promise from being installed as the
+    // in-flight marker and stalling the pump forever. A tick QUEUED but not
+    // yet started when stop() lands is dropped — it never issued a durable
+    // command, so nothing is owed. Only a tick that already ran counts as
+    // in-flight work (bounded-drained on shutdown).
+    const p = Promise.resolve().then(async () => {
+      if (!running && !manual) return; // scheduled tick dropped after stop
+      try {
+        await tick();
+        ticks++;
+      } catch (e) {
+        errors++;
+        try { onError(e); } catch { /* the pump's error path must itself survive */ }
+      }
+    }).finally(() => {
+      if (inFlight === p) inFlight = null;
+      schedule();
+    });
+    inFlight = p;
+    return p;
+  }
+
+  return {
+    start() {
+      if (running) return;
+      running = true;
+      fire(); // first tick now — later ones ride the timer chain
+    },
+    async stop({ drainMs = MANAGED_STOP_DRAIN_MS } = {}) {
+      running = false;
+      if (timer) { clearTimeoutFn(timer); timer = null; }
+      if (!inFlight) return { ticks, errors, drained: true };
+      // Bounded drain: a wedged tick must not hang shutdown. A dropped wait
+      // is NOT a dropped reservation — the server's durable records outlive
+      // the process either way. The deadline is a real shutdown bound (not
+      // the injectable cadence timer) and is always cleared — a settled
+      // tick must not leave a 15s timer keeping the process alive.
+      let deadline = null;
+      try {
+        await Promise.race([
+          inFlight.catch(() => {}),
+          new Promise((r) => { deadline = setTimeout(r, Math.max(0, drainMs)); }),
+        ]);
+      } finally {
+        if (deadline) clearTimeout(deadline);
+      }
+      return { ticks, errors, drained: !inFlight };
+    },
+    fire: () => fire(true), // explicit one-shot tick — allowed without start()
+    ticks: () => ticks,
+    errors: () => errors,
+    running: () => running,
+    inFlight: () => !!inFlight,
+  };
+}
+
+// The internal token lives at <stateDir>/execution/internal-token and the
+// porch exec store is ACP_EXEC_DIR (default <stateDir>/execution) — both must
+// resolve to the SAME root or the driver would read one store and hold auth
+// for another. An ACP_EXEC_DIR that isn't literally <stateDir>/execution
+// (explicit pair mismatch, or alone under another name) is a split store —
+// fail closed instead of silently deriving the wrong parent.
+export function resolveManagedStateDir(env = process.env) {
+  const stateDir = String(env.STATE_DIR || '').trim()
+    ? resolve(env.STATE_DIR.trim()) : null;
+  const execDir = String(env.ACP_EXEC_DIR || '').trim()
+    ? resolve(env.ACP_EXEC_DIR.trim()) : null;
+  if (execDir) {
+    if (basename(execDir) !== 'execution'
+      || (stateDir && resolve(execDir, '..') !== stateDir)) {
+      throw new Error(
+        `managed config inconsistent: STATE_DIR=${stateDir ?? '(unset)'} vs `
+        + `ACP_EXEC_DIR=${execDir} (must equal <stateDir>/execution) — `
+        + 'refusing a split store');
+    }
+    return resolve(execDir, '..');
+  }
+  return stateDir ?? resolve(join(homedir(), '.hermes', 'acp-ui-state'));
+}
+
+// Build the managed driver. Returns {enabled:false} when the gate is off —
+// callers can start()/stop() it unconditionally. Every production dependency
+// is injectable for tests (client/transport/runtime/scheduler/pump/timers),
+// and every env value is read from the supplied env, not the module snapshot.
+export async function createManagedDriver(deps = {}) {
+  const env = deps.env ?? process.env;
+  const enabled = deps.enabled ?? truthyEnv(env.ACP_EXEC_START);
+  const runnerId = deps.runnerId ?? env.RUNNER_ID ?? RUNNER_ID;
+  const driver = {
+    enabled,
+    runnerId,
+    scheduler: null,
+    pump: null,
+    async start() {},
+    async stop() { return { ticks: 0, errors: 0, drained: true }; },
+    async tickOnce() { return null; },
+    stats: () => ({ ticks: 0, errors: 0 }),
+    describe: () => ({ enabled, runnerId, state: 'disabled' }),
+  };
+  if (!enabled) return driver;
+
+  const stateDir = deps.stateDir ?? resolveManagedStateDir(env);
+  const client = deps.client
+    ?? (deps.clientFactory ?? createInternalClient)({
+      baseUrl: deps.baseUrl ?? env.ACP_EXEC_API_URL ?? env.STATE_URL ?? STATE_URL,
+      stateDir,
+      transport: deps.transport,
+    });
+  const runtime = deps.runtime
+    ?? (deps.runtimeFactory ?? createPorchRuntime)({ env });
+  // Resolve the gate BEFORE construction — the scheduler must receive the
+  // SAME truth the startup log reports, never a null that silently disables
+  // validation while the evidence line claims otherwise.
+  const validation = deps.validationEnabled ?? env.ACP_EXEC_VALIDATION === '1';
+  // F2: the fusion panel drives panelist attempts through the F1 constrained
+  // container runtime — NEVER the process runtime. Gated independently via
+  // ACP_EXEC_FUSION=1; when on, the environment config (client view),
+  // controller client and capability store are REQUIRED — a missing/invalid
+  // F1 deployment fails the driver build, never falls back.
+  const fusionEnabled = deps.fusionEnabled ?? env.ACP_EXEC_FUSION === '1';
+  const fusion = deps.fusion !== undefined ? deps.fusion : null;
+  let fusionCfg = fusion;
+  if (fusionEnabled && fusionCfg === null) {
+    const f1ConfigFile = deps.f1ConfigFile
+      ?? env.ACP_F1_CONFIG ?? '/run/f1/environment.config.json';
+    const f1Config = await loadEnvironmentConfig(f1ConfigFile, { env, view: 'client' });
+    const f1Client = deps.f1Client ?? createControllerClient({
+      socketPath: f1Config.environment.socketPath,
+      tokenFile: f1Config.environment.tokenFile,
+    });
+    const capabilityStore = deps.capabilityStore ?? createCapabilityStore({
+      dir: f1Config.pathFor('env') + '/capability',
+    });
+    fusionCfg = {
+      runtime: createContainerRuntime({
+        config: f1Config, client: f1Client, env, capabilityStore,
+      }),
+      capabilityStore,
+    };
+  }
+  const scheduler = deps.scheduler
+    ?? (deps.schedulerFactory ?? createManagedScheduler)({
+      client,
+      runtime,
+      runnerId,
+      instanceId: deps.instanceId,
+      leaseMs: deps.leaseMs,
+      stateDir,
+      env,
+      validationEnabled: validation,
+      now: deps.now,
+      hooks: deps.hooks,
+      fusion: fusionCfg,
+    });
+  // P5: the durable idea-preparation lead lives HERE — the runner owns its
+  // CLI processes and drives it on its own serial pump via the authenticated
+  // internal client. Gated by ACP_EXEC_PREPARATION (same truthy parser as
+  // the other exec gates) and subordinate to ACP_EXEC_START: a driver that
+  // cannot launch implementation does not run interviews either.
+  const preparationEnabled = deps.preparationEnabled
+    ?? truthyEnv(env.ACP_EXEC_PREPARATION);
+  const preparation = preparationEnabled
+    ? (deps.preparation ?? createPreparationSupervisor({
+      client, stateDir, env, ...(deps.preparationOpts ?? {}),
+    }))
+    : null;
+  const tickMs = deps.tickMs
+    ?? Math.max(250, Number(env.ACP_EXEC_TICK_MS) || MANAGED_DEFAULT_TICK_MS);
+  const prepTickMs = deps.prepTickMs
+    ?? Math.max(250, Number(env.ACP_PREP_TICK_MS) || tickMs);
+  const pump = deps.pump ?? createManagedPump({
+    tick: () => scheduler.tick(),
+    intervalMs: tickMs,
+    onError: deps.onTickError,
+    setTimeoutFn: deps.setTimeoutFn,
+    clearTimeoutFn: deps.clearTimeoutFn,
+  });
+  const prepPump = preparation
+    ? (deps.prepPump ?? createManagedPump({
+      tick: () => preparation.sweep(),
+      intervalMs: prepTickMs,
+      onError: deps.onPrepTickError ?? deps.onTickError,
+      setTimeoutFn: deps.setTimeoutFn,
+      clearTimeoutFn: deps.clearTimeoutFn,
+    }))
+    : null;
+
+  driver.scheduler = scheduler;
+  driver.pump = pump;
+  driver.preparation = preparation;
+  driver.prepPump = prepPump;
+  driver.start = async () => {
+    // Runtime-level startup evidence: who we are and what the gates are —
+    // no secrets, no tokens.
+    console.error(
+      `managed execution: enabled runner=${runnerId} `
+      + `instance=${scheduler.instanceId} tick=${tickMs}ms `
+      + `validation=${validation ? 'on' : 'off'} `
+      + `fusion=${fusionCfg ? 'on' : 'off'} `
+      + `preparation=${preparation ? 'on' : 'off'} stateDir=${stateDir}`,
+    );
+    pump.start();
+    prepPump?.start();
+  };
+  driver.stop = async (opts = {}) => {
+    // Order matters: forbid ALL new managed work BEFORE stopping the tick
+    // pump — an in-flight tick about to dispatch, or a background
+    // validation task about to spawn its next check, must find the fence
+    // already up. The pump then stops scheduling and drains its in-flight
+    // tick; finally the scheduler's own background tasks (check groups,
+    // phase loops) drain — all INSIDE ONE overall deadline, not a
+    // per-stage bound (container SIGKILL grace is typically ~10s, so even
+    // the full budget is best-effort, never a guarantee).
+    // Anything still pending after the deadline is left in its durable
+    // recorded state: reservations and unproven proc records stay for a
+    // successor to adopt/reconcile by positive proof — shutdown marks
+    // nothing terminal, and owned process groups are NOT assumed dead on
+    // a generic host (detached groups survive Node exit; only the
+    // recorded kill proofs or a successor's probe establish death).
+    const deadline = Date.now() + (opts.drainMs ?? MANAGED_STOP_DRAIN_MS);
+    const remaining = () => Math.max(0, deadline - Date.now());
+    try {
+      scheduler.quiesce?.();
+    } catch (e) {
+      console.error(`runner: managed quiesce failed: ${e?.message || e}`);
+    }
+    // Fence preparation FIRST too — no new sweeps while the process exits.
+    // In-memory lead sessions are torn down inside this same drain budget;
+    // durable session/attempt state survives for the successor runner.
+    let prepRes = null;
+    try {
+      preparation?.stop();
+    } catch (e) {
+      console.error(`runner: preparation stop failed: ${e?.message || e}`);
+    }
+    try {
+      await prepPump?.stop({ drainMs: remaining() });
+    } catch (e) {
+      console.error(`runner: preparation pump stop failed: ${e?.message || e}`);
+    }
+    const pumpRes = await pump.stop({ drainMs: remaining() });
+    try {
+      prepRes = preparation
+        ? await preparation.dispose({ drainMs: remaining() }) : null;
+    } catch (e) {
+      console.error(`runner: preparation dispose failed: ${e?.message || e}`);
+    }
+    let taskDrain = null;
+    try {
+      taskDrain = await scheduler.drain?.(remaining());
+    } catch (e) {
+      console.error(`runner: managed task drain: ${e?.message || e}`);
+    }
+    if (taskDrain && taskDrain.pending > 0) {
+      // Honest limit: in-flight managed tasks did not finish inside the
+      // overall bound. Their durable proc/run records stand as last
+      // recorded — live groups are NOT claimed dead; the successor's
+      // reconcile/adopt proof decides.
+      console.error(
+        `runner: managed shutdown left ${taskDrain.pending} background `
+        + 'task(s) unresolved inside the drain bound — proc records and '
+        + 'reservations retained in last-recorded state for successor proof');
+    }
+    return { ...pumpRes, tasks: taskDrain, preparation: prepRes };
+  };
+  driver.tickOnce = () => pump.fire();
+  driver.stats = () => ({ ticks: pump.ticks(), errors: pump.errors() });
+  driver.describe = () => ({
+    enabled: true,
+    runnerId,
+    instanceId: scheduler.instanceId,
+    validation: validation ? 'on' : 'off',
+    preparation: preparation ? 'on' : 'off',
+    tickMs,
+    ticks: pump.ticks(),
+    tickErrors: pump.errors(),
+  });
+  return driver;
+}
+
+// ---------------------------------------------------------------------------
+// Entry — runOnce/runServe are exported with injected seams so tests drive the
+// exact production path; importing this module runs nothing.
+// ---------------------------------------------------------------------------
+
+// --once is a LEGACY-ONLY bounded pass. With the managed gate on it refuses
+// outright (before any client/runtime/scheduler exists): a single pass would
+// launch managed work and then stop supervising it — observation, check
+// settlement and cancellation would be orphaned until another runner
+// appeared. Managed execution requires --serve, whose pump stays alive for
+// the whole process lifetime. With the gate off, --once is exactly the
+// historical single legacy pass.
+export async function runOnce({
+  passOnceImpl = passOnce,
+  driver = null,
+  env = process.env,
+} = {}) {
+  const managedWanted = driver ? driver.enabled
+    : truthyEnv(env.ACP_EXEC_START);
+  if (managedWanted) {
+    console.error(
+      'runner: --once is a bounded legacy-only pass — managed execution '
+      + '(ACP_EXEC_START=1) requires --serve so launched work stays '
+      + 'supervised; refusing instead of orphaning it');
+    process.exitCode = 2;
+    return;
+  }
+  const d = driver ?? (await createManagedDriver({ env }));
   try {
-    const results = await passOnce();
-    console.log(JSON.stringify({ ok: true, runs: results }, null, 2));
+    const results = await passOnceImpl();
+    console.log(JSON.stringify({ ok: true, runs: results, managed: d.describe() }, null, 2));
   } catch (e) {
     console.error(`runner: ${e.message}`);
     process.exitCode = 1;
+  } finally {
+    await d.stop();
   }
-} else if (mode === '--serve') {
-  let stopped = false;
-  for (const sig of ['SIGINT', 'SIGTERM']) {
-    process.on(sig, () => {
-      if (stopped) process.exit(0);
-      stopped = true;
-      console.error(`runner: ${sig}, stopping after this pass…`);
-    });
-  }
-  while (!stopped) {
-    try {
-      const results = await passOnce();
-      const ran = results.filter((r) => !r.skipped && !r.dryRun && !r.error).length;
-      if (ran) console.log(JSON.stringify({ at: new Date().toISOString(), runs: results }));
-    } catch (e) {
-      console.error(`runner: ${e.message}`);
-    }
-    if (stopped) break;
-    const waitMs = await pollIntervalMs();
-    await new Promise((r) => setTimeout(r, waitMs));
-  }
-} else {
-  console.error(
-    'usage: node server/acp-runner.mjs --once | --serve | stop-all | release-all | cancel <cardId>',
-  );
-  process.exitCode = 2;
 }
+
+export async function runServe({
+  passOnceImpl = passOnce,
+  driver = null,
+  pollImpl = pollIntervalMs,
+  setTimeoutFn = setTimeout,
+  registerSignals = null, // (onSig) -> unsubscribe; default installs SIGINT/SIGTERM
+} = {}) {
+  const d = driver ?? (await createManagedDriver());
+  let stopped = false;
+  let managedQuiesce = null; // the pump.stop() promise, started at signal time
+  const onSig = (sig) => {
+    if (stopped) process.exit(0);
+    stopped = true;
+    console.error(`runner: ${sig}, stopping after this pass…`);
+    // Immediate managed quiescence — the legacy pass may stay blocked in
+    // runCard for hours; the pump must stop scheduling NOW, not when the
+    // pass returns. No new launches issue after this point; an in-flight
+    // tick drains under the bounded deadline. Owned reservations are NOT
+    // resolved — they stay durable on the server and a successor instance
+    // adopts them after a positive death/environment proof (U4).
+    if (d.enabled) {
+      console.error(
+        'runner: managed quiesce — scheduling stopped; in-flight tick '
+        + 'bounded; owned reservations retained for successor adoption');
+      managedQuiesce = d.stop().catch((e) =>
+        console.error(`runner: managed stop: ${e?.message || e}`));
+    }
+  };
+  let unsubscribe = () => {};
+  if (registerSignals === null) {
+    const handlers = ['SIGINT', 'SIGTERM'].map((sig) => {
+      const h = () => onSig(sig);
+      process.on(sig, h);
+      return [sig, h];
+    });
+    unsubscribe = () => { for (const [sig, h] of handlers) process.off(sig, h); };
+  } else {
+    unsubscribe = registerSignals(onSig) || (() => {});
+  }
+  try {
+    if (d.enabled) await d.start();
+    while (!stopped) {
+      try {
+        const results = await passOnceImpl();
+        const ran = results.filter((r) => !r.skipped && !r.dryRun && !r.error).length;
+        if (ran) console.log(JSON.stringify({ at: new Date().toISOString(), runs: results }));
+      } catch (e) {
+        console.error(`runner: ${e.message}`);
+      }
+      if (stopped) break;
+      const waitMs = await pollImpl();
+      await new Promise((r) => setTimeoutFn(r, waitMs));
+    }
+  } finally {
+    unsubscribe();
+    await d.stop();
+  }
+}
+
+export async function main(argv = process.argv) {
+  const mode = argv[2];
+  if (mode === 'stop-all' || mode === '--stop-all') {
+    // Legacy claims/children only — managed runs hold no claims.
+    await stopAll({ kill: true });
+  } else if (mode === 'release-all' || mode === '--release-all') {
+    await stopAll({ kill: false });
+  } else if (mode === 'cancel' || mode === '--cancel') {
+    const ref = argv[3];
+    if (!ref) {
+      console.error('usage: node server/acp-runner.mjs cancel <cardId>');
+      process.exitCode = 2;
+    } else {
+      await cancelCard(ref);
+    }
+  } else if (mode === 'managed-status') {
+    // Startup evidence without side effects: instantiates the production
+    // client/runtime/scheduler (when enabled) and reports the gates.
+    const d = await createManagedDriver();
+    console.log(JSON.stringify(d.describe()));
+  } else if (mode === '--once') {
+    await runOnce();
+  } else if (mode === '--serve') {
+    await runServe();
+  } else {
+    console.error(
+      'usage: node server/acp-runner.mjs --once | --serve | managed-status | stop-all | release-all | cancel <cardId>',
+    );
+    process.exitCode = 2;
+  }
+}
+
+const invokedAsScript = (() => {
+  try {
+    return !!process.argv[1]
+      && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
+if (invokedAsScript) await main();

@@ -43,17 +43,18 @@ const WEB_CONFIG_KEY = 'acp-ui:agents';
 const WEB_CONFIG_PATH_LABEL = '(browser local storage)';
 
 // ---------------------------------------------------------------------------
-// Local deployment defaults (added for the .222 LAN deployment). The four ACP
-// bridges run as systemd user units on the same machine that serves this
-// bundle; the WebSocket host is derived from whatever hostname the page was
-// opened with, so the bundle stays host-agnostic. Seeded only when nothing is
-// stored yet — once the user edits Settings, the stored config wins.
+// Local deployment defaults (added for the .222 LAN deployment). The ACP
+// bridges run on the same machine that serves this bundle; the WebSocket
+// host is derived from whatever hostname the page was opened with, so the
+// bundle stays host-agnostic. Seeded only when nothing is stored yet — once
+// the user edits Settings, the stored config wins.
 // ---------------------------------------------------------------------------
 const BRIDGE_PORTS: Record<string, number> = {
   'Hermes Agent': 25901,
   'OpenCode': 25902,
   'Devin': 25903,
   'Pi': 25904,
+  'Codex': 25907,
 };
 
 function defaultWebConfig(): AgentsConfig {

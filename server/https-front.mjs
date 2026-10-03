@@ -17,6 +17,7 @@
 //   https 25912 -> http 127.0.0.1:25902   ACP bridge: OpenCode
 //   https 25913 -> http 127.0.0.1:25903   ACP bridge: Devin
 //   https 25914 -> http 127.0.0.1:25904   ACP bridge: Pi
+//   https 25917 -> http 127.0.0.1:25907   ACP bridge: Codex (via codex-acp adapter)
 //
 // The +10 offset for the state server and the bridges is the convention the
 // panel reads too (`src/lib/host/secure.ts`): insecure port + 10 = secure port.
@@ -53,6 +54,7 @@ const DEFAULT_TARGETS = {
   25912: 25902,   // ACP bridge: OpenCode
   25913: 25903,   // ACP bridge: Devin
   25914: 25904,   // ACP bridge: Pi
+  25917: 25907,   // ACP bridge: Codex (via codex-acp adapter)
   25915: 6080,    // noVNC — live Camoufox screen (ephemeral, for interactive logins)
 };
 

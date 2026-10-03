@@ -10,26 +10,90 @@
 // this panel is mounted.
 import { computed, onMounted, onBeforeUnmount } from 'vue';
 import { useWorkflowStore } from '../stores/workflow';
+import { useExecutionStore } from '../stores/execution';
+import { useBoardStore } from '../stores/board';
 import { DIRECTIONS } from '../lib/porch/graph';
 import type { Direction } from '../lib/porch/types';
 import WorkflowStepper from '../features/workflow/WorkflowStepper.vue';
+import ManagedRunEvents from '../features/board/ManagedRunEvents.vue';
+import {
+  approveWorkOrderPayload,
+  canApproveWorkOrder,
+  canExcludePanelist,
+  canRetryParticipant,
+  excludePanelistPayload,
+  fmtTs,
+  fusion as fusionState,
+  fusionParticipants,
+  fusionPendingActions,
+  fusionStatusLabel,
+  fusionWorkOrders,
+  participantStatusLabel,
+  pendingActionText,
+  phaseLabel,
+  resultKindLabel,
+  retryParticipantPayload,
+  runStatusLabel,
+  shortId as execShortId,
+} from '../lib/execution/ui-model';
 
 const wf = useWorkflowStore();
+const exec = useExecutionStore();
+const board = useBoardStore();
 
 // initWorkflowStore() can resolve after unmount (loadKvStore waits on the
 // state server). Without this guard the .then below would start a 2s
 // interval the Pinia store then keeps for the rest of the session.
 let disposed = false;
 
+let indexTimer: ReturnType<typeof setInterval> | null = null;
+
 onMounted(() => {
   void wf.initWorkflowStore().then(() => {
     if (!disposed) wf.startPolling();
   });
+  void exec.refreshIndex();
+  void exec.loadPresets();
+  // The managed index refreshes while this panel is mounted — the store's
+  // own poll only covers watched/focused cards.
+  indexTimer = setInterval(() => void exec.refreshIndex(), 2000);
 });
 onBeforeUnmount(() => {
   disposed = true;
   wf.stopPolling();
+  exec.clearFocus();
+  if (indexTimer !== null) {
+    clearInterval(indexTimer);
+    indexTimer = null;
+  }
 });
+
+// ---- managed runs (U6) -----------------------------------------------------
+// The managed section reads ONLY the execution API — porch state stays
+// untouched. `exec.focused` pins one managed run's detail below the list;
+// the board's drawer routes here via execStore.openManagedRun().
+
+const focusedState = computed(() =>
+  exec.focused ? exec.stateFor(exec.focused.cardId) : null,
+);
+const focusedRun = computed(() => focusedState.value?.run ?? null);
+const focusedCardTitle = computed(() => {
+  const id = exec.focused?.cardId;
+  if (!id) return '';
+  return board.cards.find((c) => c.id === id)?.title ?? id;
+});
+/** Every run recorded on the focused card — historical detail stays
+ * selectable; `reserved` is the server's own reservation flag. */
+const focusedRuns = computed(() => focusedState.value?.view?.runs ?? []);
+
+function onSelectManagedRun(e: Event): void {
+  const runId = (e.target as HTMLSelectElement).value;
+  if (exec.focused && runId) void exec.selectRun(exec.focused.cardId, runId);
+}
+
+function cardLabel(cardId: string): string {
+  return board.cards.find((c) => c.id === cardId)?.title || cardId.slice(0, 8);
+}
 
 const DIR_LABELS: Record<Direction, string> = {
   run: 'Run',
@@ -77,6 +141,74 @@ const nodeCounts = computed<Record<string, number>>(() => {
   }
   return out;
 });
+
+// ---- fusion run detail (F4) -------------------------------------------------
+// The managed section renders the durable run.fusion state for the
+// focused card and exposes the pending user decisions — the same commands
+// the card drawer issues, through the same store path (one click = one
+// POST, never queued offline).
+
+const focusedFusion = computed(() => fusionState(focusedRun.value));
+const focusedBusy = computed(() => focusedState.value?.busy ?? null);
+const managedOffline = computed(() => exec.online === false);
+
+const fzParticipantLine = computed(() => {
+  const parts = fusionParticipants(focusedRun.value);
+  if (!parts.length) return '';
+  const byStatus = new Map<string, number>();
+  for (const p of parts) byStatus.set(p.status, (byStatus.get(p.status) ?? 0) + 1);
+  return [...byStatus.entries()].map(([s, n]) => `${n} ${participantStatusLabel(s)}`).join(' · ');
+});
+
+/** Gate check for a fusion action on the focused run — offline or a
+ * command already in flight disables with a title reason. */
+function fusionGate(gate: { ok: boolean; reason: string }): { disabled: boolean; title: string } {
+  if (managedOffline.value) {
+    return { disabled: true, title: 'state server unreachable — actions are disabled' };
+  }
+  if (focusedBusy.value) {
+    return { disabled: true, title: `a ${focusedBusy.value} command is still in flight` };
+  }
+  return { disabled: !gate.ok, title: gate.ok ? '' : gate.reason };
+}
+
+async function sendFusionCommand(
+  type: 'retry_participant' | 'exclude_panelist' | 'approve_work_order',
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const cardId = exec.focused?.cardId;
+  if (!cardId) return;
+  const r = await exec.sendCommand(cardId, type, payload);
+  if (!r.ok && r.error) alert(r.error);
+}
+
+async function onManagedRetry(pid: string) {
+  const r = focusedRun.value;
+  if (!r) return;
+  await sendFusionCommand('retry_participant', retryParticipantPayload(r, pid));
+}
+
+async function onManagedExclude(pid: string) {
+  const r = focusedRun.value;
+  if (!r) return;
+  const reason = prompt(`Exclude panelist ${pid} — reason (optional):`, 'repeated failures');
+  if (reason === null) return;
+  if (!confirm(`Exclude ${pid} from this panel? The exclusion is durable.`)) return;
+  await sendFusionCommand('exclude_panelist', excludePanelistPayload(r, pid, reason));
+}
+
+async function onManagedApproveWo(versionId: string) {
+  const r = focusedRun.value;
+  if (!r) return;
+  const wo = fusionWorkOrders(r).find((w) => w.versionId === versionId);
+  const payload = wo ? approveWorkOrderPayload(r, wo) : null;
+  if (!payload) {
+    alert('the work-order record is incomplete — version or hash missing');
+    return;
+  }
+  if (!confirm(`Approve work order ${versionId}?`)) return;
+  await sendFusionCommand('approve_work_order', payload);
+}
 </script>
 
 <template>
@@ -107,6 +239,116 @@ const nodeCounts = computed<Record<string, number>>(() => {
     </div>
 
     <div class="panel-body">
+      <!-- Managed card runs (execution API) — separate source/events,
+           porch display below is untouched. -->
+      <section v-if="exec.managedIndex.length || exec.focused" class="managed" data-testid="managed-section">
+        <div class="managed-head">
+          <span class="managed-title">Managed runs</span>
+          <span v-if="exec.indexError" class="managed-err">{{ exec.indexError }}</span>
+        </div>
+        <div
+          v-for="mc in exec.managedIndex"
+          :key="mc.cardId"
+          class="managed-row mono"
+          :class="{ sel: exec.focused?.cardId === mc.cardId }"
+          @click="exec.openManagedRun(mc.cardId, mc.currentRunId)"
+        >
+          <span class="managed-card" :title="cardLabel(mc.cardId)">{{ cardLabel(mc.cardId) }}</span>
+          <span v-if="mc.currentRun?.mode === 'fusion'" class="managed-mode" title="fusion panel run">fusion</span>
+          <span v-if="mc.currentRun?.pending" class="managed-pending" :data-testid="`managed-pending-${mc.cardId}`" title="this run is waiting on a user decision">needs you</span>
+          <span class="managed-run">{{ mc.currentRunId ? execShortId(mc.currentRunId) : 'no run' }}</span>
+        </div>
+
+        <div v-if="exec.focused" class="managed-detail" data-testid="managed-detail">
+          <div class="managed-detailhead mono">
+            {{ execShortId(focusedState?.selectedRunId ?? exec.focused.runId ?? '') }}
+            <template v-if="focusedRun">
+              · {{ runStatusLabel(focusedRun.status) }}<template v-if="focusedRun.phase"> · {{ phaseLabel(focusedRun.phase) }}</template>
+            </template>
+          </div>
+          <p class="managed-sub mono">
+            {{ focusedCardTitle }}<template v-if="focusedState?.view?.currentRunId"> · current {{ execShortId(focusedState.view.currentRunId) }}</template>
+          </p>
+          <div v-if="focusedRuns.length" class="managed-runsel">
+            <label class="managed-sub mono">run
+              <select
+                class="f-input managed-sel"
+                :value="focusedState?.selectedRunId ?? ''"
+                data-testid="managed-run-select"
+                @change="onSelectManagedRun"
+              >
+                <option v-for="r in [...focusedRuns].reverse()" :key="r.id" :value="r.id">
+                  {{ execShortId(r.id) }} · {{ r.status ?? '?' }}{{ r.reserved ? ' · reserved' : '' }}
+                </option>
+              </select>
+            </label>
+          </div>
+          <p v-if="focusedState?.runError" class="managed-err mono" data-testid="managed-run-error">
+            {{ focusedState.runError }}
+            <button class="btn" data-testid="managed-run-retry" @click="exec.focused && void exec.refreshRun(exec.focused.cardId)">retry</button>
+          </p>
+          <p v-else-if="!focusedRun" class="managed-sub mono">
+            {{ focusedState?.runInflight ? 'loading run detail…' : 'no detail loaded' }}
+          </p>
+          <template v-else>
+            <p v-if="focusedRun.error" class="managed-sub mono">error: {{ focusedRun.error }}</p>
+
+            <!-- fusion state (F4): composition, participant roll-up and
+                 the durable pending user decisions with their controls -->
+            <div v-if="focusedFusion" class="managed-fusion" data-testid="managed-fusion">
+              <p class="managed-sub mono" data-testid="managed-fusion-kind">
+                fusion · {{ resultKindLabel(focusedFusion.resultKind) }}
+                · panel {{ fusionStatusLabel(focusedFusion.status) }}
+                · search {{ focusedFusion.snapshot?.search?.enabled ? 'on' : 'off' }}
+              </p>
+              <p v-if="fzParticipantLine" class="managed-sub mono" data-testid="managed-fusion-participants">
+                {{ fzParticipantLine }}
+              </p>
+              <div
+                v-for="a in fusionPendingActions(focusedRun)"
+                :key="a.type + ':' + ((a as Record<string,unknown>).participantId ?? (a as Record<string,unknown>).versionId)"
+                class="managed-action"
+                :data-testid="`managed-action-${a.type}`"
+              >
+                <span class="managed-warn">{{ pendingActionText(a, focusedRun) }}</span>
+                <template v-if="a.type === 'participant_decision'">
+                  <button
+                    class="btn managed-actionbtn"
+                    :data-testid="`managed-retry-${a.participantId}`"
+                    :disabled="fusionGate(canRetryParticipant(focusedRun, a.participantId)).disabled"
+                    :title="fusionGate(canRetryParticipant(focusedRun, a.participantId)).title"
+                    @click="onManagedRetry(a.participantId)"
+                  >retry</button>
+                  <button
+                    class="btn managed-actionbtn"
+                    :data-testid="`managed-exclude-${a.participantId}`"
+                    :disabled="fusionGate(canExcludePanelist(focusedRun, a.participantId)).disabled"
+                    :title="fusionGate(canExcludePanelist(focusedRun, a.participantId)).title"
+                    @click="onManagedExclude(a.participantId)"
+                  >exclude</button>
+                </template>
+                <button
+                  v-else-if="a.type === 'work_order_approval'"
+                  class="btn managed-actionbtn"
+                  :data-testid="`managed-approve-${a.versionId}`"
+                  :disabled="fusionGate(canApproveWorkOrder(focusedRun, a.versionId)).disabled"
+                  :title="fusionGate(canApproveWorkOrder(focusedRun, a.versionId)).title"
+                  @click="onManagedApproveWo(a.versionId)"
+                >approve work order</button>
+              </div>
+            </div>
+
+            <ManagedRunEvents
+              :events="focusedState?.events ?? []"
+              :pending="focusedState?.eventsPending ?? false"
+              :corrupt="focusedState?.eventsCorrupt ?? 0"
+              :total="focusedState?.eventsTotal ?? 0"
+            />
+            <p v-if="focusedRun.finishedAt" class="managed-sub mono">finished {{ fmtTs(focusedRun.finishedAt) }}</p>
+          </template>
+        </div>
+      </section>
+
       <template v-if="wf.porchUp === false">
         <div class="wf-empty">
           <p>Porch endpoint unreachable.</p>
@@ -253,5 +495,123 @@ const nodeCounts = computed<Record<string, number>>(() => {
   font-family: var(--font-mono, monospace);
   font-size: 0.5625rem;
   color: var(--text-muted, #a39a8e);
+}
+
+/* Managed runs (execution API) — visually separate from the porch list. */
+.managed {
+  border-bottom: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  padding: 0.375rem 0.875rem 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.managed-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.managed-title {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--text-secondary, #6b6259);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.managed-err {
+  font-size: 0.625rem;
+  color: var(--text-accent, #c2532f);
+}
+.managed-row {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.625rem;
+  padding: 0.1875rem 0.25rem;
+  border-radius: var(--radius-sm, 4px);
+  cursor: pointer;
+  color: var(--text-secondary, #6b6259);
+}
+.managed-row:hover {
+  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+}
+.managed-row.sel {
+  background: var(--accent-soft, rgba(194, 83, 47, 0.14));
+}
+.managed-card {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.managed-run {
+  margin-left: auto;
+  color: var(--text-muted, #a39a8e);
+}
+.managed-detail {
+  margin-top: 0.25rem;
+  padding: 0.375rem;
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border-radius: var(--radius-sm, 4px);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.managed-detailhead {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--text-primary, #2b2723);
+}
+.managed-sub {
+  margin: 0;
+  font-size: 0.625rem;
+  color: var(--text-secondary, #6b6259);
+}
+.managed-runsel {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+.managed-sel {
+  font-size: 0.625rem;
+  max-width: 100%;
+}
+/* F4 fusion badges + pending actions */
+.managed-mode {
+  color: var(--text-accent, #c2532f);
+  border: 1px solid var(--text-accent, #c2532f);
+  border-radius: var(--radius-sm, 4px);
+  padding: 0 0.25rem;
+  font-size: 0.5625rem;
+}
+.managed-pending {
+  color: #fff;
+  background: var(--text-accent, #c2532f);
+  border-radius: var(--radius-sm, 4px);
+  padding: 0 0.25rem;
+  font-size: 0.5625rem;
+}
+.managed-fusion {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.25rem 0;
+  border-top: 1px dashed var(--border-faint, rgba(43, 39, 35, 0.09));
+}
+.managed-action {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+}
+.managed-warn {
+  color: var(--text-accent, #c2532f);
+  font-size: 0.625rem;
+  flex: 1;
+  min-width: 10rem;
+}
+.managed-actionbtn {
+  font-size: 0.625rem;
+  min-height: 22px;
+  padding: 0 0.5rem;
 }
 </style>

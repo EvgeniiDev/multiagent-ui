@@ -24,7 +24,13 @@
 // changes next to agent events (F4).
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
-import { loadKvStore, type KVStore } from '../lib/host/storage';
+import {
+  loadKvStore,
+  fetchRemoteDoc,
+  mirrorLocalDoc,
+  mutateRemoteDocChecked,
+  type KVStore,
+} from '../lib/host/storage';
 import { uuid } from '../lib/uuid';
 import { useActivityStore } from './activity';
 import { useProjectsStore } from '../features/scope/registry';
@@ -59,6 +65,39 @@ export interface BoardCardSession {
   agentName: string;
   sessionId: string;
 }
+
+/** Server-owned managed-execution marker projected onto a board card (U6).
+ * Written into board.json exclusively by the execution domain's
+ * board_projection — the client mirrors it read-only for display and
+ * merge preservation, never authors it. */
+export interface ManagedExecution {
+  managed: true;
+  runId: string | null;
+  runStatus: string | null;
+  controlRevision: number;
+}
+
+/** Card fields the managed lifecycle owns — mirrors MANAGED_CARD_FIELDS in
+ * server/execution/execution-domain.mjs exactly. Local mutations of these
+ * on a managed card are refused; a managed-aware save copies the
+ * authoritative remote values. `order` is NOT in this list: it is a user
+ * field for writes (same-stage reorders persist), but the server
+ * projection also assigns it on stage changes, so sync reads it back. */
+export const MANAGED_CARD_FIELDS = [
+  'stage',
+  'status',
+  'statusByStage',
+  'blocked',
+  'blockedReason',
+  'cancelled',
+  'project',
+  'session',
+  'execution',
+] as const;
+
+/** Fields an authoritative managed row carries that local display adopts —
+ * the write-protected set plus `order` (projection-assigned). */
+const MANAGED_SYNC_FIELDS = [...MANAGED_CARD_FIELDS, 'order'] as const;
 
 export interface BoardCard {
   id: string;
@@ -96,6 +135,9 @@ export interface BoardCard {
   order: number;
   createdAt: number;
   updatedAt: number;
+  /** Present only while the card is managed by the execution engine —
+   * read-only server projection, kept by sanitizeCard for managed rows. */
+  execution?: ManagedExecution;
 }
 
 export interface BoardFilters {
@@ -231,6 +273,27 @@ function sanitizeCard(raw: unknown): BoardCard | null {
       : typeof c.blockedBy === 'string'
         ? c.blockedBy
         : '';
+  const rawExec = (c as Record<string, unknown>).execution;
+  const execution =
+    rawExec &&
+    typeof rawExec === 'object' &&
+    (rawExec as ManagedExecution).managed === true
+      ? {
+          managed: true as const,
+          runId:
+            typeof (rawExec as ManagedExecution).runId === 'string'
+              ? (rawExec as ManagedExecution).runId
+              : null,
+          runStatus:
+            typeof (rawExec as ManagedExecution).runStatus === 'string'
+              ? (rawExec as ManagedExecution).runStatus
+              : null,
+          controlRevision:
+            typeof (rawExec as ManagedExecution).controlRevision === 'number'
+              ? (rawExec as ManagedExecution).controlRevision
+              : 0,
+        }
+      : undefined;
   return {
     id: c.id,
     title: c.title,
@@ -274,6 +337,7 @@ function sanitizeCard(raw: unknown): BoardCard | null {
     order: typeof c.order === 'number' ? c.order : 0,
     createdAt: typeof c.createdAt === 'number' ? c.createdAt : Date.now(),
     updatedAt: typeof c.updatedAt === 'number' ? c.updatedAt : Date.now(),
+    ...(execution ? { execution } : {}),
   };
 }
 
@@ -281,8 +345,45 @@ export const useBoardStore = defineStore('board', () => {
   const cards = ref<BoardCard[]>([]);
   const filters = ref<BoardFilters>(emptyFilters());
   const ready = ref(false);
+  /** Last managed-save diagnostic — surfaced in the board UI; cleared on a
+   * successful authoritative write. */
+  const saveError = ref<{ code: string; error: string; at: number } | null>(null);
   let store: KVStore | null = null;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Pending user-field deltas — per card, per FIELD, stamped with a
+  // monotonic mutation generation. The managed save path merges ONLY these
+  // fields onto a fresh remote row, so an untouched field of an edited
+  // card (or an untouched card) is never rewritten from a stale local
+  // copy, and an edit that lands mid-flight keeps its newer generation so
+  // it is never cleared unshipped.
+  const dirtyFields = new Map<string, Map<string, number>>();
+  /** Cards created locally that the remote doc has never seen — the only
+   * local-only rows a merge may add (never resurrect remote deletions). */
+  const newCardIds = new Set<string>();
+  const deletedCardIds = new Set<string>();
+  let mutGen = 0;
+  let managedSaveRunning = false;
+  let managedSaveAgain = false;
+  let managedSyncSeq = 0;
+
+  function markFields(id: string, fields: string[]): void {
+    let m = dirtyFields.get(id);
+    if (!m) {
+      m = new Map();
+      dirtyFields.set(id, m);
+    }
+    const g = ++mutGen;
+    for (const f of fields) m.set(f, g);
+  }
+
+  function markNew(id: string): void {
+    newCardIds.add(id);
+  }
+
+  const hasManagedCards = computed(() =>
+    cards.value.some((c) => c.execution?.managed === true)
+  );
 
   // ---- persistence --------------------------------------------------------
 
@@ -296,9 +397,224 @@ export const useBoardStore = defineStore('board', () => {
 
   async function persist(): Promise<void> {
     if (!store) return;
-    await store.set('version', STORE_VERSION);
-    await store.set('cards', cards.value);
-    await store.save();
+    if (!hasManagedCards.value) {
+      dirtyFields.clear();
+      newCardIds.clear();
+      deletedCardIds.clear();
+      await store.set('version', STORE_VERSION);
+      await store.set('cards', cards.value);
+      await store.save();
+      return;
+    }
+    await persistManagedBoard();
+  }
+
+  /** Managed-board save: NEVER takes the KV last-write-wins/force path.
+   * GET the fresh remote doc, merge only pending user-field deltas onto
+   * fresh rows (managed-owned fields always come from remote), PUT with
+   * the fresh rev, retry only on `rev_conflict`. Serialized: while a save
+   * is in flight a further schedule just marks `managedSaveAgain`, and a
+   * field's dirty mark is cleared only when the generation actually sent
+   * still equals the current one — an edit that lands mid-PUT is never
+   * lost. A protection refusal surfaces `saveError` + authoritative
+   * reload; an unreachable server keeps the local mirror and dirty marks. */
+  async function persistManagedBoard(): Promise<void> {
+    if (managedSaveRunning) {
+      managedSaveAgain = true;
+      return;
+    }
+    managedSaveRunning = true;
+    try {
+      do {
+        managedSaveAgain = false;
+        await runManagedSaveOnce();
+      } while (managedSaveAgain);
+    } finally {
+      managedSaveRunning = false;
+    }
+  }
+
+  async function runManagedSaveOnce(): Promise<void> {
+    mirrorLocalDoc(STORE_PATH, { version: STORE_VERSION, cards: cards.value });
+    // Nothing pending → no PUT. A stray debounce must not bump the remote
+    // rev (a no-op write would still conflict every other writer's CAS).
+    if (!dirtyFields.size && !newCardIds.size && !deletedCardIds.size) return;
+    // Field gens actually merged into the PUT body — cleared only when no
+    // newer generation exists on success. Read inside the CAS callback:
+    // each attempt re-reads BOTH the fresh remote doc and the live local
+    // array (values + generations from the same moment — a captured stale
+    // array tagged with new gens would ship outdated values).
+    const sent = new Map<string, Map<string, number>>();
+    const sentNew = new Set<string>();
+    const sentDeleted = new Set<string>();
+    const res = await mutateRemoteDocChecked(STORE_PATH, (remote) => {
+      sent.clear();
+      sentNew.clear();
+      sentDeleted.clear();
+      return mergeBoardCards(remote, cards.value, sent, sentNew, sentDeleted);
+    });
+    if (res.ok) {
+      for (const [id, fields] of sent) {
+        const df = dirtyFields.get(id);
+        if (!df) continue;
+        for (const [f, gen] of fields) {
+          if (df.get(f) === gen) df.delete(f); // newer edit → stays dirty
+        }
+        if (!df.size) dirtyFields.delete(id);
+      }
+      for (const id of sentNew) newCardIds.delete(id);
+      for (const id of sentDeleted) {
+        deletedCardIds.delete(id);
+        dirtyFields.delete(id);
+      }
+      saveError.value = null;
+      // The PUT response carries no document — pull the merged result so
+      // the server-side managed overlay lands locally immediately.
+      await adoptRemoteBoard();
+      return;
+    }
+    saveError.value = {
+      code: res.reason === 'rejected' ? (res.code ?? 'rejected') : res.reason,
+      error: res.error,
+      at: Date.now(),
+    };
+    if (res.reason !== 'unavailable') {
+      // rev_conflict exhausted or a protection refusal — converge on the
+      // authoritative document before the user edits again.
+      await adoptRemoteBoard();
+    }
+  }
+
+  /** Rebuild local cards from the remote document: remote rows win for
+   * every field without a pending local delta (including full managed
+   * lifecycle), remote-only rows appear, rows deleted remotely disappear
+   * (a remote deletion is never resurrected), and still-dirty fields keep
+   * their unsaved local values over the remote base. */
+  async function adoptRemoteBoard(): Promise<boolean> {
+    const remote = await fetchRemoteDoc(STORE_PATH);
+    if (remote === 'error' || remote === 'missing') return false;
+    const remoteCards = (Array.isArray(remote.data?.cards) ? remote.data.cards : [])
+      .map(sanitizeCard)
+      .filter((c): c is BoardCard => c !== null);
+    const remoteIds = new Set(remoteCards.map((c) => c.id));
+    const localById = new Map(cards.value.map((c) => [c.id, c]));
+    const next: BoardCard[] = [];
+    for (const rc of remoteCards) {
+      if (deletedCardIds.has(rc.id)) continue;
+      const lc = localById.get(rc.id);
+      const df = dirtyFields.get(rc.id);
+      if (lc && df?.size) {
+        // Remote row is the base — pending local field deltas overlay it;
+        // managed-owned fields never come from the local copy.
+        const merged: Record<string, unknown> = { ...rc };
+        const managed = rc.execution?.managed === true;
+        const lrec = lc as unknown as Record<string, unknown>;
+        for (const f of df.keys()) {
+          if (managed && (MANAGED_CARD_FIELDS as readonly string[]).includes(f)) continue;
+          merged[f] = lrec[f];
+        }
+        next.push(merged as unknown as BoardCard);
+      } else {
+        next.push(rc);
+      }
+    }
+    for (const c of cards.value) {
+      if (remoteIds.has(c.id) || deletedCardIds.has(c.id)) continue;
+      if (newCardIds.has(c.id)) next.push(c); // locally created, unsaved
+    }
+    cards.value = next;
+    mirrorLocalDoc(STORE_PATH, { version: STORE_VERSION, cards: next });
+    return true;
+  }
+
+  /** Copy the server's managed-row fields into local rows — the read path
+   * the execution store uses so a poll never authors lifecycle. Only rows
+   * that are managed REMOTELY are overlaid (a stale local marker can't
+   * fake one in), and nothing here schedules a persistence write.
+   * Returns true when an authoritative remote read succeeded (regardless
+   * of whether any field changed); the latest issued call wins so an
+   * older response can't roll back a newer sync. */
+  async function syncManagedRows(): Promise<boolean> {
+    const my = ++managedSyncSeq;
+    const remote = await fetchRemoteDoc(STORE_PATH);
+    if (remote === 'error' || remote === 'missing') return false;
+    if (my !== managedSyncSeq) return false; // superseded — newer read owns state
+    const remoteCards = Array.isArray(remote.data?.cards) ? remote.data.cards : [];
+    const remoteById = new Map<string, Record<string, unknown>>();
+    for (const rc of remoteCards) {
+      if (rc && typeof rc === 'object' && typeof (rc as BoardCard).id === 'string') {
+        remoteById.set((rc as BoardCard).id, rc as Record<string, unknown>);
+      }
+    }
+    for (const c of cards.value) {
+      const rc = remoteById.get(c.id);
+      if (!rc || (rc.execution as ManagedExecution | undefined)?.managed !== true) continue;
+      const rec = c as unknown as Record<string, unknown>;
+      for (const f of MANAGED_SYNC_FIELDS) {
+        if (f in rc) rec[f] = rc[f];
+        else if (f in rec) delete rec[f];
+      }
+    }
+    return true;
+  }
+
+  /** Managed-aware merge for the CAS save: remote rows are the base; only
+   * locally dirty FIELDS contribute their values over the remote row
+   * (managed-owned fields are never taken from the local copy), locally
+   * created rows are appended, and user deletions drop unmanaged rows only
+   * (a managed deletion is never submitted). `sent`/`sentNew`/`sentDeleted`
+   * record what the attempt actually shipped so success clears exactly
+   * those — and only those — generations. */
+  function mergeBoardCards(
+    remote: Record<string, unknown>,
+    localCards: BoardCard[],
+    sent: Map<string, Map<string, number>>,
+    sentNew: Set<string>,
+    sentDeleted: Set<string>,
+  ): Record<string, unknown> {
+    const remoteCards = Array.isArray(remote.cards) ? remote.cards : [];
+    const localById = new Map(localCards.map((c) => [c.id, c]));
+    const managedRow = (r: unknown): r is Record<string, unknown> =>
+      !!r &&
+      typeof r === 'object' &&
+      (r as { execution?: ManagedExecution }).execution?.managed === true;
+    const out: unknown[] = [];
+    const seen = new Set<string>();
+    for (const rc of remoteCards) {
+      const id = rc && typeof rc === 'object' ? (rc as BoardCard).id : null;
+      if (typeof id !== 'string' || !rc || typeof rc !== 'object') continue;
+      seen.add(id);
+      if (deletedCardIds.has(id)) {
+        if (managedRow(rc)) out.push(rc); // managed rows are never deleted here
+        else sentDeleted.add(id);
+        continue;
+      }
+      const lc = localById.get(id);
+      const df = dirtyFields.get(id);
+      if (!lc || !df?.size) {
+        out.push(rc); // untouched — remote row verbatim
+        continue;
+      }
+      const managed = managedRow(rc);
+      const merged: Record<string, unknown> = { ...rc };
+      const lrec = lc as unknown as Record<string, unknown>;
+      const shipped = new Map<string, number>();
+      for (const [f, gen] of df) {
+        if (managed && (MANAGED_CARD_FIELDS as readonly string[]).includes(f)) continue;
+        merged[f] = lrec[f];
+        shipped.set(f, gen);
+      }
+      if (shipped.size) sent.set(id, shipped);
+      out.push(merged);
+    }
+    for (const lc of localCards) {
+      if (seen.has(lc.id) || deletedCardIds.has(lc.id)) continue;
+      if (newCardIds.has(lc.id)) {
+        out.push(lc);
+        sentNew.add(lc.id);
+      }
+    }
+    return { ...remote, version: STORE_VERSION, cards: out };
   }
 
   async function initBoardStore(): Promise<void> {
@@ -447,6 +763,7 @@ export const useBoardStore = defineStore('board', () => {
     const project = partial.project?.trim() || filters.value.project || '';
     const card = makeCard({ ...partial, project, stage: 'backlog', status: null });
     cards.value.push(card);
+    markNew(card.id);
     scheduleSave();
     logCardEvent(card, 'card created in backlog');
     return card;
@@ -465,24 +782,74 @@ export const useBoardStore = defineStore('board', () => {
       status: null,
     });
     cards.value.push(card);
+    markNew(card.id);
     scheduleSave();
     logCardEvent(card, 'example card created');
     return card;
   }
 
+  const MANAGED_REFUSAL =
+    'this card is managed by the execution engine — its stage, status, flags, ' +
+    'project and session are server-owned; control it from the managed execution section';
+
   function updateCard(id: string, patch: Partial<BoardCard>): MutationResult {
     const card = cards.value.find((c) => c.id === id);
     if (!card) return { ok: false };
     const { status: _status, stage: _stage, ...rest } = patch;
-    Object.assign(card, rest, { id: card.id, updatedAt: Date.now() });
+    if (card.execution?.managed === true) {
+      // Managed lifecycle fields are never authored from a draft — strip
+      // them and report which ones the patch tried to move.
+      const touched: string[] = [];
+      if (_status !== undefined && _status !== card.status) touched.push('status');
+      if (_stage !== undefined && _stage !== card.stage) touched.push('stage');
+      const rec = rest as Record<string, unknown>;
+      const self = card as unknown as Record<string, unknown>;
+      for (const f of MANAGED_CARD_FIELDS) {
+        if (!(f in rec)) continue;
+        if (JSON.stringify(rec[f]) !== JSON.stringify(self[f])) touched.push(f);
+        delete rec[f];
+      }
+      // Only genuinely-changed user fields become deltas — a full stale
+      // draft never rewrites fields the user did not touch.
+      const changed = Object.keys(rest).filter(
+        (f) => JSON.stringify(rec[f]) !== JSON.stringify(self[f]),
+      );
+      if (!changed.length) {
+        return touched.length ? { ok: false, reason: MANAGED_REFUSAL } : { ok: true };
+      }
+      Object.assign(card, rest, { id: card.id, updatedAt: Date.now() });
+      markFields(id, [...changed, 'updatedAt']);
+      scheduleSave();
+      return touched.length ? { ok: false, reason: MANAGED_REFUSAL } : { ok: true };
+    }
+    // Only fields that actually differ from the card become deltas — a
+    // whole-draft flush from a stale drawer never overwrites fields the
+    // user did not edit.
+    const rec = rest as Record<string, unknown>;
+    const self = card as unknown as Record<string, unknown>;
+    const changed = Object.keys(rest).filter(
+      (f) => JSON.stringify(rec[f]) !== JSON.stringify(self[f]),
+    );
     // Status/stage move through their own paths (setCardStatus / moveCard)
     // so the per-stage status rules always hold — but a direct patch that
     // carries a valid status still applies, gated like setCardStatus.
     let refusal: string | null = null;
     if (_status !== undefined && STAGE_STATUSES[card.stage].includes(_status as CardStatus)) {
       refusal = reviewGateRefusal(card.id, card.stage, _status as CardStatus, card.status);
-      if (!refusal) card.status = _status as CardStatus;
+      if (!refusal) {
+        card.status = _status as CardStatus;
+        changed.push('status');
+      }
     }
+    if (!changed.length) {
+      if (refusal) {
+        logCardEvent(card, `status → ${_status} refused: ${refusal}`);
+        return { ok: false, reason: refusal };
+      }
+      return { ok: true }; // nothing changed — no write at all
+    }
+    Object.assign(card, rest, { id: card.id, updatedAt: Date.now() });
+    markFields(id, [...changed, 'updatedAt']);
     scheduleSave();
     if (refusal) {
       logCardEvent(card, `status → ${_status} refused: ${refusal}`);
@@ -491,12 +858,21 @@ export const useBoardStore = defineStore('board', () => {
     return { ok: true };
   }
 
-  function removeCard(id: string): void {
+  function removeCard(id: string): MutationResult {
     const card = cards.value.find((c) => c.id === id);
-    if (!card) return;
+    if (!card) return { ok: false };
+    if (card.execution?.managed === true) {
+      // The server refuses a managed row's deletion via the legacy API —
+      // refuse locally so the user gets the reason, not a silent 409.
+      return { ok: false, reason: `${MANAGED_REFUSAL} — it cannot be deleted here` };
+    }
     cards.value = cards.value.filter((c) => c.id !== id);
+    dirtyFields.delete(id);
+    newCardIds.delete(id);
+    deletedCardIds.add(id);
     scheduleSave();
     logCardEvent(card, `card deleted from ${card.stage}`);
+    return { ok: true };
   }
 
   function duplicateCard(id: string): BoardCard | null {
@@ -510,6 +886,7 @@ export const useBoardStore = defineStore('board', () => {
       order: src.order + 1,
     });
     cards.value.push(copy);
+    markNew(copy.id);
     normalizeStage(src.stage);
     scheduleSave();
     logCardEvent(copy, `duplicated from "${src.title}" in ${src.stage}`);
@@ -522,7 +899,11 @@ export const useBoardStore = defineStore('board', () => {
       .filter((c) => c.stage === stage)
       .sort((a, b) => a.order - b.order || a.createdAt - b.createdAt);
     inStage.forEach((c, i) => {
-      c.order = (i + 1) * ORDER_STEP;
+      const next = (i + 1) * ORDER_STEP;
+      if (c.order !== next) {
+        c.order = next;
+        markFields(c.id, ['order']);
+      }
     });
   }
 
@@ -535,10 +916,15 @@ export const useBoardStore = defineStore('board', () => {
    * on a first visit it gets the stage's initial status — `in_progress`, or
    * `null` for backlog/done. The outgoing status is remembered per stage.
    */
-  function moveCard(id: string, to: BoardStageId, beforeId?: string | null): void {
+  function moveCard(id: string, to: BoardStageId, beforeId?: string | null): MutationResult {
     const card = cards.value.find((c) => c.id === id);
-    if (!card || !BOARD_STAGE_IDS.includes(to)) return;
+    if (!card || !BOARD_STAGE_IDS.includes(to)) return { ok: false };
     const from = card.stage;
+    if (card.execution?.managed === true && from !== to) {
+      // Cross-stage placement is server-owned for managed cards; a
+      // same-stage reorder is still a user edit (order is not protected).
+      return { ok: false, reason: MANAGED_REFUSAL };
+    }
     if (from !== to) {
       const prevStatus = card.status;
       if (card.status) {
@@ -575,17 +961,24 @@ export const useBoardStore = defineStore('board', () => {
       card.order = (prev + siblings[beforeIdx].order) / 2;
       normalizeStage(to);
     }
+    markFields(
+      id,
+      from !== to
+        ? ['stage', 'status', 'statusByStage', 'order', 'updatedAt']
+        : ['order', 'updatedAt'],
+    );
     scheduleSave();
     if (from !== to) logCardEvent(card, `card moved ${from} → ${to}`);
+    return { ok: true };
   }
 
   /** Keyboard path: shift a card one stage left/right in BOARD_STAGE_IDS. */
-  function moveCardBy(id: string, delta: -1 | 1): void {
+  function moveCardBy(id: string, delta: -1 | 1): MutationResult {
     const card = cards.value.find((c) => c.id === id);
-    if (!card) return;
+    if (!card) return { ok: false };
     const idx = BOARD_STAGE_IDS.indexOf(card.stage);
     const next = BOARD_STAGE_IDS[idx + delta];
-    if (next) moveCard(id, next);
+    return next ? moveCard(id, next) : { ok: true };
   }
 
   /**
@@ -596,6 +989,9 @@ export const useBoardStore = defineStore('board', () => {
   function setCardStatus(id: string, status: CardStatus): MutationResult {
     const card = cards.value.find((c) => c.id === id);
     if (!card || !STAGE_STATUSES[card.stage].includes(status)) return { ok: false };
+    if (card.execution?.managed === true) {
+      return { ok: false, reason: MANAGED_REFUSAL };
+    }
     const prev = card.status;
     if (prev === status) return { ok: true };
     const refusal = reviewGateRefusal(card.id, card.stage, status, prev);
@@ -605,10 +1001,11 @@ export const useBoardStore = defineStore('board', () => {
     }
     card.status = status;
     card.updatedAt = Date.now();
+    markFields(id, ['status', 'updatedAt']);
     scheduleSave();
     logCardEvent(card, `status ${prev ?? '—'} → ${status} in ${card.stage}`);
     if (card.stage === 'reviewtest' && status === 'accepted') {
-      moveCard(id, 'done');
+      void moveCard(id, 'done');
     }
     return { ok: true };
   }
@@ -630,28 +1027,84 @@ export const useBoardStore = defineStore('board', () => {
     flag: 'blocked' | 'cancelled',
     on: boolean,
     reason?: string
-  ): void {
+  ): MutationResult {
     const card = cards.value.find((c) => c.id === id);
-    if (!card) return;
+    if (!card) return { ok: false };
+    if (card.execution?.managed === true) {
+      // blocked/cancelled are server-owned while managed — a visible
+      // refusal beats a write the server would reject wholesale.
+      return { ok: false, reason: MANAGED_REFUSAL };
+    }
     // No-op only when nothing would change — a reason passed for an
     // already-set flag is still written (the pair stays in one mutation).
     if (
       card[flag] === on &&
       (flag !== 'blocked' || reason === undefined || reason === card.blockedReason)
     ) {
-      return;
+      return { ok: true };
     }
     card[flag] = on;
+    const fields = [flag, 'updatedAt'];
     if (flag === 'blocked') {
       if (reason !== undefined) card.blockedReason = reason;
       else if (!on) card.blockedReason = '';
+      fields.push('blockedReason');
     }
     card.updatedAt = Date.now();
+    markFields(id, fields);
     scheduleSave();
     const detail = flag === 'blocked' && on && card.blockedReason
       ? `: ${card.blockedReason}`
       : '';
     logCardEvent(card, on ? `flagged ${flag}${detail}` : `${flag} flag cleared`);
+    return { ok: true };
+  }
+
+  // ---- managed projection -------------------------------------------------
+
+  /** Adopt the server projection for one managed card — display state
+   * only; this never marks fields dirty and never schedules a save. The
+   * marker carries the wire truth {managed, runId, runStatus,
+   * controlRevision}; stage/status come from the view's projection. */
+  function applyManagedProjection(view: {
+    cardId: string;
+    controlRevision: number;
+    currentRunId: string | null;
+    runs?: { id: string; status?: string | null }[];
+    projection: { stage: string; status: string | null } | null;
+  }): void {
+    const card = cards.value.find((c) => c.id === view.cardId);
+    if (!card) return;
+    // Never roll back to an older control revision than the one already
+    // displayed — the caller's request ordering guards this, this is the
+    // backstop for an out-of-order projection write.
+    if (
+      card.execution?.managed === true &&
+      view.controlRevision < card.execution.controlRevision
+    ) {
+      return;
+    }
+    const runStatus = view.currentRunId
+      ? (view.runs ?? []).find((r) => r.id === view.currentRunId)?.status ?? null
+      : null;
+    card.execution = {
+      managed: true,
+      runId: view.currentRunId,
+      runStatus,
+      controlRevision: view.controlRevision,
+    };
+    const p = view.projection;
+    if (p && BOARD_STAGE_IDS.includes(p.stage as BoardStageId)) {
+      card.stage = p.stage as BoardStageId;
+      card.status = coerceStatus(card.stage, p.status);
+    }
+  }
+
+  /** The card is not (or no longer) managed server-side — drop the local
+   * marker so the drawer stops offering managed controls. Read path only. */
+  function clearManagedProjection(cardId: string): void {
+    const card = cards.value.find((c) => c.id === cardId);
+    if (card?.execution?.managed === true) delete card.execution;
   }
 
   function clearFilters(): void {
@@ -662,6 +1115,8 @@ export const useBoardStore = defineStore('board', () => {
     cards,
     filters,
     ready,
+    saveError,
+    hasManagedCards,
     filteredCards,
     scopedCards,
     isFiltering,
@@ -678,6 +1133,11 @@ export const useBoardStore = defineStore('board', () => {
     duplicateCard,
     moveCard,
     moveCardBy,
+    applyManagedProjection,
+    clearManagedProjection,
+    syncManagedRows,
+    adoptRemoteBoard,
+    persistManagedBoard,
     clearFilters,
   };
 });

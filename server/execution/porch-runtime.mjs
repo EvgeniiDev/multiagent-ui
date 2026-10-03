@@ -8,7 +8,7 @@
 // Import-safe: no spawn, listener, or fs write at module load. Every mutating
 // step is explicit in start()/cancel(). See runtime-contract.md.
 
-import { promises as fs, readFileSync, readlinkSync } from 'node:fs';
+import { promises as fs, readFileSync, readlinkSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -94,6 +94,14 @@ function procNs(ns) {
   }
 }
 
+function procNsOf(ns, pid) {
+  try {
+    return readlinkSync(`/proc/${pid}/ns/${ns}`);
+  } catch {
+    return null;
+  }
+}
+
 // Field 22 of /proc/<pid>/stat — jiffies since boot. comm may contain spaces
 // or ')', so fields are counted from the last ')'.
 export function procStarttime(pid) {
@@ -105,6 +113,56 @@ export function procStarttime(pid) {
     return fields[19] || null; // field 22 overall
   } catch {
     return null;
+  }
+}
+
+// /proc/<pid>/syscall — first token is either 'running' or the syscall
+// number (e.g. 232 = epoll_wait on x86_64). Used by the stuck detector: a
+// supervisor parked in a wait-syscall with zero IO/CPU delta is evidence;
+// 'running' or an unreadable probe is never evidence.
+const IDLE_WAIT_SYSCALLS = new Set(['7', '23', '61', '232', '270', '271', '407']);
+function procSyscall(pid) {
+  try {
+    const raw = readFileSync(`/proc/${pid}/syscall`, 'utf8').trim();
+    if (!raw) return { token: null, readable: false };
+    const token = raw.split(/\s+/)[0] ?? null;
+    return { token, readable: true };
+  } catch (e) {
+    return { token: null, readable: false, code: e?.code ?? null };
+  }
+}
+
+function procIo(pid) {
+  // Every counter /proc/<pid>/io exposes — the delta check must see ALL io,
+  // not just byte streams (a stalled-on-write process still shows syscw).
+  try {
+    const raw = readFileSync(`/proc/${pid}/io`, 'utf8');
+    let sum = 0;
+    for (const line of raw.split('\n')) {
+      const m = /^[a-z_]+:\s*(\d+)/.exec(line);
+      if (m) sum += Number(m[1]);
+    }
+    return { sum, readable: true };
+  } catch (e) {
+    return { sum: null, readable: false, code: e?.code ?? null };
+  }
+}
+
+// utime+stime (fields 14+15) from /proc/<pid>/stat — CPU jiffies consumed.
+function procCpu(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const close = stat.lastIndexOf(')');
+    if (close < 0) return { cpu: null, readable: false };
+    const fields = stat.slice(close + 2).split(' ');
+    const utime = Number(fields[11]); // field 14 overall
+    const stime = Number(fields[12]); // field 15 overall
+    if (!Number.isFinite(utime) || !Number.isFinite(stime)) {
+      return { cpu: null, readable: false };
+    }
+    return { cpu: utime + stime, readable: true };
+  } catch (e) {
+    return { cpu: null, readable: false, code: e?.code ?? null };
   }
 }
 
@@ -140,8 +198,19 @@ export function createPorchRuntime(options = {}) {
   const resultMaxBytes = options.maxResultBytes ?? RESULT_MAX_BYTES;
   const controlMaxBytes = options.maxControlBytes ?? CONTROL_MAX_BYTES;
   const namespace = options.namespace || 'acp-ui';
+  // Test seam: the porch subprocess boundary. Tests inject a canned spawn
+  // result so start() exercises the REAL record/persist/session-dir path
+  // without a porch binary.
+  const spawn = options.spawn || spawnBounded;
 
   function environment() {
+    // Per-container-instance identity: the hostname is the Docker container
+    // id (compose default), and PID 1 inside our pid namespace is the
+    // container init — its starttime changes on every recreate/restart even
+    // when the hostname is pinned. The pair {containerId, initStarttime} is
+    // stable across a same-container Node restart.
+    const containerId = os.hostname() || null;
+    const initStarttime = procStarttime(1);
     return {
       namespace,
       backend: 'porch-process',
@@ -152,6 +221,9 @@ export function createPorchRuntime(options = {}) {
       pidNs: procNs('pid'),
       hostname: os.hostname(),
       bootId: bootId(),
+      containerId,
+      initStarttime,
+      envInstance: { containerId, initStarttime },
       platform: process.platform,
       node: process.version,
       rootDir, steerDir, outputDir, attemptsDir,
@@ -160,17 +232,51 @@ export function createPorchRuntime(options = {}) {
   }
 
   // Identity of a possibly-foreign process (e.g. a supervisor pid read from
-  // registry meta). PID alone is never ownership proof — compare pid,
-  // starttime, and pid namespace together before trusting liveness.
+  // registry meta, or our own recorded launcher). PID alone is never proof —
+  // callers compare pid + starttime + pid namespace, and must distinguish:
+  //   exists=false                -> clean ENOENT: process is gone (proof)
+  //   exists=null                 -> EACCES/EPERM/EIO on the probe itself:
+  //                                  UNVERIFIABLE, never counts as absent
+  //   exists,state='Z'            -> zombie: defunct, counts as terminated
+  //   exists,readable=false       -> /proc/pid exists but stat unreadable:
+  //                                  UNVERIFIABLE, not dead
+  //   exists,starttime mismatch   -> pid was recycled (termination proof)
+  // `alive` only means "a live entry exists"; it is never a termination proof.
   function processIdentity(pid) {
     if (!Number.isInteger(pid) || pid <= 0) return null;
+    // statSync distinguishes errno; existsSync would fold EACCES into "absent".
+    let exists;
+    try {
+      statSync(`/proc/${pid}`);
+      exists = true;
+    } catch (e) {
+      exists = e && e.code === 'ENOENT' ? false : null;
+    }
+    let state = null;
+    let starttime = null;
+    let readable = false;
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const close = stat.lastIndexOf(')');
+      if (close >= 0) {
+        const fields = stat.slice(close + 2).split(' ');
+        state = fields[0] || null;
+        starttime = fields[19] || null; // field 22 overall
+        readable = true;
+      }
+    } catch (e) {
+      // A clean ENOENT here is independent absence evidence; anything else
+      // stays unverifiable.
+      if (e && e.code === 'ENOENT' && exists !== true) exists = false;
+    }
     return {
       pid,
-      starttime: procStarttime(pid),
-      pidNs: (() => {
-        try { return readlinkSync(`/proc/${pid}/ns/pid`); } catch { return null; }
-      })(),
-      alive: procStarttime(pid) !== null,
+      exists,   // true | false | null(unverifiable)
+      state,
+      starttime,
+      pidNs: procNsOf('pid', pid),
+      readable,
+      alive: exists === true && state !== 'Z',
     };
   }
 
@@ -179,7 +285,7 @@ export function createPorchRuntime(options = {}) {
   }
 
   async function porchCtl(args, { timeoutMs = controlTimeoutMs, maxBytes = controlMaxBytes } = {}) {
-    const res = await spawnBounded([porchPath, 'delegate', ...args], {
+    const res = await spawn([porchPath, 'delegate', ...args], {
       env: controlEnv(), timeoutMs, maxStdout: maxBytes, maxStderr: LAUNCH_MAX_BYTES,
     });
     if (res.spawnError) {
@@ -210,6 +316,11 @@ export function createPorchRuntime(options = {}) {
       attemptDir,
       artifactsDir,
       phase: 'prepared',
+      // Durable spawn marker. `false` is only ever persisted by pre-spawn
+      // rejection paths, which provably never invoked spawnBounded; onSpawn
+      // flips it to true at fork. A record showing phase 'launching' with
+      // spawned=false is a crash window — nothing is proven either way.
+      spawned: false,
       createdAt: new Date().toISOString(),
       environment: env0,
       configPath: null,
@@ -299,6 +410,12 @@ export function createPorchRuntime(options = {}) {
         cwd,
         envOverridesDropped: dropped,
         startedAt: new Date().toISOString(),
+        // The observer's session-log probe must resolve the dir the LAUNCHED
+        // pi actually writes — computed once from the effective launchEnv
+        // (base + params.env), persisted here; process.env at read time is
+        // never consulted (contract mirrors installed pi session-manager:
+        // ENV_SESSION_DIR flat > agentDir/sessions/--<resolved-cwd-slug>--).
+        pi: { sessionId: launchEnv.PORCH_PI_SESSION_ID, sessionDir: piSessionDirFor(launchEnv, cwd) },
       };
       await persist();
     } catch (e) {
@@ -308,12 +425,29 @@ export function createPorchRuntime(options = {}) {
     // --- launch handshake: porch exits 0 with the run id on stdout, or the
     // outcome is failed / uncertain. From here on a failure of OUR bookkeeping
     // must never downgrade a possibly-live supervisor to retryable 'failed'.
-    const res = await spawnBounded(
+    //
+    // The launcher's own identity is captured in onSpawn — synchronously at
+    // fork — and persisted into launch.json immediately, so that a controller
+    // that dies mid-handshake leaves positive evidence about WHICH process
+    // must be proven dead before any retry is legal.
+    let launcherWrite = null;
+    const res = await spawn(
       [porchPath, 'delegate', '-a', record.profileId, '--detach',
         '--prompt-file', record.promptFile],
       { cwd, env: launchEnv, timeoutMs: params.launchTimeoutMs ?? launchTimeoutMs,
-        maxStdout: LAUNCH_MAX_BYTES, maxStderr: LAUNCH_MAX_BYTES },
+        maxStdout: LAUNCH_MAX_BYTES, maxStderr: LAUNCH_MAX_BYTES,
+        onSpawn: (child) => {
+          record.spawned = true;
+          record.launch.launcher = {
+            pid: child.pid ?? null,
+            starttime: procStarttime(child.pid),
+            pidNs: procNsOf('pid', child.pid),
+            capturedAt: new Date().toISOString(),
+          };
+          launcherWrite = persist().catch(() => false);
+        } },
     );
+    if (launcherWrite) await launcherWrite;
     const diag = {
       exitCode: res.code, signal: res.signal, timedOut: res.timedOut,
       observationCut: !!res.observationCut,
@@ -323,6 +457,12 @@ export function createPorchRuntime(options = {}) {
     };
     record.launch.finishedAt = new Date().toISOString();
     record.launch.diagnostics = diag;
+    if (!record.launch.launcher && Number.isInteger(res.pid)) {
+      // 'error'-event spawn path still reports the child pid — keep whatever
+      // identity we have; a record without it is "unknown", never "no spawn".
+      record.launch.launcher = { pid: res.pid, starttime: null, pidNs: null,
+        capturedAt: new Date().toISOString() };
+    }
 
     if (res.spawnError) {
       record.phase = 'launch_failed';
@@ -392,7 +532,13 @@ export function createPorchRuntime(options = {}) {
       model: parsed.model ?? null,
       effort: parsed.effort ?? null,
       pid: parsed.pid ?? null,
+      // The recorded childPID is retained verbatim — but a null/absent
+      // child_pid is never proof of no child (the serialized status emits
+      // the key unconditionally). A positive no-child attestation exists
+      // only when the payload carries an explicit `child_spawned:false`.
       childPid: parsed.child_pid ?? null,
+      childSpawned: Number.isInteger(parsed.child_pid) ? true
+        : (parsed.child_spawned === false ? false : undefined),
       process: processIdentity(parsed.pid),
       startedAt: parsed.started_at ?? null,
       updatedAt: parsed.updated_at ?? null,
@@ -560,19 +706,178 @@ export function createPorchRuntime(options = {}) {
       if (wantCwd && !(r.cwd && normPath(r.cwd) === wantCwd)) return false;
       return true;
     });
+    // Unreadable registry entries must surface, not vanish: a scan that met
+    // unreadable entries is incomplete, and zero clean matches is only
+    // meaningful under a complete scan.
+    const unreadable = listed.runs
+      .filter((r) => r.unreadable)
+      .map((r) => ({ runId: r.runId ?? null, unreadable: r.unreadable }));
     return {
       ok: true,
       scannedAt: new Date().toISOString(),
       totalRuns: listed.runs.length,
       matches,
+      unreadable,
     };
+  }
+
+  // Read our own per-attempt launch record (attempts/<id>/launch.json) —
+  // the durable launcher-identity evidence written before/at spawn. A
+  // missing or corrupt record is reported as such; it is never proof that
+  // no launcher existed.
+  async function launchRecord(attemptId) {
+    assertSafeId('attemptId', attemptId);
+    const file = path.join(attemptsDir, attemptId, 'launch.json');
+    let raw;
+    try { raw = await fs.readFile(file, 'utf-8'); }
+    catch (e) {
+      if (e && e.code === 'ENOENT') return { attemptId, missing: true, corrupt: false };
+      throw e;
+    }
+    let rec;
+    try { rec = JSON.parse(raw); }
+    catch { return { attemptId, missing: false, corrupt: true }; }
+    return {
+      attemptId, missing: false, corrupt: false, file,
+      schemaVersion: rec.schemaVersion ?? null,
+      phase: rec.phase ?? null,
+      spawned: rec.spawned === true ? true : rec.spawned === false ? false : null,
+      porchRunId: rec.porchRunId ?? null,
+      launcher: rec.launch?.launcher ?? null,
+      diagnostics: rec.launch?.diagnostics ?? null,
+      error: rec.error ?? null,
+      environment: rec.environment ?? null,
+      cwd: rec.launch?.cwd ?? null,
+      pi: rec.launch?.pi ?? null,
+    };
+  }
+
+  // Point-in-time activity probe of a process IN OUR namespace (same /proc).
+  // Returns syscall token + IO + CPU counters — a caller compares two samples
+  // spaced over the idle window. exists uses the errno-aware tri-state:
+  // EACCES/EPERM stay unverifiable, never "absent".
+  async function activity(pid) {
+    if (!Number.isInteger(pid) || pid <= 0) return { pid, exists: null, readable: false };
+    let exists;
+    try {
+      statSync(`/proc/${pid}`);
+      exists = true;
+    } catch (e) {
+      exists = e && e.code === 'ENOENT' ? false : null;
+    }
+    if (exists !== true) {
+      return { pid, exists, readable: false, syscall: null, idleWait: null, ioSum: null, cpuSum: null };
+    }
+    const sc = procSyscall(pid);
+    const io = procIo(pid);
+    const cpu = procCpu(pid);
+    return {
+      pid,
+      exists: true,
+      readable: sc.readable || io.readable || cpu.readable,
+      syscall: sc.token,
+      idleWait: sc.readable ? (sc.token === 'running' ? false : IDLE_WAIT_SYSCALLS.has(sc.token)) : null,
+      ioSum: io.readable ? io.sum : null,   // null = unreadable, NEVER zero
+      cpuSum: cpu.readable ? cpu.cpu : null,
+    };
+  }
+
+  // Attempt dir presence — the dir is created early inside start(), but a
+  // missing dir is NOT by itself proof that start never ran: a live Node
+  // may hold an in-flight async start() before its mkdir completes, and a
+  // dir may be deleted/unreadable. The only honest never-entered proof is
+  // the caller's OWN knowledge (this instance never invoked start for this
+  // attemptId, and has no in-flight start) combined with a clean zero-match
+  // registry scan; for a FOREIGN owner's attempt, absence is usable only
+  // after that owner is positively proven dead.
+  async function attemptDirState(attemptId) {
+    assertSafeId('attemptId', attemptId);
+    const dir = path.join(attemptsDir, attemptId);
+    let entries;
+    try {
+      entries = await fs.readdir(dir);
+    } catch (e) {
+      if (e && e.code === 'ENOENT') return { attemptId, exists: false, files: [] };
+      return { attemptId, exists: null, files: [], error: e.code || 'unreadable' };
+    }
+    return { attemptId, exists: true, files: entries };
+  }
+
+  // The Pi session jsonl bound to THIS attempt — launches pass the supported
+  // `pi --mode rpc --session-id acp-<attemptId>` (see porch
+  // backend_run.sh/pi_rpc_oneshot.py); pi writes
+  // <sessions-root>/--<cwd-slug>--/<ts>_acp-<attemptId>.jsonl. Used ONLY as a
+  // growth metric by the stuck heuristic: the file must live in the dir that
+  // encodes the attempt's OWN workspace cwd — a same-named file under another
+  // cwd is not this attempt's log. Any read failure, ambiguity, or missing
+  // file is `ok:false` (unknown), never zero-growth evidence.
+  // Mirrors installed pi session-manager.getDefaultSessionDirPath: the cwd
+  // slug is `--${resolvePath(cwd) with / \ : -> -}--` under
+  // <agentDir>/sessions. PI_CODING_AGENT_SESSION_DIR (= ENV_SESSION_DIR,
+  // honored by installed pi main.js like --session-dir) is a FLAT override —
+  // no cwd slug is appended. The porch pi adapter passes the whole env to
+  // the pi child unchanged, so whatever reaches launchEnv here is what the
+  // launched pi resolves. `~` binds the LAUNCHED HOME and a relative path
+  // binds the launch cwd — the same expansion pi applies inside the child.
+  const piNormalizePath = (p, { home, cwd }) => {
+    const s = String(p);
+    if (s === '~') return path.resolve(home);
+    if (s.startsWith('~/')) return path.join(path.resolve(home), s.slice(2));
+    return path.isAbsolute(s) ? path.resolve(s) : path.resolve(cwd, s);
+  };
+  const piSessionDirFor = (launchEnv, cwd) => {
+    const home = launchEnv.HOME || os.homedir();
+    const explicit = launchEnv.PI_CODING_AGENT_SESSION_DIR;
+    if (explicit) return piNormalizePath(explicit, { home, cwd });
+    const agentDir = launchEnv.PI_CODING_AGENT_DIR
+      ? piNormalizePath(launchEnv.PI_CODING_AGENT_DIR, { home, cwd })
+      : path.join(home, '.pi', 'agent');
+    const slug = `--${path.resolve(cwd).replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`;
+    return path.join(agentDir, 'sessions', slug);
+  };
+  // Reads the session jsonl for attempt `attemptId` — ONLY through the dir
+  // recorded at launch (immutable evidence), never the mutable process env.
+  async function sessionLog(attemptId) {
+    try {
+      assertSafeId('attemptId', attemptId);
+    } catch {
+      return { ok: false, code: 'invalid_attempt_id' };
+    }
+    const rec = await launchRecord(attemptId).catch(() => null);
+    const dir = rec?.pi?.sessionDir;
+    if (typeof dir !== 'string' || !dir.startsWith('/')) {
+      // A record predating the pi block (or missing/corrupt) cannot prove a
+      // location — unknown, never zero-growth evidence.
+      return { ok: false, code: 'session_dir_unrecorded' };
+    }
+    const suffix = `_${rec.pi.sessionId || `acp-${attemptId}`}.jsonl`;
+    let entries;
+    try {
+      entries = await fs.readdir(dir);
+    } catch (e) {
+      return { ok: false, code: e?.code === 'ENOENT' ? 'session_log_missing' : 'sessions_unreadable' };
+    }
+    const hits = [];
+    for (const e of entries) {
+      if (!e.endsWith(suffix)) continue;
+      const p = path.join(dir, e);
+      try {
+        const st = await fs.stat(p);
+        if (st.isFile()) hits.push({ path: p, bytes: st.size, mtimeMs: st.mtimeMs });
+      } catch { /* raced unlink — skip */ }
+    }
+    if (hits.length !== 1) {
+      return { ok: false, code: hits.length ? 'session_log_ambiguous' : 'session_log_missing' };
+    }
+    return { ok: true, ...hits[0] };
   }
 
   return {
     kind: 'porch-process',
     rootDir, steerDir, outputDir, attemptsDir, porchPath,
     environment, processIdentity, start, status, events, wait, cancel,
-    listRuns, reconcile,
+    listRuns, reconcile, launchRecord, activity, attemptDirState, sessionLog,
+    IDLE_WAIT_SYSCALLS,
   };
 }
 

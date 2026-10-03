@@ -31,6 +31,7 @@ export const useUiStore = defineStore('ui', () => {
   const showSettings = ref(false);
   const showTraffic = ref(false);
   let store: KVStore | null = null;
+  let viewPicked = false;
 
   // Global project scope ('all' | project id). Reads/writes delegate to the
   // registry — persistence, validation and the Common default live there.
@@ -44,11 +45,19 @@ export const useUiStore = defineStore('ui', () => {
   async function initUiStore(): Promise<void> {
     store = await loadKvStore(STORE_PATH);
     const saved = await store.get<ViewId>(KEY);
-    if (saved && VIEWS.some((v) => v.id === saved)) activeView.value = saved;
+    // A view picked while init was still awaiting the store already won —
+    // persist it instead of reverting to the saved value.
+    if (viewPicked) {
+      await store.set(KEY, activeView.value);
+      await store.save();
+    } else if (saved && VIEWS.some((v) => v.id === saved)) {
+      activeView.value = saved;
+    }
     bindShortcuts();
   }
 
   async function setView(view: ViewId): Promise<void> {
+    viewPicked = true;
     activeView.value = view;
     if (store) {
       await store.set(KEY, view);

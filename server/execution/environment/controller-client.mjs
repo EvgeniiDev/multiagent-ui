@@ -13,11 +13,7 @@
 import { promises as fs } from 'node:fs';
 import http from 'node:http';
 import { RuntimeError } from '../common.mjs';
-
-// Channel-token shape: the controller provisions crypto.randomBytes(24)
-// hex (see provisionToken in deploy/execution/env-controller.mjs) — the
-// same 48-hex contract internal-transport.mjs uses on its own channel.
-const TOKEN_RE = /^[0-9a-f]{48}$/;
+import { TOKEN_RE } from '../internal-transport.mjs';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 

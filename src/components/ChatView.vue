@@ -216,6 +216,60 @@ function toggleAttachment(messageId: string, index: number): void {
   else expandedAttachments.value.add(key);
 }
 const isLoading = computed(() => rt.isLoading);
+
+// Live turn status: when the agent works without writing text (a long tool
+// call, a slow model), the feed looks frozen — a static "Working…" is
+// indistinguishable from a stuck session. Track the turn start and tick a
+// 1s clock so the indicator shows WHAT runs and FOR HOW LONG.
+const turnStartedAt = ref<number | null>(null);
+const turnTick = ref(0);
+let turnTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopTurnTimer() {
+  if (turnTimer !== null) {
+    clearInterval(turnTimer);
+    turnTimer = null;
+  }
+}
+
+watch(isLoading, (loading) => {
+  if (loading) {
+    turnStartedAt.value = Date.now();
+    turnTick.value = 0;
+    stopTurnTimer();
+    turnTimer = setInterval(() => { turnTick.value += 1; }, 1000);
+  } else {
+    stopTurnTimer();
+    turnStartedAt.value = null;
+  }
+});
+
+/** Elapsed seconds of the running turn (driven by turnTick). */
+const turnElapsedSec = computed(() => {
+  if (turnStartedAt.value == null) return 0;
+  void turnTick.value;
+  return Math.max(0, Math.round((Date.now() - turnStartedAt.value) / 1000));
+});
+
+/** Newest in-progress tool call across all messages, if any. */
+const activeToolCall = computed(() => {
+  let found = null;
+  for (const m of messages.value) {
+    for (const tc of m.toolCalls ?? []) {
+      if (tc.status === 'pending' || tc.status === 'in_progress') found = tc;
+    }
+  }
+  return found;
+});
+
+/** One-line live status for the loading indicator. */
+const turnStatusText = computed(() => {
+  const secs = turnElapsedSec.value;
+  const when = secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  const tc = activeToolCall.value;
+  if (tc) return `Working · ${tc.kind} ${tc.title} · ${when}`;
+  return `Working · thinking · ${when}`;
+});
 const isConnected = computed(() => rt.isConnected);
 const isReconnecting = computed(() => rt.isReconnecting);
 // Non-null while the feed shows the localStorage tail instead of a settled
@@ -578,6 +632,7 @@ onMounted(() => {
   }
 });
 onBeforeUnmount(() => {
+  stopTurnTimer();
   composerRo?.disconnect();
   composerRo = null;
   if (narrowMql) {
@@ -918,10 +973,11 @@ function getToolKind(kind: string): string {
         />
       </div>
 
-      <!-- Loading indicator -->
+      <!-- Loading indicator: live status (active tool + elapsed time) so a
+           long silent turn reads as work in progress, not a stuck session. -->
       <div v-if="isLoading" class="loading-indicator">
         <span class="spinner"></span>
-        <span>Working…</span>
+        <span :title="turnStatusText">{{ turnStatusText }}</span>
         <button class="cancel-btn" @click="handleCancel">Stop</button>
       </div>
       </div>

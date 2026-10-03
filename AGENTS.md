@@ -17,7 +17,7 @@ anything: `docker compose ps` + `ss -tlnp`.
 | 25808 | web (`dist-web/`) |
 | 25809, 25906, 25910–25914 | https-front |
 | 25900 | state server |
-| 25901–25904 | bridges: hermes / opencode / devin / pi |
+| 25901–25904, 25907 | bridges: hermes / opencode / devin / pi / codex |
 | 25905 | stt |
 
 A stray process on an occupied port is killed, not worked around.

@@ -1,0 +1,730 @@
+<script setup lang="ts">
+// Idea-preparation section of the card drawer (P5): the user-channel UI
+// over the durable preparation session (server/execution/preparation/*).
+// Everything rendered here comes from the execution store's polled
+// preparation view — one durable discussion, derived readiness, pinned
+// bindings — never from cached board state and never from a model's claim.
+//
+// Commands are deliberate user actions only: one click = one commandId =
+// one POST through execStore.sendCommand (busy-guarded, revision-checked).
+// Offline, every control is disabled with its reason; the server remains
+// authoritative for every gate mirrored here.
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useExecutionStore } from '../../stores/execution';
+import {
+  canChangePrepBinding,
+  canConfirmGate,
+  canPrepHandoff,
+  canStartPrep,
+  canStopPrep,
+  canTalkPrep,
+  docKindLabel,
+  fmtTs,
+  prepAnswerPayload,
+  prepBindingProblem,
+  prepBindingsForStage,
+  prepBlockerText,
+  prepContinuePayload,
+  prepDraftPayload,
+  prepGateLabel,
+  prepGatePayload,
+  prepHandoffPayload,
+  prepPhaseLabel,
+  prepStageLabel,
+  prepStartPayload,
+  prepStatusLabel,
+  prepStopPayload,
+  prepBindPayload,
+  PREP_STAGES,
+  shortId,
+  type GateResult,
+} from '../../lib/execution/ui-model';
+import type {
+  ExecDocKind,
+  PrepBindingInfo,
+  PrepGate,
+  PrepQuestion,
+  PrepStage,
+} from '../../lib/execution/api';
+
+const props = defineProps<{ cardId: string }>();
+
+const exec = useExecutionStore();
+
+// This panel owns exactly one watch on its card — mounted with the drawer,
+// re-balanced on a card switch (same contract as ExecutionPanel).
+watch(
+  () => props.cardId,
+  (id, prev) => {
+    if (prev && prev !== id) exec.unwatchCard(prev);
+    if (id) exec.watchCard(id);
+  },
+);
+
+onMounted(() => {
+  exec.watchCard(props.cardId);
+  void exec.loadPrepBindings();
+});
+onBeforeUnmount(() => {
+  exec.unwatchCard(props.cardId);
+  uiSeq += 1; // every in-flight answer/send for this card dies with the panel
+});
+
+const st = computed(() => exec.stateFor(props.cardId));
+const view = computed(() => st.value.view);
+const prep = computed(() => st.value.preparation);
+const offline = computed(() => exec.online === false);
+const busy = computed(() => st.value.busy !== null);
+
+// The section renders only when the deployment advertises the feature AND
+// the card is managed — an unmanaged card has no aggregate to hold a
+// session, and a feature-off server has no endpoints.
+const featureOn = computed(() => view.value?.features?.preparation === true);
+const visible = computed(() => featureOn.value && view.value?.managed === true);
+
+const session = computed(() => prep.value);
+// The card view's summary is the cheap truth: while it names a session the
+// full view hasn't delivered yet, render loading — never the start form
+// (a transient blank would let a user start over a live session).
+const loading = computed(
+  () => featureOn.value && !session.value && !!view.value?.preparation,
+);
+const stopped = computed(() => session.value?.status === 'stopped');
+const questions = computed(() => session.value?.checkpoint?.openQuestions ?? []);
+const gatesAll = computed(() => session.value?.gates ?? []);
+const lastAttempt = computed(() => {
+  const list = session.value?.attempts ?? [];
+  return list.length ? list[list.length - 1] : null;
+});
+const handoffMode = ref('solo');
+const handoffTargets = computed(() => session.value?.handoffTargets ?? []);
+
+let uiSeq = 0;
+const stillCurrent = (cardId: string, seq: number) => props.cardId === cardId && seq === uiSeq;
+
+function gated(gate: GateResult): { disabled: boolean; title: string } {
+  if (offline.value) return { disabled: true, title: 'state server unreachable — actions are disabled' };
+  if (busy.value) return { disabled: true, title: `a ${st.value.busy} command is still in flight` };
+  return { disabled: !gate.ok, title: gate.ok ? '' : gate.reason };
+}
+
+async function send(
+  type: Parameters<typeof exec.sendCommand>[1],
+  payload: Record<string, unknown> = {},
+): Promise<boolean> {
+  const cardId = props.cardId;
+  const seq = uiSeq;
+  const r = await exec.sendCommand(cardId, type, payload);
+  if (!r.ok && r.error && stillCurrent(cardId, seq)) {
+    alert(r.status === 409 ? `${r.error}\n\nState was reloaded from the server.` : r.error);
+  }
+  return stillCurrent(cardId, seq) ? r.ok : false;
+}
+
+// ---- start form -------------------------------------------------------------
+
+const intentDraft = ref('');
+// '' = no binding for that stage at start (the lead runs unbound; the
+// server still validates every selection it is given).
+const startBindings = ref<Partial<Record<PrepStage, string>>>({});
+const startBindingsOpen = ref(false);
+const talkGate = computed(() => (view.value ? canTalkPrep(view.value) : { ok: false, reason: 'loading…' }));
+const startGate = computed(() => {
+  if (!view.value) return { ok: false, reason: 'loading…' };
+  const g = canStartPrep(view.value);
+  if (!g.ok) return g;
+  if (!intentDraft.value.trim()) return { ok: false, reason: 'describe the idea first' };
+  return g;
+});
+
+async function onStartPrep() {
+  const bindings: Partial<Record<PrepStage, string | null>> = {};
+  for (const stage of PREP_STAGES) {
+    const v = startBindings.value[stage];
+    if (v) bindings[stage] = v;
+  }
+  const ok = await send('start_preparation', prepStartPayload(intentDraft.value, bindings));
+  if (ok) {
+    intentDraft.value = '';
+    startBindings.value = {};
+    startBindingsOpen.value = false;
+  }
+}
+
+// ---- answers ----------------------------------------------------------------
+
+const answerDrafts = ref<Record<string, string>>({});
+const answerSelects = ref<Record<string, string>>({});
+
+function questionGate(q: PrepQuestion): GateResult {
+  const talk = talkGate.value;
+  if (!talk.ok) return talk;
+  if (q.status !== 'open') return { ok: false, reason: `question is ${q.status}` };
+  const opts = q.dialog?.options;
+  if (opts?.length) {
+    if (!answerSelects.value[q.questionId]) return { ok: false, reason: 'choose an answer' };
+    return { ok: true, reason: '' };
+  }
+  if (!(answerDrafts.value[q.questionId] ?? '').trim()) {
+    return { ok: false, reason: 'type an answer' };
+  }
+  return { ok: true, reason: '' };
+}
+
+async function onAnswer(q: PrepQuestion) {
+  const text = q.dialog?.options?.length
+    ? answerSelects.value[q.questionId]
+    : (answerDrafts.value[q.questionId] ?? '').trim();
+  if (!text) return;
+  const ok = await send('answer_question', prepAnswerPayload(q.questionId, text));
+  if (ok) {
+    delete answerDrafts.value[q.questionId];
+    delete answerSelects.value[q.questionId];
+  }
+}
+
+// ---- continue / stop ----------------------------------------------------------
+
+const continueDraft = ref('');
+const continueGate = computed(() => {
+  if (!talkGate.value.ok) return talkGate.value;
+  if (!continueDraft.value.trim()) return { ok: false, reason: 'write a message to the lead first' };
+  return { ok: true, reason: '' };
+});
+
+async function onContinue() {
+  const ok = await send('continue_discussion', prepContinuePayload(continueDraft.value));
+  if (ok) continueDraft.value = '';
+}
+
+async function onStopPrep() {
+  if (!confirm(
+    'Stop this preparation session?\n\n' +
+      'The discussion state is preserved (checkpoint, decisions, open ' +
+      'questions stay recorded), but the conversation closes — the card ' +
+      'returns to the plain managed lifecycle.',
+  )) return;
+  await send('stop_preparation', prepStopPayload());
+}
+
+// ---- drafts / documents ---------------------------------------------------------
+
+const DOC_KINDS: ExecDocKind[] = ['requirements', 'design', 'plan'];
+const draftGate = computed(() => talkGate.value);
+
+function presentedLine(kind: ExecDocKind): string {
+  const p = session.value?.presented?.[kind];
+  if (!p) return '—';
+  const c = session.value?.completeness?.[kind];
+  const bits = [shortId(p.versionId)];
+  if (p.draft) bits.push('draft');
+  if (c?.stale) bits.push('stale — newer version exists');
+  if (c?.approved) bits.push('approved');
+  return bits.join(' · ');
+}
+
+async function onRequestDraft(kind: ExecDocKind) {
+  await send('request_draft', prepDraftPayload(kind));
+}
+
+// ---- gates ---------------------------------------------------------------------
+
+async function onConfirmGate(g: PrepGate) {
+  await send('confirm_gate', prepGatePayload(g.gateId));
+}
+
+// ---- bindings -------------------------------------------------------------------
+
+const bindings = computed(() => exec.prepBindings ?? []);
+const bindingsError = computed(() => exec.prepBindingsError);
+function stageChoices(stage: PrepStage): PrepBindingInfo[] {
+  return prepBindingsForStage(bindings.value, stage);
+}
+const bindPicks = ref<Partial<Record<PrepStage, string>>>({});
+
+function stageProblem(stage: PrepStage): string | null {
+  return prepBindingProblem(session.value?.bindings?.[stage] ?? null);
+}
+
+async function onApplyBinding(stage: PrepStage) {
+  const want = bindPicks.value[stage] ?? '';
+  const bindingId = want === '' ? null : want;
+  await send('change_skill_binding', prepBindPayload(stage, bindingId));
+  void exec.loadPrepBindings(true);
+}
+
+// ---- handoff --------------------------------------------------------------------
+
+const handoffGate = computed(() =>
+  view.value ? canPrepHandoff(view.value) : { ok: false, reason: 'loading…' });
+
+async function onHandoff() {
+  const mode = handoffMode.value;
+  const target = handoffTargets.value.find((t) => t.mode === mode);
+  if (!confirm(
+    `Record a handoff offer for mode "${mode}"?\n\n` +
+      'This freezes the current accepted inputs into a durable handoff ' +
+      'record. It does NOT start implementation — that stays a separate ' +
+      'Start action below.' +
+      (target && !target.implemented
+        ? `\n\nNote: mode "${mode}" is not implemented on this deployment — ` +
+          'the offer is recorded as unimplemented.' : ''),
+  )) return;
+  await send('handoff_preparation', prepHandoffPayload(mode));
+}
+
+const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
+</script>
+
+<template>
+  <section v-if="visible" class="exec-panel prep-panel" data-testid="prep-panel">
+    <div class="exec-block">
+      <div class="exec-blockhead">
+        <span class="exec-blocktitle">Idea preparation</span>
+        <span
+          v-if="session"
+          class="exec-line mono"
+          data-testid="prep-status"
+        >{{ prepStatusLabel(session.status) }} · {{ prepPhaseLabel(session.phase) }}<template v-if="session.ready"> · ready</template></span>
+      </div>
+      <p v-if="st.prepError" class="exec-line exec-warn" data-testid="prep-stale">
+        last known state — the preparation view failed to refresh: {{ st.prepError }}
+      </p>
+      <p v-if="st.commandError" class="exec-line exec-warn" data-testid="prep-cmderror">
+        {{ st.commandError.error }}
+      </p>
+
+      <!-- ── session view in flight ─────────────────────────────────────── -->
+      <p v-if="loading" class="exec-line" data-testid="prep-loading">
+        loading the preparation session…
+      </p>
+
+      <!-- ── no session: the start form ─────────────────────────────────── -->
+      <template v-else-if="!session">
+        <p class="exec-line">
+          Turn this card's raw idea into accepted requirements and a plan —
+          one durable discussion with the lead, explicit document approvals,
+          then an explicit handoff. Implementation never auto-starts.
+        </p>
+        <textarea
+          v-model="intentDraft"
+          class="f-input exec-area"
+          rows="3"
+          data-testid="prep-intent"
+          placeholder="Describe the idea for this card — the lead will interview you."
+        ></textarea>
+        <details
+          class="prep-bindings-detail"
+          data-testid="prep-bindings-start"
+          :open="startBindingsOpen"
+          @toggle="startBindingsOpen = ($event.target as HTMLDetailsElement).open"
+        >
+          <summary class="exec-line">Skill bindings for this session (optional)</summary>
+          <div v-for="stage in PREP_STAGES" :key="`start-${stage}`" class="prep-bindrow">
+            <span class="exec-role">{{ prepStageLabel(stage) }}</span>
+            <select
+              v-model="startBindings[stage]"
+              class="f-input exec-select exec-grow"
+              :data-testid="`prep-start-bind-${stage}`"
+            >
+              <option value="">lead only (no skill)</option>
+              <option
+                v-for="b in stageChoices(stage)"
+                :key="b.bindingId"
+                :value="b.bindingId"
+                :disabled="b.status !== 'available'"
+              >{{ b.bindingId }}{{ b.status !== 'available' ? ` — unavailable: ${b.unsupported?.reason ?? b.status}` : '' }}</option>
+            </select>
+          </div>
+          <p v-if="bindingsError" class="exec-line exec-warn" data-testid="prep-bindings-error">
+            binding registry: {{ bindingsError }}
+          </p>
+        </details>
+        <div class="exec-btnrow">
+          <button
+            class="btn exec-btn"
+            data-testid="prep-start"
+            :disabled="gated(startGate).disabled"
+            :title="gated(startGate).title"
+            @click="onStartPrep"
+          >Start preparation</button>
+        </div>
+      </template>
+
+      <!-- ── stopped session ────────────────────────────────────────────── -->
+      <template v-else-if="stopped">
+        <p class="exec-line" data-testid="prep-stopped">
+          Session {{ session.sessionId }} stopped{{ session.stopReason ? ` — ${session.stopReason}` : '' }}.
+          The checkpoint, documents and open questions are preserved; starting
+          again creates a new session.
+        </p>
+        <div class="exec-startrow">
+          <input
+            v-model="intentDraft"
+            class="f-input exec-grow"
+            data-testid="prep-restart-intent"
+            placeholder="intent for the new session…"
+            @keydown.enter="onStartPrep"
+          />
+          <button
+            class="btn exec-actionbtn"
+            data-testid="prep-restart"
+            :disabled="gated(startGate).disabled"
+            :title="gated(startGate).title"
+            @click="onStartPrep"
+          >Start new session</button>
+        </div>
+      </template>
+
+      <!-- ── the live session ───────────────────────────────────────────── -->
+      <template v-else-if="session">
+        <p class="exec-line mono" data-testid="prep-meta">
+          {{ session.sessionId }} · discussion “{{ session.discussion ?? 'prep' }}” · updated {{ fmtTs(session.updatedAt) }}
+        </p>
+        <p v-if="session.blocker" class="exec-line exec-warn" data-testid="prep-blocker">
+          lead blocker: {{ session.blocker }}
+        </p>
+        <p v-if="lastAttempt?.progress" class="exec-line" data-testid="prep-progress">
+          {{ lastAttempt.progress }}
+        </p>
+
+        <!-- readiness blockers — named, never a confidence number -->
+        <ul v-if="session.blockers.length" class="exec-checks" data-testid="prep-blockers">
+          <li
+            v-for="(b, i) in session.blockers"
+            :key="i"
+            class="exec-checkline exec-blocking"
+            data-testid="prep-blocker-item"
+          >{{ prepBlockerText(b) }}</li>
+        </ul>
+        <p v-else class="exec-line" data-testid="prep-ready">ready — all approvals and gates hold</p>
+
+        <!-- one durable discussion -->
+        <div class="prep-discussion" data-testid="prep-discussion">
+          <div class="exec-subtitle">Discussion</div>
+          <div v-if="!questions.length" class="exec-line" data-testid="prep-no-questions">
+            no questions yet — the lead is composing its first turn
+          </div>
+          <div
+            v-for="q in questions"
+            :key="q.questionId"
+            class="prep-q"
+            :class="{ 'prep-q-open': q.status === 'open' }"
+            :data-testid="`prep-q-${q.questionId}`"
+          >
+            <p class="exec-sumtext" :data-testid="`prep-qtext-${q.questionId}`">
+              <span class="exec-role" data-testid="prep-qchip">Q</span>
+              {{ q.text }}
+            </p>
+            <p v-if="q.status === 'answered'" class="exec-line" :data-testid="`prep-a-${q.questionId}`">
+              → {{ q.answer }}
+            </p>
+            <p v-else-if="q.status !== 'open'" class="exec-line">
+              → {{ q.status }}
+            </p>
+            <div v-else class="prep-answerrow">
+              <select
+                v-if="q.dialog?.options?.length"
+                v-model="answerSelects[q.questionId]"
+                class="f-input exec-select exec-grow"
+                :data-testid="`prep-answer-select-${q.questionId}`"
+              >
+                <option value="" disabled>choose…</option>
+                <option v-for="o in q.dialog!.options" :key="o" :value="o">{{ o }}</option>
+              </select>
+              <input
+                v-else
+                v-model="answerDrafts[q.questionId]"
+                class="f-input exec-grow"
+                :data-testid="`prep-answer-${q.questionId}`"
+                placeholder="your answer…"
+                @keydown.enter="onAnswer(q)"
+              />
+              <button
+                class="btn exec-actionbtn"
+                :data-testid="`prep-send-${q.questionId}`"
+                :disabled="gated(questionGate(q)).disabled"
+                :title="gated(questionGate(q)).title"
+                @click="onAnswer(q)"
+              >Answer</button>
+            </div>
+          </div>
+          <div v-if="session.checkpoint.decisions.length" class="exec-detail" data-testid="prep-decisions">
+            <div class="exec-subtitle">Decisions</div>
+            <p v-for="(d, i) in session.checkpoint.decisions" :key="`d-${i}`" class="exec-line">
+              · {{ d.text }}
+            </p>
+          </div>
+          <div v-if="session.checkpoint.assumptions.length" class="exec-detail" data-testid="prep-assumptions">
+            <div class="exec-subtitle">Assumptions</div>
+            <p v-for="(a, i) in session.checkpoint.assumptions" :key="`a-${i}`" class="exec-line">
+              ~ {{ a.text }}
+            </p>
+          </div>
+          <div class="exec-startrow">
+            <input
+              v-model="continueDraft"
+              class="f-input exec-grow"
+              data-testid="prep-continue-text"
+              placeholder="say something to the lead — steer, correct, add context…"
+              @keydown.enter="onContinue"
+            />
+            <button
+              class="btn exec-actionbtn"
+              data-testid="prep-continue"
+              :disabled="gated(continueGate).disabled"
+              :title="gated(continueGate).title"
+              @click="onContinue"
+            >Send</button>
+          </div>
+        </div>
+
+        <!-- documents + drafts -->
+        <div class="exec-detail" data-testid="prep-docs">
+          <div class="exec-subtitle">Documents</div>
+          <div v-for="k in DOC_KINDS" :key="k" class="exec-actionrow">
+            <span class="exec-role">{{ docKindLabel(k) }}</span>
+            <span class="exec-line exec-grow mono" :data-testid="`prep-doc-${k}`">{{ presentedLine(k) }}</span>
+            <button
+              class="btn exec-actionbtn"
+              :data-testid="`prep-draft-${k}`"
+              :disabled="gated(draftGate).disabled"
+              :title="gated(draftGate).title"
+              @click="onRequestDraft(k)"
+            >Draft {{ k }}</button>
+          </div>
+        </div>
+
+        <!-- gates -->
+        <div v-if="gatesAll.length" class="exec-detail" data-testid="prep-gates">
+          <div class="exec-subtitle">Skill gates</div>
+          <div
+            v-for="g in gatesAll"
+            :key="g.gateId"
+            class="exec-actionrow"
+            :data-testid="`prep-gate-${g.gateId}`"
+          >
+            <span class="exec-line exec-grow" :class="gateStatusClass(g)">
+              {{ prepGateLabel(g) }}<template v-if="g.status !== 'pending'"> — {{ g.status }}<template v-if="g.invalidationReason"> ({{ g.invalidationReason }})</template></template>
+            </span>
+            <button
+              v-if="g.status === 'pending'"
+              class="btn exec-actionbtn"
+              :data-testid="`prep-gate-confirm-${g.gateId}`"
+              :disabled="gated(canConfirmGate(view!, g)).disabled"
+              :title="gated(canConfirmGate(view!, g)).title"
+              @click="onConfirmGate(g)"
+            >Confirm</button>
+          </div>
+        </div>
+
+        <!-- bindings -->
+        <div class="exec-detail" data-testid="prep-bindings">
+          <div class="exec-subtitle">Skill bindings</div>
+          <div v-for="stage in PREP_STAGES" :key="stage" class="exec-detail">
+            <div class="exec-actionrow">
+              <span class="exec-role">{{ prepStageLabel(stage) }}</span>
+              <select
+                v-model="bindPicks[stage]"
+                class="f-input exec-select exec-grow"
+                :data-testid="`prep-bind-${stage}`"
+              >
+                <option value="">{{ session.bindings[stage]?.bindingId ?? 'lead only' }}</option>
+                <option
+                  v-for="b in stageChoices(stage)"
+                  :key="b.bindingId"
+                  :value="b.bindingId"
+                  :disabled="b.status !== 'available'"
+                >{{ b.bindingId }}{{ b.status !== 'available' ? ` — unavailable: ${b.unsupported?.reason ?? b.status}` : '' }}</option>
+              </select>
+              <button
+                class="btn exec-actionbtn"
+                :data-testid="`prep-bind-apply-${stage}`"
+                :disabled="gated(canChangePrepBinding(view!, stage, bindPicks[stage] || null)).disabled"
+                :title="gated(canChangePrepBinding(view!, stage, bindPicks[stage] || null)).title"
+                @click="onApplyBinding(stage)"
+              >Set</button>
+            </div>
+            <p v-if="stageProblem(stage)" class="exec-line exec-warn" :data-testid="`prep-bind-problem-${stage}`">
+              {{ stageProblem(stage) }}
+            </p>
+          </div>
+          <p v-if="bindingsError" class="exec-line exec-warn" data-testid="prep-bindings-error">
+            binding registry: {{ bindingsError }}
+          </p>
+        </div>
+
+        <!-- handoff — records the offer; implementation start stays a
+             separate action in the run section below -->
+        <div class="exec-detail" data-testid="prep-handoff">
+          <div class="exec-subtitle">Handoff</div>
+          <div class="exec-actionrow">
+            <select v-model="handoffMode" class="f-input exec-select" data-testid="prep-handoff-mode">
+              <option
+                v-for="t in handoffTargets"
+                :key="t.mode"
+                :value="t.mode"
+              >{{ t.mode }}{{ t.implemented ? '' : ' (not implemented)' }}</option>
+            </select>
+            <button
+              class="btn exec-actionbtn"
+              data-testid="prep-handoff-btn"
+              :disabled="gated(handoffGate).disabled"
+              :title="gated(handoffGate).title"
+              @click="onHandoff"
+            >Record handoff offer</button>
+          </div>
+          <div v-for="h in session.handoffs" :key="h.handoffId" class="exec-line" :data-testid="`prep-handoff-${h.handoffId}`">
+            → {{ h.mode }} @ {{ fmtTs(h.at) }}{{ h.stale ? ' — stale (inputs changed)' : '' }}{{ h.implemented === false ? ' — mode not implemented' : '' }}
+          </div>
+        </div>
+
+        <div class="exec-btnrow">
+          <button
+            class="btn exec-btn"
+            data-testid="prep-stop"
+            :disabled="gated(canStopPrep(view!)).disabled"
+            :title="gated(canStopPrep(view!)).title"
+            @click="onStopPrep"
+          >Stop preparation</button>
+        </div>
+      </template>
+    </div>
+  </section>
+</template>
+
+<style scoped>
+.prep-panel {
+  border-top: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  padding-top: 0.625rem;
+}
+.exec-block {
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+  border-radius: var(--radius-sm, 4px);
+  background: var(--tint-hover, rgba(43, 39, 35, 0.02));
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+.exec-blockhead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.exec-blocktitle {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--text-secondary, #6b6259);
+}
+.exec-line {
+  font-size: 0.625rem;
+  color: var(--text-secondary, #6b6259);
+  margin: 0;
+}
+.exec-subtitle {
+  font-size: 0.625rem;
+  font-weight: 600;
+  color: var(--text-secondary, #6b6259);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.exec-select {
+  font-size: 0.6875rem;
+}
+.exec-area {
+  font-size: 0.6875rem;
+}
+.exec-btnrow,
+.exec-actionrow {
+  display: flex;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.exec-btn {
+  align-self: flex-start;
+}
+.exec-warn,
+.exec-blocking {
+  color: var(--text-accent, #c2532f);
+}
+.exec-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+.exec-role {
+  font-size: 0.625rem;
+  color: var(--text-secondary, #6b6259);
+}
+.exec-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.exec-checkline {
+  font-size: 0.625rem;
+  color: var(--text-secondary, #6b6259);
+}
+.exec-grow {
+  flex: 1;
+  min-width: 0;
+}
+.exec-startrow {
+  display: flex;
+  gap: 0.375rem;
+  align-items: center;
+}
+.exec-actionbtn {
+  flex: none;
+}
+.exec-sumtext {
+  margin: 0;
+  font-size: 0.625rem;
+  color: var(--text-primary, #2b2723);
+  white-space: pre-wrap;
+}
+.prep-discussion {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+.prep-q {
+  border-left: 2px solid var(--border-faint, rgba(43, 39, 35, 0.15));
+  padding-left: 0.375rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+.prep-q-open {
+  border-left-color: var(--text-accent, #c2532f);
+}
+.prep-answerrow {
+  display: flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+.prep-bindrow {
+  display: grid;
+  grid-template-columns: 4.5rem 1fr;
+  gap: 0.25rem;
+  align-items: center;
+  margin-top: 0.25rem;
+}
+.prep-bindings-detail summary {
+  cursor: pointer;
+}
+.prep-gate-confirmed {
+  color: var(--text-secondary, #6b6259);
+}
+.prep-gate-invalidated {
+  color: var(--text-accent, #c2532f);
+  text-decoration: line-through;
+}
+</style>
