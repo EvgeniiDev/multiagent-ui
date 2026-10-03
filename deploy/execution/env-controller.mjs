@@ -36,10 +36,11 @@ import {
 import { loadEnvironmentConfigSync } from '../../server/execution/environment/env-config.mjs';
 import {
   validateAgentProfile, profileFlags, scopedAgentSpec, porchAgentEntry,
-  profileDigest,
+  profileDigest, usesDuckDuckGoTransport,
 } from '../../server/execution/environment/agent-profile.mjs';
 import { createDockerApi } from './docker-api.mjs';
 import { gitArchiveExtract } from './tarx.mjs';
+import { duckDuckGoExtensionSource } from './duckduckgo-transport.mjs';
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const BRANCH_RE = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,120}$/;
@@ -253,6 +254,10 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     await atomicWriteJson(path.join(conf, 'porch-config.json'), synth, 0o600);
     await atomicWriteJson(path.join(conf, 'profile-flags.json'),
       profileFlags(profile, { extRoot: '/work/node_modules', skillRoot: '/work/skills' }), 0o600);
+    if (usesDuckDuckGoTransport(profile)) {
+      await fs.copyFile(new URL('./duckduckgo-transport.mjs', import.meta.url), path.join(conf, 'duckduckgo-transport.mjs'));
+      await fs.writeFile(path.join(conf, 'duckduckgo-extension.ts'), duckDuckGoExtensionSource(), { mode:0o600 });
+    }
     await fs.writeFile(path.join(conf, 'prompt.md'), prompt, { mode: 0o600 });
     // Per-worker porch snapshot — copied under the ro conf mount so the
     // running worker can never mutate its own harness mid-run.

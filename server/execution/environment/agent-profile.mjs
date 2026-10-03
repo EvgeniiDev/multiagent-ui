@@ -147,15 +147,24 @@ export function porchAgentEntry(profile) {
   };
 }
 
+export function usesDuckDuckGoTransport(profile) {
+  const p = validateAgentProfile(profile);
+  return p.search.enabled && p.search.provider === 'duckduckgo'
+    && p.extensions.some(e => e.resource === 'piExt' && e.rel === 'pi-web-access');
+}
+
 // The deterministic pi argv fragment injected by the boundary shim
 // (PI_PROFILE_FLAGS_FILE). Synthesized BY THE CONTROLLER from the validated
 // profile — the runner payload carries the profile, never argv.
 //   extRoot: container path where the 'piExt' resource root is mounted.
 export function profileFlags(profile, { extRoot = '/work/node_modules', skillRoot = '/work/skills' } = {}) {
   const p = validateAgentProfile(profile);
+  const duckDuckGoTransport = usesDuckDuckGoTransport(p);
   const flags = [];
   flags.push('--no-extensions');           // explicit -e only, no discovery
-  for (const e of p.extensions) flags.push('-e', `${extRoot}/${e.rel}`);
+  for (const e of p.extensions) flags.push('-e',
+    duckDuckGoTransport && e.resource === 'piExt' && e.rel === 'pi-web-access'
+      ? '/work/conf/duckduckgo-extension.ts' : `${extRoot}/${e.rel}`);
   flags.push('--no-skills');
   for (const s of p.skills) flags.push('--skill', `${skillRoot}/${s.rel}`);
   flags.push('--no-context-files', '--no-prompt-templates', '--no-themes', '-na');

@@ -282,7 +282,7 @@ sect('agent-profile');
   check('porch agent entry synthesized', entry.backend === 'pi-cli' && entry.model === p.model);
   const flags = profileFlags(p);
   check('profile flags include -e allowlist + --tools',
-    flags.includes('--no-extensions') && flags.includes('/work/node_modules/pi-web-access')
+    flags.includes('--no-extensions') && flags.includes('/work/conf/duckduckgo-extension.ts')
     && flags.includes('--tools') && flags.includes('bash,read,web_search')
     && flags.includes('--thinking') && flags.includes('low'));
 }

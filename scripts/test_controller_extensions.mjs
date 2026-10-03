@@ -7,7 +7,7 @@ import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { createEnvController } from '../deploy/execution/env-controller.mjs';
 import { createDockerApi } from '../deploy/execution/docker-api.mjs';
-import { profileDigest } from '../server/execution/environment/agent-profile.mjs';
+import { profileDigest, profileFlags, porchAgentEntry } from '../server/execution/environment/agent-profile.mjs';
 
 const roots = [];
 after(async () => { await Promise.all(roots.map(r => fs.rm(r, { recursive: true, force: true }))); });
@@ -50,8 +50,44 @@ async function fixture() {
   const profile = { schemaVersion:1, profileId:'test', pi:{ version:'0.85.1' }, image:'worker', provider:'test', model:'test/model', thinking:'low', skills:[], extensions:[], tools:['read'], search:{ enabled:false }, launch:{ progress:'none', extraFlags:[] }, systemPromptFile:null };
   const prepare = (workerId, materials = {}, role = 'participant') => controller.handle('worker.prepare', { workerId, attemptId:workerId.slice(2), role, profile, profileDigest:profileDigest(profile), prompt:'task', materials:{ projectRoot:'project', snapshotSha:sha, ...materials } });
   const canonical = async () => (await controller.handle('canonical.prepare', { canonicalId:'canonical', projectRoot:'project', snapshotSha:sha })).canonical;
-  return { root, project, sha, config, docker, controller, containers, calls, created, prepare, canonical };
+  return { root, project, sha, config, docker, controller, containers, calls, created, prepare, canonical, profile };
 }
+
+test('DuckDuckGo search flags point to controller-owned shim and copied transport', async () => {
+  const f = await fixture();
+  f.profile.search = { enabled:true, provider:'duckduckgo', params:{} };
+  f.profile.extensions = [{ resource:'piExt', rel:'pi-web-access' }];
+  const { worker } = await f.prepare('w-search');
+  const conf = path.join(worker.workerDir,'conf');
+  const flags = JSON.parse(await fs.readFile(path.join(conf,'profile-flags.json'),'utf8'));
+  assert.equal(flags.includes('/work/conf/duckduckgo-extension.ts'),true);
+  assert.equal(flags.includes('/work/node_modules/pi-web-access'),false);
+  const shim = await fs.readFile(path.join(conf,'duckduckgo-extension.ts'),'utf8');
+  assert.match(shim,/\/work\/conf\/duckduckgo-transport\.mjs/);
+  assert.match(shim,/\/work\/node_modules\/pi-web-access\/index\.ts/);
+  assert.equal(await fs.readFile(path.join(conf,'duckduckgo-transport.mjs'),'utf8'),
+    await fs.readFile(new URL('../deploy/execution/duckduckgo-transport.mjs',import.meta.url),'utf8'));
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(conf,'porch-config.json'),'utf8')).agents.test,porchAgentEntry(f.profile));
+  assert.equal(f.created[0].HostConfig.Binds.some(b => b.endsWith(':/work/conf:ro')),true);
+  assert.equal(f.created[0].HostConfig.Binds.some(b => b.endsWith(':/work/node_modules:ro')),true);
+});
+
+test('DuckDuckGo shim applies only to the exact registered extension and enabled provider', async () => {
+  for (const change of [
+    { search:{enabled:false,provider:'duckduckgo'} },
+    { search:{enabled:true,provider:'other'} },
+    { extensions:[{resource:'piExt',rel:'pi-web-access-other'}] },
+    { extensions:[{resource:'piSkills',rel:'pi-web-access'}] },
+    { extensions:[] },
+  ]) {
+    const f = await fixture();
+    Object.assign(f.profile,{search:{enabled:true,provider:'duckduckgo'},extensions:[{resource:'piExt',rel:'pi-web-access'}]},change);
+    const { worker } = await f.prepare('w-ordinary');
+    assert.equal(profileFlags(f.profile).includes('/work/conf/duckduckgo-extension.ts'),false);
+    await assert.rejects(fs.stat(path.join(worker.workerDir,'conf/duckduckgo-extension.ts')),{code:'ENOENT'});
+    await assert.rejects(fs.stat(path.join(worker.workerDir,'conf/duckduckgo-transport.mjs')),{code:'ENOENT'});
+  }
+});
 
 test('worker network Docker API payload sets the tunnel-safe bridge MTU', async (t) => {
   const f = await fixture(); const socketPath = path.join(f.root,'docker.sock');
