@@ -537,3 +537,154 @@ describe('ui-model — downstream modes + completeness', () => {
     assert.match(ui.canStart(v).reason, /still live/);
   });
 });
+
+// ============================================================================
+// ui-model — server-flagged modes unlock start; handoff offers stay durable
+//
+// Backend-ui-contract §10: modes stay disabled until the server reports
+// them available. canStartInMode(mode) without a view keeps the old
+// conservative behavior (orchestrator/swarm refuse); with a card view
+// whose `features` advertise the mode, start passes through to the run
+// gates. The PreparationPanel renders the startable set verbatim.
+// ============================================================================
+
+describe('ui-model — flagged modes unlock start', () => {
+  test('canStartInMode with a flagged view admits orchestrator/swarm', () => {
+    // No view: conservative — refuse without a POST.
+    assert.equal(ui.canStartInMode('orchestrator').ok, false);
+    assert.equal(ui.canStartInMode('swarm').ok, false);
+    // Flagged view: admitted (run gates still apply at send time).
+    const flagged = cardView({ features: { orchestrator: true, swarm: true } });
+    assert.equal(ui.canStartInMode('orchestrator', flagged).ok, true);
+    assert.equal(ui.canStartInMode('swarm', flagged).ok, true);
+    // Unflagged view: still refused.
+    const plain = cardView({ features: {} });
+    assert.equal(ui.canStartInMode('orchestrator', plain).ok, false);
+    assert.match(ui.canStartInMode('orchestrator', plain).reason, /no run backend/);
+    // Unknown modes never admit, with or without a view.
+    assert.equal(ui.canStartInMode('fleet', flagged).ok, false);
+    assert.match(ui.canStartInMode('fleet', flagged).reason, /unknown downstream mode/);
+  });
+
+  test('startableModes mirrors the server features flags', () => {
+    assert.deepEqual(ui.startableModes(cardView({ features: {} })), ['solo', 'fusion']);
+    assert.deepEqual(
+      ui.startableModes(cardView({ features: { orchestrator: true } })),
+      ['solo', 'fusion', 'orchestrator'],
+    );
+    assert.deepEqual(
+      ui.startableModes(cardView({ features: { orchestrator: true, swarm: true } })),
+      ['solo', 'fusion', 'orchestrator', 'swarm'],
+    );
+  });
+});
+
+// ============================================================================
+// PreparationPanel SSR — card draft filling, gate confirm, handoff offer
+//
+// The brainstorm/grill flow is: start form → live discussion (questions,
+// answers, decisions) → presented card drafts per kind → explicit gate
+// confirms → handoff offer recording. These render the panel against a
+// managed card with a live session and assert each surface exists with
+// the exact testids the live e2e suite drives.
+// ============================================================================
+
+describe('PreparationPanel SSR — discussion, drafts, gates, handoff', () => {
+  beforeEach(async () => {
+    const storageMod = await import('../src/lib/host/storage.ts');
+    await storageMod.__resetWebKvForTests();
+    if (typeof localStorage !== 'undefined') localStorage.clear();
+    setActivePinia(createPinia());
+  });
+  afterEach(() => releaseExec());
+
+  async function renderPrepPanel(cardId, viewOver, prepOver) {
+    const { createSSRApp } = await import('vue');
+    const { renderToString } = await import('@vue/server-renderer');
+    const { useBoardStore } = await import('../src/stores/board.ts');
+    const Panel = (await import('../src/features/board/PreparationPanel.vue')).default;
+    const exec = useExecutionStore();
+    const client = new FakeExec();
+    setExecutionClient(client);
+    const board = useBoardStore();
+    board.cards = [{
+      id: cardId, title: 'idea card', description: '', project: 'demo', agent: '',
+      priority: 'medium', acceptance: '', verification: '', links: [], session: null,
+      stage: 'backlog', status: null, statusByStage: {}, blocked: false,
+      blockedReason: '', cancelled: false, touches: [], dependsOn: [],
+      blocks: [], conflictsWith: [], order: 1, createdAt: 1, updatedAt: 1,
+      execution: { managed: true, internalRevision: 1, controlRevision: 2 },
+    }];
+    const st = exec.stateFor(cardId);
+    st.phase = 'ready';
+    st.view = cardView({ cardId, ...viewOver });
+    st.preparation = prepView({ ...prepOver });
+    const html = await renderToString(createSSRApp(Panel, { cardId }));
+    return html;
+  }
+
+  test('live discussion renders questions, answers, decisions, gates', async () => {
+    const html = await renderPrepPanel('pc1', {}, {
+      gates: [
+        { gateId: 'g1', type: 'intent_confirm', status: 'pending' },
+        { gateId: 'g2', type: 'artifact_confirm', subject: { docKind: 'requirements' }, status: 'confirmed', confirmedAt: now() },
+      ],
+      checkpoint: {
+        revision: 3, updatedAt: now(),
+        decisions: [{ text: 'use postgres' }],
+        assumptions: [{ text: 'single tenant' }],
+        openQuestions: [{
+          questionId: 'q-1', text: 'Which store?', blocking: true, status: 'open',
+          channel: 'dialog', dialog: { method: 'select', options: ['redis', 'pg'] },
+          attemptId: 'pa-1', createdAt: now() - 4000,
+        }],
+        log: [],
+      },
+      completeness: { requirements: 'presented', design: 'absent', plan: 'draft' },
+      presented: { requirements: { versionId: 'dv_req1', draft: true }, design: null, plan: null },
+    });
+    assert.ok(html.includes('prep-discussion'), 'discussion surface renders');
+    assert.ok(html.includes('prep-q-q-1'), 'open question row renders with its id');
+    assert.ok(html.includes('Which store?'), 'question text renders verbatim');
+    assert.ok(html.includes('prep-answer-select-q-1'), 'dialog options render as a select');
+    assert.ok(html.includes('use postgres'), 'recorded decisions render');
+    assert.ok(html.includes('single tenant'), 'recorded assumptions render');
+    assert.ok(html.includes('prep-gate-g1'), 'pending gate renders');
+    assert.ok(html.includes('prep-gate-confirm-g1'), 'pending gate carries a confirm control');
+    assert.ok(html.includes('prep-doc-requirements'), 'per-kind card draft row renders');
+    assert.ok(html.includes('prep-draft-requirements'), 'draft control renders');
+    assert.ok(html.includes('prep-completeness'), 'server-derived completeness renders');
+    assert.ok(html.includes('requirements: presented'), 'kind state renders verbatim');
+  });
+
+  test('accepted plan + confirmed gates drive the handoff offer surface', async () => {
+    const html = await renderPrepPanel('pc2', {}, {
+      ready: true, blockers: [],
+      gates: [{ gateId: 'g1', type: 'intent_confirm', status: 'confirmed', confirmedAt: now() }],
+      completeness: { requirements: 'approved', design: 'absent', plan: 'approved' },
+      presented: {
+        requirements: { versionId: 'dv_req1' },
+        design: null,
+        plan: { versionId: 'dv_plan1' },
+      },
+      handoffs: [{ handoffId: 'h1', mode: 'solo', implemented: true, at: now() - 1000, stale: false }],
+    });
+    assert.ok(html.includes('prep-ready'), 'readiness renders when blockers clear');
+    assert.ok(html.includes('prep-handoff-mode'), 'handoff mode picker renders');
+    assert.ok(html.includes('prep-handoff-btn'), 'handoff offer control renders');
+    assert.ok(html.includes('prep-handoff-h1'), 'recorded handoff offer renders');
+    assert.ok(html.includes('prep-modes-available'), 'startable-mode line renders');
+    assert.ok(html.includes('solo, fusion'), 'solo+fusion startable on this deployment');
+  });
+
+  test('flagged orchestrator/swarm appear in the startable-mode line', async () => {
+    const html = await renderPrepPanel(
+      'pc3',
+      { features: { start: true, orchestrator: true, swarm: true, preparation: true } },
+      {},
+    );
+    assert.ok(html.includes('prep-modes-available'), 'startable-mode line renders');
+    assert.ok(html.includes('orchestrator'), 'flagged orchestrator is named startable');
+    assert.ok(html.includes('swarm'), 'flagged swarm is named startable');
+  });
+});

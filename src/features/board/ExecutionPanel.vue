@@ -22,10 +22,19 @@ import {
   canApproveWorkOrder,
   canContinue,
   canExcludePanelist,
+  canOrchAnswer,
+  canOrchApprove,
+  canOrchGrant,
+  canOrchRetry,
   canRetryParticipant,
   canStart,
   canStartFusion,
+  canStartOrchestrator,
+  canStartSwarm,
   canStop,
+  canSwarmDecide,
+  canSwarmExtend,
+  canSwarmInput,
   checksToRows,
   currentVersion,
   currentWorkOrder,
@@ -44,6 +53,20 @@ import {
   fusionStatusLabel,
   fusionWorkOrders,
   isFusion,
+  isOrchestrator,
+  isSwarm,
+  orchAnswerPayload,
+  orchApprovePayload,
+  orchDraftProblems,
+  orchGrantPayload,
+  orchestrator as orchState,
+  orchPendingActions,
+  orchPendingActionText,
+  orchPhaseLabel,
+  orchRetryPayload,
+  orchStartPayload,
+  orchTaskStatusLabel,
+  orchTasks,
   participantStatusLabel,
   phaseLabel,
   planBindingNote,
@@ -58,10 +81,26 @@ import {
   startPayload,
   stopPayload,
   continuePayload,
+  swarm as swarmState,
+  swarmDecidePayload,
+  swarmDecisions,
+  swarmDraftProblems,
+  swarmExtendPayload,
+  swarmFrozen,
+  swarmInputPayload,
+  swarmMessages,
+  swarmParticipants,
+  swarmPendingActions,
+  swarmPendingActionText,
+  swarmPhaseLabel,
+  swarmStartPayload,
+  swarmStatusLabel,
   verdictLabel,
   type CheckRow,
   type DocSourceInput,
   type FusionDraft,
+  type OrchDraft,
+  type SwarmDraft,
 } from '../../lib/execution/ui-model';
 import type { ExecCheck, ExecDocKind, ExecPresetInput, ExecRole, FusionWorkOrder } from '../../lib/execution/api';
 import ManagedRunEvents from './ManagedRunEvents.vue';
@@ -214,6 +253,8 @@ watch(
     artifactSeq += 1;
     openedArtifact.value = null;
     fusionEditorOpen.value = false;
+    orchEditorOpen.value = false;
+    swarmEditorOpen.value = false;
   },
 );
 onBeforeUnmount(() => {
@@ -857,6 +898,233 @@ async function onApproveWorkOrder(wo: FusionWorkOrder | undefined) {
   )) return;
   await send('approve_work_order', payload);
 }
+
+// ---- orchestrator run graph (backend-ui-contract §§4–5) -------------------
+// The graph renders ONLY what the durable run.orchestrator record
+// carries — spec version, subtasks with attempts/evidence/waiting, the
+// integrate import, pendingActions. Every control is an explicit button
+// → send() → one commandId → one POST (orch_approve | orch_answer |
+// orch_grant | orch_retry; stop/continue shared). No fake transitions:
+// waiting/failed states surface with their unblock action or nothing.
+
+const oz = computed(() => orchState(run.value));
+const ozTasks = computed(() => orchTasks(run.value));
+const ozPending = computed(() => orchPendingActions(run.value));
+const ozStats = computed(() => oz.value?.stats ?? null);
+const ozSpec = computed(() => oz.value?.spec ?? null);
+const ozIntegrate = computed(() => oz.value?.integrate ?? null);
+
+// -- editor (start payload composition, contract §3) --
+
+const orchEditorOpen = ref(false);
+const orchDecomposer = ref('');
+const orchVerifier = ref('');
+const orchIntegrator = ref('');
+const orchWorkers = ref<{ name: string; profileId: string }[]>([]);
+const orchAttempts = ref('3');
+const orchIntegratorAttempts = ref('2');
+const orchMaxSubtasks = ref('16');
+const orchSpecApproval = ref(true);
+const orchBaseRef = ref('');
+
+/** Profile ids the server accepts — the compat table is the only source
+ * (pi entry like the fusion editor; the server digest-binds at start). */
+const orchProfiles = computed(() => exec.compatibility?.pi?.models ?? []);
+
+function openOrchEditor() {
+  const ms = orchProfiles.value;
+  orchDecomposer.value = ms[0] ?? '';
+  orchVerifier.value = ms[1] ?? ms[0] ?? '';
+  orchIntegrator.value = ms[2] ?? ms[0] ?? '';
+  orchWorkers.value = [{ name: 'default', profileId: ms[0] ?? '' }];
+  orchEditorOpen.value = true;
+}
+
+const orchDraft = computed<OrchDraft>(() => ({
+  decomposer: orchDecomposer.value,
+  verifier: orchVerifier.value,
+  integrator: orchIntegrator.value,
+  workers: orchWorkers.value.map((w) => ({ name: w.name, profileId: w.profileId })),
+  limits: {
+    maxAttemptsPerTask: Number(orchAttempts.value) || undefined,
+    maxIntegratorAttempts: Number(orchIntegratorAttempts.value) || undefined,
+    maxSubtasks: Number(orchMaxSubtasks.value) || undefined,
+    requireSpecApproval: orchSpecApproval.value,
+  },
+  baseRef: orchBaseRef.value,
+}));
+
+const orchProblems = computed(() =>
+  view.value ? orchDraftProblems(view.value, orchDraft.value) : ['loading managed state']);
+const orchStartGate = computed(() =>
+  view.value ? canStartOrchestrator(view.value, orchDraft.value) : { ok: false, reason: 'loading' });
+
+async function onStartOrchestrator() {
+  const ok = await send('start', orchStartPayload(orchDraft.value));
+  if (ok) orchEditorOpen.value = false;
+}
+
+// -- task decisions --
+
+const orchApproveGate = computed(() => canOrchApprove(run.value));
+const orchAnswerFor = (taskId: string) => canOrchAnswer(run.value, taskId);
+const orchGrantFor = (taskId: string) => canOrchGrant(run.value, taskId);
+const orchRetryFor = (taskId: string) => canOrchRetry(run.value, taskId);
+const orchAnswerDrafts = ref<Record<string, string>>({});
+
+async function onOrchApprove() {
+  const r = run.value;
+  const sha = ozSpec.value?.sha256;
+  if (!r || !sha) return;
+  if (!confirm(
+    `Approve decomposition spec ${fmtSha(sha, 12)}…?\n\n` +
+      'This freezes the spec — ready tasks promote and work begins.',
+  )) return;
+  await send('orch_approve', orchApprovePayload(r, sha));
+}
+
+async function onOrchAnswer(taskId: string) {
+  const r = run.value;
+  const text = (orchAnswerDrafts.value[taskId] ?? '').trim();
+  if (!r || !text) return;
+  const ok = await send('orch_answer', orchAnswerPayload(r, taskId, text));
+  if (ok) delete orchAnswerDrafts.value[taskId];
+}
+
+async function onOrchGrant(taskId: string) {
+  const r = run.value;
+  if (!r) return;
+  const raw = prompt(`Grant task ${taskId} extra attempts — how many?`, '1');
+  if (raw === null) return;
+  const attempts = Math.floor(Number(raw));
+  if (!Number.isFinite(attempts) || attempts <= 0) {
+    alert('attempts must be a positive number');
+    return;
+  }
+  await send('orch_grant', orchGrantPayload(r, taskId, attempts));
+}
+
+async function onOrchRetry(taskId: string) {
+  const r = run.value;
+  if (!r) return;
+  await send('orch_retry', orchRetryPayload(r, taskId));
+}
+
+// ---- swarm run state (backend-ui-contract §§6–7) --------------------------
+// The swarm renders ONLY what the durable run.swarm record carries —
+// participants with turn budget/attempt/waiting, contested ownership,
+// broker-escalated decisions, the message bus, freeze state, findings and
+// limits. Controls are explicit buttons → send() → one commandId → one
+// POST (swarm_input | swarm_extend | swarm_decide; stop/continue
+// shared). While frozen the UI disables apply expectations and shows the
+// freeze reason — the broker rejects those edits anyway.
+
+const sw = computed(() => swarmState(run.value));
+const swParticipants = computed(() => swarmParticipants(run.value));
+const swPending = computed(() => swarmPendingActions(run.value));
+const swMessages = computed(() => swarmMessages(run.value));
+const swDecisions = computed(() => swarmDecisions(run.value));
+const swFrozen = computed(() => swarmFrozen(run.value));
+const swLimits = computed(() => sw.value?.limits ?? null);
+const swFindings = computed(() => sw.value?.findings ?? []);
+const swOwnership = computed(() => sw.value?.ownership ?? []);
+
+// -- editor (start payload composition, contract §3) --
+
+const swarmEditorOpen = ref(false);
+const swarmParts = ref<{ participantId: string; callsign: string; profileId: string; ownedPaths: string }[]>([]);
+const swarmTurns = ref('8');
+const swarmRounds = ref('4');
+const swarmMaxMessages = ref('200');
+const swarmVerify = ref(true);
+const swarmBaseRef = ref('');
+
+function openSwarmEditor() {
+  const ms = orchProfiles.value;
+  swarmParts.value = [
+    { participantId: 'p1', callsign: 'A', profileId: ms[0] ?? '', ownedPaths: 'src/a/**' },
+    { participantId: 'p2', callsign: 'B', profileId: ms[1] ?? ms[0] ?? '', ownedPaths: 'src/b/**' },
+  ];
+  swarmEditorOpen.value = true;
+}
+
+function addSwarmParticipant() {
+  const n = swarmParts.value.length + 1;
+  const ms = orchProfiles.value;
+  swarmParts.value.push({
+    participantId: `p${n}`,
+    callsign: String.fromCharCode(64 + n),
+    profileId: ms[n - 1] ?? ms[0] ?? '',
+    ownedPaths: `src/p${n}/**`,
+  });
+}
+
+const swarmDraft = computed<SwarmDraft>(() => ({
+  participants: swarmParts.value.map((p) => ({
+    participantId: p.participantId,
+    callsign: p.callsign,
+    profileId: p.profileId,
+    ownedPaths: p.ownedPaths,
+  })),
+  limits: {
+    maxTurnsPerParticipant: Number(swarmTurns.value) || undefined,
+    maxRounds: Number(swarmRounds.value) || undefined,
+    maxMessages: Number(swarmMaxMessages.value) || undefined,
+    verifyRequired: swarmVerify.value,
+  },
+  baseRef: swarmBaseRef.value,
+}));
+
+const swarmProblems = computed(() =>
+  view.value ? swarmDraftProblems(view.value, swarmDraft.value) : ['loading managed state']);
+const swarmStartGate = computed(() =>
+  view.value ? canStartSwarm(view.value, swarmDraft.value) : { ok: false, reason: 'loading' });
+
+async function onStartSwarm() {
+  const ok = await send('start', swarmStartPayload(swarmDraft.value));
+  if (ok) swarmEditorOpen.value = false;
+}
+
+// -- participant decisions --
+
+const swarmInputDrafts = ref<Record<string, string>>({});
+const swarmBroadcast = ref('');
+const swarmDecideNotes = ref<Record<string, string>>({});
+
+async function onSwarmInput(participantId: string) {
+  const r = run.value;
+  const text = participantId === 'all'
+    ? swarmBroadcast.value.trim()
+    : (swarmInputDrafts.value[participantId] ?? '').trim();
+  if (!r || !text) return;
+  const ok = await send('swarm_input', swarmInputPayload(r, participantId, text));
+  if (ok) {
+    if (participantId === 'all') swarmBroadcast.value = '';
+    else delete swarmInputDrafts.value[participantId];
+  }
+}
+
+async function onSwarmExtend(participantId?: string | null) {
+  const r = run.value;
+  if (!r) return;
+  const raw = prompt(
+    `Extend ${participantId ? `participant ${participantId}` : 'the swarm'} — extra turns?`, '4');
+  if (raw === null) return;
+  const turns = Math.floor(Number(raw));
+  if (!Number.isFinite(turns) || turns <= 0) {
+    alert('turns must be a positive number');
+    return;
+  }
+  await send('swarm_extend', swarmExtendPayload(r, turns, participantId ?? null));
+}
+
+async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') {
+  const r = run.value;
+  if (!r) return;
+  const note = (swarmDecideNotes.value[decisionId] ?? '').trim();
+  if (!confirm(`${outcome === 'approve' ? 'Approve' : 'Reject'} contested decision ${decisionId}?`)) return;
+  await send('swarm_decide', swarmDecidePayload(r, decisionId, outcome, note));
+}
 </script>
 
 <template>
@@ -1244,12 +1512,163 @@ async function onApproveWorkOrder(wo: FusionWorkOrder | undefined) {
         >+ New fusion run</button>
       </div>
 
+      <!-- orchestrator (backend-ui-contract §§3–5): compose a decomposed run.
+           Visible only when the state service reports the orchestrator
+           gate on — the server is authoritative either way. Until then
+           the handoff offer in the Preparation panel stays the record. -->
+      <div v-if="view.features?.orchestrator" class="exec-block" data-testid="exec-orchestrator">
+        <div class="exec-blockhead">
+          <span class="exec-blocktitle">Orchestrator</span>
+          <span v-if="oz" class="exec-line mono" data-testid="orch-status">
+            {{ orchPhaseLabel(oz.phase) }}<template v-if="ozStats"> · {{ ozStats.accepted ?? 0 }}/{{ ozStats.tasks ?? 0 }} accepted</template>
+          </span>
+        </div>
+
+        <template v-if="orchEditorOpen">
+          <div class="exec-editor" data-testid="orch-editor">
+            <div class="exec-member" data-testid="orch-decomposer-row">
+              <span class="exec-role mono">decomposer *</span>
+              <select v-model="orchDecomposer" class="f-input mono exec-grow" data-testid="orch-decomposer" aria-label="decomposer profile">
+                <option value="">profile…</option>
+                <option v-for="m in orchProfiles" :key="m" :value="m">{{ m }}</option>
+              </select>
+            </div>
+            <div class="exec-member" data-testid="orch-verifier-row">
+              <span class="exec-role mono">verifier *</span>
+              <select v-model="orchVerifier" class="f-input mono exec-grow" data-testid="orch-verifier" aria-label="verifier profile">
+                <option value="">profile…</option>
+                <option v-for="m in orchProfiles" :key="m" :value="m">{{ m }}</option>
+              </select>
+            </div>
+            <div class="exec-member" data-testid="orch-integrator-row">
+              <span class="exec-role mono">integrator *</span>
+              <select v-model="orchIntegrator" class="f-input mono exec-grow" data-testid="orch-integrator" aria-label="integrator profile">
+                <option value="">profile…</option>
+                <option v-for="m in orchProfiles" :key="m" :value="m">{{ m }}</option>
+              </select>
+            </div>
+            <div class="exec-members" data-testid="orch-workers">
+              <div v-for="(w, i) in orchWorkers" :key="i" class="exec-member exec-member4">
+                <input v-model="w.name" class="f-input mono" :aria-label="`worker ${i} name`" :data-testid="`orch-worker-name-${i}`" placeholder="pool name" />
+                <select v-model="w.profileId" class="f-input mono" :aria-label="`worker ${i} profile`" :data-testid="`orch-worker-profile-${i}`">
+                  <option value="">profile…</option>
+                  <option v-for="m in orchProfiles" :key="m" :value="m">{{ m }}</option>
+                </select>
+                <button
+                  v-if="orchWorkers.length > 1"
+                  class="link-del"
+                  :aria-label="`remove worker ${i}`"
+                  @click="orchWorkers.splice(i, 1)"
+                >×</button>
+                <span v-else />
+              </div>
+              <button class="link-add" data-testid="orch-add-worker" @click="orchWorkers.push({ name: '', profileId: orchProfiles[0] ?? '' })">+ worker pool</button>
+            </div>
+            <div class="exec-btnrow">
+              <input v-model="orchBaseRef" class="f-input mono exec-grow" placeholder="base ref (default HEAD)" data-testid="orch-baseref" />
+              <label class="check-setup">
+                <input v-model="orchSpecApproval" type="checkbox" data-testid="orch-spec-approval" /> require spec approval
+              </label>
+            </div>
+            <div class="exec-limits">
+              <label>attempts/task <input v-model="orchAttempts" class="f-input exec-num" data-testid="orch-attempts" /></label>
+              <label>integrator attempts <input v-model="orchIntegratorAttempts" class="f-input exec-num" data-testid="orch-integrator-attempts" /></label>
+              <label>max subtasks <input v-model="orchMaxSubtasks" class="f-input exec-num" data-testid="orch-max-subtasks" /></label>
+            </div>
+            <p v-if="orchProblems.length" class="exec-warn" data-testid="orch-problems">
+              {{ orchProblems.join(' · ') }}
+            </p>
+            <div class="exec-btnrow">
+              <button
+                class="btn primary"
+                data-testid="orch-start"
+                :disabled="gated(orchStartGate).disabled"
+                :title="gated(orchStartGate).title || 'Start an orchestrator run with this composition'"
+                @click="onStartOrchestrator"
+              >{{ st.busy === 'start' ? 'Starting…' : 'Start orchestrator run' }}</button>
+              <button class="btn" data-testid="orch-cancel" @click="orchEditorOpen = false">Close</button>
+            </div>
+          </div>
+        </template>
+        <button
+          v-else
+          class="link-add"
+          data-testid="orch-configure"
+          @click="openOrchEditor"
+        >+ New orchestrator run</button>
+      </div>
+
+      <!-- swarm (backend-ui-contract §§3,6–7): compose a swarm run.
+           Visible only when the state service reports the swarm gate on. -->
+      <div v-if="view.features?.swarm" class="exec-block" data-testid="exec-swarm">
+        <div class="exec-blockhead">
+          <span class="exec-blocktitle">Swarm</span>
+          <span v-if="sw" class="exec-line mono" data-testid="swarm-status">
+            {{ swarmPhaseLabel(sw.phase) }} · round {{ sw.round ?? '—' }}
+          </span>
+        </div>
+
+        <template v-if="swarmEditorOpen">
+          <div class="exec-editor" data-testid="swarm-editor">
+            <div class="exec-members" data-testid="swarm-participants-edit">
+              <div v-for="(p, i) in swarmParts" :key="i" class="exec-member exec-member-swarm">
+                <input v-model="p.callsign" class="f-input mono exec-cs" :aria-label="`participant ${i} callsign`" :data-testid="`swarm-callsign-${i}`" placeholder="A" />
+                <input v-model="p.participantId" class="f-input mono" :aria-label="`participant ${i} id`" :data-testid="`swarm-pid-${i}`" placeholder="p1" />
+                <select v-model="p.profileId" class="f-input mono" :aria-label="`participant ${i} profile`" :data-testid="`swarm-profile-${i}`">
+                  <option value="">profile…</option>
+                  <option v-for="m in orchProfiles" :key="m" :value="m">{{ m }}</option>
+                </select>
+                <input v-model="p.ownedPaths" class="f-input mono exec-grow" :aria-label="`participant ${i} owned paths`" :data-testid="`swarm-paths-${i}`" placeholder="src/a/**, docs/**" />
+                <button
+                  v-if="swarmParts.length > 2"
+                  class="link-del"
+                  :aria-label="`remove participant ${i}`"
+                  @click="swarmParts.splice(i, 1)"
+                >×</button>
+                <span v-else />
+              </div>
+              <button v-if="swarmParts.length < 3" class="link-add" data-testid="swarm-add-participant" @click="addSwarmParticipant">+ participant</button>
+            </div>
+            <div class="exec-btnrow">
+              <input v-model="swarmBaseRef" class="f-input mono exec-grow" placeholder="base ref (default HEAD)" data-testid="swarm-baseref" />
+              <label class="check-setup">
+                <input v-model="swarmVerify" type="checkbox" data-testid="swarm-verify" /> verify required
+              </label>
+            </div>
+            <div class="exec-limits">
+              <label>turns/participant <input v-model="swarmTurns" class="f-input exec-num" data-testid="swarm-turns" /></label>
+              <label>max rounds <input v-model="swarmRounds" class="f-input exec-num" data-testid="swarm-rounds" /></label>
+              <label>max messages <input v-model="swarmMaxMessages" class="f-input exec-num" data-testid="swarm-max-messages" /></label>
+            </div>
+            <p v-if="swarmProblems.length" class="exec-warn" data-testid="swarm-problems">
+              {{ swarmProblems.join(' · ') }}
+            </p>
+            <div class="exec-btnrow">
+              <button
+                class="btn primary"
+                data-testid="swarm-start"
+                :disabled="gated(swarmStartGate).disabled"
+                :title="gated(swarmStartGate).title || 'Start a swarm run with this composition'"
+                @click="onStartSwarm"
+              >{{ st.busy === 'start' ? 'Starting…' : 'Start swarm run' }}</button>
+              <button class="btn" data-testid="swarm-cancel" @click="swarmEditorOpen = false">Close</button>
+            </div>
+          </div>
+        </template>
+        <button
+          v-else
+          class="link-add"
+          data-testid="swarm-configure"
+          @click="openSwarmEditor"
+        >+ New swarm run</button>
+      </div>
+
       <!-- run control -->
       <div class="exec-block" data-testid="exec-runcontrol">
         <div class="exec-blockhead">
           <span class="exec-blocktitle">Run</span>
           <span v-if="run" class="exec-line mono" data-testid="run-status">
-            {{ shortId(run.id) }} · {{ run.mode === 'fusion' ? 'fusion · ' : '' }}{{ runStatusLabel(run.status) }}<template v-if="run.phase"> · {{ phaseLabel(run.phase) }}</template>
+            {{ shortId(run.id) }} · {{ ['fusion', 'orchestrator', 'swarm'].includes(run.mode) ? `${run.mode} · ` : '' }}{{ runStatusLabel(run.status) }}<template v-if="run.phase"> · {{ phaseLabel(run.phase) }}</template>
           </span>
         </div>
 
@@ -1496,8 +1915,274 @@ async function onApproveWorkOrder(wo: FusionWorkOrder | undefined) {
             </div>
           </template>
 
+          <!-- ============ orchestrator run detail (contract §§4–5) ============ -->
+          <template v-if="oz">
+            <!-- required actions — the durable pendingActions the run is
+                 parked on; each row names the exact decision and carries
+                 its control. This is the notification surface. -->
+            <div v-if="ozPending.length" class="exec-detail exec-pending" data-testid="orch-actions">
+              <span class="exec-subtitle mono">action required</span>
+              <div v-for="(a, i) in ozPending" :key="`${a.type}-${i}`" class="exec-actionrow">
+                <p class="exec-warn" :data-testid="`orch-pending-${a.type}`">{{ orchPendingActionText(a) }}</p>
+                <button
+                  v-if="a.type === 'spec_approval'"
+                  class="btn primary exec-actionbtn"
+                  data-testid="orch-approve-spec"
+                  :disabled="gated(orchApproveGate).disabled"
+                  :title="gated(orchApproveGate).title || 'Approve this spec version'"
+                  @click="onOrchApprove"
+                >Approve spec</button>
+              </div>
+            </div>
+
+            <!-- spec version + acceptance hash -->
+            <div class="exec-detail" data-testid="orch-detail">
+              <span class="exec-subtitle mono">orchestrator · {{ orchPhaseLabel(oz.phase) }}</span>
+              <p v-if="ozSpec" class="exec-line mono" data-testid="orch-spec">
+                spec v{{ ozSpec.version ?? '?' }} · {{ ozSpec.status ?? '?' }} · {{ fmtSha(ozSpec.sha256, 12) }}<template v-if="ozSpec.approvedAt"> · approved {{ ozSpec.approvedAt }}</template><template v-if="ozSpec.by"> by {{ ozSpec.by }}</template>
+                <button v-if="ozSpec.artifactId" class="exec-artlink" @click="onOpenArtifact(ozSpec.artifactId!)">view</button>
+              </p>
+              <p v-if="run.acceptance" class="exec-line mono" data-testid="orch-acceptance">
+                acceptance hash {{ fmtSha(run.acceptance.resultSha256, 16) }}… · round {{ run.acceptance.round }}
+              </p>
+              <p v-if="ozIntegrate?.import" class="exec-line mono" data-testid="orch-integrate">
+                integrated {{ fmtSha(ozIntegrate.import.commitSha, 8) }} · tree {{ fmtSha(ozIntegrate.import.treeSha, 8) }}<template v-if="ozIntegrate.import.diffStat"> · {{ ozIntegrate.import.diffStat }}</template>
+              </p>
+              <p v-if="oz.owner" class="exec-line mono" data-testid="orch-owner">
+                supervisor claim {{ oz.owner.runnerId }}<template v-if="oz.owner.instanceId">/{{ oz.owner.instanceId }}</template>
+              </p>
+            </div>
+
+            <!-- subtask graph -->
+            <div class="exec-detail" data-testid="orch-tasks">
+              <span class="exec-subtitle mono">subtasks<template v-if="ozStats"> · {{ ozStats.accepted ?? 0 }}/{{ ozStats.tasks ?? 0 }} accepted · {{ ozStats.running ?? 0 }} running · {{ ozStats.failed ?? 0 }} failed</template></span>
+              <div v-for="t in ozTasks" :key="t.taskId" class="exec-participant mono" :data-testid="`orch-task-${t.taskId}`">
+                <span class="exec-pname">{{ t.taskId }} · {{ t.title }}</span>
+                <span :data-status="t.status">{{ orchTaskStatusLabel(t.status) }}</span>
+                <span v-if="(t.deps ?? []).length" class="exec-pmeta">deps {{ t.deps!.join(', ') }}</span>
+                <span v-if="t.profile" class="exec-pmeta">pool {{ t.profile }}</span>
+                <span v-if="t.budget" class="exec-pmeta">attempts {{ t.budget.used ?? '?' }}/{{ t.budget.limit ?? '?' }}</span>
+                <p v-if="(t.boundary ?? []).length" class="exec-line">boundary: {{ t.boundary!.join(', ') }}</p>
+                <p v-if="t.inputCommit" class="exec-line">input {{ fmtSha(t.inputCommit, 8) }}<template v-if="(t.snapshotOf ?? []).length"> · from {{ t.snapshotOf!.join(', ') }}</template></p>
+                <p v-if="t.resultCommit" class="exec-line" :data-testid="`orch-result-${t.taskId}`">result {{ fmtSha(t.resultCommit, 8) }} · hash {{ fmtSha(t.resultSha256, 12) }}</p>
+                <p v-if="t.evidence" class="exec-line">
+                  verdict {{ t.evidence.verdict ?? '—' }}
+                  <button v-if="t.evidence.verifyArtifactId" class="exec-artlink" @click="onOpenArtifact(t.evidence.verifyArtifactId!)">verify</button>
+                  <button v-if="t.evidence.findingsArtifactId" class="exec-artlink" @click="onOpenArtifact(t.evidence.findingsArtifactId!)">findings</button>
+                </p>
+                <p v-if="t.waiting" class="exec-line exec-warn" :data-testid="`orch-waiting-${t.taskId}`">
+                  waiting: {{ t.waiting.reason ?? '?' }}<template v-if="t.waiting.question"> — {{ t.waiting.question }}</template>
+                </p>
+                <div v-if="(t.attempts ?? []).length" class="exec-attempts">
+                  <div v-for="a in t.attempts!" :key="a.id" class="exec-attempt mono" :data-testid="`orch-attempt-${a.id}`">
+                    attempt #{{ a.n }} · {{ a.kind }} · {{ a.status }}<template v-if="a.resultCommit"> · {{ fmtSha(a.resultCommit, 8) }}</template><template v-if="a.error"> · {{ a.error }}</template>
+                  </div>
+                </div>
+                <template v-if="t.status === 'waiting'">
+                  <div class="exec-actionrow">
+                    <input
+                      v-model="orchAnswerDrafts[t.taskId]"
+                      class="f-input exec-grow"
+                      :data-testid="`orch-answer-${t.taskId}`"
+                      placeholder="answer the question…"
+                      :disabled="gated(orchAnswerFor(t.taskId)).disabled"
+                      @keydown.enter="onOrchAnswer(t.taskId)"
+                    />
+                    <button
+                      class="exec-artlink"
+                      :data-testid="`orch-answer-send-${t.taskId}`"
+                      :disabled="gated(orchAnswerFor(t.taskId)).disabled"
+                      :title="gated(orchAnswerFor(t.taskId)).title"
+                      @click="onOrchAnswer(t.taskId)"
+                    >answer</button>
+                  </div>
+                </template>
+                <template v-if="t.status === 'failed' || t.status === 'waiting'">
+                  <button
+                    class="exec-artlink"
+                    :data-testid="`orch-grant-${t.taskId}`"
+                    :disabled="gated(orchGrantFor(t.taskId)).disabled"
+                    :title="gated(orchGrantFor(t.taskId)).title || 'Grant extra attempts'"
+                    @click="onOrchGrant(t.taskId)"
+                  >grant attempts</button>
+                  <!-- retry only while budget remains — canOrchRetry reads
+                       budget.used/budget.limit; an exhausted task shows
+                       grant alone (the retry POST would be refused). -->
+                  <button
+                    v-if="t.status === 'failed' && orchRetryFor(t.taskId).ok"
+                    class="exec-artlink"
+                    :data-testid="`orch-retry-${t.taskId}`"
+                    :title="'Re-queue the task within its remaining budget'"
+                    @click="onOrchRetry(t.taskId)"
+                  >retry</button>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <!-- ============ swarm run detail (contract §§6–7) ============ -->
+          <template v-if="sw">
+            <!-- required actions -->
+            <div v-if="swPending.length" class="exec-detail exec-pending" data-testid="swarm-actions">
+              <span class="exec-subtitle mono">action required</span>
+              <div v-for="(a, i) in swPending" :key="`${a.type}-${i}`" class="exec-actionrow">
+                <p class="exec-warn" :data-testid="`swarm-pending-${a.type}`">{{ swarmPendingActionText(a, run) }}</p>
+                <button
+                  v-if="a.type === 'extend'"
+                  class="btn exec-actionbtn"
+                  :data-testid="`swarm-extend-${a.participantId ?? 'all'}`"
+                  :disabled="gated(canSwarmExtend(run, a.participantId)).disabled"
+                  :title="gated(canSwarmExtend(run, a.participantId)).title || 'Grant extra turns'"
+                  @click="onSwarmExtend(a.participantId ?? null)"
+                >Extend</button>
+              </div>
+            </div>
+
+            <!-- freeze banner — apply expectations disabled, reason shown -->
+            <p v-if="swFrozen.frozen" class="exec-warn mono" data-testid="swarm-freeze">
+              frozen ({{ swFrozen.reason }}) — new edits are held until it clears
+            </p>
+
+            <!-- phase + limits -->
+            <div class="exec-detail" data-testid="swarm-detail">
+              <span class="exec-subtitle mono">swarm · {{ swarmPhaseLabel(sw.phase) }} · round {{ sw.round ?? '—' }}</span>
+              <p v-if="swLimits" class="exec-line mono" data-testid="swarm-limits">
+                turns {{ swLimits.turnsUsed ?? '?' }}/{{ swLimits.turnsLimit ?? '?' }}
+                · round {{ swLimits.round ?? '?' }}/{{ swLimits.maxRounds ?? '?' }}
+                · messages {{ swLimits.messagesUsed ?? '?' }}/{{ swLimits.maxMessages ?? '?' }}
+              </p>
+              <p v-if="run.acceptance" class="exec-line mono" data-testid="swarm-acceptance">
+                acceptance hash {{ fmtSha(run.acceptance.resultSha256, 16) }}… · round {{ run.acceptance.round }}
+              </p>
+              <p v-if="sw.owner" class="exec-line mono" data-testid="swarm-owner">
+                broker claim {{ sw.owner.runnerId }}<template v-if="sw.owner.instanceId">/{{ sw.owner.instanceId }}</template>
+              </p>
+            </div>
+
+            <!-- participants: claims, budget, attempt hash -->
+            <div class="exec-detail" data-testid="swarm-participants">
+              <span class="exec-subtitle mono">participants</span>
+              <div v-for="p in swParticipants" :key="p.participantId" class="exec-participant mono" :data-testid="`swarm-participant-${p.participantId}`">
+                <span class="exec-pname">{{ p.callsign ?? p.participantId }} · {{ p.participantId }}</span>
+                <span class="exec-pmodel">{{ p.profileId ?? '—' }}</span>
+                <span :data-status="p.status">{{ swarmStatusLabel(p.status) }}</span>
+                <span v-if="p.budget" class="exec-pmeta">turns {{ p.budget.turnsUsed ?? '?' }}/{{ p.budget.turnsLimit ?? '?' }}</span>
+                <span v-if="p.attempt" class="exec-pmeta" :data-testid="`swarm-attempt-${p.participantId}`">attempt {{ p.attempt.status ?? '?' }}<template v-if="p.attempt.porchRunId"> · porch {{ shortId(p.attempt.porchRunId) }}</template></span>
+                <p v-if="(p.ownedPaths ?? []).length" class="exec-line">owns: {{ p.ownedPaths!.join(', ') }}</p>
+                <p v-if="p.waiting" class="exec-line exec-warn">waiting: {{ p.waiting.reason ?? '?' }}<template v-if="p.waiting.detail"> — {{ p.waiting.detail }}</template></p>
+                <div class="exec-actionrow">
+                  <input
+                    v-model="swarmInputDrafts[p.participantId]"
+                    class="f-input exec-grow"
+                    :data-testid="`swarm-input-${p.participantId}`"
+                    placeholder="steer or answer…"
+                    :disabled="gated(canSwarmInput(run, p.participantId)).disabled"
+                    @keydown.enter="onSwarmInput(p.participantId)"
+                  />
+                  <button
+                    class="exec-artlink"
+                    :data-testid="`swarm-send-${p.participantId}`"
+                    :disabled="gated(canSwarmInput(run, p.participantId)).disabled"
+                    :title="gated(canSwarmInput(run, p.participantId)).title"
+                    @click="onSwarmInput(p.participantId)"
+                  >send</button>
+                  <button
+                    v-if="p.status === 'exhausted'"
+                    class="exec-artlink"
+                    :data-testid="`swarm-extend-btn-${p.participantId}`"
+                    :disabled="gated(canSwarmExtend(run, p.participantId)).disabled"
+                    :title="gated(canSwarmExtend(run, p.participantId)).title"
+                    @click="onSwarmExtend(p.participantId)"
+                  >extend</button>
+                </div>
+              </div>
+              <div class="exec-actionrow">
+                <input
+                  v-model="swarmBroadcast"
+                  class="f-input exec-grow"
+                  data-testid="swarm-broadcast"
+                  placeholder="broadcast to all participants…"
+                  :disabled="gated(canSwarmInput(run, 'all')).disabled"
+                  @keydown.enter="onSwarmInput('all')"
+                />
+                <button
+                  class="exec-artlink"
+                  data-testid="swarm-broadcast-send"
+                  :disabled="gated(canSwarmInput(run, 'all')).disabled"
+                  :title="gated(canSwarmInput(run, 'all')).title"
+                  @click="onSwarmInput('all')"
+                >broadcast</button>
+              </div>
+            </div>
+
+            <!-- ownership claims -->
+            <div v-if="swOwnership.length" class="exec-detail" data-testid="swarm-ownership">
+              <span class="exec-subtitle mono">path ownership</span>
+              <p v-for="o in swOwnership" :key="`${o.path}-${o.owner}`" class="exec-line mono" :data-contested="String(o.contested === true)">
+                {{ o.path }} → {{ o.owner }}<template v-if="o.contested"> · contested</template>
+              </p>
+            </div>
+
+            <!-- decisions: contested → user settles -->
+            <div v-if="swDecisions.length" class="exec-detail" data-testid="swarm-decisions">
+              <span class="exec-subtitle mono">decisions</span>
+              <div v-for="d in swDecisions" :key="d.id" class="exec-wo mono" :data-testid="`swarm-decision-${d.id}`">
+                <p class="exec-line">
+                  <strong>{{ d.id }}</strong> · {{ d.kind ?? '?' }} · {{ d.status ?? '?' }}
+                  · proposer {{ d.proposer ?? '?' }} · paths {{ (d.paths ?? []).join(', ') || '—' }}
+                </p>
+                <p v-if="d.rationale" class="exec-line">{{ d.rationale }}</p>
+                <template v-if="d.status === 'pending'">
+                  <div class="exec-actionrow">
+                    <input
+                      v-model="swarmDecideNotes[d.id]"
+                      class="f-input exec-grow"
+                      :data-testid="`swarm-decide-note-${d.id}`"
+                      placeholder="note (optional)…"
+                    />
+                    <button
+                      class="btn primary exec-actionbtn"
+                      :data-testid="`swarm-decide-approve-${d.id}`"
+                      :disabled="gated(canSwarmDecide(run, d.id)).disabled"
+                      :title="gated(canSwarmDecide(run, d.id)).title"
+                      @click="onSwarmDecide(d.id, 'approve')"
+                    >Approve</button>
+                    <button
+                      class="btn danger exec-actionbtn"
+                      :data-testid="`swarm-decide-reject-${d.id}`"
+                      :disabled="gated(canSwarmDecide(run, d.id)).disabled"
+                      :title="gated(canSwarmDecide(run, d.id)).title"
+                      @click="onSwarmDecide(d.id, 'reject')"
+                    >Reject</button>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            <!-- message bus -->
+            <div v-if="swMessages.length" class="exec-detail" data-testid="swarm-messages">
+              <span class="exec-subtitle mono">messages</span>
+              <div v-for="m in swMessages" :key="m.id" class="exec-round mono" :data-testid="`swarm-msg-${m.id}`">
+                <p class="exec-line">#{{ m.seq ?? '?' }} · {{ m.from ?? '?' }} → {{ m.to ?? '?' }} · {{ m.kind ?? '?' }}</p>
+                <p class="exec-ftext">{{ m.text ?? '' }}</p>
+              </div>
+            </div>
+
+            <!-- findings -->
+            <div v-if="swFindings.length" class="exec-detail" data-testid="swarm-findings">
+              <span class="exec-subtitle mono">findings</span>
+              <div v-for="f in swFindings" :key="f.id" class="exec-finding">
+                <span class="exec-fhead mono">
+                  <span class="exec-sev" :data-sev="f.severity">{{ f.severity ?? '?' }}</span> {{ f.id }}
+                  · owner {{ f.owner ?? '?' }} · {{ f.status ?? '?' }}
+                </span>
+                <p class="exec-ftext">{{ f.text ?? '' }}</p>
+              </div>
+            </div>
+          </template>
+
           <!-- recorded result (the descriptor bound at acceptance) -->
-          <div v-if="run.result && !isFusion(run)" class="exec-detail" data-testid="run-result">
+          <div v-if="run.result && !isFusion(run) && !isOrchestrator(run) && !isSwarm(run)" class="exec-detail" data-testid="run-result">
             <span class="exec-subtitle mono">result</span>
             <p class="exec-line mono">
               {{ run.result.role }} {{ shortId(run.result.attemptId) }}
@@ -1632,7 +2317,7 @@ async function onApproveWorkOrder(wo: FusionWorkOrder | undefined) {
             @keydown.enter="exec.selectRun(props.cardId, r.id)"
           >
             {{ shortId(r.id) }} · {{ runStatusLabel(r.status) }}
-            <span v-if="r.mode === 'fusion'" class="exec-mode" title="fusion panel run">fusion</span>
+            <span v-if="r.mode && r.mode !== 'solo'" class="exec-mode" :title="`${r.mode} run`">{{ r.mode }}</span>
             <span v-if="r.pending" class="exec-pending-badge" title="this run is waiting on a user decision">needs you</span>
             <span v-if="r.reserved" class="exec-warn" title="a live attempt or unproven validation still reserves this run">reserved</span>
             <span v-if="r.id === view.currentRunId" class="exec-current">current</span>
@@ -1942,6 +2627,12 @@ async function onApproveWorkOrder(wo: FusionWorkOrder | undefined) {
 }
 .exec-member4 {
   grid-template-columns: 5.5rem 1fr auto;
+}
+.exec-member-swarm {
+  grid-template-columns: 2.5rem 4rem 1fr 1fr auto;
+}
+.exec-cs {
+  text-align: center;
 }
 .exec-participant {
   display: flex;

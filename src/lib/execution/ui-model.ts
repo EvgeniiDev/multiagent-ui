@@ -23,6 +23,9 @@ import type {
   FusionResultKind,
   FusionState,
   FusionWorkOrder,
+  OrchestratorState,
+  OrchPendingAction,
+  OrchTask,
   PrepBindingInfo,
   PrepBindingRef,
   PrepCompletenessCounters,
@@ -31,6 +34,11 @@ import type {
   PrepGate,
   PrepQuestion,
   PrepStage,
+  SwarmDecision,
+  SwarmMessage,
+  SwarmParticipant,
+  SwarmPendingAction,
+  SwarmState,
 } from './api.ts';
 
 // Run statuses the server treats as still-in-flight for `start` admission
@@ -858,10 +866,23 @@ export const PREP_DOWNSTREAM_MODES: PrepDownstreamMode[] = [
   'solo', 'fusion', 'orchestrator', 'swarm',
 ];
 
-/** Modes the user may actually START a run in on this build. Solo/fusion
- * have server-side start paths; orchestrator/swarm start commands do not
- * exist yet (execution-domain accepts only solo|fusion). */
+/** Modes the user may actually START a run in on this build — the
+ * server-controlled availability behind each mode (backend-ui-contract
+ * §10: keep modes disabled until reported available). Solo/fusion have
+ * server-side start paths; orchestrator/swarm start commands land only in
+ * deployments whose `features` advertise them. */
 export const PREP_STARTABLE_MODES: PrepDownstreamMode[] = ['solo', 'fusion'];
+
+/** Modes the card view's `features` flag as available for START. Mirrors
+ * the fusion gate convention (`features.fusion === true`): an absent or
+ * false flag hides the editor and refuses the POST — never a
+ * frontend-only illusion of execution. */
+export function startableModes(view: ExecCardView): PrepDownstreamMode[] {
+  const out: PrepDownstreamMode[] = ['solo', 'fusion'];
+  if (view.features?.orchestrator === true) out.push('orchestrator');
+  if (view.features?.swarm === true) out.push('swarm');
+  return out;
+}
 
 export interface PrepHandoffTarget {
   mode: string;
@@ -874,10 +895,13 @@ export function unimplementedModeReason(mode: string): string {
   return `mode "${mode}" is recorded as a handoff offer only — no run backend exists on this deployment, nothing would execute`;
 }
 
-/** Gate a downstream-mode START choice: solo/fusion pass through to the
- * normal run gates; orchestrator/swarm refuse without a POST. */
-export function canStartInMode(mode: string): GateResult {
+/** Gate a downstream-mode START choice: startable modes (solo/fusion,
+ * plus orchestrator/swarm once the card view's `features` advertise
+ * them) pass through to the normal run gates; anything else refuses
+ * without a POST — no frontend-only execution. */
+export function canStartInMode(mode: string, view?: ExecCardView | null): GateResult {
   if ((PREP_STARTABLE_MODES as string[]).includes(mode)) return ok;
+  if (view && (startableModes(view) as string[]).includes(mode)) return ok;
   if ((PREP_DOWNSTREAM_MODES as string[]).includes(mode)) {
     return no(unimplementedModeReason(mode));
   }
@@ -1157,5 +1181,550 @@ export function prepGatePayload(gateId: string): Record<string, unknown> {
 export function prepHandoffPayload(mode: string, note?: string): Record<string, unknown> {
   const payload: Record<string, unknown> = { mode };
   if (note?.trim()) payload.note = note.trim().slice(0, 500);
+  return payload;
+}
+
+// == orchestrator run graph (backend-ui-contract §§4–5) =====================
+//
+// Presentation + gating for run.orchestrator. Every gate mirrors a server
+// rule from the contract's command table: the spec-approval binds the
+// exact pending sha256; answer/grant/retry address a waiting/failed task
+// by taskId; stop/continue halt/resume ALL participants atomically. The
+// server remains authoritative — these produce disabled-reason text.
+
+export function isOrchestrator(run: ExecRun | null | undefined): boolean {
+  return run?.mode === 'orchestrator' && !!run.orchestrator;
+}
+
+export function orchestrator(run: ExecRun | null | undefined): OrchestratorState | null {
+  return isOrchestrator(run) ? (run!.orchestrator ?? null) : null;
+}
+
+export function orchTasks(run: ExecRun | null | undefined): OrchTask[] {
+  return orchestrator(run)?.tasks ?? [];
+}
+
+export function orchTask(
+  run: ExecRun | null | undefined,
+  taskId: string,
+): OrchTask | null {
+  return orchTasks(run).find((t) => t.taskId === taskId) ?? null;
+}
+
+export function orchPendingActions(run: ExecRun | null | undefined): OrchPendingAction[] {
+  return orchestrator(run)?.pendingActions ?? [];
+}
+
+const ORCH_TASK_LABELS: Record<string, string> = {
+  pending: 'pending',
+  ready: 'ready — launchable',
+  running: 'running',
+  verifying: 'verifying',
+  returned: 'returned — fix round queued',
+  accepted: 'accepted',
+  failed: 'failed',
+  blocked: 'blocked',
+  waiting: 'waiting on you',
+  cancelled: 'cancelled',
+};
+
+export function orchTaskStatusLabel(s: string | null | undefined): string {
+  return ORCH_TASK_LABELS[s ?? ''] ?? s ?? '—';
+}
+
+const ORCH_PHASE_LABELS: Record<string, string> = {
+  decompose: 'decomposing',
+  approval: 'awaiting spec approval',
+  work: 'working',
+  integrate: 'integrating',
+  validate: 'validating',
+  done: 'done',
+  stopped: 'stopped',
+  failed: 'failed',
+};
+
+export function orchPhaseLabel(s: string | null | undefined): string {
+  return ORCH_PHASE_LABELS[s ?? ''] ?? s ?? '—';
+}
+
+/** One-line text for a durable orchestrator pending action — the
+ * required-action banner. */
+export function orchPendingActionText(a: OrchPendingAction): string {
+  if (a.type === 'spec_approval') {
+    return `decomposition spec ${fmtSha(a.specSha256, 12)}… awaits your approval — ready tasks promote only after it freezes`;
+  }
+  if (a.type === 'question') {
+    return `task ${a.taskId} asks: ${a.question ?? 'a question awaits your answer'}`;
+  }
+  if (a.type === 'grant') {
+    return `task ${a.taskId} exhausted its attempts (${a.reason ?? 'attempts_exhausted'}) — grant budget or decide`;
+  }
+  return `task ${a.taskId} is blocked (${a.reason ?? 'decision needed'}) — decide to unblock`;
+}
+
+/** Run states in which the server still accepts an orchestrator user
+ * decision — live or stopped work, never a finished/failed run. */
+const ORCH_DECIDABLE_RUN = new Set(['queued', 'active', 'blocked']);
+
+function orchDecidable(run: ExecRun | null): GateResult {
+  if (!isOrchestrator(run)) return no('not an orchestrator run');
+  if (!ORCH_DECIDABLE_RUN.has(run!.status)) {
+    return no(`run is ${run!.status} — orchestrator decisions apply only to live or blocked runs`);
+  }
+  return ok;
+}
+
+/** `orch_approve`: a matching spec_approval pending action AND the sha256
+ * must be the CURRENT spec version (a stale approval is refused
+ * server-side anyway). */
+export function canOrchApprove(run: ExecRun | null, specSha256?: string): GateResult {
+  const d = orchDecidable(run);
+  if (!d.ok) return d;
+  const o = orchestrator(run)!;
+  const pending = (o.pendingActions ?? []).find((a) => a.type === 'spec_approval');
+  if (!pending || pending.type !== 'spec_approval') {
+    return no('the run is not waiting on a spec approval');
+  }
+  const want = specSha256 ?? o.spec?.sha256 ?? null;
+  if (want && want !== pending.specSha256) {
+    return no('a newer spec version is pending — only the current version is approvable');
+  }
+  if ((o.spec?.status ?? 'pending') !== 'pending') {
+    return no(`the spec is ${o.spec?.status} — only a pending spec may be approved`);
+  }
+  return ok;
+}
+
+/** `orch_answer`: the task must be waiting on a question (or carry a
+ * matching question pending action). */
+export function canOrchAnswer(run: ExecRun | null, taskId: string): GateResult {
+  const d = orchDecidable(run);
+  if (!d.ok) return d;
+  const t = orchTask(run, taskId);
+  if (!t) return no(`task ${taskId} is not in this run`);
+  const waitingQuestion = t.status === 'waiting' && (t.waiting?.reason ?? 'question') === 'question';
+  const pending = orchPendingActions(run).some(
+    (a) => a.type === 'question' && (a as { taskId: string }).taskId === taskId);
+  if (!waitingQuestion && !pending) {
+    return no(`task ${taskId} is ${t.status} — only a task waiting on a question may be answered`);
+  }
+  return ok;
+}
+
+/** `orch_grant`: the task exhausted its budget (failed, or waiting on a
+ * grant) — adds attempts and re-readies it. */
+export function canOrchGrant(run: ExecRun | null, taskId: string): GateResult {
+  const d = orchDecidable(run);
+  if (!d.ok) return d;
+  const t = orchTask(run, taskId);
+  if (!t) return no(`task ${taskId} is not in this run`);
+  const grantPending = orchPendingActions(run).some(
+    (a) => a.type === 'grant' && (a as { taskId: string }).taskId === taskId);
+  if (t.status !== 'failed' && !grantPending
+    && !(t.status === 'waiting' && t.waiting?.reason === 'attempts_exhausted')) {
+    return no(`task ${taskId} is ${t.status} — only an attempts-exhausted task may be granted budget`);
+  }
+  return ok;
+}
+
+/** `orch_retry`: the task failed but still holds budget (contract: "with
+ * budget left" — the UI reads budget.used < budget.limit when present;
+ * absent budget figures defer to the server). */
+export function canOrchRetry(run: ExecRun | null, taskId: string): GateResult {
+  const d = orchDecidable(run);
+  if (!d.ok) return d;
+  const t = orchTask(run, taskId);
+  if (!t) return no(`task ${taskId} is not in this run`);
+  if (t.status !== 'failed') {
+    return no(`task ${taskId} is ${t.status} — only a failed task may be retried`);
+  }
+  const used = t.budget?.used;
+  const limit = t.budget?.limit;
+  if (typeof used === 'number' && typeof limit === 'number' && used >= limit) {
+    return no(`task ${taskId} exhausted its budget (${used}/${limit}) — grant attempts first`);
+  }
+  return ok;
+}
+
+export function orchApprovePayload(run: ExecRun, specSha256: string): Record<string, unknown> {
+  return { runId: run.id, specSha256 };
+}
+
+export function orchAnswerPayload(run: ExecRun, taskId: string, answer: string): Record<string, unknown> {
+  return { runId: run.id, taskId, answer };
+}
+
+export function orchGrantPayload(run: ExecRun, taskId: string, attempts: number): Record<string, unknown> {
+  return { runId: run.id, taskId, attempts };
+}
+
+export function orchRetryPayload(run: ExecRun, taskId: string): Record<string, unknown> {
+  return { runId: run.id, taskId };
+}
+
+// -- orchestrator start composition (backend-ui-contract §3) ------------------
+//
+// The UI composes the orchestrator block from durable choices: worker
+// profile ids from the compat table, decomposer/verifier/integrator picks
+// plus pool profiles — validated client-side for shape, authoritatively
+// by the server (profiles must exist in ACP_EXEC_PROFILES).
+
+export interface OrchWorkerDraft {
+  name: string;
+  profileId: string;
+}
+
+export interface OrchDraft {
+  decomposer: string;
+  verifier: string;
+  integrator: string;
+  workers: OrchWorkerDraft[];
+  limits?: {
+    maxAttemptsPerTask?: number;
+    maxIntegratorAttempts?: number;
+    maxSubtasks?: number;
+    requireSpecApproval?: boolean;
+  };
+  baseRef?: string;
+}
+
+/** Client-side mirror of the contract's start-shape gates — problems the
+ * server would refuse, for display before POST. */
+export function orchDraftProblems(view: ExecCardView, d: OrchDraft): string[] {
+  const problems: string[] = [];
+  if (!d.decomposer?.trim()) problems.push('a decomposer profile is required');
+  if (!d.verifier?.trim()) problems.push('a verifier profile is required');
+  if (!d.integrator?.trim()) problems.push('an integrator profile is required');
+  if (!(d.workers ?? []).length) problems.push('at least one worker pool profile is required');
+  const names = new Set<string>();
+  for (const w of d.workers ?? []) {
+    if (!w.name?.trim()) problems.push('every worker entry needs a name');
+    else if (names.has(w.name.trim())) problems.push(`duplicate worker name ${w.name.trim()}`);
+    else names.add(w.name.trim());
+    if (!w.profileId?.trim()) problems.push(`worker ${w.name?.trim() || '?'} needs a profile`);
+  }
+  const live = inflightRuns(view);
+  if (live.length) {
+    problems.push(`run ${live[0].id} is still live — stop it and let it settle first`);
+  }
+  return problems;
+}
+
+export function canStartOrchestrator(view: ExecCardView, d: OrchDraft): GateResult {
+  if (view.features?.orchestrator !== true) {
+    return no('orchestrator mode is not enabled on this deployment');
+  }
+  const g = canStartInMode('orchestrator', view);
+  if (!g.ok) return g;
+  const problems = orchDraftProblems(view, d);
+  return problems.length ? no(problems[0]) : ok;
+}
+
+/** The `start` payload for mode 'orchestrator' (contract §3). */
+export function orchStartPayload(d: OrchDraft): Record<string, unknown> {
+  const workers: Record<string, string> = {};
+  for (const w of d.workers ?? []) {
+    if (w.name?.trim() && w.profileId?.trim()) workers[w.name.trim()] = w.profileId.trim();
+  }
+  const orchestrator: Record<string, unknown> = {
+    decomposer: d.decomposer.trim(),
+    verifier: d.verifier.trim(),
+    integrator: d.integrator.trim(),
+    workers,
+  };
+  const L = d.limits ?? {};
+  const limits: Record<string, unknown> = {};
+  if (typeof L.maxAttemptsPerTask === 'number' && L.maxAttemptsPerTask > 0) {
+    limits.maxAttemptsPerTask = Math.floor(L.maxAttemptsPerTask);
+  }
+  if (typeof L.maxIntegratorAttempts === 'number' && L.maxIntegratorAttempts > 0) {
+    limits.maxIntegratorAttempts = Math.floor(L.maxIntegratorAttempts);
+  }
+  if (typeof L.maxSubtasks === 'number' && L.maxSubtasks > 0) {
+    limits.maxSubtasks = Math.floor(L.maxSubtasks);
+  }
+  if (typeof L.requireSpecApproval === 'boolean') limits.requireSpecApproval = L.requireSpecApproval;
+  if (Object.keys(limits).length) orchestrator.limits = limits;
+  const payload: Record<string, unknown> = { mode: 'orchestrator', orchestrator };
+  if (d.baseRef?.trim()) payload.baseRef = d.baseRef.trim();
+  return payload;
+}
+
+// == swarm run state (backend-ui-contract §§6–7) ==============================
+//
+// Presentation + gating for run.swarm. Every gate mirrors a server rule:
+// input steers/answers a participant (or all); extend grants turns on
+// exhaustion; decide settles a broker-escalated contested decision by id;
+// stop/continue freeze-all/resume. While frozen (verify/review/
+// awaiting_acceptance) the UI disables apply expectations and shows the
+// freeze reason — the broker rejects those edits anyway.
+
+export function isSwarm(run: ExecRun | null | undefined): boolean {
+  return run?.mode === 'swarm' && !!run.swarm;
+}
+
+export function swarm(run: ExecRun | null | undefined): SwarmState | null {
+  return isSwarm(run) ? (run!.swarm ?? null) : null;
+}
+
+export function swarmParticipants(run: ExecRun | null | undefined): SwarmParticipant[] {
+  return swarm(run)?.participants ?? [];
+}
+
+export function swarmParticipant(
+  run: ExecRun | null | undefined,
+  participantId: string,
+): SwarmParticipant | null {
+  return swarmParticipants(run).find((p) => p.participantId === participantId) ?? null;
+}
+
+export function swarmMessages(run: ExecRun | null | undefined): SwarmMessage[] {
+  return [...(swarm(run)?.messages ?? [])].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+}
+
+export function swarmDecisions(run: ExecRun | null | undefined): SwarmDecision[] {
+  return swarm(run)?.decisions ?? [];
+}
+
+export function swarmDecision(
+  run: ExecRun | null | undefined,
+  decisionId: string,
+): SwarmDecision | null {
+  return swarmDecisions(run).find((d) => d.id === decisionId) ?? null;
+}
+
+export function swarmPendingActions(run: ExecRun | null | undefined): SwarmPendingAction[] {
+  return swarm(run)?.pendingActions ?? [];
+}
+
+const SWARM_PHASE_LABELS: Record<string, string> = {
+  prepare: 'preparing',
+  implement: 'implementing',
+  verify: 'verifying',
+  review: 'review',
+  awaiting_acceptance: 'awaiting your acceptance',
+  done: 'done',
+  stopped: 'stopped',
+  failed: 'failed',
+};
+
+export function swarmPhaseLabel(s: string | null | undefined): string {
+  return SWARM_PHASE_LABELS[s ?? ''] ?? s ?? '—';
+}
+
+const SWARM_STATUS_LABELS: Record<string, string> = {
+  active: 'active',
+  waiting: 'waiting on you',
+  exhausted: 'turns exhausted',
+  stopped: 'stopped',
+  done: 'done',
+};
+
+export function swarmStatusLabel(s: string | null | undefined): string {
+  return SWARM_STATUS_LABELS[s ?? ''] ?? s ?? '—';
+}
+
+/** True while the broker rejects new edits — the UI disables apply
+ * expectations and shows the freeze reason instead. */
+export function swarmFrozen(run: ExecRun | null | undefined): { frozen: boolean; reason: string } {
+  const s = swarm(run);
+  if (s?.freeze?.active === true) {
+    return { frozen: true, reason: s.freeze.reason ?? 'frozen' };
+  }
+  if (s && ['verify', 'review', 'awaiting_acceptance'].includes(s.phase ?? '')) {
+    return { frozen: true, reason: s.phase ?? 'frozen' };
+  }
+  return { frozen: false, reason: '' };
+}
+
+/** One-line text for a durable swarm pending action. */
+export function swarmPendingActionText(
+  a: SwarmPendingAction,
+  run?: ExecRun | null,
+): string {
+  if (a.type === 'decision') {
+    const d = run ? swarmDecision(run, a.decisionId) : null;
+    const what = d
+      ? `${d.kind ?? 'decision'} on ${(d.paths ?? []).join(', ') || 'shared paths'}${d.rationale ? ` — ${d.rationale.slice(0, 120)}` : ''}`
+      : `decision ${a.decisionId}`;
+    return `contested decision needs you: ${what}`;
+  }
+  if (a.type === 'question') {
+    const p = run ? swarmParticipant(run, a.participantId) : null;
+    const who = p ? `${p.callsign ?? p.participantId} (${p.participantId})` : a.participantId;
+    return `participant ${who} asks: ${a.question ?? 'a question awaits your answer'}`;
+  }
+  const who = a.participantId ? `participant ${a.participantId}` : 'the swarm';
+  return `${who} exhausted its turns (${a.reason ?? 'turns_exhausted'}) — extend the budget or stop`;
+}
+
+/** Run states in which the server still accepts a swarm user decision. */
+const SWARM_DECIDABLE_RUN = new Set(['queued', 'active', 'blocked']);
+
+function swarmDecidable(run: ExecRun | null): GateResult {
+  if (!isSwarm(run)) return no('not a swarm run');
+  if (!SWARM_DECIDABLE_RUN.has(run!.status)) {
+    return no(`run is ${run!.status} — swarm decisions apply only to live or blocked runs`);
+  }
+  return ok;
+}
+
+/** `swarm_input`: steer/answer one participant, or 'all' to broadcast.
+ * Frozen runs refuse — the broker would reject the steer anyway. */
+export function canSwarmInput(
+  run: ExecRun | null,
+  participantId: string,
+  text?: string,
+): GateResult {
+  const d = swarmDecidable(run);
+  if (!d.ok) return d;
+  const frozen = swarmFrozen(run);
+  if (frozen.frozen) return no(`the swarm is frozen (${frozen.reason}) — input is held until it clears`);
+  if (participantId !== 'all' && !swarmParticipant(run, participantId)) {
+    return no(`participant ${participantId} is not in this swarm`);
+  }
+  if (text !== undefined && !text.trim()) return no('write the message first');
+  return ok;
+}
+
+/** `swarm_extend`: the named participant (or the swarm when omitted)
+ * exhausted its turns — grants more. */
+export function canSwarmExtend(run: ExecRun | null, participantId?: string | null): GateResult {
+  const d = swarmDecidable(run);
+  if (!d.ok) return d;
+  if (participantId) {
+    const p = swarmParticipant(run, participantId);
+    if (!p) return no(`participant ${participantId} is not in this swarm`);
+    const extendPending = swarmPendingActions(run).some(
+      (a) => a.type === 'extend'
+        && ((a as { participantId?: string | null }).participantId ?? null) === participantId);
+    if (p.status !== 'exhausted' && !extendPending) {
+      return no(`participant ${participantId} is ${p.status} — only an exhausted participant may be extended`);
+    }
+  }
+  return ok;
+}
+
+/** `swarm_decide`: settle a broker-escalated contested decision by id. */
+export function canSwarmDecide(run: ExecRun | null, decisionId: string): GateResult {
+  const d = swarmDecidable(run);
+  if (!d.ok) return d;
+  const dec = swarmDecision(run, decisionId);
+  if (!dec) return no(`decision ${decisionId} is not in this swarm`);
+  if (dec.status !== 'pending') {
+    return no(`decision ${decisionId} is ${dec.status} — only a pending decision may be settled`);
+  }
+  const escalated = swarmPendingActions(run).some(
+    (a) => a.type === 'decision' && (a as { decisionId: string }).decisionId === decisionId);
+  if (!escalated) {
+    return no(`decision ${decisionId} is not escalated to you — nothing to settle`);
+  }
+  return ok;
+}
+
+export function swarmInputPayload(
+  run: ExecRun,
+  participantId: string,
+  text: string,
+): Record<string, unknown> {
+  return participantId === 'all'
+    ? { runId: run.id, to: 'all', text }
+    : { runId: run.id, participantId, text };
+}
+
+export function swarmExtendPayload(
+  run: ExecRun,
+  turns: number,
+  participantId?: string | null,
+): Record<string, unknown> {
+  const p: Record<string, unknown> = { runId: run.id, turns };
+  if (participantId) p.participantId = participantId;
+  return p;
+}
+
+export function swarmDecidePayload(
+  run: ExecRun,
+  decisionId: string,
+  outcome: 'approve' | 'reject',
+  note?: string,
+): Record<string, unknown> {
+  const p: Record<string, unknown> = { runId: run.id, decisionId, outcome };
+  if (note?.trim()) p.note = note.trim().slice(0, 500);
+  return p;
+}
+
+// -- swarm start composition (backend-ui-contract §3) -------------------------
+
+export interface SwarmParticipantDraft {
+  participantId: string;
+  callsign: string;
+  profileId: string;
+  ownedPaths: string;
+}
+
+export interface SwarmDraft {
+  participants: SwarmParticipantDraft[];
+  shared?: Record<string, string>;
+  limits?: {
+    maxTurnsPerParticipant?: number;
+    maxRounds?: number;
+    maxMessages?: number;
+    verifyRequired?: boolean;
+  };
+  baseRef?: string;
+}
+
+/** Client-side mirror of the contract's swarm start-shape gates. */
+export function swarmDraftProblems(view: ExecCardView, d: SwarmDraft): string[] {
+  const problems: string[] = [];
+  const list = d.participants ?? [];
+  if (list.length < 2) problems.push('a swarm needs at least 2 participants');
+  if (list.length > 3) problems.push('a swarm holds at most 3 participants');
+  const ids = new Set<string>();
+  for (const p of list) {
+    if (!p.participantId?.trim()) problems.push('every participant needs an id');
+    else if (ids.has(p.participantId.trim())) problems.push(`duplicate participant id ${p.participantId.trim()}`);
+    else ids.add(p.participantId.trim());
+    if (!p.profileId?.trim()) problems.push(`participant ${p.participantId?.trim() || '?'} needs a profile`);
+    if (!(p.ownedPaths ?? '').split(',').map((s) => s.trim()).filter(Boolean).length) {
+      problems.push(`participant ${p.participantId?.trim() || '?'} needs owned paths`);
+    }
+  }
+  const live = inflightRuns(view);
+  if (live.length) {
+    problems.push(`run ${live[0].id} is still live — stop it and let it settle first`);
+  }
+  return problems;
+}
+
+export function canStartSwarm(view: ExecCardView, d: SwarmDraft): GateResult {
+  if (view.features?.swarm !== true) return no('swarm mode is not enabled on this deployment');
+  const g = canStartInMode('swarm', view);
+  if (!g.ok) return g;
+  const problems = swarmDraftProblems(view, d);
+  return problems.length ? no(problems[0]) : ok;
+}
+
+/** The `start` payload for mode 'swarm' (contract §3). */
+export function swarmStartPayload(d: SwarmDraft): Record<string, unknown> {
+  const participants = (d.participants ?? []).map((p) => ({
+    participantId: p.participantId.trim(),
+    callsign: p.callsign?.trim() || p.participantId.trim(),
+    profileId: p.profileId.trim(),
+    ownedPaths: p.ownedPaths.split(',').map((s) => s.trim()).filter(Boolean),
+  }));
+  const swarm: Record<string, unknown> = { participants };
+  if (d.shared && Object.keys(d.shared).length) swarm.shared = { ...d.shared };
+  const L = d.limits ?? {};
+  const limits: Record<string, unknown> = {};
+  if (typeof L.maxTurnsPerParticipant === 'number' && L.maxTurnsPerParticipant > 0) {
+    limits.maxTurnsPerParticipant = Math.floor(L.maxTurnsPerParticipant);
+  }
+  if (typeof L.maxRounds === 'number' && L.maxRounds > 0) limits.maxRounds = Math.floor(L.maxRounds);
+  if (typeof L.maxMessages === 'number' && L.maxMessages > 0) limits.maxMessages = Math.floor(L.maxMessages);
+  if (typeof L.verifyRequired === 'boolean') limits.verifyRequired = L.verifyRequired;
+  if (Object.keys(limits).length) swarm.limits = limits;
+  const payload: Record<string, unknown> = { mode: 'swarm', swarm };
+  if (d.baseRef?.trim()) payload.baseRef = d.baseRef.trim();
   return payload;
 }

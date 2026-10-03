@@ -205,14 +205,17 @@ export interface ExecCardView {
   workspaces: Record<string, ExecWorkspaceView>;
   commandsProcessed: number;
   projection: ExecProjection | null;
-  /** Server-side feature gates ({start, validation, fusion, preparation}) —
-   * the UI keys gated surfaces off this; the commands themselves stay
-   * server-gated regardless. */
+  /** Server-side feature gates — the UI keys gated surfaces off this;
+   * the commands themselves stay server-gated regardless. `orchestrator`
+   * and `swarm` follow the backend-ui-contract §10 rule: the modes stay
+   * disabled until the server reports them available. */
   features?: {
     start?: boolean;
     validation?: boolean;
     fusion?: boolean;
     preparation?: boolean;
+    orchestrator?: boolean;
+    swarm?: boolean;
   };
   /** Compact preparation summary (sessions.mjs:preparationSummary) — null
    * when the card has no preparation session or the feature is off. */
@@ -622,6 +625,154 @@ export interface ExecArtifact {
   [k: string]: unknown;
 }
 
+// ---- orchestrator run state (backend-ui-contract §§4–5) ----------------------
+// The durable `run.orchestrator` slice: decomposition spec version,
+// subtask records with attempts/evidence/waiting, the integrate import,
+// the authoritative user-unblock list (pendingActions), stats and the
+// supervisor claim (owner — read-only for the UI). User commands:
+// orch_approve | orch_answer | orch_grant | orch_retry (stop/continue shared).
+
+export type OrchTaskStatus =
+  | 'pending' | 'ready' | 'running' | 'verifying' | 'returned'
+  | 'accepted' | 'failed' | 'blocked' | 'waiting' | 'cancelled';
+
+export interface OrchAttempt {
+  id: string;
+  n: number;
+  kind: 'work' | 'fix' | 'verify' | string;
+  status: string;
+  resultCommit?: string | null;
+  error?: string | null;
+  [k: string]: unknown;
+}
+
+export interface OrchTask {
+  taskId: string;
+  title: string;
+  status: OrchTaskStatus | string;
+  deps?: string[];
+  profile?: string | null;
+  boundary?: string[];
+  inputCommit?: string | null;
+  snapshotOf?: string[];
+  attempts?: OrchAttempt[];
+  resultCommit?: string | null;
+  resultSha256?: string | null;
+  evidence?: {
+    verifyArtifactId?: string | null;
+    verdict?: string | null;
+    findingsArtifactId?: string | null;
+  } | null;
+  waiting?: { reason?: string | null; question?: string | null; since?: number | null } | null;
+  budget?: { used?: number; limit?: number } | null;
+  [k: string]: unknown;
+}
+
+export type OrchPendingAction =
+  | { type: 'spec_approval'; specSha256: string }
+  | { type: 'question'; taskId: string; question?: string | null }
+  | { type: 'grant'; taskId: string; reason?: string | null }
+  | { type: 'decision'; taskId: string; reason?: string | null };
+
+export interface OrchestratorState {
+  spec?: {
+    version?: number;
+    sha256?: string | null;
+    status?: 'pending' | 'approved' | 'superseded' | 'rejected' | string;
+    approvedAt?: string | null;
+    by?: string | null;
+    artifactId?: string | null;
+  } | null;
+  phase?: 'decompose' | 'approval' | 'work' | 'integrate' | 'validate' | 'done' | 'stopped' | 'failed' | string;
+  tasks?: OrchTask[];
+  integrate?: {
+    canonicalId?: string | null;
+    attemptId?: string | null;
+    import?: { commitSha?: string | null; treeSha?: string | null; changed?: boolean | null; diffStat?: string | null } | null;
+  } | null;
+  pendingActions?: OrchPendingAction[];
+  stats?: { tasks?: number; accepted?: number; running?: number; failed?: number } | null;
+  owner?: { runnerId?: string | null; instanceId?: string | null } | null;
+  [k: string]: unknown;
+}
+
+// ---- swarm run state (backend-ui-contract §§6–7) ---------------------------
+// The durable `run.swarm` slice: participants with turn budget/attempt/
+// waiting, contested path ownership, broker-escalated decisions, the
+// message bus, freeze state, findings and the authoritative user-unblock
+// list (pendingActions). User commands: swarm_input | swarm_extend |
+// swarm_decide (stop/continue shared). New edits while frozen are
+// broker-rejected — the UI disables apply expectations and shows why.
+
+export interface SwarmParticipant {
+  participantId: string;
+  callsign?: string | null;
+  profileId?: string | null;
+  status?: 'active' | 'waiting' | 'exhausted' | 'stopped' | 'done' | string;
+  ownedPaths?: string[];
+  attempt?: { id?: string | null; status?: string | null; porchRunId?: string | null } | null;
+  budget?: { turnsUsed?: number; turnsLimit?: number } | null;
+  waiting?: { reason?: string | null; detail?: string | null } | null;
+  cursor?: { lastSeenSeq?: number | null } | null;
+  [k: string]: unknown;
+}
+
+export interface SwarmDecision {
+  id: string;
+  kind?: 'apply' | 'interface' | 'contested' | string;
+  proposer?: string | null;
+  paths?: string[];
+  status?: 'pending' | 'approved' | 'rejected' | 'superseded' | string;
+  at?: number | null;
+  rationale?: string | null;
+  artifactId?: string | null;
+  [k: string]: unknown;
+}
+
+export interface SwarmMessage {
+  id: string;
+  seq?: number | null;
+  from?: string | null;
+  to?: string | null;
+  kind?: 'question' | 'answer' | 'proposal' | 'notice' | string;
+  text?: string | null;
+  at?: number | null;
+  [k: string]: unknown;
+}
+
+export interface SwarmFinding {
+  id: string;
+  owner?: string | null;
+  text?: string | null;
+  severity?: string | null;
+  status?: 'open' | 'fixed' | 'wontfix' | string;
+  [k: string]: unknown;
+}
+
+export type SwarmPendingAction =
+  | { type: 'decision'; decisionId: string }
+  | { type: 'question'; participantId: string; question?: string | null }
+  | { type: 'extend'; participantId?: string | null; reason?: string | null };
+
+export interface SwarmState {
+  phase?: 'prepare' | 'implement' | 'verify' | 'review' | 'awaiting_acceptance' | 'done' | 'stopped' | 'failed' | string;
+  round?: number | null;
+  participants?: SwarmParticipant[];
+  ownership?: { path?: string | null; owner?: string | null; since?: number | null; contested?: boolean }[];
+  decisions?: SwarmDecision[];
+  messages?: SwarmMessage[];
+  freeze?: { active?: boolean; reason?: string | null; since?: number | null } | null;
+  findings?: SwarmFinding[];
+  limits?: {
+    turnsUsed?: number; turnsLimit?: number;
+    round?: number; maxRounds?: number;
+    messagesUsed?: number; maxMessages?: number;
+  } | null;
+  pendingActions?: SwarmPendingAction[];
+  owner?: { runnerId?: string | null; instanceId?: string | null } | null;
+  [k: string]: unknown;
+}
+
 // ---- fusion panel (F2/F3 durable state — server/execution/fusion/domain.mjs)
 // ---------------------------------------------------------------------------
 
@@ -817,6 +968,13 @@ export interface ExecRun {
     task?: { kind: string; versionId: string; sha256: string } | null;
   };
   fusion?: FusionState | null;
+  /** Orchestrator run detail (backend-ui-contract §4) — null unless
+   * mode==='orchestrator'. Rendered by the run-graph section; the
+   * pendingActions list is the ONLY user-unblock surface. */
+  orchestrator?: OrchestratorState | null;
+  /** Swarm run detail (backend-ui-contract §6) — null unless
+   * mode==='swarm'. Claims/messages/decisions/limits render verbatim. */
+  swarm?: SwarmState | null;
   composition: ExecComposition | null;
   reviewRules?: unknown;
   baseRef: string;
@@ -922,6 +1080,17 @@ export const USER_COMMAND_TYPES = [
   'retry_participant',
   'exclude_panelist',
   'approve_work_order',
+  // Orchestrator user commands (backend-ui-contract §5) — gated on
+  // features.orchestrator server-side; the UI mirrors the flag.
+  'orch_approve',
+  'orch_answer',
+  'orch_grant',
+  'orch_retry',
+  // Swarm user commands (backend-ui-contract §7) — gated on
+  // features.swarm server-side; the UI mirrors the flag.
+  'swarm_input',
+  'swarm_extend',
+  'swarm_decide',
   // P5: idea-preparation commands — minted on the managed card, dispatched
   // through the SAME revision-checked envelope as every lifecycle command.
   'start_preparation',
