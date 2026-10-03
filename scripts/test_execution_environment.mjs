@@ -206,6 +206,27 @@ sect('env-config');
   const cc = validateEnvironmentConfig(baseConfig(), { env: {}, view: 'controller' });
   check('controller view resolves mountPath', cc.environment.socketPath === path.join(tmp, 'env', 'controller', 'env.sock'));
   check('roles validated', Object.keys(cfg.roles).length === 5 && cfg.roles.integrator.canonical === true);
+  // §backend-env-needs: backend role registrations (orch-*, swarm-*) validate
+  // with the requested projectMode/inputs/deps/canonical surface.
+  {
+    const withBackend = baseConfig({ roles: {
+      'orch-decomposer':  { projectMode: 'snapshot-ro',  inputs: ['requirements', 'plan', 'design', 'workers'], deps: false, canonical: false },
+      'orch-worker':      { projectMode: 'private-repo', inputs: ['task', 'brief', 'boundary', 'criteria', 'deps', 'requirements', 'plan', 'context'], deps: true, canonical: true },
+      'orch-verifier':    { projectMode: 'snapshot-ro',  inputs: ['task', 'diff', 'criteria', 'boundary', 'context', 'report'], deps: false, canonical: false },
+      'orch-integrator':  { projectMode: 'private-repo', inputs: ['task', 'work-order', 'requirements', 'plan', 'design', 'results'], deps: true, canonical: true },
+      'swarm-participant': { projectMode: 'snapshot-ro', inputs: ['task', 'brief', 'messages', 'decisions', 'ownership', 'scratch'], deps: false, canonical: false },
+    } });
+    const bc = validateEnvironmentConfig(withBackend, { env: {}, view: 'client' });
+    check('backend roles accepted', ['orch-decomposer', 'orch-worker', 'orch-verifier', 'orch-integrator', 'swarm-participant']
+      .every((r) => bc.roles[r]) && bc.roles['orch-worker'].canonical === true);
+    check('swarm snapshot-ro (no direct canonical write)',
+      bc.roles['swarm-participant'].projectMode === 'snapshot-ro' && bc.roles['swarm-participant'].canonical !== true);
+    try {
+      const bad = withBackend; bad.roles['bogus-role'] = { projectMode: 'snapshot-ro', inputs: [] };
+      validateEnvironmentConfig(bad);
+      check('unknown role still rejected', false);
+    } catch (e) { check('unknown role still rejected', e.code === 'config_invalid'); }
+  }
 
   try {
     validateEnvironmentConfig(baseConfig({ environment: { socketPath: '../escape.sock' } }));

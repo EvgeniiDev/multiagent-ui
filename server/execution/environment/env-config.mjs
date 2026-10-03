@@ -31,7 +31,9 @@ export const REL_PATH_RE = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,300}$/; // relative r
 const REL_RE = REL_PATH_RE;
 const ENV_KEY_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const KINDS = new Set(['provider', 'search', 'registry', 'service']);
-const ROLES = new Set(['panelist', 'judge', 'integrator', 'setup', 'probe']);
+const ROLES = new Set(['panelist', 'judge', 'integrator', 'setup', 'probe',
+  'orch-decomposer', 'orch-worker', 'orch-verifier', 'orch-integrator',
+  'swarm-participant']);
 const PROJECT_MODES = new Set(['snapshot-ro', 'private-repo', 'none', 'workdir-rw']);
 
 function fail(code, msg) { throw new RuntimeError(code, msg); }
@@ -301,7 +303,9 @@ export function validateEnvironmentConfig(raw, { env = {}, view = 'controller' }
     }
     roles[name] = role;
   }
-  for (const needed of ROLES) {
+  // Only the fusion/foundation roles are mandatory — backend orch/swarm
+  // roles are optional additions (their driver maps to them when present).
+  for (const needed of ['panelist', 'judge', 'integrator', 'setup', 'probe']) {
     if (!roles[needed]) fail('config_invalid', `roles.${needed} is required`);
   }
 

@@ -884,7 +884,10 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     const workerId = p?.workerId;
     const wrec = registry.workers[workerId];
     if (!wrec) throw new RuntimeError('unknown_worker', `no such worker: ${workerId}`);
-    if (wrec.role !== 'integrator' || !wrec.canonicalId) {
+    // Canonical binding (not the role name) is the authority: prepare already
+    // refused roles without canonical:true, so any worker carrying a
+    // canonicalId was bound through a canonical-capable role.
+    if (!wrec.canonicalId) {
       throw new RuntimeError('not_integrator', `worker ${workerId} has no canonical binding`);
     }
     const canon = registry.canonicals[wrec.canonicalId];
