@@ -6,7 +6,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { immutableDependencyBasis, createOrchDriver } from '../server/execution/orchestrator/controller.mjs';
+import { immutableDependencyBasis, createOrchDriver, extractJsonDoc } from '../server/execution/orchestrator/controller.mjs';
 import { parseIntegrationDeclarations, workerMaterials } from '../server/execution/orchestrator/prompt.mjs';
 import * as ws from '../server/execution/orchestrator/workspaces.mjs';
 const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
@@ -102,4 +102,17 @@ test('historical terminal rows cannot complete stop without physical namespace p
   assert.equal(await driver.drive({ cardId: 'c' }, run), 'stopped');
   assert.deepEqual(commands, ['orch_worker_settled','complete_run']);
   assert.equal(run.status, 'cancelled');
+});
+
+
+test('role result JSON preserves nested Markdown fences and rejects multiple or unterminated blocks', () => {
+  const verdict = { decision: 'return', summary: 'actual verifier report shape', findings: [
+    { id: 'f3', severity: 'major', text: 'Plan includes ```acp-checks {"checks":[{"run":"node --test"}]} but candidate omitted proof', where: 'report:1' },
+  ] };
+  const framed = '```json\n' + JSON.stringify(verdict, null, 2) + '\n```\nSTATUS: DONE';
+  assert.deepEqual(extractJsonDoc(framed), verdict);
+  assert.equal(extractJsonDoc(framed).findings[0].text, verdict.findings[0].text);
+  assert.equal(extractJsonDoc(framed + '\n' + framed), null);
+  assert.equal(extractJsonDoc('```json\n'+JSON.stringify(verdict)), null);
+  assert.equal(extractJsonDoc('```json\n{invalid}\n```'), null);
 });

@@ -76,13 +76,15 @@ const SAFE_PART = (s, max = 40) =>
 const taskById = (oz, id) => (oz?.tasks || []).find((t) => t && t.id === id) ?? null;
 
 // Extract the single JSON document out of a role's final text — the
-// contract is "one JSON doc" possibly fenced; we take the last fenced
-// block or the last top-level {...} span.
+// contract is "one JSON doc" possibly fenced. Delimiters occupy their own
+// lines, so Markdown backticks inside JSON strings remain ordinary bytes.
 export function extractJsonDoc(finalText) {
   if (typeof finalText !== 'string' || !finalText.trim()) return null;
-  const fences = [...finalText.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/g)]
+  const fences = [...finalText.matchAll(/^```(?:json)?[ \t]*\r?\n([\s\S]*?)^```[ \t]*\r?$/gm)]
     .map((m) => m[1]).filter((s) => s.trim().startsWith('{'));
-  const candidates = fences.length ? [fences[fences.length - 1]] : [finalText];
+  if (fences.length > 1) return null;
+  if (!fences.length && /^```(?:json)?[ \t]*\r?$/m.test(finalText)) return null;
+  const candidates = fences.length ? [fences[0]] : [finalText];
   for (const c of candidates) {
     const start = c.indexOf('{');
     const end = c.lastIndexOf('}');
