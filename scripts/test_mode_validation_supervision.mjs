@@ -470,3 +470,43 @@ test('shared validation serializes real local heartbeat contention at the copy r
     assert.equal(Object.values(run.validation.procs)[0].state, 'settled');
   } finally { await stopAndDrain(env.svc, sched, runId, 'card-a'); }
 });
+
+test('workspace projection preserves exact environment retirement bindings through real adoption', async () => {
+  const opsDir = await fs.mkdtemp(join(tmpdir(), 'workspace-retirement-')); cleanupRoots.add(opsDir);
+  const opsFile = join(opsDir, 'ops-token'), opsToken = 'f'.repeat(48);
+  await fs.writeFile(opsFile, opsToken, {mode:0o600});
+  const env = await mkEnv({envExtra:{ACP_OPS_TOKEN_FILE:opsFile}});
+  await seedBase(env.svc, env.projectDir);
+  const runId = await mkValidationRun(env.svc, 'card-a', [{run:'true',timeoutSec:5}]);
+  const {sched} = mkSched(env, {validationEnabled:false});
+  const run = await drive(env.svc, sched, runId, r => r.phase === 'awaiting_validation');
+  const durable = (await loadAggregate(env.stateDir, 'card-a')).workspaces[run.workspaceId];
+  const projected = (await getCard(env.svc, 'card-a')).json.workspaces[run.workspaceId];
+  for (const field of ['envInstance','envSlot','envGeneration']) {
+    assert.deepEqual(projected.owner[field], durable.owner[field], `${field} survives scheduler-facing projection`);
+  }
+  const successor = {...sched.identity(), instanceId:'workspace-successor', pid:4242, pidStarttime:'successor-start',
+    envKey:{...sched.identity().envKey,pidNs:'successor-namespace'},
+    envInstance:{containerId:'successor-container',initStarttime:'successor-init'}};
+  const client = mkClient(env.svc, env.stateDir);
+  const registration = await client.registerEnvironment({commandId:'workspace-successor-register',
+    payload:{slot:successor.envSlot,...successor}});
+  successor.envGeneration = registration.result.generation;
+  const adopt = async id => client.command('card-a', {commandId:id,type:'adopt_workspace',
+    expectedInternalRevision:(await getCard(env.svc,'card-a')).json.internalRevision,
+    payload:{workspaceId:run.workspaceId,runId,proof:{kind:'environment_retired'},...successor}});
+  await assert.rejects(adopt('before-retirement'), {code:'ownership_unproven'});
+  const target = {envInstance:projected.owner.envInstance,generation:projected.owner.envGeneration};
+  const retirement = await req(env.svc,'POST','/api/internal/environments/retire', {
+    commandId:'workspace-retire-original',type:'retire_environment',
+    payload:{slot:projected.owner.envSlot,by:'controlled test fixture',target,
+      evidence:{source:'compose_lifecycle',containerId:target.envInstance.containerId,state:'removed',observedAt:Date.now(),detail:'Fixture former environment removed'}}},
+    {'x-acp-ops-token':opsToken});
+  assert.equal(retirement.status,200,J(retirement.json));
+  const result = await adopt('after-exact-retirement'); assert.equal(result.result.adopted,true);
+  const adopted = (await getCard(env.svc,'card-a')).json.workspaces[run.workspaceId];
+  assert.equal(adopted.owner.instanceId,successor.instanceId);
+  assert.deepEqual(adopted.owner.envInstance,successor.envInstance);
+  assert.equal(adopted.owner.envGeneration,successor.envGeneration);
+  assert.equal(adopted.path,durable.path,'adoption preserves the original worktree');
+});
