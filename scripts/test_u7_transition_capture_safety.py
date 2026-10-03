@@ -24,6 +24,20 @@ Covered:
     transition-began flag, no service stop/up/start
   * publish failure + sabotaged rollback restore -> residual prior copy
     preserved in the kept rollback dir and explicitly reported
+  * fixed :u7baseline image pins are part of the baseline generation —
+    a failed publish re-points them at the prior target or withdraws
+    tags that did not exist, never leaving them on the refused capture
+  * SIGINT/SIGTERM at backup AND install boundaries — the rollback
+    completes before the signal is re-raised (real pending-signal
+    delivery proves a transaction commits whole or rolls back whole);
+    a fault in the post-move bookkeeping window still restores the
+    moved prior / withdraws the moved new file
+  * the publish transaction holds an exclusive cross-process flock;
+    restore/verify take shared/exclusive reads — no concurrent
+    publisher can interleave and no reader sees a mixed generation
+  * the rollback copy fallback never writes through a destination
+    symlink — a hostile mid-rollback swap cannot redirect captured
+    bytes outside the private dir
   * successful apply -> staged capture is published AT the mutation
     boundary and is exactly what restore()/verify() consume; image
     pins resolve to the staged capture ids; service mutations happen
@@ -34,10 +48,12 @@ Run:  python3 scripts/test_u7_transition_capture_safety.py
 
 from __future__ import annotations
 
+import fcntl
 import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -47,6 +63,11 @@ import urllib.request
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
+
+# The real signal.signal — captured BEFORE setUp patches the module
+# attribute, so a test can still install a genuine handler for
+# pending-signal delivery checks.
+_real_signal = signal.signal
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -231,6 +252,15 @@ class World:
             self.images[iid].setdefault("RepoTags", []).append(tag)
             self.tags[tag] = iid
             return cp()
+        if cmd[:2] == ["docker", "rmi"]:
+            ref = cmd[2]
+            if ref in self.tags:
+                iid = self.tags.pop(ref)
+                if iid in self.images \
+                        and ref in self.images[iid]["RepoTags"]:
+                    self.images[iid]["RepoTags"].remove(ref)
+                return cp(0, f"Untagged: {ref}\n")
+            return cp(1, "", f"Error: No such image: {ref}")
         if cmd[:2] == ["docker", "top"]:
             svc = cmd[2].removeprefix("acp-ui-").removesuffix("-1")
             rows = self.top_rows.get(svc)
@@ -340,6 +370,13 @@ class CaptureSafetyTest(unittest.TestCase):
         # Module-level flag survives between tests in this process —
         # reset so a refused apply provably never sets it.
         T._transition_began = False
+        if hasattr(T, "_baseline_lock_depth"):
+            T._baseline_lock_depth = 0
+        self.addCleanup(
+            signal.pthread_sigmask, signal.SIG_UNBLOCK,
+            {signal.SIGINT, signal.SIGTERM})
+        self.addCleanup(_real_signal, signal.SIGTERM, signal.SIG_DFL)
+        self.addCleanup(_real_signal, signal.SIGINT, signal.SIG_DFL)
 
     # -- helpers -----------------------------------------------------
     def cli(self, *argv: str):
@@ -358,8 +395,10 @@ class CaptureSafetyTest(unittest.TestCase):
 
     def assert_sentinels_intact(self):
         for name, data in self.sentinel.items():
-            got = (self.priv / name).read_bytes()
-            self.assertEqual(got, data, f"{name} changed")
+            p = self.priv / name
+            self.assertTrue(p.exists(),
+                            f"{name} missing — baseline file stranded")
+            self.assertEqual(p.read_bytes(), data, f"{name} changed")
 
     def assert_no_residue(self, extra=()):
         self.assertEqual([p.name for p in self.priv.glob("stage-*")], [],
@@ -376,19 +415,44 @@ class CaptureSafetyTest(unittest.TestCase):
                          "unexpected files left in shared private dir")
 
     def install_publish_fault(self, *, install=None, backup=None,
-                              restore=()):
-        """Patch os.replace/shutil.copy2 so _publish_stage can be killed
-        at a chosen point — classified by where each move goes, not by
-        call order:
+                              install_after=None, backup_after=None,
+                              signal_at=None, kill_at=None,
+                              restore_replace=(), restore_fallback=(),
+                              link_dst=None):
+        """Patch os.replace and the rollback copy fallbacks
+        (shutil.copyfileobj + shutil.copy2) so _publish_stage can be
+        killed at a chosen point — classified by where each move goes,
+        not by call order:
 
-          install=N  -> the Nth staged-file -> priv install raises
-          backup=N   -> the Nth priv -> rollback-dir move raises
-          restore=(names) -> every rollback restore of those names
-                             raises (os.replace AND the copy2 fallback)
+          install=N / backup=N  -> the Nth move of that kind raises
+                                   BEFORE it runs (no file moved)
+          install_after=N / backup_after=N
+                               -> the Nth move runs, THEN raises — the
+                                  file DID move but bookkeeping after
+                                  the call never ran (the signal/moved-
+                                  untracked window)
+          signal_at=(kind, N, signum)
+                               -> the Nth move of kind runs, then the
+                                  driver's signal handler is invoked
+                                  with signum — SystemExit raised
+                                  inside the os.replace frame
+          kill_at=(kind, N, signum)
+                               -> the Nth move of kind runs, then a
+                                  REAL signum is sent to this process
+          restore_replace=(names)  -> rollback os.replace of those
+                                      priors raises
+          restore_fallback=(names) -> the rollback copy fallback of
+                                      those priors raises
+          link_dst={name: target}  -> before a failing restore-replace,
+                                      dst is swapped for a symlink to
+                                      target (hostile mid-rollback swap)
 
         Returns patchers; start them before apply(). self.fault records
         how many moves of each kind ran and which file was failed."""
-        real_replace, real_copy2 = os.replace, shutil.copy2
+        real_replace = os.replace
+        real_copyfileobj = shutil.copyfileobj
+        real_copy2 = shutil.copy2
+        link_dst = link_dst or {}
         self.fault = {"install": 0, "backup": 0, "failed": None}
 
         def kind_of(src, dst):
@@ -407,24 +471,54 @@ class CaptureSafetyTest(unittest.TestCase):
             k = kind_of(src, dst)
             if k in ("install", "backup"):
                 self.fault[k] += 1
+                n, nm = self.fault[k], Path(src).name
                 limit = {"install": install, "backup": backup}[k]
-                if limit is not None and self.fault[k] == limit:
-                    self.fault["failed"] = Path(src).name
-                    raise OSError(f"injected {k} failure on "
-                                  f"{Path(src).name}")
-            elif k == "restore" and Path(src).name in restore:
-                self.fault["failed"] = Path(src).name
-                raise OSError(f"injected restore failure on "
-                              f"{Path(src).name}")
+                if limit is not None and n == limit:
+                    self.fault["failed"] = nm
+                    raise OSError(f"injected {k} failure on {nm}")
+                after = {"install": install_after,
+                         "backup": backup_after}[k]
+                if after is not None and n == after:
+                    self.fault["failed"] = nm
+                    real_replace(src, dst)
+                    raise OSError(f"injected post-move {k} failure on "
+                                  f"{nm}")
+                if signal_at is not None \
+                        and signal_at[:2] == (k, n):
+                    real_replace(src, dst)
+                    self.fault["failed"] = nm
+                    T._on_signal(signal_at[2], None)
+                    return
+                if kill_at is not None and kill_at[:2] == (k, n):
+                    real_replace(src, dst)
+                    self.fault["failed"] = nm
+                    os.kill(os.getpid(), kill_at[2])
+                    return
+            elif k == "restore" and Path(src).name in restore_replace:
+                nm = Path(src).name
+                if nm in link_dst:
+                    if os.path.lexists(dst):
+                        os.remove(dst)
+                    os.symlink(link_dst[nm], dst)
+                self.fault["failed"] = nm
+                raise OSError(f"injected restore failure on {nm}")
             return real_replace(src, dst)
 
+        def flaky_copyfileobj(fsrc, fdst, length=None):
+            if Path(fsrc.name).name in restore_fallback:
+                raise OSError("injected copy fallback failure on "
+                              f"{Path(fsrc.name).name}")
+            return real_copyfileobj(fsrc, fdst, length)
+
         def flaky_copy2(src, dst):
-            if Path(src).name in restore:
+            if Path(src).name in restore_fallback:
                 raise OSError("injected copy fallback failure on "
                               f"{Path(src).name}")
             return real_copy2(src, dst)
 
         return [mock.patch.object(os, "replace", flaky_replace),
+                mock.patch.object(shutil, "copyfileobj",
+                                  flaky_copyfileobj),
                 mock.patch.object(shutil, "copy2", flaky_copy2)]
 
     def start_faults(self, **kw):
@@ -606,7 +700,9 @@ class CaptureSafetyTest(unittest.TestCase):
         rollback dir, the staged partial file left in its place is
         honestly reported — still no receipt, no flag, no service
         mutation."""
-        self.start_faults(install=2, restore={"inspect-state.json"})
+        self.start_faults(install=2,
+                          restore_replace={"inspect-state.json"},
+                          restore_fallback={"inspect-state.json"})
 
         rc, out = self.apply()
         self.assertEqual(rc, 1, out)
@@ -644,6 +740,284 @@ class CaptureSafetyTest(unittest.TestCase):
         self.assertFalse(T._transition_began)
         self.assertFalse((self.priv / f"window-{WINDOW}.json").exists())
         self.assertFalse((self.priv / "transition-receipt.json").exists())
+        self.assertEqual(self.world.service_mutations(), [])
+
+    def test_publish_failure_restores_prior_pin_targets(self):
+        """The fixed :u7baseline tags are part of the baseline
+        generation — the published restore file resolves them BY NAME.
+        A failed publish must therefore restore each tag's prior target
+        (or withdraw a tag that did not exist), never leave them
+        re-pointed at the unpublished capture."""
+        tag = {s: f"acp-ui-u7-restore-{s}:u7baseline" for s in SERVICES}
+        prior = {s: f"sha256:{0xf0 + i:064x}" for i, s in
+                 enumerate(SERVICES[:3])}
+        for svc, iid in prior.items():
+            self.world.images[iid] = {"Id": iid,
+                                      "RepoTags": [f"prior-{svc}:prev",
+                                                   tag[svc]]}
+            self.world.tags[tag[svc]] = iid
+        untagged = SERVICES[3:]
+        self.start_faults(install=4)
+
+        rc, out = self.apply()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("REFUSE", out)
+
+        # Previously pinned services: the fixed tag resolves to the
+        # PRIOR image id again — the old baseline restores the old
+        # image, not the failed capture.
+        for svc, iid in prior.items():
+            self.assertEqual(self.world.tags.get(tag[svc]), iid,
+                             f"{tag[svc]} still points at the "
+                             "unpublished capture")
+            self.assertIn(tag[svc], self.world.images[iid]["RepoTags"])
+        # Services with NO prior pin: the fresh tag was withdrawn, not
+        # left behind resolving to the unpublished image.
+        for svc in untagged:
+            self.assertNotIn(tag[svc], self.world.tags,
+                             f"{tag[svc]} leaked from the refused "
+                             "publish")
+        self.assert_sentinels_intact()
+        self.assert_no_residue()
+        self.assertFalse(T._transition_began)
+        self.assertEqual(self.world.service_mutations(), [])
+
+    def test_signal_during_publish_rolls_back_then_reraises(self):
+        """SIGTERM landing mid-install (the driver's real _on_signal
+        raising SystemExit inside os.replace) is NOT a publishable
+        OSError: the rollback must still run to completion BEFORE the
+        signal is re-raised — priors byte-identical, partial installs
+        withdrawn, pins restored — and the process must exit with the
+        signal status, never a swallowed REFUSE."""
+        self.start_faults(signal_at=("install", 4, signal.SIGTERM))
+
+        rc, out = self.apply()
+        self.assertEqual(rc, 128 + signal.SIGTERM,
+                         f"SIGTERM was swallowed into a normal exit: "
+                         f"rc={rc} out={out}")
+        # The 4th install (bridge-hermes) really did land before the
+        # signal — the rollback had real work to undo.
+        self.assertEqual(self.fault["failed"],
+                         "inspect-bridge-hermes.json")
+        self.assert_sentinels_intact()
+        # The pins moved before the signal — they must be rolled back
+        # too, not left pointing at the unpublished capture.
+        self.assertEqual(self.world.tags, {},
+                         "restore-image pins survived a signaled publish")
+        self.assert_no_residue()
+        self.assertFalse(T._transition_began)
+        self.assertEqual(self.world.service_mutations(), [])
+
+    def test_signal_during_backup_phase_rolls_back_priors(self):
+        """SIGTERM inside the backup phase — after a prior was moved
+        aside but before the move's bookkeeping ran — must still
+        restore every moved prior: rollback state comes from the
+        rollback dir's CONTENTS, so an interrupted move cannot strand
+        a baseline file."""
+        self.start_faults(signal_at=("backup", 3, signal.SIGTERM))
+
+        rc, out = self.apply()
+        self.assertEqual(rc, 128 + signal.SIGTERM, out)
+        # 3 priors were genuinely moved aside before the signal.
+        self.assertEqual(self.fault["backup"], 3)
+        self.assert_sentinels_intact()
+        self.assert_no_residue()
+        self.assertFalse(T._transition_began)
+        self.assertEqual(self.world.service_mutations(), [])
+
+    def test_post_move_backup_fault_restores_untracked_prior(self):
+        """An OSError raised AFTER os.replace already moved a prior —
+        the exact interleaving a signal produces — must not strand the
+        file: the prior moved but was never recorded in the rollback
+        bookkeeping, so only content-derived rollback brings it back."""
+        self.start_faults(backup_after=3)
+
+        rc, out = self.apply()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("REFUSE", out)
+        self.assertIn("restored intact", out)
+        # The 3rd backup move really happened before the fault.
+        self.assertEqual(self.fault["backup"], 3)
+        self.assert_sentinels_intact()
+        self.assert_no_residue()
+        self.assertFalse(T._transition_began)
+
+    def test_post_move_install_fault_withdraws_untracked_new_file(self):
+        """Same post-move window on the install side: a staged NEW name
+        (no prior) whose os.replace completed but whose bookkeeping
+        never ran must still be withdrawn — rollback decides from what
+        the rollback dir actually contains, not from an append that may
+        have been skipped."""
+        self.start_faults(install_after=8)
+
+        rc, out = self.apply()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("REFUSE", out)
+        self.assertIn("restored intact", out)
+        # render-off.json (install #8) moved in, then the fault hit.
+        self.assertEqual(self.fault["failed"], "render-off.json")
+        self.assertFalse((self.priv / "render-off.json").exists(),
+                         "post-move new file survived rollback")
+        self.assert_sentinels_intact()
+        self.assert_no_residue()
+        self.assertFalse(T._transition_began)
+
+    def test_real_sigterm_pending_until_transaction_completes(self):
+        """A REAL SIGTERM delivered mid-install must not corrupt the
+        baseline: signal delivery is deferred to the commit point, so
+        the publish either commits a complete new generation or rolls
+        fully back — here it commits (the mask holds to the end), the
+        handler then runs and the process exits with the signal
+        status. Proves a pending signal can never split the
+        transaction."""
+        _real_signal(signal.SIGTERM, T._on_signal)
+        self.start_faults(kill_at=("install", 2, signal.SIGTERM))
+
+        rc, out = self.apply()
+        self.assertEqual(rc, 128 + signal.SIGTERM,
+                         f"pending SIGTERM lost or swallowed: "
+                         f"rc={rc} out={out}")
+        self.assertEqual(self.fault["failed"], "inspect-runner.json")
+        # The publish COMMITTED under deferral — the whole shared
+        # baseline is the new staged generation, never a mix.
+        for svc in SERVICES:
+            p = self.priv / f"inspect-{svc}.json"
+            self.assertTrue(p.exists(),
+                            f"mixed generation: {p.name} missing")
+            try:
+                d = json.loads(p.read_text())
+            except Exception:
+                self.fail(f"mixed generation: {p.name} holds "
+                          f"{p.read_bytes()[:60]!r}")
+            self.assertEqual(d[0]["Image"], NEW_IMAGE[svc],
+                             f"mixed generation: inspect-{svc}.json")
+        manifest = json.loads(
+            (self.priv / "restore-acp-ui-check.json").read_text())
+        self.assertEqual(manifest["state"]["image"], NEW_IMAGE["state"])
+        self.assertTrue(
+            (self.priv / "restore-acp-ui.yaml").read_text())
+        # No half-committed residue.
+        self.assertEqual([p.name for p in self.priv.glob("stage-*")], [])
+        self.assertEqual([p.name for p in self.priv.glob("rollback-*")],
+                         [])
+        self.assertEqual(self.world.service_mutations(), [])
+
+    def test_publish_holds_exclusive_baseline_lock(self):
+        """The publish transaction must hold an OS-level (flock)
+        EXCLUSIVE lock for the whole critical section — a concurrent
+        publisher cannot acquire EX and a concurrent reader cannot
+        acquire SH mid-publish, so neither can see a half-moved
+        generation. Probed non-blockingly from inside the publish
+        itself; released again afterwards."""
+        lock_path = getattr(
+            T, "_baseline_lock_path",
+            lambda: self.priv.with_name(self.priv.name + ".lock"))()
+        probes = {}
+        real_replace = os.replace
+
+        def probing_replace(src, dst):
+            s, d = Path(src), Path(dst)
+            if d.parent == self.priv \
+                    and s.parent.parent == self.priv \
+                    and s.parent.name.startswith("stage-") \
+                    and "mid" not in probes:
+                res = {}
+                for name, op in (
+                        ("EX", fcntl.LOCK_EX | fcntl.LOCK_NB),
+                        ("SH", fcntl.LOCK_SH | fcntl.LOCK_NB)):
+                    fd = os.open(lock_path,
+                                 os.O_RDWR | os.O_CREAT, 0o600)
+                    try:
+                        fcntl.flock(fd, op)
+                        res[name] = "acquired"
+                    except BlockingIOError:
+                        res[name] = "blocked"
+                    finally:
+                        os.close(fd)
+                probes["mid"] = res
+            return real_replace(src, dst)
+
+        with mock.patch.object(os, "replace", probing_replace):
+            rc, out = self.apply()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(probes.get("mid"),
+                         {"EX": "blocked", "SH": "blocked"},
+                         "publish ran without holding the baseline "
+                         "lock exclusively")
+        # And the lock is released once the transaction is over.
+        fd = os.open(lock_path, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            self.fail("baseline lock still held after publish")
+        finally:
+            os.close(fd)
+
+    def test_readers_acquire_baseline_lock(self):
+        """restore and verify must take the baseline lock while they
+        read — a shared lock for verify, exclusive for restore (which
+        may also regenerate the restore file) — so a publish in
+        progress can never hand them a mixed generation."""
+        lock_path = os.path.realpath(
+            self.priv.with_name(self.priv.name + ".lock"))
+        ops = []
+        real_flock = fcntl.flock
+
+        def spy(fd, op):
+            try:
+                ops.append((os.path.realpath(
+                    os.readlink(f"/proc/self/fd/{fd}")), op))
+            except OSError:
+                ops.append(("?", op))
+            return real_flock(fd, op)
+
+        # An empty manifest is a valid, fully-matching baseline for the
+        # fake world — keeps this about locking, not content.
+        (self.priv / "restore-acp-ui-check.json").write_text("{}")
+        self.world.health_dir = str(T.LIVE_STATE_DIR)
+        with mock.patch("fcntl.flock", spy):
+            rc, out = self.cli("verify")
+            self.assertEqual(rc, 0, out)
+            rc, out = self.cli("restore")
+            self.assertEqual(rc, 0, out)
+        got = [op for p, op in ops if p == lock_path]
+        self.assertIn(fcntl.LOCK_SH, got,
+                      f"verify read the baseline unlocked: {ops}")
+        self.assertIn(fcntl.LOCK_EX, got,
+                      f"restore read the baseline unlocked: {ops}")
+
+    def test_rollback_copy_never_follows_dst_symlink(self):
+        """The rollback copy fallback must never write through a
+        destination symlink: a hostile swap that replaces the partially
+        published inspect-state.json with a link to a file OUTSIDE the
+        private dir must leave the outside file untouched and still
+        restore the prior baseline bytes as a real file."""
+        outside = self.tmp / "outside-priv.txt"
+        outside.write_bytes(b"OUTSIDE-ORIGINAL\n")
+        self.start_faults(
+            install=2,
+            restore_replace={"inspect-state.json"},
+            link_dst={"inspect-state.json": outside})
+
+        rc, out = self.apply()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("REFUSE", out)
+        self.assertIn("restored intact", out)
+        self.assertEqual(self.fault["failed"], "inspect-state.json")
+
+        # The file behind the planted link was never written through.
+        self.assertEqual(outside.read_bytes(), b"OUTSIDE-ORIGINAL\n",
+                         "rollback copy followed a dst symlink and "
+                         "wrote captured bytes outside the private dir")
+        # And the prior itself still came back — as a real file, not
+        # the attacker's link.
+        p = self.priv / "inspect-state.json"
+        self.assertFalse(p.is_symlink(), "restored prior is a symlink")
+        self.assertEqual(p.read_bytes(),
+                         self.sentinel["inspect-state.json"])
+        self.assert_sentinels_intact()
+        self.assert_no_residue()
+        self.assertFalse(T._transition_began)
         self.assertEqual(self.world.service_mutations(), [])
 
     def test_successful_apply_publishes_staged_capture(self):
