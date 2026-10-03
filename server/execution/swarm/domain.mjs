@@ -126,7 +126,7 @@ export async function buildSwarmRun(D, ctx, aggregate, payload, now) {
   for (const role of ['reviewer','checker']) composition.preset.members[role] = D.validateMember(role, composition.preset.members[role], compat);
   const run = {id: `run_${randomUUID()}`, mode: 'swarm', status: 'queued', phase: 'coordinate', createdAt: now,
     inputs, composition, reviewRules: D.snapshotReviewRules(await ctx.getDoc('roles.json'), composition.preset.limits ?? {}),
-    baseRef, baseCommit, workspaceId: D.retainableWorkspaceId?.(aggregate) ?? null, attempts: [], events: [], eventsCursor: 0, result: null};
+    baseRef, baseCommit, workspaceId: payload.freshWorkspace ? null : D.retainableWorkspaceId?.(aggregate) ?? null, attempts: [], events: [], eventsCursor: 0, result: null};
   run.swarm = createSwarmState(run.id, spec, {projectRoot: D.projectKeyFor(aggregate.projectPath), snapshotSha: baseCommit, sourcePath: aggregate.projectPath}, now);
   return run;
 }
@@ -294,7 +294,7 @@ export async function cmdSwarmPhase(D,ctx,aggregate,payload,now) {
     if (s.phase!=='coordinate' || !s.participants.every(p=>p.declaration) || !agreed(s) || !Object.values(s.protocol.decisions).some(d=>d.scope?.kind==='global' && d.status==='agreed')) fail('coordination_pending','Explicit global allocation agreement and every declaration required');
     s.phase='implement';run.phase='implement';for(const p of s.participants){p.ready=false;p.waiting=null;p.status='active';}
   } else if (payload.phase==='awaiting_validation') {
-    if (!WRITE_PHASES.has(s.phase) || !s.participants.every(p=>p.ready || s.phase==='catch_up'&&!s.fixParticipants.includes(p.participantId)) || !agreed(s) || s.freeze?.active!==true || s.materialized?.epoch!==s.epoch) fail('convergence_pending','All owners and decisions must converge under a physical barrier');
+    if (!WRITE_PHASES.has(s.phase) || !s.participants.every(p=>p.ready || s.phase==='catch_up'&&!s.fixParticipants.includes(p.participantId)) || !agreed(s) || s.freeze?.active!==true || s.freeze.physicalConfirmed!==true || s.materialized?.epoch!==s.epoch) fail('convergence_pending','All owners and decisions must converge under a physical barrier');
     s.phase='verify';run.phase='awaiting_validation';run.fixContext=null;s.verifiedEpoch=s.epoch;
   } else if (payload.phase==='catch_up') {
     if (!run.fixContext || ['active','unproven'].includes(run.validation?.status)) fail('fix_unready','Core must settle validation before owner fixes');
@@ -353,7 +353,7 @@ export function swarmOnStop(D,ctx,run,now) {
 }
 export async function cmdSwarmMaterialized(D,ctx,aggregate,payload,now) {
  const run=runFor(D,aggregate,payload);owned(D,run,payload);liveRun(run);
- if(run.swarm.freeze?.active!==true||payload.epoch!==run.swarm.epoch||!/^[a-f0-9]{40,64}$/.test(payload.commitSha??'')||!/^[a-f0-9]{40,64}$/.test(payload.treeSha??''))fail('materialization_invalid','Exact frozen current epoch import required');
+ if(run.swarm.freeze?.active!==true||run.swarm.freeze.physicalConfirmed!==true||payload.epoch!==run.swarm.epoch||!/^[a-f0-9]{40,64}$/.test(payload.commitSha??'')||!/^[a-f0-9]{40,64}$/.test(payload.treeSha??''))fail('materialization_invalid','Exact frozen current epoch import required');
  run.swarm.materialized={epoch:payload.epoch,commitSha:payload.commitSha,treeSha:payload.treeSha,canonicalId:payload.canonicalId,at:now};return save(D,ctx,aggregate,run);
 }
 
