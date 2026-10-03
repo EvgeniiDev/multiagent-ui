@@ -25,6 +25,9 @@ import type {
   FusionWorkOrder,
   PrepBindingInfo,
   PrepBindingRef,
+  PrepCompletenessCounters,
+  PrepCompletenessState,
+  PrepCompletenessValue,
   PrepGate,
   PrepQuestion,
   PrepStage,
@@ -835,8 +838,84 @@ export function fusionStartPayload(d: FusionDraft): Record<string, unknown> {
 // /api/execution/cards/:id/preparation). Every gate here mirrors a server
 // rule from server/execution/preparation/session.mjs — the server remains
 // authoritative; these produce the disabled-reason text.
+//
+// Mode selection: the run modes a prepared package may target are the four
+// HANDOFF_MODES (solo|fusion|orchestrator|swarm). The server marks each
+// with `implemented` — solo/fusion are live on this build, orchestrator
+// and swarm have no consumer yet (HANDOFF_IMPLEMENTED). Helpers below keep
+// unavailable modes visible-but-gated: selectable for recording an offer,
+// never presented as launchable, and start payloads for them are refused
+// client-side with the reason instead of a POST the server would reject.
 
 export const PREP_STAGES: PrepStage[] = ['intent', 'requirements', 'design', 'plan', 'review'];
+
+/** Downstream run modes a handoff offer may name. Orchestrator/swarm are
+ * recorded-but-unimplemented until their backend lands — the UI must show
+ * them as such, never as startable. */
+export type PrepDownstreamMode = 'solo' | 'fusion' | 'orchestrator' | 'swarm';
+
+export const PREP_DOWNSTREAM_MODES: PrepDownstreamMode[] = [
+  'solo', 'fusion', 'orchestrator', 'swarm',
+];
+
+/** Modes the user may actually START a run in on this build. Solo/fusion
+ * have server-side start paths; orchestrator/swarm start commands do not
+ * exist yet (execution-domain accepts only solo|fusion). */
+export const PREP_STARTABLE_MODES: PrepDownstreamMode[] = ['solo', 'fusion'];
+
+export interface PrepHandoffTarget {
+  mode: string;
+  implemented: boolean;
+}
+
+/** An unimplemented mode stays selectable in the handoff picker (the offer
+ * is durable data), but Start for it is refused with this reason. */
+export function unimplementedModeReason(mode: string): string {
+  return `mode "${mode}" is recorded as a handoff offer only — no run backend exists on this deployment, nothing would execute`;
+}
+
+/** Gate a downstream-mode START choice: solo/fusion pass through to the
+ * normal run gates; orchestrator/swarm refuse without a POST. */
+export function canStartInMode(mode: string): GateResult {
+  if ((PREP_STARTABLE_MODES as string[]).includes(mode)) return ok;
+  if ((PREP_DOWNSTREAM_MODES as string[]).includes(mode)) {
+    return no(unimplementedModeReason(mode));
+  }
+  return no(`unknown downstream mode ${JSON.stringify(mode)} — expected one of ${PREP_DOWNSTREAM_MODES.join('|')}`);
+}
+
+/** Completeness state label for a document kind — the server sends a state
+ * string per kind ('absent'|'draft'|'presented'|'confirmed'|'approved'),
+ * counts for assumptions/decisions, an object for openQuestions. */
+export function prepCompletenessState(
+  view: ExecPrepView | null | undefined,
+  kind: string,
+): PrepCompletenessState | null {
+  const v: PrepCompletenessValue | undefined = view?.completeness?.[kind];
+  return typeof v === 'string' ? (v as PrepCompletenessState) : null;
+}
+
+export function prepOpenQuestionCounts(
+  view: ExecPrepView | null | undefined,
+): PrepCompletenessCounters {
+  const v: PrepCompletenessValue | undefined = view?.completeness?.['openQuestions'];
+  if (v && typeof v === 'object') {
+    const c = v as Partial<PrepCompletenessCounters>;
+    return {
+      open: c.open ?? 0,
+      blocking: c.blocking ?? 0,
+      answered: c.answered ?? 0,
+      deferred: c.deferred ?? 0,
+    };
+  }
+  const open = prepQuestions(view).filter((q) => q.status === 'open');
+  return {
+    open: open.length,
+    blocking: open.filter((q) => q.blocking === true).length,
+    answered: prepQuestions(view).filter((q) => q.status === 'answered').length,
+    deferred: 0,
+  };
+}
 
 const PREP_PHASE_LABELS: Record<string, string> = {
   clarify: 'clarifying the idea',
