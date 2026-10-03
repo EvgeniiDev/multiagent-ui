@@ -47,7 +47,9 @@ test('prompt supplies executable coordination commands and exact current ack',as
   protocol.dispatch({type:'open_decision',id:'allocation',scope:{kind:'global'},text:'a owns a.txt; b owns tests',auth:lease});
   f.run.swarm.protocol=protocol.getState();
   const prompt=buildSwarmPrompt({run:f.run,participant:p,requirements:'req',plan:'plan'});
-  const examples=JSON.parse(prompt.split('Command examples (alternatives; select only relevant commands):\n')[1].split('\n')[0]);
+  const commands=JSON.parse(prompt.split('Command examples (alternatives; select only relevant commands):\n')[1].split('\n')[0]);
+  assert.ok(Array.isArray(commands));assert.ok(commands.every(c=>typeof c.type==='string'));
+  const examples={message:commands.find(c=>c.type==='send_message'),reserve:commands.find(c=>c.type==='reserve_path'),openDecision:commands.find(c=>c.type==='open_decision'),ackCurrent:commands.find(c=>c.type==='ack_decision'),create:commands.find(c=>c.type==='apply'&&c.ops[0].kind==='create')};
   protocol.dispatch({...examples.message,auth:lease});assert.equal(protocol.getState().messages.at(-1).body,examples.message.body);
   protocol.dispatch({...examples.reserve,auth:lease});assert.equal(protocol.getState().files[examples.reserve.path].reservedBy,'a');
   protocol.dispatch({...examples.openDecision,auth:lease});assert.equal(protocol.getState().decisions[examples.openDecision.id].scope.kind,'global');
