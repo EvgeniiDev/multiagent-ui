@@ -22,7 +22,7 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { safeGit } from './safe-git.mjs';
 import { RuntimeError, normPath, ensureDir } from '../common.mjs';
 import { exclusiveCreateArtifact } from './durable-artifact.mjs';
 import { invalid, conflict } from './errors.mjs';
@@ -85,16 +85,7 @@ export async function recordResolution({
   const real = await fs.realpath(repoPath).catch(() => {
     throw invalid('invalid_argument', `repoPath does not resolve: ${repoPath}`);
   });
-  const run = (args) => new Promise((resolvePromise, reject) => {
-    const child = spawn('git', args, { cwd: real, shell: false });
-    let out = '';
-    let err = '';
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { err += d; });
-    child.on('error', (e) => reject(new RuntimeError('git_unavailable',
-      `git binary unavailable: ${e.message}`)));
-    child.on('close', (code) => resolvePromise({ code, stdout: out, stderr: err }));
-  });
+  const run = (args) => safeGit(real, args);
   const headRes = await run(['rev-parse', 'HEAD']);
   if (headRes.code !== 0) {
     throw new RuntimeError('git_failed', `cannot read resolution HEAD: ${headRes.stderr.slice(0, 200)}`);
