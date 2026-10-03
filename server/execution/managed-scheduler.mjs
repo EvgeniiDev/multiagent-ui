@@ -2305,6 +2305,25 @@ export function createManagedScheduler({
     const envGone = proof.kind === 'environment_lost'
       || proof.kind === 'environment_retired'
       || (proof.kind === 'process_dead' && ownerWasInit);
+    let retiredResult = null;
+    if (envGone && att.porchRunId) {
+      // The dead environment proves physical settlement, but may have
+      // finished and persisted its result before the owner disappeared.
+      // Read before adoption so an observation failure retains the original
+      // owner/death proof for a later retry instead of losing that proof.
+      const st = await runtime.status(att.porchRunId).catch(() => null);
+      if (!st?.ok) return 'retired_result_retry';
+      if (st.terminal && ['completed', 'failed', 'cancelled'].includes(st.status)) {
+        const h = await harvestTerminal(att.porchRunId, st);
+        if (!h.ok) return 'retired_result_retry';
+        retiredResult = {
+          status: st.status, exitCode: st.exitCode,
+          runExitCode: h.wt.runExitCode ?? null,
+          error: st.error ?? h.wt.error ?? null,
+          durationS: h.wt.durationS ?? null, finalText: h.wt.finalText ?? null,
+        };
+      }
+    }
     try {
       await send(card, 'adopt_attempt', {
         runId: run.id, attemptId: att.id, proof, leaseMs, ...self(),
@@ -2317,6 +2336,7 @@ export function createManagedScheduler({
       throw e;
     }
     if (envGone) {
+      if (retiredResult) return resolveTerminal(card, run, att, retiredResult);
       // Whole-environment retirement is proven (bootId changed, or an
       // ops-verified retirement record exists for the exact envInstance):
       // nothing in the old env survives, no detached supervisor can exist —

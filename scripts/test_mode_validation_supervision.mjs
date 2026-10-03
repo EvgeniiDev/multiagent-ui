@@ -198,7 +198,7 @@ function mkClient(svc, stateDir, sw = null) {
 function mkSched(env, {
   registry, behaviors, instanceId = `inst-${randomUUID().slice(0, 8)}`,
   runnerId = 'host-runner', hooks, sw, leaseMs = 30_000, now,
-  validationEnabled = true, instPid = 90000 + Math.floor(Math.random() * 8000),
+  validationEnabled = true, ownerIsInit = false, instPid = 90000 + Math.floor(Math.random() * 8000),
 } = {}) {
   const runtime = createFakeRuntime({
     registry,
@@ -208,7 +208,7 @@ function mkSched(env, {
       uid: myUid, gid: myGid, hostname: hostname(),
       pidNs: MY_PIDNS,
       bootId: 'fakeboot',
-      envInstance: { containerId: hostname(), initStarttime: procStarttimeLocal(1) },
+      envInstance: { containerId: hostname(), initStarttime: ownerIsInit ? `st-${instPid}` : procStarttimeLocal(1) },
     },
     behaviors,
   });
@@ -358,18 +358,25 @@ async function stopAndDrain(svc, sched, runId, cardId, maxTicks = 120) {
 }
 
 
-for (const mode of ['orchestrator', 'swarm']) for (const lostBind of [false, true]) {
-  test(`${mode}: shared roles settle/import evidence${lostBind ? " after lost durable bind" : ""}`, async () => {
+for (const mode of ['orchestrator', 'swarm']) for (const recovery of ['none', 'lost-bind', 'init-death']) {
+  const lostBind = recovery === 'lost-bind';
+  const initDeath = recovery === 'init-death';
+  test(`${mode}: shared roles settle/import evidence${recovery === "none" ? "" : ` after ${recovery}`}`, async () => {
     const env = await mkEnv();
     await seedBase(env.svc, env.projectDir);
     const runId = await mkValidationRun(env.svc, 'card-a', [{run: 'true', timeoutSec: 5}]);
     const sw = {};
-    let {sched, runtime, instPid} = mkSched(env, {sw});
+    let {sched, runtime, instPid} = mkSched(env, {sw, ownerIsInit: initDeath});
     await drive(env.svc, sched, runId, r => r.validation?.phase === "review");
     let run = await drive(env.svc, sched, runId, r => r.attempts.some(a => a.role === 'reviewer'));
     // Persist the exact shared-U5 handoff boundary; mode workers are already settled.
     const stored = await loadRun(env.stateDir, runId);
     stored.mode = mode;
+    if (initDeath) {
+      const attempt = stored.attempts.find(a => a.role === 'reviewer');
+      attempt.status = 'running';
+      attempt.finishedAt = null;
+    }
     if (lostBind) {
       // Crash boundary: runtime has spawned/registered the reviewer, but its
       // durable bind is absent. Recovery must find that same supervisor.
@@ -383,7 +390,7 @@ for (const mode of ['orchestrator', 'swarm']) for (const lostBind of [false, tru
     const aggregate = await loadAggregate(env.stateDir, 'card-a');
     aggregate.runs[aggregate.runs.findIndex(r => r.id === runId)] = stored;
     await saveAggregate(env.stateDir, aggregate);
-    if (lostBind) {
+    if (lostBind || initDeath) {
       runtime._registry.procs.set(instPid, {exists: false, readable: true});
       ({sched, runtime} = mkSched(env, {registry: runtime._registry}));
     }
@@ -396,6 +403,22 @@ for (const mode of ['orchestrator', 'swarm']) for (const lostBind of [false, tru
     await writeRoleDoc(run, 'reviewer', {version: 1, round: run.validation.round,
       resultSha256: run.validation.resultSha256, findings: []});
     await sleep(25);
+    if (initDeath) {
+      const status = runtime.status.bind(runtime);
+      runtime.status = async () => ({ok: false, error: {code: 'temporary_read_failure'}});
+      await sched.tick();
+      let retained = await runView(env.svc, runId);
+      assert.equal(retained.attempts.find(a => a.id === reviewer.id).owner.instanceId, reviewer.owner.instanceId);
+      assert.equal(retained.status, 'active');
+      runtime.status = status;
+      const wait = runtime.wait.bind(runtime);
+      runtime.wait = async () => ({ok: false, error: {code: 'temporary_result_failure'}});
+      await sched.tick();
+      retained = await runView(env.svc, runId);
+      assert.equal(retained.attempts.find(a => a.id === reviewer.id).owner.instanceId, reviewer.owner.instanceId);
+      assert.equal(retained.status, 'active');
+      runtime.wait = wait;
+    }
     run = await drive(env.svc, sched, runId, r => Boolean(r.validation?.reports?.findings), {maxTicks: 8, delayMs: 10});
     assert.equal(run.attempts.find(a => a.id === reviewer.id).status, 'completed');
     assert.equal(run.validation.reports.findings.attemptId, reviewer.id);
