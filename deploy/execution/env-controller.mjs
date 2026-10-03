@@ -203,6 +203,14 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
   }
 
   async function prepareWorkerNet(workerId) {
+    // Completed attempts retain their files/registry, not a bridge subnet.
+    // Retry a prior cleanup outage before allocating another address pool.
+    for (const rec of Object.values(registry.workers)) {
+      if (rec.workerId !== workerId && !rec.resourcesReleasedAt
+        && ['stopped', 'gone', 'removed'].includes(rec.state)) {
+        await releaseStoppedResources(rec).catch(() => {});
+      }
+    }
     const name = `${envSec.networkNamePrefix}${workerId}`.slice(0, 120);
     const labels = {
       [`${envSec.labelPrefix}`]: 'worker-net',
@@ -240,6 +248,53 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
       await docker.containerRemove(rec.containerId, { force: true }).catch(() => {});
     }
     if (rec.netName) await removeWorkerNet(rec.netName);
+  }
+
+  async function releaseStoppedResources(rec) {
+    return exclusive(`resource-cleanup:${rec.workerId}`, async () => {
+      if (rec.resourcesReleasedAt) return;
+      try {
+        const expectedName = `${envSec.networkNamePrefix}${rec.workerId}`.slice(0, 120);
+        if (rec.netName !== expectedName) throw new RuntimeError('worker_network_mismatch', 'unregistered network name');
+        const observed = await inspectWorker(rec);
+        if (!['stopped', 'gone'].includes(observed.state)) {
+          throw new RuntimeError('worker_cleanup_unconfirmed', `namespace is ${observed.state}`);
+        }
+        if (observed.state === 'stopped') {
+          await docker.containerRemove(rec.containerId, { force: false });
+        }
+        const gone = await inspectWorker(rec);
+        if (!gone.confirmedGone) {
+          throw new RuntimeError('worker_cleanup_unconfirmed', 'container removal is not confirmed');
+        }
+        rec.state = 'gone'; rec.gone = true;
+        rec.goneAt ??= new Date().toISOString();
+        await saveRegistry();
+        const net = await docker.networkInspect(rec.netName);
+        if (net) {
+          if ((rec.netId && net.Id !== rec.netId)
+            || net.Labels?.[envSec.labelPrefix] !== 'worker-net'
+            || net.Labels?.[`${envSec.labelPrefix}.worker`] !== rec.workerId) {
+            throw new RuntimeError('worker_network_mismatch', 'network identity/ownership changed');
+          }
+          rec.netId ??= net.Id;
+          await saveRegistry();
+          const gw = await findGateway();
+          if (await docker.networkDisconnect(net.Id, gw.id) !== true
+            || await docker.networkRemove(net.Id) !== true
+            || await docker.networkInspect(rec.netName) !== null) {
+            throw new RuntimeError('worker_network_cleanup_failed', 'network removal is not confirmed');
+          }
+        }
+        rec.resourcesReleasedAt = new Date().toISOString();
+        rec.resourcesCleanupError = null;
+        await saveRegistry();
+      } catch (e) {
+        rec.resourcesCleanupError = String(e?.message || e).slice(0, 300);
+        await saveRegistry();
+        throw e;
+      }
+    });
   }
 
   // ---- worker materials ------------------------------------------------------
@@ -797,14 +852,20 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     rec.state = confirmed.state; rec.frozen = false; rec.freezeRequested = false;
     if (confirmed.confirmedGone) { rec.gone = true; rec.goneAt = new Date().toISOString(); }
     await saveRegistry();
-    return { ok: true, workerId, state: confirmed.state, controller: identity() };
+    await releaseStoppedResources(rec);
+    return { ok: true, workerId, state: rec.state, controller: identity() };
   }
 
   async function workerRemove(p) {
     const workerId = p?.workerId;
     const rec = registry.workers[workerId];
     if (!rec) throw new RuntimeError('unknown_worker', `no such worker: ${workerId}`);
-    await tearDownWorker(rec);
+    rec.stopRequested = true;
+    await saveRegistry();
+    if (rec.containerId) await docker.containerRemove(rec.containerId, { force: true });
+    const gone = await inspectWorker(rec);
+    if (!gone.confirmedGone) throw new RuntimeError('worker_remove_unconfirmed', 'container removal is not confirmed');
+    await releaseStoppedResources(rec);
     rec.state = 'removed';
     rec.removedAt = new Date().toISOString();
     await saveRegistry();
@@ -1447,6 +1508,12 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
       // last durable state untouched. A boot-time daemon error must never
       // mass-mark live workers gone.
       if (inspectError) continue;
+      if (['stopped', 'gone'].includes(state)) {
+        rec.state = state;
+        if (state === 'gone') { rec.gone = true; rec.goneAt ??= new Date().toISOString(); }
+        await releaseStoppedResources(rec).catch(() => {});
+        continue;
+      }
       // Transitional (created/restarting/removing) and unclassifiable
       // states keep their honest docker status; only exited|dead become
       // 'stopped', only confirmed 404 becomes 'gone'.

@@ -154,14 +154,14 @@ function fakeDocker() {
     async containerList() {
       return [{ Id: 'gw-container-1', State: 'running', Names: ['/acp-f1-egress-gw'] }];
     },
-    async networkInspect(name) { return nets.get(name) || null; },
+    async networkInspect(name) { return nets.get(name) || [...nets.values()].find(net => net.Id === name) || null; },
     async networkCreate(spec) {
-      nets.set(spec.Name, { Id: `net-${++n}`, Name: spec.Name, Internal: spec.Internal });
+      nets.set(spec.Name, { Id: `net-${++n}`, Name: spec.Name, Internal: spec.Internal, Labels: spec.Labels });
       return { Id: nets.get(spec.Name).Id };
     },
     async networkConnect() { return {}; },
     async networkDisconnect(netId, cid) { this.calls.push(['networkDisconnect', netId]); return true; },
-    async networkRemove(name) { nets.delete(name); return true; },
+    async networkRemove(name) { const net = nets.get(name) || [...nets.values()].find(net => net.Id === name); if (net) nets.delete(net.Name); return true; },
     async containerCreate(spec) {
       const id = `ctr-${++n}`;
       const c = { Id: id, spec, state: 'created', running: false };

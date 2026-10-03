@@ -32,11 +32,13 @@ async function fixture() {
       maxPromptBytes: 10000, maxInputBytes: 10000, maxOutputBytes: 100000, maxExecMs: 10000,
       workerNamePrefix: 'test-', networkNamePrefix: 'test-', labelPrefix: 'test',
       egressGateway: { proxyUrl: 'http://proxy:3128', alias: 'proxy', labelSelector: 'test=proxy' } } };
-  const containers = new Map(), calls = [], created = [];
+  const containers = new Map(), networks = new Map(), calls = [], created = [];
   let id = 0;
   const docker = { imageInspect: async () => ({ Id: 'image' }), containerList: async () => [{ Id:'gateway', State:'running' }],
-    networkInspect: async () => ({ Id:'network' }), networkCreate: async () => ({ Id:'network' }), networkConnect: async () => {},
-    networkDisconnect: async () => {}, networkRemove: async () => {},
+    networkInspect: async key => networks.get(key) ?? [...networks.values()].find(n => n.Id === key) ?? null,
+    networkCreate: async spec => { const net = {Id: `net-${spec.Name}`, Name: spec.Name, Labels: spec.Labels}; networks.set(spec.Name, net); return net; }, networkConnect: async () => {},
+    networkDisconnect: async (nid,cid) => { calls.push(['disconnect',nid,cid]); return true; },
+    networkRemove: async key => { const net = networks.get(key) ?? [...networks.values()].find(n => n.Id === key); if (net) networks.delete(net.Name); calls.push(['net-remove',key]); return true; },
     containerCreate: async spec => { const cid = `container-${++id}`; created.push(spec); containers.set(cid, { Running: false, Status: 'created', Paused: false }); return { Id:cid }; },
     containerStart: async cid => { Object.assign(containers.get(cid), { Running:true, Status:'running' }); },
     containerInspect: async cid => containers.has(cid) ? { Id:cid, State: { ...containers.get(cid) } } : null,
@@ -50,7 +52,7 @@ async function fixture() {
   const profile = { schemaVersion:1, profileId:'test', pi:{ version:'0.85.1' }, image:'worker', provider:'test', model:'test/model', thinking:'low', skills:[], extensions:[], tools:['read'], search:{ enabled:false }, launch:{ progress:'none', extraFlags:[] }, systemPromptFile:null };
   const prepare = (workerId, materials = {}, role = 'participant') => controller.handle('worker.prepare', { workerId, attemptId:workerId.slice(2), role, profile, profileDigest:profileDigest(profile), prompt:'task', materials:{ projectRoot:'project', snapshotSha:sha, ...materials } });
   const canonical = async () => (await controller.handle('canonical.prepare', { canonicalId:'canonical', projectRoot:'project', snapshotSha:sha })).canonical;
-  return { root, project, sha, config, docker, controller, containers, calls, created, prepare, canonical, profile };
+  return { root, project, sha, config, docker, controller, containers, networks, calls, created, prepare, canonical, profile };
 }
 
 test('DuckDuckGo search flags point to controller-owned shim and copied transport', async () => {
@@ -307,4 +309,66 @@ test('worker import ignores executable Git configuration and imports raw binary 
   assert.equal(result.ok,true);
   await assert.rejects(fs.stat(marker), { code:'ENOENT' });
   assert.deepEqual(await fs.readFile(path.join(canonical.worktree,'new.dat')),bytes);
+});
+
+
+test('terminal stop releases only its registered container/network and preserves result materials', async () => {
+  const f = await fixture(); const {worker} = await f.prepare('w-one');
+  const {worker: peer} = await f.prepare('w-peer');
+  await fs.writeFile(path.join(worker.workerDir,'project/result.txt'), 'finished-result');
+  const stopped = await f.controller.handle('worker.stop', {workerId: worker.workerId});
+  assert.equal(stopped.state, 'gone');
+  assert.equal(f.containers.has(worker.containerId), false);
+  assert.equal(f.networks.has(worker.netName), false);
+  assert.equal(f.containers.has(peer.containerId), true);
+  assert.equal(f.networks.has(peer.netName), true);
+  assert.equal(await fs.readFile(path.join(worker.workerDir,'project/result.txt'),'utf8'), 'finished-result');
+  assert.ok(worker.resourcesReleasedAt);
+  assert.equal((await f.controller.handle('worker.status', {workerId: worker.workerId})).namespaceAlive, false);
+  await f.controller.handle('worker.stop', {workerId: worker.workerId});
+  assert.equal(f.calls.filter(c => c[0] === 'net-remove').length, 1);
+});
+
+test('terminal network cleanup failure is durable and retried before the next launch', async () => {
+  const f = await fixture(); const {worker} = await f.prepare('w-one');
+  const remove = f.docker.networkRemove;
+  f.docker.networkRemove = async () => false;
+  await assert.rejects(f.controller.handle('worker.stop', {workerId: worker.workerId}));
+  assert.equal(worker.gone, true); assert.equal(worker.resourcesReleasedAt, undefined);
+  assert.equal(f.networks.has(worker.netName), true);
+  f.docker.networkRemove = remove;
+  await f.prepare('w-next');
+  assert.equal(f.networks.has(worker.netName), false); assert.ok(worker.resourcesReleasedAt);
+});
+
+test('boot retries historical terminal network cleanup while retaining paused live workers', async () => {
+  const f = await fixture(); const {worker} = await f.prepare('w-old');
+  const {worker: peer} = await f.prepare('w-peer');
+  await f.docker.containerStop(worker.containerId);
+  await f.controller.handle('worker.freeze', {workerId: peer.workerId});
+  await fs.writeFile(f.config.environment.registryFile, JSON.stringify(f.controller.registry));
+  const restarted = createEnvController({config: f.config, docker: f.docker}); await restarted.boot();
+  assert.ok(restarted.registry.workers[worker.workerId].resourcesReleasedAt);
+  assert.equal(f.networks.has(worker.netName), false);
+  assert.equal(f.networks.has(peer.netName), true); assert.equal(f.containers.get(peer.containerId).Paused, true);
+});
+
+
+test('terminal cleanup rejects a replacement network instead of disconnecting foreign endpoints', async () => {
+  const f = await fixture(); const {worker} = await f.prepare('w-one');
+  f.networks.set(worker.netName, {Id:'foreign-net', Name:worker.netName, Labels:{test:'worker-net','test.worker':'w-peer'}});
+  await assert.rejects(f.controller.handle('worker.stop', {workerId: worker.workerId}), {code:'worker_network_mismatch'});
+  assert.equal(f.networks.get(worker.netName).Id, 'foreign-net');
+  assert.equal(f.calls.some(c => ['disconnect','net-remove'].includes(c[0])), false);
+  assert.equal(worker.resourcesReleasedAt, undefined);
+});
+
+test('unconfirmed container removal retains its network and never claims released resources', async () => {
+  const f = await fixture(); const {worker} = await f.prepare('w-one');
+  f.docker.containerRemove = async () => {};
+  await assert.rejects(f.controller.handle('worker.stop', {workerId: worker.workerId}), {code:'worker_cleanup_unconfirmed'});
+  assert.equal(f.networks.has(worker.netName), true);
+  assert.equal(f.calls.some(c => ['disconnect','net-remove'].includes(c[0])), false);
+  const persisted = JSON.parse(await fs.readFile(f.config.environment.registryFile,'utf8')).workers[worker.workerId];
+  assert.equal(persisted.resourcesReleasedAt, undefined); assert.ok(persisted.resourcesCleanupError);
 });
