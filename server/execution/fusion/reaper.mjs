@@ -48,12 +48,18 @@
 // session log, porch registry and artifacts are all retained by design
 // (worker.remove tears down container+network only).
 
-import { ATTEMPT_TERMINAL } from '../execution-domain.mjs';
+// Keep this safety allowlist independent of the managed-card command domain.
+// These are the domain's terminal attempt statuses; cancelling remains live.
+const ATTEMPT_TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'blocked']);
 
 const RUN_DONE = new Set(['completed', 'failed', 'cancelled']);
 const REAP_FINAL = new Set(['reaped', 'already_absent']);
 const HISTORY_MAX = 16;
 const DETAILS_MAX = 64;
+// Linux pid_max is exclusive; PID_MAX_LIMIT is 2^22 (include/linux/threads.h).
+const LINUX_PID_MAX_LIMIT = 4_194_304;
+const isValidPid = (value) => Number.isSafeInteger(value)
+  && value > 0 && value < LINUX_PID_MAX_LIMIT;
 
 // Worker-scoped probe tri-state — the only honest drain verdicts:
 //   'enoent'       — exists===false after a successful probe (positive ENOENT)
@@ -204,7 +210,13 @@ export function createWorkerReaper({
     if (!reg || reg.ok !== true || reg.complete !== true) {
       return defer('registry_incomplete', 'porch registry scan incomplete or unreadable');
     }
-    const rows = (reg.rows || []).filter((r) => r && !r.corrupt);
+    if (!Array.isArray(reg.rows)) {
+      return defer('registry_incomplete', 'porch registry scan has no row list');
+    }
+    const rows = reg.rows;
+    if (rows.some((r) => !r || r.corrupt)) {
+      return defer('registry_row_corrupt', 'porch registry scan contains a corrupt row');
+    }
     // Exact identity per row, bound or not: meta.run_id must exist and
     // equal the row's own directory name (the directory only addresses the
     // row — meta.json is the record), meta status and state status must
@@ -251,7 +263,26 @@ export function createWorkerReaper({
       if (d) return defer(d[0], d[1]);
     }
 
+    const pids = [];
+    let invalidPid = null;
+    for (const r of rows) {
+      for (const [value, role, invalid] of [
+        [r.pid, 'supervisor', r.pidInvalid],
+        [r.childPid, 'child', r.childPidInvalid],
+      ]) {
+        if (invalid || (value != null && !isValidPid(value))) {
+          invalidPid ??= { role, runId: r.runId };
+        }
+      }
+      if (isValidPid(r.pid)) pids.push({ pid: r.pid, role: 'supervisor', runId: r.runId });
+      if (isValidPid(r.childPid)) pids.push({ pid: r.childPid, role: 'child', runId: r.runId });
+    }
+
     // ---- already-absent: needs the prior durable proof + 'gone' --------------
+    if (invalidPid && wstate === 'gone') {
+      return defer('process_identity_unverifiable',
+        `recorded ${invalidPid.role} pid for run ${invalidPid.runId} is invalid`);
+    }
     if (wstate === 'gone') {
       const tp = cur?.terminalProof ?? null;
       const proven = !!tp
@@ -273,11 +304,6 @@ export function createWorkerReaper({
     }
 
     // ---- 4. drain: every owned worker process positively dead -----------------
-    const pids = [];
-    for (const r of rows) {
-      if (Number.isInteger(r.pid) && r.pid > 0) pids.push({ pid: r.pid, role: 'supervisor', runId: r.runId });
-      if (Number.isInteger(r.childPid) && r.childPid > 0) pids.push({ pid: r.childPid, role: 'child', runId: r.runId });
-    }
     const drained = [];
     if (wstate === 'stopped') {
       // Controller-confirmed namespace down — every owned process is dead;
@@ -287,7 +313,7 @@ export function createWorkerReaper({
       // A RUNNING container needs a non-empty positive drain proof: zero
       // recorded pids means zero processes were verified dead — absence of
       // process evidence is not process-drain proof.
-      if (!pids.length) {
+      if (!pids.length && !invalidPid) {
         return defer('process_identity_missing',
           'worker running but the registry recorded no supervisor/child pid — drain unproven');
       }
@@ -302,6 +328,10 @@ export function createWorkerReaper({
         }
         drained.push({ ...p, evidence: cls, starttime: probe.starttime ?? null, pidNs: probe.pidNs ?? null });
       }
+    }
+    if (invalidPid) {
+      return defer('process_identity_unverifiable',
+        `recorded ${invalidPid.role} pid for run ${invalidPid.runId} is invalid`);
     }
 
     // ---- durable proof BEFORE any destructive call -----------------------------
