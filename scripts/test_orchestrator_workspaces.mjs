@@ -183,7 +183,7 @@ test('canonical artifact reused by two consumers + final integration', async (t)
     const d = await exportWorkerDiff({ repoPath, inputCommit });
     diffs.push({ taskId: id, ...d, resultCommit: fr.resultCommit });
   }
-  const inputs = diffs.map((d) => ({ taskId: d.taskId, resultCommit: d.resultCommit }));
+  const inputs = diffs.map((d) => ({ taskId: d.taskId, inputCommit:d.inputCommit, resultCommit: d.resultCommit }));
   const order = ['a', 'b'];
   assert.equal(await loadArtifact(storeDir, inputs, order), null);
   // integrator resolves inside the plan: caller-supplied resolution text.
@@ -191,7 +191,8 @@ test('canonical artifact reused by two consumers + final integration', async (t)
   const { repoPath: ir } = await createPrivateRepo({
     sourcePath: dir, baseCommit: base, name: 'resolve', baseDir,
   });
-  const baseTree = await treeHashFor(ir, G(ir, 'rev-parse', 'HEAD'));
+  const baseCommit = G(ir, 'rev-parse', 'HEAD');
+  const baseTree = await treeHashFor(ir, baseCommit);
   const pa = spawnSync('git', ['apply', '-'], { cwd: ir, input: diffs[0].formatPatch, encoding: 'utf8' });
   assert.equal(pa.status, 0);
   G(ir, 'add', '-A');
@@ -203,9 +204,9 @@ test('canonical artifact reused by two consumers + final integration', async (t)
   await fs.writeFile(path.join(ir, 'shared.txt'), 'resolved by integrator\n');
   G(ir, 'add', '-A');
   G(ir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'resolve a+b');
-  const parentDiffs = diffs.map((d) => ({ taskId: d.taskId, changed: d.changed, files: d.files }));
+  const parentDiffs = diffs;
   const rec = await recordResolution({
-    storeDir, inputs, order, baseTree, repoPath: ir, parentDiffs,
+    storeDir, inputs, order, baseTree, baseCommit, repoPath: ir, parentDiffs,
     resolvedPaths: ['shared.txt'],
     resolutionNote: 'kept both intents: shared.txt merged by hand',
   });
@@ -219,7 +220,7 @@ test('canonical artifact reused by two consumers + final integration', async (t)
   assert.notEqual(artifactKey(inputs, ['b', 'a']), rec.key);
   // re-recording the same resolution is idempotent; a different one refuses
   const same = await recordResolution({
-    storeDir, inputs, order, baseTree, repoPath: ir, parentDiffs,
+    storeDir, inputs, order, baseTree, baseCommit, repoPath: ir, parentDiffs,
     resolvedPaths: ['shared.txt'],
   });
   assert.equal(same.resultCommit, rec.resultCommit);
