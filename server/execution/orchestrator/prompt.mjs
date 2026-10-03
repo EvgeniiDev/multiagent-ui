@@ -117,9 +117,10 @@ export function buildWorkerPrompt({ cardTitle = null, kind = 'work', task, input
   return lines.join('\n');
 }
 
-export function workerMaterials({ projectRoot, snapshotSha, canonicalId, fromCanonical, taskText, briefText, boundaryText, criteriaText, depsText, requirementsText, planText, contextText }) {
+export function workerMaterials({ projectRoot, snapshotSha, snapshotId, canonicalId, fromCanonical, taskText, briefText, boundaryText, criteriaText, depsText, requirementsText, planText, contextText }) {
   return {
     projectRoot, snapshotSha, canonicalId,
+    ...(snapshotId ? { snapshotId } : {}),
     ...(fromCanonical ? { fromCanonical: true } : {}),
     inputs: [
       { name: 'task', content: taskText },
@@ -210,6 +211,12 @@ export function buildAssemblerPrompt({ cardTitle = null, taskCount }) {
     '- Ничего не меняй вне принятых границ и разрешённых пересечений.',
     '- Финальное дерево должно содержать ВСЕ пути `changed[]` всех родителей.',
     '',
+    'Before STATUS, emit exactly one standalone ```acp-orchestrator-integration JSON block:',
+    '{"additionalPaths":[],"resolvedPaths":[]}',
+    'additionalPaths explicitly declares every assembler-only changed path outside parent diffs.',
+    'resolvedPaths explicitly declares parent-owned paths whose final content/mode/deletion differs',
+    'from parent proofs because of intentional conflict resolution. Use canonical relative paths.',
+    'Empty arrays are required when no such edits were made. Undeclared edits fail closed.',
     'Отчёт — короткое описание сборки. Последняя строка — `STATUS: DONE | BLOCKED`.',
   ].join('\n');
 }
@@ -257,4 +264,24 @@ export function resultsBundleText(entries) {
     out.push('```diff', e.formatPatch ?? '(empty diff)', '```', '');
   }
   return out.join('\n');
+}
+
+// Committed declarations are also accepted as bare JSON during recovery.
+export function parseIntegrationDeclarations(text) {
+  if (typeof text !== 'string') throw new Error('integration declaration is missing');
+  const matches = [...text.matchAll(/^```acp-orchestrator-integration[ \t]*\r?\n([\s\S]*?)^```[ \t]*\r?$/gm)];
+  if (matches.length > 1) throw new Error('multiple integration declarations');
+  const raw = matches.length === 1 ? matches[0][1] : text.trim();
+  const value = JSON.parse(raw);
+  if (!value || Array.isArray(value) || Object.keys(value).sort().join(',') !== 'additionalPaths,resolvedPaths') {
+    throw new Error('integration declaration requires exactly additionalPaths and resolvedPaths');
+  }
+  for (const key of ['additionalPaths', 'resolvedPaths']) {
+    if (!Array.isArray(value[key]) || value[key].some((p) => typeof p !== 'string'
+      || !p || p.startsWith('/') || /[\\\x00-\x1f]/.test(p)
+      || p.split('/').some((part) => !part || part === '.' || part === '..' || part === '.git'))
+      || new Set(value[key]).size !== value[key].length) throw new Error(`invalid ${key}`);
+  }
+  if (value.additionalPaths.some((p) => value.resolvedPaths.includes(p))) throw new Error('declaration categories overlap');
+  return value;
 }
