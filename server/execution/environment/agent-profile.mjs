@@ -84,6 +84,9 @@ function validateSearch(raw) {
   if (!isObj(raw)) fail('search must be an object');
   const enabled = raw.enabled === true;
   const params = isObj(raw.params) ? raw.params : {};
+  for (const key of ['provider', 'proxy']) {
+    if (Object.hasOwn(params, key)) fail(`search.params.${key} is reserved`);
+  }
   // Params become the worker's scoped web-search.json verbatim — keep them
   // JSON-pure and bounded so the digest meaningfully captures them.
   const json = JSON.stringify(params);

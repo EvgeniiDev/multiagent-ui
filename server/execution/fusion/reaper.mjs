@@ -54,6 +54,10 @@ const RUN_DONE = new Set(['completed', 'failed', 'cancelled']);
 const REAP_FINAL = new Set(['reaped', 'already_absent']);
 const HISTORY_MAX = 16;
 const DETAILS_MAX = 64;
+// Linux pid_max is exclusive; PID_MAX_LIMIT is 2^22 (include/linux/threads.h).
+const LINUX_PID_MAX_LIMIT = 4_194_304;
+const isValidPid = (value) => Number.isSafeInteger(value)
+  && value > 0 && value < LINUX_PID_MAX_LIMIT;
 
 // Worker-scoped probe tri-state — the only honest drain verdicts:
 //   'enoent'       — exists===false after a successful probe (positive ENOENT)
@@ -260,13 +264,16 @@ export function createWorkerReaper({
     const pids = [];
     let invalidPid = null;
     for (const r of rows) {
-      for (const [value, role] of [[r.pid, 'supervisor'], [r.childPid, 'child']]) {
-        if (value != null && (!Number.isInteger(value) || value <= 0)) {
+      for (const [value, role, invalid] of [
+        [r.pid, 'supervisor', r.pidInvalid],
+        [r.childPid, 'child', r.childPidInvalid],
+      ]) {
+        if (invalid || (value != null && !isValidPid(value))) {
           invalidPid ??= { role, runId: r.runId };
         }
       }
-      if (Number.isInteger(r.pid) && r.pid > 0) pids.push({ pid: r.pid, role: 'supervisor', runId: r.runId });
-      if (Number.isInteger(r.childPid) && r.childPid > 0) pids.push({ pid: r.childPid, role: 'child', runId: r.runId });
+      if (isValidPid(r.pid)) pids.push({ pid: r.pid, role: 'supervisor', runId: r.runId });
+      if (isValidPid(r.childPid)) pids.push({ pid: r.childPid, role: 'child', runId: r.runId });
     }
 
     // ---- already-absent: needs the prior durable proof + 'gone' --------------

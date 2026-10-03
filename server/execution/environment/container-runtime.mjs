@@ -44,7 +44,35 @@ const WAIT_KILL_GRACE_MS = 8_000;
 const CONTROL_MAX_BYTES = 1024 * 1024;
 const RESULT_MAX_BYTES = 8 * 1024 * 1024;
 
+// Linux pid_max is exclusive; the kernel's PID_MAX_LIMIT is 2^22 on 64-bit
+// systems (include/linux/threads.h). See proc_sys_kernel(5).
+const LINUX_PID_MAX_LIMIT = 4_194_304;
+const isValidPid = (value) => Number.isSafeInteger(value)
+  && value > 0 && value < LINUX_PID_MAX_LIMIT;
+
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+
+// Normalize one porch row without erasing evidence that a PID field was
+// present but malformed. Reaper treats those markers as unverifiable.
+export function normalizeRegistryRunRow(runId, meta, state) {
+  return {
+    runId,                              // porch addresses runs by dir name
+    metaRunId: meta.run_id ?? null,
+    status: meta.status ?? null,
+    terminal: TERMINAL_STATUSES.has(meta.status),
+    exitCode: meta.exit_code ?? null,
+    error: meta.error ?? null,
+    pid: isValidPid(meta.pid) ? meta.pid : null,
+    pidInvalid: Object.hasOwn(meta, 'pid') && meta.pid != null && !isValidPid(meta.pid),
+    childPid: isValidPid(meta.child_pid) ? meta.child_pid : null,
+    childPidInvalid: Object.hasOwn(meta, 'child_pid') && meta.child_pid != null && !isValidPid(meta.child_pid),
+    childRecorded: Number.isInteger(meta.child_pid),
+    startedAt: meta.started_at ?? null,
+    finishedAt: meta.finished_at ?? null,
+    stateStatus: typeof state?.status === 'string' ? state.status : null,
+    stateTerminal: TERMINAL_STATUSES.has(state?.status),
+  };
+}
 
 // Container-side fixed layout — mirrors what the controller mounts.
 export const CONTAINER_PATHS = {
@@ -759,7 +787,7 @@ export function createContainerRuntime({
   // meaningless without the worker; this probe runs `proc-probe` in the
   // worker via exec — the controller allowlist permits exactly that argv.
   async function processIdentityFor(workerId, pid) {
-    if (!Number.isInteger(pid) || pid <= 0) return null;
+    if (!isValidPid(pid)) return null;
     const res = await exec(workerId, {
       template: 'proc-probe', args: [String(pid)],
       cwdKey: 'home', timeoutMs: 10_000, maxStdout: 16 * 1024,
@@ -897,21 +925,7 @@ export function createContainerRuntime({
       let state = null;
       try { state = JSON.parse(await fs.readFile(path.join(runDir, 'state.json'), 'utf8')); }
       catch { /* state.json is corroborating evidence; meta.json is the record */ }
-      rows.push({
-        runId: dir,                       // porch addresses runs by dir name
-        metaRunId: meta.run_id ?? null,
-        status: meta.status ?? null,
-        terminal: TERMINAL_STATUSES.has(meta.status),
-        exitCode: meta.exit_code ?? null,
-        error: meta.error ?? null,
-        pid: Number.isInteger(meta.pid) ? meta.pid : null,
-        childPid: Number.isInteger(meta.child_pid) ? meta.child_pid : null,
-        childRecorded: Number.isInteger(meta.child_pid),
-        startedAt: meta.started_at ?? null,
-        finishedAt: meta.finished_at ?? null,
-        stateStatus: typeof state?.status === 'string' ? state.status : null,
-        stateTerminal: TERMINAL_STATUSES.has(state?.status),
-      });
+      rows.push(normalizeRegistryRunRow(dir, meta, state));
     }
     return { ok: true, complete, dirExists: true, rows };
   }
