@@ -70,7 +70,7 @@ export function createSwarmDriver(deps) {
   await command(card,run,'swarm_worker_settled',{attemptId:att.id,workerId:workerId(att),state:proof.state},`namespace-${att.id}`);return true;
  }
  async function settle(card,run,att,wt,entry){
-  const cancelled=!!att.cancel||run.status==='stopping'||run.stopIntent;
+  const cancelled=!!att.cancel||!!run.attempts.find(a=>a.id===att.id)?.cancel||now()>=att.deadlineAt||run.status==='stopping'||run.stopIntent;
   let outcome=cancelled?'cancelled':wt.status==='completed'&&(wt.runExitCode??wt.exitCode)===0?'completed':'failed';let proposal=null,reason=`participant ${outcome}`;
   if(outcome==='completed'){
    const parsed=parseSwarmResult(wt.finalText);if(!parsed.ok){outcome='failed';reason=parsed.error;}

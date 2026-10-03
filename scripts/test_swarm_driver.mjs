@@ -100,3 +100,11 @@ test('expired cancelled peer terminal observation precedes already-terminal canc
   assert.equal(await d.drive({},f.run),'resolved');assert.equal(cancels,0);assert.equal(f.att.status,'cancelled');assert.equal(f.att.namespace.state,'gone');assert.equal(f.run.swarm.protocol.participants.a.activeTurn,null);
  }finally{await f.cleanup();}
 });
+
+test('fresh cancellation intent wins over a stale completed observation at deadline',async()=>{
+ const f=await fixture();try{
+  const finalText='```acp-swarm\n'+JSON.stringify({goal:'late',commands:[],outcome:'done'})+'\n```';
+  const d=createSwarmDriver({runtime:{canonicalPrepare:async()=>({ok:true,canonical:{hostDir:f.root}}),wait:async()=>({outcome:'terminal',status:'completed',runExitCode:0,finalText}),forAttempt:()=>({stopWorker:async()=>({ok:true}),workerStatus:async()=>({state:'gone'})})},send:f.send,self:()=>({runnerId:'me'}),getRun:async()=>structuredClone(f.run),stateDir:join(f.root,'state'),now:()=>600001,canLaunch:()=>false});
+  assert.equal(await d.drive({},structuredClone(f.run)),'resolved');assert.equal(f.att.status,'cancelled');assert.equal(f.att.frameApplied,undefined);assert.equal(f.run.swarm.participants[0].ready,false);
+ }finally{await f.cleanup();}
+});
