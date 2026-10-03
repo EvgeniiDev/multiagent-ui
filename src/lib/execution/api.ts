@@ -480,6 +480,9 @@ export interface ExecAttempt {
   /** Core roles plus fusion roles ('panelist' | 'judge' | 'integrator'). */
   role: ExecRole | 'panelist' | 'judge' | 'integrator' | (string & {});
   phase: string;
+  /** Orchestrator task linkage; worker/fix/verifier attempts remain in run.attempts. */
+  taskId?: string;
+  kind?: 'work' | 'fix' | 'verify';
   validationId?: string;
   round?: number;
   n: number;
@@ -668,23 +671,48 @@ export interface OrchTask {
   [k: string]: unknown;
 }
 
+/** Durable task row returned by the backend; attempts are references to run.attempts. */
+export interface OrchTaskRecord {
+  id: string;
+  title: string;
+  dependsOn: string[];
+  boundary?: string[];
+  worker: { profileId: string };
+  limits: { maxAttempts: number; maxFixCycles: number };
+  state: {
+    status: string;
+    attemptsUsed: number;
+    fixesUsed: number;
+    extraAttempts?: number;
+    extraFixes?: number;
+    attempts: string[];
+    inputCommit?: string | null;
+    snapshotOf?: string[];
+    resultCommit?: string | null;
+    resultSha256?: string | null;
+    evidence?: { verdictArtifactId?: string | null; verdict?: string | null; findings?: unknown[] } | null;
+    waiting?: OrchTask['waiting'];
+  };
+}
+
 export type OrchPendingAction =
   | { type: 'spec_approval'; specSha256: string }
   | { type: 'question'; taskId: string; question?: string | null }
   | { type: 'grant'; taskId: string; reason?: string | null }
-  | { type: 'decision'; taskId: string; reason?: string | null };
+  | { type: 'decision'; proposalId: string; kind: 'decompose' | 'amend'; fields: string[] };
 
 export interface OrchestratorState {
   spec?: {
     version?: number;
     sha256?: string | null;
     status?: 'pending' | 'approved' | 'superseded' | 'rejected' | string;
-    approvedAt?: string | null;
+    approvedAt?: number | null;
     by?: string | null;
     artifactId?: string | null;
   } | null;
   phase?: 'decompose' | 'approval' | 'work' | 'integrate' | 'validate' | 'done' | 'stopped' | 'failed' | string;
-  tasks?: OrchTask[];
+  graph?: { status: string; revision?: number; pendingApproval?: { proposalId: string; kind?: string; fields?: string[] } | null };
+  tasks?: OrchTaskRecord[];
   integrate?: {
     canonicalId?: string | null;
     attemptId?: string | null;
@@ -1083,6 +1111,7 @@ export const USER_COMMAND_TYPES = [
   // Orchestrator user commands (backend-ui-contract §5) — gated on
   // features.orchestrator server-side; the UI mirrors the flag.
   'orch_approve',
+  'orch_decide',
   'orch_answer',
   'orch_grant',
   'orch_retry',

@@ -1851,6 +1851,27 @@ function orchRun(over = {}) {
     owner: { runnerId: 'r1', instanceId: null },
     ...(over.orchestrator ?? {}),
   };
+  // Model the actual HTTP task rows, including references into run.attempts.
+  const attempts = [];
+  oz.graph ??= { status: 'approval_pending', pendingApproval: null };
+  oz.tasks = oz.tasks.map((t) => {
+    if (t.state) return t;
+    attempts.push(...(t.attempts ?? []));
+    return {
+      id: t.taskId, title: t.title, dependsOn: t.deps ?? [], boundary: t.boundary,
+      worker: { profileId: t.profile ?? 'default' },
+      limits: { maxAttempts: t.budget?.limit ?? 3, maxFixCycles: 3 },
+      state: {
+        status: t.status, attemptsUsed: t.budget?.used ?? 0, fixesUsed: 0,
+        extraAttempts: 0, extraFixes: 0,
+        attempts: (t.attempts ?? []).map((a) => a.id),
+        inputCommit: t.inputCommit, snapshotOf: t.snapshotOf,
+        resultCommit: t.resultCommit, resultSha256: t.resultSha256,
+        evidence: t.evidence ? { verdictArtifactId: t.evidence.verifyArtifactId, verdict: t.evidence.verdict } : null,
+        waiting: t.waiting,
+      },
+    };
+  });
   return {
     id: 'run_o1',
     cardId: 'card_1',
@@ -1868,7 +1889,7 @@ function orchRun(over = {}) {
     baseRef: 'main',
     baseCommit: 'a'.repeat(64),
     workspaceId: null,
-    attempts: [],
+    attempts,
     result: null,
     acceptance: { resultSha256: SHA, round: 1, at: now() - 1000 },
     events: [],
@@ -2002,7 +2023,7 @@ describe('orchestrator ui-model gates + payloads', () => {
     const draft = {
       decomposer: 'zen-relay/d', verifier: 'zen-relay/v', integrator: 'zen-relay/i',
       workers: [{ name: 'default', profileId: 'zen-relay/w' }],
-      limits: { maxAttemptsPerTask: 3, maxIntegratorAttempts: 2, maxSubtasks: 16, requireSpecApproval: true },
+      limits: { taskAttempts: 3, maxIntegratorAttempts: 2, maxSubtasks: 16, requireSpecApproval: true },
       baseRef: 'main',
     };
     const off = cardView({ features: {} });
@@ -2017,8 +2038,8 @@ describe('orchestrator ui-model gates + payloads', () => {
     }).some((s) => /duplicate/i.test(s)));
     const p = orchStartPayload(draft);
     assert.equal(p.mode, 'orchestrator');
-    assert.deepEqual(p.orchestrator.workers, { default: 'zen-relay/w' });
-    assert.equal(p.orchestrator.decomposer, 'zen-relay/d');
+    assert.equal(p.orchestrator.workers.default.profile.model, 'zen-relay/w');
+    assert.equal(p.orchestrator.decomposer.profile.model, 'zen-relay/d');
     assert.equal(p.baseRef, 'main');
   });
 
@@ -2063,7 +2084,7 @@ describe('swarm ui-model gates + payloads', () => {
     assert.equal(canSwarmDecide(r, 'd0').ok, false, 'an approved decision never re-settles');
     assert.equal(canSwarmDecide(r, 'dx').ok, false, 'unknown decision refused');
     assert.deepEqual(swarmInputPayload(r, 'p1', 'go'), { runId: 'run_s1', participantId: 'p1', text: 'go' });
-    assert.deepEqual(swarmInputPayload(r, 'all', 'go'), { runId: 'run_s1', to: 'all', text: 'go' });
+    assert.deepEqual(swarmInputPayload(r, 'all', 'go'), { runId: 'run_s1', participantId: 'all', text: 'go' });
     assert.deepEqual(swarmExtendPayload(r, 4, 'p2'), { runId: 'run_s1', turns: 4, participantId: 'p2' });
     assert.deepEqual(
       swarmDecidePayload(r, 'd1', 'approve', 'lgtm'),
@@ -2160,6 +2181,8 @@ describe('orchestrator/swarm SSR render — drawer editors + run detail', () => 
     });
     st.selectedRunId = 'run_o1';
     st.run = orchRun({ cardId: 'co3' });
+    st.run.orchestrator.graph.pendingApproval = {proposalId:'ip1',kind:'amend',fields:['plan']};
+    st.run.orchestrator.pendingActions.push({type:'decision',proposalId:'ip1',kind:'amend',fields:['plan']});
     const html = await renderToString(createSSRApp(CardDrawer, { cardId: 'co3' }));
     assert.ok(html.includes('orch-actions'), 'required-action banner renders');
     assert.ok(html.includes('orch-pending-spec_approval'), 'spec approval pending renders');
@@ -2169,6 +2192,9 @@ describe('orchestrator/swarm SSR render — drawer editors + run detail', () => 
     assert.ok(html.includes('orch-waiting-st-2'), 'waiting reason renders');
     assert.ok(html.includes('orch-answer-send-st-2'), 'answer control renders');
     assert.ok(html.includes('orch-grant-st-3'), 'grant control renders');
+    assert.ok(html.includes('orch-decide-approve-ip1'), 'input-change approval renders');
+    assert.ok(html.includes('orch-decide-reject-ip1'), 'input-change rejection renders');
+    assert.ok(html.includes('input change ip1'), 'proposal is identified for review');
     assert.ok(!html.includes('orch-retry-st-3'), 'budget-exhausted task shows grant, not retry');
     assert.ok(html.includes('orch-attempt-att_3'), 'task attempts render');
     assert.ok(html.includes('orch-result-st-1'), 'accepted result commit + hash render');
@@ -2267,5 +2293,64 @@ describe('orchestrator/swarm SSR render — drawer editors + run detail', () => 
     st.run = swarmRun({ cardId: 'cs2', swarm: { phase: 'verify', freeze: { active: true, reason: 'verify' } } });
     const html = await renderToString(createSSRApp(CardDrawer, { cardId: 'cs2' }));
     assert.ok(html.includes('swarm-freeze'), 'freeze banner renders with the reason');
+  });
+});
+
+
+describe('execution modes published backend contract regression', () => {
+  test('orchestrator and swarm starts carry full validated inline profiles', async () => {
+    const { validateAgentProfile } = await import('../server/execution/environment/agent-profile.mjs');
+    const draft = { decomposer: 'zen-relay/d', verifier: 'zen-relay/v', integrator: 'zen-relay/i',
+      workers: [{name:'default', profileId:'zen-relay/w'}], limits: {taskAttempts:4} };
+    const p = orchStartPayload(draft);
+    for (const entry of [p.orchestrator.decomposer, p.orchestrator.verifier,
+      p.orchestrator.integrator, p.orchestrator.workers.default]) {
+      assert.equal(validateAgentProfile(entry.profile).provider, 'zen-relay');
+    }
+    assert.equal(p.orchestrator.limits.taskAttempts, 4);
+    assert.ok(p.orchestrator.workers.default.profile.tools.includes('edit'));
+    assert.deepEqual(p.orchestrator.decomposer.profile.tools, ['read','bash','grep','find','ls']);
+    assert.deepEqual(p.orchestrator.verifier.profile.tools, ['read','bash','grep','find','ls']);
+    const sw = swarmStartPayload({participants:[
+      {participantId:'p1',callsign:'A',profileId:'zen-relay/a',ownedPaths:'src/a/**'},
+      {participantId:'p2',callsign:'B',profileId:'zen-relay/b',ownedPaths:'src/b/**'},
+    ]});
+    for (const row of sw.swarm.participants) {
+      assert.equal(validateAgentProfile(row.profile).provider, 'zen-relay');
+      assert.ok(row.profile.tools.includes('write'));
+      assert.equal(row.profileId, undefined);
+    }
+  });
+
+  test('durable nested tasks retain identity, real attempts, evidence and unblock gates', () => {
+    const r = orchRun({ attempts:[{id:'att_real',n:1,role:'worker',kind:'work',status:'failed',error:'boom'}],
+      orchestrator:{graph:{status:'active',pendingApproval:null},tasks:[
+        {id:'st-q',title:'question',dependsOn:['st-a'],worker:{profileId:'default'},limits:{maxAttempts:2,maxFixCycles:1},
+          state:{status:'waiting',attemptsUsed:1,extraAttempts:0,fixesUsed:0,extraFixes:0,
+            attempts:['att_real'],waiting:{reason:'question',question:'which store?'},
+            evidence:{verdict:'return',verdictArtifactId:'art_real'}}},
+        {id:'st-blocked',title:'exhausted',dependsOn:[],worker:{profileId:'default'},limits:{maxAttempts:1,maxFixCycles:1},
+          state:{status:'blocked',attemptsUsed:1,attempts:[],waiting:{reason:'grant'}}},
+      ],pendingActions:[{type:'question',taskId:'st-q',question:'which store?'},{type:'grant',taskId:'st-blocked'}]}});
+    const t = orchTask(r,'st-q');
+    assert.equal(t.status,'waiting');
+    assert.deepEqual(t.deps,['st-a']);
+    assert.equal(t.attempts[0].id,'att_real');
+    assert.equal(t.evidence.verifyArtifactId,'art_real');
+    assert.equal(canOrchAnswer(r,'st-q').ok,true);
+    assert.equal(canOrchGrant(r,'st-blocked').ok,true);
+    assert.equal(canOrchRetry(r,'st-blocked').ok,false);
+    assert.deepEqual(orchGrantPayload(r,'st-blocked',1,2),{runId:r.id,taskId:'st-blocked',attempts:1,fixCycles:2});
+  });
+
+  test('input-change proposals have an exact user decision command', async () => {
+    const {canOrchDecide,orchDecidePayload} = await import('../src/lib/execution/ui-model.ts');
+    const r = orchRun({orchestrator:{graph:{status:'approval_pending',pendingApproval:{proposalId:'ip1',kind:'amend',fields:['plan']}},
+      pendingActions:[{type:'decision',proposalId:'ip1',kind:'amend',fields:['plan']}]}});
+    assert.equal(canOrchDecide(r,'ip1').ok,true);
+    assert.equal(canOrchApprove(r).ok,false);
+    assert.deepEqual(orchDecidePayload(r,'ip1','reject'),{runId:r.id,proposalId:'ip1',decision:'reject'});
+    assert.equal(canOrchDecide(r,'old').ok,false);
+    assert.ok((await import('../src/lib/execution/api.ts')).USER_COMMAND_TYPES.includes('orch_decide'));
   });
 });

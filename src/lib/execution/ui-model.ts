@@ -1201,7 +1201,29 @@ export function orchestrator(run: ExecRun | null | undefined): OrchestratorState
 }
 
 export function orchTasks(run: ExecRun | null | undefined): OrchTask[] {
-  return orchestrator(run)?.tasks ?? [];
+  return (orchestrator(run)?.tasks ?? []).map((row) => {
+    const state = row.state;
+    const fixing = state.status === 'returned';
+    return {
+      taskId: row.id, title: row.title, status: state.status,
+      deps: row.dependsOn, profile: row.worker.profileId, boundary: row.boundary,
+      inputCommit: state.inputCommit, snapshotOf: state.snapshotOf,
+      resultCommit: state.resultCommit, resultSha256: state.resultSha256,
+      waiting: state.waiting,
+      evidence: state.evidence ? {
+        verdict: state.evidence.verdict, verifyArtifactId: state.evidence.verdictArtifactId,
+      } : null,
+      budget: {
+        used: fixing ? state.fixesUsed : state.attemptsUsed,
+        limit: fixing ? row.limits.maxFixCycles + (state.extraFixes ?? 0)
+          : row.limits.maxAttempts + (state.extraAttempts ?? 0),
+      },
+      attempts: state.attempts.flatMap((id) => {
+        const attempt = run?.attempts?.find((a) => a.id === id);
+        return attempt ? [{ ...attempt, kind: String(attempt.kind ?? attempt.role) }] : [];
+      }),
+    };
+  });
 }
 
 export function orchTask(
@@ -1259,7 +1281,7 @@ export function orchPendingActionText(a: OrchPendingAction): string {
   if (a.type === 'grant') {
     return `task ${a.taskId} exhausted its attempts (${a.reason ?? 'attempts_exhausted'}) — grant budget or decide`;
   }
-  return `task ${a.taskId} is blocked (${a.reason ?? 'decision needed'}) — decide to unblock`;
+  return `input change ${a.proposalId} (${a.kind}) affects ${a.fields.join(', ')} — approve or reject the proposal`;
 }
 
 /** Run states in which the server still accepts an orchestrator user
@@ -1281,6 +1303,7 @@ export function canOrchApprove(run: ExecRun | null, specSha256?: string): GateRe
   const d = orchDecidable(run);
   if (!d.ok) return d;
   const o = orchestrator(run)!;
+  if (o.graph?.pendingApproval) return no('resolve the pending input-change proposal first');
   const pending = (o.pendingActions ?? []).find((a) => a.type === 'spec_approval');
   if (!pending || pending.type !== 'spec_approval') {
     return no('the run is not waiting on a spec approval');
@@ -1320,7 +1343,7 @@ export function canOrchGrant(run: ExecRun | null, taskId: string): GateResult {
   if (!t) return no(`task ${taskId} is not in this run`);
   const grantPending = orchPendingActions(run).some(
     (a) => a.type === 'grant' && (a as { taskId: string }).taskId === taskId);
-  if (t.status !== 'failed' && !grantPending
+  if (!['failed', 'blocked', 'waiting'].includes(t.status) && !grantPending
     && !(t.status === 'waiting' && t.waiting?.reason === 'attempts_exhausted')) {
     return no(`task ${taskId} is ${t.status} — only an attempts-exhausted task may be granted budget`);
   }
@@ -1335,8 +1358,8 @@ export function canOrchRetry(run: ExecRun | null, taskId: string): GateResult {
   if (!d.ok) return d;
   const t = orchTask(run, taskId);
   if (!t) return no(`task ${taskId} is not in this run`);
-  if (t.status !== 'failed') {
-    return no(`task ${taskId} is ${t.status} — only a failed task may be retried`);
+  if (!['failed', 'returned', 'waiting'].includes(t.status)) {
+    return no(`task ${taskId} is ${t.status} — only failed/returned/waiting tasks may be retried`);
   }
   const used = t.budget?.used;
   const limit = t.budget?.limit;
@@ -1344,6 +1367,21 @@ export function canOrchRetry(run: ExecRun | null, taskId: string): GateResult {
     return no(`task ${taskId} exhausted its budget (${used}/${limit}) — grant attempts first`);
   }
   return ok;
+}
+
+export function canOrchDecide(run: ExecRun | null, proposalId: string): GateResult {
+  const d = orchDecidable(run);
+  if (!d.ok) return d;
+  const o = orchestrator(run)!;
+  if (o.graph?.pendingApproval?.proposalId !== proposalId
+    || !orchPendingActions(run).some((a) => a.type === 'decision' && a.proposalId === proposalId)) {
+    return no('this input-change proposal is no longer pending');
+  }
+  return ok;
+}
+
+export function orchDecidePayload(run: ExecRun, proposalId: string, decision: 'approve' | 'reject'): Record<string, unknown> {
+  return { runId: run.id, proposalId, decision };
 }
 
 export function orchApprovePayload(run: ExecRun, specSha256: string): Record<string, unknown> {
@@ -1354,8 +1392,8 @@ export function orchAnswerPayload(run: ExecRun, taskId: string, answer: string):
   return { runId: run.id, taskId, answer };
 }
 
-export function orchGrantPayload(run: ExecRun, taskId: string, attempts: number): Record<string, unknown> {
-  return { runId: run.id, taskId, attempts };
+export function orchGrantPayload(run: ExecRun, taskId: string, attempts: number, fixCycles?: number): Record<string, unknown> {
+  return { runId: run.id, taskId, attempts, ...(fixCycles === undefined ? {} : { fixCycles }) };
 }
 
 export function orchRetryPayload(run: ExecRun, taskId: string): Record<string, unknown> {
@@ -1365,9 +1403,8 @@ export function orchRetryPayload(run: ExecRun, taskId: string): Record<string, u
 // -- orchestrator start composition (backend-ui-contract §3) ------------------
 //
 // The UI composes the orchestrator block from durable choices: worker
-// profile ids from the compat table, decomposer/verifier/integrator picks
-// plus pool profiles — validated client-side for shape, authoritatively
-// by the server (profiles must exist in ACP_EXEC_PROFILES).
+// model picks from the compat table, synthesized into inline full profiles
+// for decomposer/verifier/integrator and workers, validated by the server.
 
 export interface OrchWorkerDraft {
   name: string;
@@ -1380,7 +1417,7 @@ export interface OrchDraft {
   integrator: string;
   workers: OrchWorkerDraft[];
   limits?: {
-    maxAttemptsPerTask?: number;
+    taskAttempts?: number;
     maxIntegratorAttempts?: number;
     maxSubtasks?: number;
     requireSpecApproval?: boolean;
@@ -1420,22 +1457,28 @@ export function canStartOrchestrator(view: ExecCardView, d: OrchDraft): GateResu
   return problems.length ? no(problems[0]) : ok;
 }
 
+/** Models come from the same pi compatibility list as fusion; profiles are inline. */
+function modeProfile(modelRef: string, profileId: string, role: FusionProfilePick['role']): Record<string, unknown> {
+  const { provider, model } = splitModelRef(modelRef.trim());
+  return fusionProfile({ profileId, provider, model, role });
+}
+
 /** The `start` payload for mode 'orchestrator' (contract §3). */
 export function orchStartPayload(d: OrchDraft): Record<string, unknown> {
-  const workers: Record<string, string> = {};
+  const workers: Record<string, { profile: Record<string, unknown> }> = {};
   for (const w of d.workers ?? []) {
-    if (w.name?.trim() && w.profileId?.trim()) workers[w.name.trim()] = w.profileId.trim();
+    if (w.name?.trim() && w.profileId?.trim()) workers[w.name.trim()] = { profile: modeProfile(w.profileId, `orch-worker-${w.name.trim()}`, 'integrator') };
   }
   const orchestrator: Record<string, unknown> = {
-    decomposer: d.decomposer.trim(),
-    verifier: d.verifier.trim(),
-    integrator: d.integrator.trim(),
+    decomposer: { profile: modeProfile(d.decomposer, 'orch-decomposer', 'judge') },
+    verifier: { profile: modeProfile(d.verifier, 'orch-verifier', 'judge') },
+    integrator: { profile: modeProfile(d.integrator, 'orch-integrator', 'integrator') },
     workers,
   };
   const L = d.limits ?? {};
   const limits: Record<string, unknown> = {};
-  if (typeof L.maxAttemptsPerTask === 'number' && L.maxAttemptsPerTask > 0) {
-    limits.maxAttemptsPerTask = Math.floor(L.maxAttemptsPerTask);
+  if (typeof L.taskAttempts === 'number' && L.taskAttempts > 0) {
+    limits.taskAttempts = Math.floor(L.taskAttempts);
   }
   if (typeof L.maxIntegratorAttempts === 'number' && L.maxIntegratorAttempts > 0) {
     limits.maxIntegratorAttempts = Math.floor(L.maxIntegratorAttempts);
@@ -1627,9 +1670,7 @@ export function swarmInputPayload(
   participantId: string,
   text: string,
 ): Record<string, unknown> {
-  return participantId === 'all'
-    ? { runId: run.id, to: 'all', text }
-    : { runId: run.id, participantId, text };
+  return { runId: run.id, participantId, text };
 }
 
 export function swarmExtendPayload(
@@ -1710,7 +1751,7 @@ export function swarmStartPayload(d: SwarmDraft): Record<string, unknown> {
   const participants = (d.participants ?? []).map((p) => ({
     participantId: p.participantId.trim(),
     callsign: p.callsign?.trim() || p.participantId.trim(),
-    profileId: p.profileId.trim(),
+    profile: modeProfile(p.profileId, `swarm-${p.participantId.trim()}`, 'integrator'),
     ownedPaths: p.ownedPaths.split(',').map((s) => s.trim()).filter(Boolean),
   }));
   const swarm: Record<string, unknown> = { participants };

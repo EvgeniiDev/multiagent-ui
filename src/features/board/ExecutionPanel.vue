@@ -24,6 +24,7 @@ import {
   canExcludePanelist,
   canOrchAnswer,
   canOrchApprove,
+  canOrchDecide,
   canOrchGrant,
   canOrchRetry,
   canRetryParticipant,
@@ -57,6 +58,7 @@ import {
   isSwarm,
   orchAnswerPayload,
   orchApprovePayload,
+  orchDecidePayload,
   orchDraftProblems,
   orchGrantPayload,
   orchestrator as orchState,
@@ -927,8 +929,7 @@ const orchMaxSubtasks = ref('16');
 const orchSpecApproval = ref(true);
 const orchBaseRef = ref('');
 
-/** Profile ids the server accepts — the compat table is the only source
- * (pi entry like the fusion editor; the server digest-binds at start). */
+/** Provider-qualified models used to build inline worker profiles. */
 const orchProfiles = computed(() => exec.compatibility?.pi?.models ?? []);
 
 function openOrchEditor() {
@@ -946,7 +947,7 @@ const orchDraft = computed<OrchDraft>(() => ({
   integrator: orchIntegrator.value,
   workers: orchWorkers.value.map((w) => ({ name: w.name, profileId: w.profileId })),
   limits: {
-    maxAttemptsPerTask: Number(orchAttempts.value) || undefined,
+    taskAttempts: Number(orchAttempts.value) || undefined,
     maxIntegratorAttempts: Number(orchIntegratorAttempts.value) || undefined,
     maxSubtasks: Number(orchMaxSubtasks.value) || undefined,
     requireSpecApproval: orchSpecApproval.value,
@@ -972,6 +973,13 @@ const orchGrantFor = (taskId: string) => canOrchGrant(run.value, taskId);
 const orchRetryFor = (taskId: string) => canOrchRetry(run.value, taskId);
 const orchAnswerDrafts = ref<Record<string, string>>({});
 
+async function onOrchDecide(proposalId: string, decision: 'approve' | 'reject') {
+  const r = run.value;
+  if (!r || !canOrchDecide(r, proposalId).ok) return;
+  if (!confirm(`${decision === 'approve' ? 'Approve' : 'Reject'} input-change proposal ${proposalId}?`)) return;
+  await send('orch_decide', orchDecidePayload(r, proposalId, decision));
+}
+
 async function onOrchApprove() {
   const r = run.value;
   const sha = ozSpec.value?.sha256;
@@ -996,12 +1004,19 @@ async function onOrchGrant(taskId: string) {
   if (!r) return;
   const raw = prompt(`Grant task ${taskId} extra attempts — how many?`, '1');
   if (raw === null) return;
-  const attempts = Math.floor(Number(raw));
-  if (!Number.isFinite(attempts) || attempts <= 0) {
-    alert('attempts must be a positive number');
+  const attempts = Number(raw);
+  if (!Number.isInteger(attempts) || attempts <= 0 || attempts > 10) {
+    alert('attempts must be a number from 1 to 10');
     return;
   }
-  await send('orch_grant', orchGrantPayload(r, taskId, attempts));
+  const fixesRaw = prompt(`Grant task ${taskId} extra fix cycles (0 to keep the current limit)`, '0');
+  if (fixesRaw === null) return;
+  const fixCycles = Number(fixesRaw);
+  if (!Number.isInteger(fixCycles) || fixCycles < 0 || fixCycles > 10) {
+    alert('fix cycles must be an integer from 0 to 10');
+    return;
+  }
+  await send('orch_grant', orchGrantPayload(r, taskId, attempts, fixCycles));
 }
 
 async function onOrchRetry(taskId: string) {
@@ -1520,7 +1535,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
         <div class="exec-blockhead">
           <span class="exec-blocktitle">Orchestrator</span>
           <span v-if="oz" class="exec-line mono" data-testid="orch-status">
-            {{ orchPhaseLabel(oz.phase) }}<template v-if="ozStats"> · {{ ozStats.accepted ?? 0 }}/{{ ozStats.tasks ?? 0 }} accepted</template>
+            {{ orchPhaseLabel(run?.phase) }}<template v-if="ozStats"> · {{ ozStats.accepted ?? 0 }}/{{ ozStats.tasks ?? 0 }} accepted</template>
           </span>
         </div>
 
@@ -1932,12 +1947,22 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
                   :title="gated(orchApproveGate).title || 'Approve this spec version'"
                   @click="onOrchApprove"
                 >Approve spec</button>
+                <template v-if="a.type === 'decision'">
+                  <button class="btn primary exec-actionbtn" :data-testid="`orch-decide-approve-${a.proposalId}`"
+                    :disabled="gated(canOrchDecide(run, a.proposalId)).disabled"
+                    :title="gated(canOrchDecide(run, a.proposalId)).title"
+                    @click="onOrchDecide(a.proposalId, 'approve')">Approve input change</button>
+                  <button class="btn danger exec-actionbtn" :data-testid="`orch-decide-reject-${a.proposalId}`"
+                    :disabled="gated(canOrchDecide(run, a.proposalId)).disabled"
+                    :title="gated(canOrchDecide(run, a.proposalId)).title"
+                    @click="onOrchDecide(a.proposalId, 'reject')">Reject input change</button>
+                </template>
               </div>
             </div>
 
             <!-- spec version + acceptance hash -->
             <div class="exec-detail" data-testid="orch-detail">
-              <span class="exec-subtitle mono">orchestrator · {{ orchPhaseLabel(oz.phase) }}</span>
+              <span class="exec-subtitle mono">orchestrator · {{ orchPhaseLabel(run?.phase) }}</span>
               <p v-if="ozSpec" class="exec-line mono" data-testid="orch-spec">
                 spec v{{ ozSpec.version ?? '?' }} · {{ ozSpec.status ?? '?' }} · {{ fmtSha(ozSpec.sha256, 12) }}<template v-if="ozSpec.approvedAt"> · approved {{ ozSpec.approvedAt }}</template><template v-if="ozSpec.by"> by {{ ozSpec.by }}</template>
                 <button v-if="ozSpec.artifactId" class="exec-artlink" @click="onOpenArtifact(ozSpec.artifactId!)">view</button>
@@ -1997,7 +2022,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
                     >answer</button>
                   </div>
                 </template>
-                <template v-if="t.status === 'failed' || t.status === 'waiting'">
+                <template v-if="t.status === 'failed' || t.status === 'waiting' || t.status === 'blocked' || t.status === 'returned'">
                   <button
                     class="exec-artlink"
                     :data-testid="`orch-grant-${t.taskId}`"
@@ -2009,10 +2034,11 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
                        budget.used/budget.limit; an exhausted task shows
                        grant alone (the retry POST would be refused). -->
                   <button
-                    v-if="t.status === 'failed' && orchRetryFor(t.taskId).ok"
+                    v-if="orchRetryFor(t.taskId).ok"
                     class="exec-artlink"
                     :data-testid="`orch-retry-${t.taskId}`"
-                    :title="'Re-queue the task within its remaining budget'"
+                    :disabled="gated(orchRetryFor(t.taskId)).disabled"
+                    :title="gated(orchRetryFor(t.taskId)).title || 'Re-queue the task within its remaining budget'"
                     @click="onOrchRetry(t.taskId)"
                   >retry</button>
                 </template>
