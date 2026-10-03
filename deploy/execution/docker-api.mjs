@@ -207,6 +207,16 @@ export function createDockerApi({ socketPath = '/var/run/docker.sock', timeoutMs
       if (r.status !== 204 && r.status !== 304) throw apiErr('container start', r);
       return true;
     },
+    containerPause: async (id) => {
+      const r = await request('POST', `/containers/${encodeURIComponent(id)}/pause`);
+      if (r.status !== 204) throw apiErr('container pause', r);
+      return true;
+    },
+    containerUnpause: async (id) => {
+      const r = await request('POST', `/containers/${encodeURIComponent(id)}/unpause`);
+      if (r.status !== 204) throw apiErr('container unpause', r);
+      return true;
+    },
     containerStop: async (id, { timeoutS = 5 } = {}) => {
       const r = await request('POST', `/containers/${encodeURIComponent(id)}/stop?t=${timeoutS}`);
       if (r.status !== 204 && r.status !== 304) throw apiErr('container stop', r);

@@ -558,11 +558,12 @@ sect('inspect-d14');
     check(`status: docker '${s}' passes through, registry untouched`,
       st.state === s && noGone(recD()) && noGone(await diskD()), `state=${st.state}`);
   }
-  // paused with Running===true is 'running' — the namespace is up; whether
-  // exec works is the daemon's call, not the classifier's.
+  // Docker pause preserves the namespace while preventing execution.
+  // Consumers require the physical pause proof separately from liveness.
   setC(true, 'paused');
-  check('status: paused-with-Running reports running',
-    (await d14State()).state === 'running');
+  const pausedState = await d14State();
+  check('status: paused-with-Running reports paused with live namespace',
+    pausedState.state === 'paused' && pausedState.namespaceAlive === true && pausedState.frozen === true);
   setC(true, 'running');
 
   // malformed inspect payloads (HTTP 200 with no usable State) → 'unknown',
