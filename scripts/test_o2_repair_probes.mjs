@@ -62,13 +62,14 @@ test('B1: unchanged base accepted as resolution drops parent content', async () 
   });
   // resolution repo = PRISTINE base (integrator forgot to apply anything)
   const { repoPath: ir } = await createPrivateRepo({ sourcePath: dir, baseCommit: base, name: 'b1-res', baseDir });
-  const baseTree = await treeHashFor(ir, G(ir, 'rev-parse', 'HEAD'));
-  const inputs = [{ taskId: 'a', resultCommit: da.resultCommit }];
+  const baseCommit = G(ir, 'rev-parse', 'HEAD');
+  const baseTree = await treeHashFor(ir, baseCommit);
+  const inputs = [{ taskId: 'a', inputCommit: da.inputCommit, resultCommit: da.resultCommit }];
   let code = null;
   try {
     await recordResolution({
-      storeDir: path.join(baseDir, 'store'), inputs, order: ['a'], baseTree,
-      repoPath: ir, parentDiffs: [{ taskId: 'a', changed: da.changed, files: da.files }],
+      storeDir: path.join(baseDir, 'store'), inputs, order: ['a'], baseTree, baseCommit,
+      repoPath: ir, parentDiffs: [da],
     });
   } catch (e) { code = e.code; }
   assert.equal(code, 'resolution_incomplete', 'pristine base must be rejected: it drops parent content');
@@ -82,15 +83,16 @@ test('B2: legitimate parent deletion accepted', async () => {
   });
   assert.ok(da.changed.includes('gone.txt'));
   const { repoPath: ir } = await createPrivateRepo({ sourcePath: dir, baseCommit: base, name: 'b2-res', baseDir });
-  const baseTree = await treeHashFor(ir, G(ir, 'rev-parse', 'HEAD'));
+  const baseCommit = G(ir, 'rev-parse', 'HEAD');
+  const baseTree = await treeHashFor(ir, baseCommit);
   const ap = spawnSync('git', ['apply', '-'], { cwd: ir, input: da.formatPatch, encoding: 'utf8' });
   assert.equal(ap.status, 0);
   G(ir, 'add', '-A');
   G(ir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'apply a (deletion)');
   const rec = await recordResolution({
     storeDir: path.join(baseDir, 'store'),
-    inputs: [{ taskId: 'a', resultCommit: da.resultCommit }], order: ['a'], baseTree,
-    repoPath: ir, parentDiffs: [{ taskId: 'a', changed: da.changed, files: da.files }],
+    inputs: [{ taskId: 'a', inputCommit: da.inputCommit, resultCommit: da.resultCommit }], order: ['a'], baseTree, baseCommit,
+    repoPath: ir, parentDiffs: [da],
   });
   assert.ok(rec.resultCommit);
 });
@@ -119,19 +121,20 @@ test('B3: parallel conflicting recordResolution — exactly one wins', async () 
   };
   const ir1 = await mkRes('b3-r1', 'merged one\n');
   const ir2 = await mkRes('b3-r2', 'merged two\n');
-  const baseTree = await treeHashFor(ir1, da.inputCommit);
+  const baseCommit = da.inputCommit;
+  const baseTree = await treeHashFor(ir1, baseCommit);
   const storeDir = path.join(baseDir, 'store');
   const inputs = [
-    { taskId: 'a', resultCommit: da.resultCommit },
-    { taskId: 'b', resultCommit: db.resultCommit },
+    { taskId: 'a', inputCommit: da.inputCommit, resultCommit: da.resultCommit },
+    { taskId: 'b', inputCommit: db.inputCommit, resultCommit: db.resultCommit },
   ];
   const pd = [
-    { taskId: 'a', changed: da.changed, files: da.files },
-    { taskId: 'b', changed: db.changed, files: db.files },
+    da,
+    db,
   ];
   const results = await Promise.allSettled([
-    recordResolution({ storeDir, inputs, order: ['a', 'b'], baseTree, repoPath: ir1, parentDiffs: pd, resolvedPaths: ['f.txt'] }),
-    recordResolution({ storeDir, inputs, order: ['a', 'b'], baseTree, repoPath: ir2, parentDiffs: pd, resolvedPaths: ['f.txt'] }),
+    recordResolution({ storeDir, inputs, order: ['a', 'b'], baseTree, baseCommit, repoPath: ir1, parentDiffs: pd, resolvedPaths: ['f.txt'] }),
+    recordResolution({ storeDir, inputs, order: ['a', 'b'], baseTree, baseCommit, repoPath: ir2, parentDiffs: pd, resolvedPaths: ['f.txt'] }),
   ]);
   const ok = results.filter((r) => r.status === 'fulfilled');
   const bad = results.filter((r) => r.status === 'rejected');
@@ -261,16 +264,17 @@ test('R3: corrupt artifact file fails closed, never reads as absent', async () =
     await fs.writeFile(path.join(rp, 'f.txt'), 'from-a\n');
   });
   const { repoPath: ir } = await createPrivateRepo({ sourcePath: dir, baseCommit: base, name: 'r3-res', baseDir });
-  const baseTree = await treeHashFor(ir, G(ir, 'rev-parse', 'HEAD'));
+  const baseCommit = G(ir, 'rev-parse', 'HEAD');
+  const baseTree = await treeHashFor(ir, baseCommit);
   const ap = spawnSync('git', ['apply', '-'], { cwd: ir, input: da.formatPatch, encoding: 'utf8' });
   assert.equal(ap.status, 0);
   G(ir, 'add', '-A');
   G(ir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'apply a');
   const storeDir = path.join(baseDir, 'store');
-  const inputs = [{ taskId: 'a', resultCommit: da.resultCommit }];
+  const inputs = [{ taskId: 'a', inputCommit: da.inputCommit, resultCommit: da.resultCommit }];
   const rec = await recordResolution({
-    storeDir, inputs, order: ['a'], baseTree, repoPath: ir,
-    parentDiffs: [{ taskId: 'a', changed: da.changed, files: da.files }],
+    storeDir, inputs, order: ['a'], baseTree, baseCommit, repoPath: ir,
+    parentDiffs: [da],
   });
   await fs.writeFile(path.join(storeDir, `${rec.key}.json`), '{corrupt json');
   let code = null;
@@ -280,8 +284,8 @@ test('R3: corrupt artifact file fails closed, never reads as absent', async () =
   let code2 = null;
   try {
     await recordResolution({
-      storeDir, inputs, order: ['a'], baseTree, repoPath: ir,
-      parentDiffs: [{ taskId: 'a', changed: da.changed, files: da.files }],
+      storeDir, inputs, order: ['a'], baseTree, baseCommit, repoPath: ir,
+      parentDiffs: [da],
     });
   } catch (e) { code2 = e.code; }
   assert.equal(code2, 'artifact_corrupt');
