@@ -2858,7 +2858,7 @@ async function cmdResolveAttempt(ctx, aggregate, payload, now) {
   const isJudge = att.role === 'judge';
   const isIntegrator = att.role === 'integrator';
   const isOrch = ORCH_ATTEMPT_ROLES.has(att.role);
-  const isSwarm = run.mode === 'swarm';
+  const isSwarm = run.mode === 'swarm' && att.role === 'participant';
   let panelAnswer = null;
   let judgeWorkOrder = null;
   let judgeParsed = null;
