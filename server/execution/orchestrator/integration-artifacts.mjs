@@ -27,13 +27,13 @@ import { RuntimeError, normPath, ensureDir } from '../common.mjs';
 import { exclusiveCreateArtifact } from './durable-artifact.mjs';
 import { invalid, conflict } from './errors.mjs';
 import { sha256, canonicalJson, SHA256_RE } from './canonical.mjs';
-import { COMMIT_RE, treeHashFor, blobAt } from './workspaces.mjs';
+import { COMMIT_RE, treeHashFor, blobAt, exportWorkerDiff, diffFileEntries } from './workspaces.mjs';
 
-export const ARTIFACT_VERSION = 1;
+export const ARTIFACT_VERSION = 2;
 
 const ARTIFACT_KEYS = new Set([
   'version', 'kind', 'key', 'inputs', 'order', 'baseTree',
-  'resolution', 'resolvedPaths', 'supersedes', 'resultCommit', 'resultTree', 'createdAt',
+  'baseCommit', 'parentProofs', 'additionalPaths', 'resolution', 'resolvedPaths', 'supersedes', 'resultCommit', 'resultTree', 'createdAt',
 ]);
 
 // Canonical key: exact input resultCommits in stable topological build
@@ -68,24 +68,13 @@ function artifactPath(storeDir, key) {
   return path.join(storeDir, `${key}.json`);
 }
 
-// Record a caller-supplied resolution. Content proof is per-FILE and
-// op-aware (parentDiffs entries carry `files[]` from exportWorkerDiff —
-// `changed[]`-only entries are rejected):
-//   added/modified → the resolution's bytes-hash MUST equal the parent's
-//     `after` hash. A resolution tree holding the UNCHANGED base bytes at
-//     that path is REJECTED (it drops the parent's change, and path
-//     existence alone would have accepted it).
-//   deleted → the path MUST be absent in the resolution (legitimate
-//     deletion is accepted, never resolution_incomplete).
-//   modechange → bytes MUST equal parent `after` AND the mode must match.
-// A path both parents changed to DIFFERENT bytes is a true conflict: the
-// caller MUST list it in `resolvedPaths[]` (explicit conflict-resolution
-// evidence, required ONLY there — uncontested paths carry exact parent
-// bytes and need no declaration). Unchanged-base content anywhere else is
-// fine (resolution = base + both sides), but it never counts as a side's
-// presence.
+// Verify complete exported parent ranges against their actual commits. Empty
+// ranges are valid. Causal successors must carry earlier bytes/mode in their
+// input tree; parallel conflicts require an explicit hand-merged result.
+// All base-to-result mutations outside parent paths require additionalPaths.
 export async function recordResolution({
-  storeDir, inputs, order, baseTree, repoPath, parentDiffs = [],
+  storeDir, inputs, order, baseTree, baseCommit, repoPath, parentDiffs = [],
+  additionalPaths = [],
   resolvedPaths = [], resolutionNote = null, supersedes = [],
   now = () => new Date().toISOString(),
 }) {
@@ -111,112 +100,97 @@ export async function recordResolution({
     throw new RuntimeError('git_failed', `cannot read resolution HEAD: ${headRes.stderr.slice(0, 200)}`);
   }
   const resultCommit = headRes.stdout.trim();
-  // Every input must be an ancestor of the resolution — the resolution
-  // contains all sides, never silently drops one. Cross-repo SHAs can
-  // never be ancestors (each private repo mints its own commits), so the
-  // caller supplies the parents' OWN exported diffs (changed paths +
-  // patch text) and we verify CONTENT: each side's changed paths must
-  // exist in the resolved tree, and where a patch still reverse-applies
-  // cleanly its content must be present verbatim.
-  const diffByTask = new Map((parentDiffs ?? []).map((d) => [d.taskId, d]));
-  // Op-aware proof per parent file. changed[]-only entries are rejected:
-  // path existence cannot prove content presence.
-  const afterByPath = new Map(); // path -> {taskIds:Set, after:Set<hash|null>}
+  if (!COMMIT_RE.test(baseCommit ?? '') || await treeHashFor(real, baseCommit) !== baseTree) {
+    throw invalid('base_proof_invalid', 'baseCommit must resolve to the declared baseTree');
+  }
+  if ((await run(['merge-base', '--is-ancestor', baseCommit, resultCommit])).code !== 0) {
+    throw invalid('base_proof_invalid', 'baseCommit must be an ancestor of the resolution result');
+  }
+  const byId = new Map(inputs.map(i => [i.taskId, i]));
+  const position = new Map(order.map((id, n) => [id, n]));
+  const ancestors = new Map();
+  for (const id of order) {
+    const i = byId.get(id);
+    if (!COMMIT_RE.test(i.inputCommit ?? '') || !Array.isArray(i.dependsOn ?? [])) {
+      throw invalid('parent_proof_invalid', `input ${id} requires authoritative inputCommit and dependsOn array`);
+    }
+    const prior = new Set();
+    for (const dep of i.dependsOn ?? []) {
+      if (!position.has(dep) || position.get(dep) >= position.get(id)) {
+        throw invalid('parent_proof_invalid', `dependency ${dep} must precede ${id} in order`);
+      }
+      prior.add(dep);
+      for (const ancestor of ancestors.get(dep)) prior.add(ancestor);
+    }
+    ancestors.set(id, prior);
+  }
+  if (!Array.isArray(parentDiffs) || parentDiffs.length !== inputs.length
+    || new Set(parentDiffs.map(d => d?.taskId)).size !== inputs.length) {
+    throw invalid('parent_proof_invalid', 'supply exactly one complete exported proof per input');
+  }
+  const proofs = new Map();
+  const afterByPath = new Map();
   for (const i of inputs) {
-    const d = diffByTask.get(i.taskId);
-    if (!d || !Array.isArray(d.files) || !d.files.length) {
-      throw conflict('resolution_incomplete',
-        `resolution has no parent file proof for input "${i.taskId}" — supply files[] from exportWorkerDiff`,
-        { taskId: i.taskId });
+    const d = parentDiffs.find(d => d.taskId === i.taskId);
+    if (!d || typeof d.repoPath !== 'string' || d.inputCommit !== i.inputCommit
+      || d.resultCommit !== i.resultCommit || !Array.isArray(d.files)) {
+      throw invalid('parent_proof_invalid', `parent ${i.taskId} lacks commit-bound exportWorkerDiff proof`);
     }
-    for (const f of d.files) {
-      if (!f || typeof f.path !== 'string') {
-        throw invalid('invalid_argument', `parent "${i.taskId}" files[] holds a bad entry`);
-      }
-      if (f.op === 'added' || f.op === 'modified' || f.op === 'modechange') {
-        if (typeof f.after !== 'string' || !SHA256_RE.test(f.after)) {
-          throw invalid('invalid_argument',
-            `parent "${i.taskId}" file "${f.path}" lacks an after bytes-hash`);
+    const actual = await exportWorkerDiff({repoPath:d.repoPath, inputCommit:i.inputCommit, resultCommit:i.resultCommit});
+    if (canonicalJson(actual.files) !== canonicalJson(d.files)
+      || (d.patchSha256 !== undefined && d.patchSha256 !== actual.patchSha256)
+      || (d.changed !== undefined && canonicalJson(d.changed) !== canonicalJson(actual.changed))) {
+      throw invalid('parent_proof_invalid', `parent ${i.taskId} proof differs from actual committed diff`);
+    }
+    proofs.set(i.taskId, actual);
+    for (const f of actual.files) {
+      if (!afterByPath.has(f.path)) afterByPath.set(f.path, []);
+      afterByPath.get(f.path).push({taskId:i.taskId, file:f});
+    }
+  }
+  const pathList = (items, name) => {
+    if (!Array.isArray(items) || items.some(p => typeof p !== 'string' || !p || path.isAbsolute(p)
+      || p.split('/').some(s => !s || s === '.' || s === '..') || p.includes('\0'))) {
+      throw invalid('invalid_argument', `${name} requires canonical relative paths`);
+    }
+    return new Set(items);
+  };
+  const resolved = pathList(resolvedPaths, 'resolvedPaths');
+  const additional = pathList(additionalPaths, 'additionalPaths');
+  // Entire base-to-result inventory is checked, including untouched paths.
+  // Extra assembler edits require an explicit declaration, never silent loss.
+  for (const f of await diffFileEntries(real, baseCommit, resultCommit)) {
+    if (!afterByPath.has(f.path) && !additional.has(f.path)) {
+      throw conflict('resolution_incomplete', `resolution changes undeclared base path ${f.path}`, {path:f.path});
+    }
+  }
+  const same = (got, f) => f.after === null ? got === null
+    : got !== null && got.hash === f.after && got.mode === f.modeAfter;
+  for (const [filePath, entries] of afterByPath) {
+    // Retain full proofs. A causal successor may supersede a prior edit only
+    // when its real input tree contains those exact bytes AND executable mode.
+    const effective = [];
+    for (const entry of entries.sort((a,b) => position.get(a.taskId)-position.get(b.taskId))) {
+      for (let n = effective.length - 1; n >= 0; n--) {
+        const earlier = effective[n];
+        if (ancestors.get(entry.taskId).has(earlier.taskId)) {
+          const d = proofs.get(entry.taskId);
+          const inputBlob = await blobAt(d.repoPath, d.inputCommit, filePath);
+          if (same(inputBlob, earlier.file)) effective.splice(n, 1);
         }
       }
-      // deleted parents carry after:null — nothing to hash.
-      if (f.op === 'deleted' && f.after !== null) {
-        throw invalid('invalid_argument',
-          `parent "${i.taskId}" file "${f.path}" deleted must carry after:null`);
-      }
-      let e = afterByPath.get(f.path);
-      if (!e) { e = { taskIds: new Set(), after: new Set(), ops: new Map() }; afterByPath.set(f.path, e); }
-      e.taskIds.add(i.taskId);
-      e.after.add(f.after);
-      e.ops.set(i.taskId, f);
+      effective.push(entry);
     }
-  }
-  const resolved = new Set(resolvedPaths ?? []);
-  for (const p of resolved) {
-    if (typeof p !== 'string' || !p) {
-      throw invalid('invalid_argument', 'resolvedPaths must hold non-empty path strings');
-    }
-  }
-  for (const [filePath, e] of afterByPath) {
+    const variants = new Map(effective.map(e => [canonicalJson([e.file.after,e.file.modeAfter]), e.file]));
     const got = await blobAt(real, resultCommit, filePath);
-    if (e.after.size > 1) {
-      // True conflict: both sides changed the same path differently (or
-      // one side deleted what the other changed). Only an explicit
-      // resolvedPaths declaration accepts it — and the resolution must
-      // differ from EVERY side (a silent pick of one side is rejected).
-      if (!resolved.has(filePath)) {
-        throw conflict('resolution_incomplete',
-          `path "${filePath}" changed differently by ${[...e.taskIds].join(',')} — ` +
-          `declare it in resolvedPaths with a hand-merged result`,
-          { path: filePath });
+    if (variants.size === 1) {
+      if (!same(got, [...variants.values()][0])) {
+        throw conflict('resolution_incomplete', `resolution drops content or mode at ${filePath}`, {path:filePath});
       }
-      if (got === null) {
-        // Deletion chosen as the resolution: allowed only when some parent
-        // deleted it (a delete-vs-change conflict resolved by deleting).
-        if (!e.after.has(null)) {
-          throw conflict('resolution_incomplete',
-            `resolved path "${filePath}" deleted but no parent deletes it`,
-            { path: filePath });
-        }
-        continue;
-      }
-      if (e.after.has(got.hash)) {
-        throw conflict('resolution_incomplete',
-          `resolved path "${filePath}" copies one side instead of merging`,
-          { path: filePath });
-      }
-      continue;
-    }
-    const want = [...e.after][0];
-    if (want === null) {
-      // Uncontested deletion: path must be absent (B2 — legitimate
-      // deletion is accepted, never resolution_incomplete).
-      if (got !== null) {
-        throw conflict('resolution_incomplete',
-          `resolution HEAD resurrects deleted path "${filePath}"`,
-          { path: filePath });
-      }
-      continue;
-    }
-    // Uncontested add/modify/modechange: exact parent bytes required —
-    // unchanged-base content (same path, base bytes) is REJECTED.
-    if (got === null) {
-      throw conflict('resolution_incomplete',
-        `resolution HEAD drops files from input "${[...e.taskIds][0]}": ${filePath}`,
-        { taskId: [...e.taskIds][0] });
-    }
-    if (got.hash !== want) {
-      throw conflict('resolution_incomplete',
-        `resolution path "${filePath}" does not carry input "${[...e.taskIds][0]}" content`,
-        { taskId: [...e.taskIds][0], path: filePath });
-    }
-    const op = [...e.ops.values()][0].op;
-    if (op === 'modechange') {
-      const wantMode = [...e.ops.values()][0].modeAfter;
-      if (got.mode !== wantMode) {
-        throw conflict('resolution_incomplete',
-          `resolution path "${filePath}" mode ${got.mode} != parent mode ${wantMode}`,
-          { path: filePath });
+    } else {
+      if (!resolved.has(filePath) || (got === null && !effective.some(e => e.file.after === null))
+        || (got !== null && effective.some(e => same(got,e.file)))) {
+        throw conflict('resolution_incomplete', `resolution requires explicit merged result at ${filePath}`, {path:filePath});
       }
     }
   }
@@ -232,7 +206,10 @@ export async function recordResolution({
     version: ARTIFACT_VERSION,
     kind: 'integration-artifact',
     key,
-    inputs: inputs.map((i) => ({ taskId: i.taskId, resultCommit: i.resultCommit })),
+    inputs: inputs.map((i) => ({ taskId: i.taskId, inputCommit: i.inputCommit, resultCommit: i.resultCommit, dependsOn: [...(i.dependsOn ?? [])] })),
+    baseCommit,
+    parentProofs: order.map(taskId => ({taskId, files: proofs.get(taskId).files, patchSha256: proofs.get(taskId).patchSha256})),
+    additionalPaths: [...additional].sort(),
     order: [...order],
     baseTree,
     resolution,
@@ -267,7 +244,9 @@ export async function recordResolution({
       if (e.code === 'artifact_corrupt') throw e;
       throw new RuntimeError('artifact_corrupt', `artifact ${key} unparseable: ${e.message}`);
     }
-    if (existing.resultCommit !== resultCommit || existing.resultTree !== resultTree) {
+    if (existing.resultCommit !== resultCommit || existing.resultTree !== resultTree
+      || canonicalJson(existing.inputs) !== canonicalJson(record.inputs) || existing.baseCommit !== baseCommit
+      || canonicalJson(existing.additionalPaths) !== canonicalJson(record.additionalPaths)) {
       throw conflict('artifact_mismatch',
         `artifact ${key} already records ${existing.resultCommit} — refusing to overwrite with ${resultCommit}`,
         { key });
@@ -281,7 +260,9 @@ export async function recordResolution({
       // Lost the race: the winner's record is canonical (read it back
       // through the same validating path — damage fails closed).
       const winner = await loadArtifact(normPath(storeDir), inputs, order);
-      if (winner.resultCommit !== resultCommit || winner.resultTree !== resultTree) {
+      if (winner.resultCommit !== resultCommit || winner.resultTree !== resultTree
+        || canonicalJson(winner.inputs) !== canonicalJson(record.inputs) || winner.baseCommit !== baseCommit
+        || canonicalJson(winner.additionalPaths) !== canonicalJson(record.additionalPaths)) {
         throw conflict('artifact_mismatch',
           `artifact ${key} already records ${winner.resultCommit} — refusing to overwrite with ${resultCommit}`,
           { key });
@@ -316,6 +297,13 @@ export async function loadArtifact(storeDir, inputs, order) {
     throw new RuntimeError('artifact_corrupt', `artifact ${key} unparseable: ${e.message}`);
   }
   validateArtifact(rec, key);
+  for (const input of inputs) {
+    const stored = rec.inputs.find(i => i.taskId === input.taskId);
+    if ((input.inputCommit !== undefined && input.inputCommit !== stored.inputCommit)
+      || (input.dependsOn !== undefined && canonicalJson(input.dependsOn) !== canonicalJson(stored.dependsOn))) {
+      throw conflict('artifact_mismatch', `artifact ${key} input provenance differs for ${input.taskId}`);
+    }
+  }
   return rec;
 }
 
@@ -335,13 +323,15 @@ function validateArtifact(rec, key) {
   }
   if (!Array.isArray(rec.inputs) || !rec.inputs.length
     || rec.inputs.some((i) => typeof i?.taskId !== 'string'
+      || !COMMIT_RE.test(i.inputCommit ?? '') || !Array.isArray(i.dependsOn)
       || typeof i?.resultCommit !== 'string' || !COMMIT_RE.test(i.resultCommit))) {
     throw new RuntimeError('artifact_corrupt', `artifact ${key} inputs damaged`);
   }
   if (!Array.isArray(rec.order) || rec.order.some((o) => typeof o !== 'string')) {
     throw new RuntimeError('artifact_corrupt', `artifact ${key} order damaged`);
   }
-  if (typeof rec.baseTree !== 'string' || !SHA256_RE.test(rec.baseTree)
+  if (!COMMIT_RE.test(rec.baseCommit ?? '') || !Array.isArray(rec.parentProofs) || !Array.isArray(rec.additionalPaths)
+    || typeof rec.baseTree !== 'string' || !SHA256_RE.test(rec.baseTree)
     || typeof rec.resultCommit !== 'string' || !COMMIT_RE.test(rec.resultCommit)
     || typeof rec.resultTree !== 'string' || !SHA256_RE.test(rec.resultTree)
     || typeof rec.createdAt !== 'string'
@@ -349,6 +339,27 @@ function validateArtifact(rec, key) {
     || !Array.isArray(rec.resolvedPaths) || !Array.isArray(rec.supersedes)) {
     throw new RuntimeError('artifact_corrupt', `artifact ${key} value shapes damaged`);
   }
+  const proofIds = new Set();
+  for (const proof of rec.parentProofs) {
+    if (!proof || !rec.inputs.some(i => i.taskId === proof.taskId) || proofIds.has(proof.taskId)
+      || !SHA256_RE.test(proof.patchSha256 ?? '') || !Array.isArray(proof.files)) {
+      throw new RuntimeError('artifact_corrupt', `artifact ${key} parent proofs damaged`);
+    }
+    proofIds.add(proof.taskId);
+    const filePaths = new Set();
+    for (const f of proof.files) {
+      if (!f || typeof f.path !== 'string' || !f.path || filePaths.has(f.path)
+        || !['added','modified','deleted','modechange'].includes(f.op)
+        || (f.before !== null && !SHA256_RE.test(f.before ?? ''))
+        || (f.after !== null && !SHA256_RE.test(f.after ?? ''))
+        || !/^(000000|100644|100755|120000|160000)$/.test(f.modeBefore ?? '')
+        || !/^(000000|100644|100755|120000|160000)$/.test(f.modeAfter ?? '')) {
+        throw new RuntimeError('artifact_corrupt', `artifact ${key} file proof damaged`);
+      }
+      filePaths.add(f.path);
+    }
+  }
+  if (proofIds.size !== rec.inputs.length) throw new RuntimeError('artifact_corrupt', `artifact ${key} missing parent proof`);
   // The filename key must EXACTLY equal the key recomputed from the
   // record's own inputs+order — a record filed under the wrong key (copy
   // error, manual plant) is damage, not data.
