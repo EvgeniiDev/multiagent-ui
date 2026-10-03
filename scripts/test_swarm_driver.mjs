@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {parseSwarmResult} from '../server/execution/swarm/prompt.mjs';
+import {parseSwarmResult,buildSwarmPrompt} from '../server/execution/swarm/prompt.mjs';
 import {createSwarmDriver} from '../server/execution/swarm/driver.mjs';
 test('result framing preserves inner code fences and refuses duplicates/authority',()=>{
  const text='```acp-swarm\n'+JSON.stringify({goal:'g',commands:[{type:'apply',ops:[{kind:'write',bytes:'```js\nx\n```'}]}],outcome:'done'})+'\n```';assert.equal(parseSwarmResult(text).result.commands[0].ops[0].bytes,'```js\nx\n```');assert.equal(parseSwarmResult(text+'\n'+text).ok,false);assert.equal(parseSwarmResult('```acp-swarm\n{"goal":"g","commands":[{"type":"apply","auth":{}}],"outcome":"done"}\n```').ok,false);
@@ -36,5 +36,23 @@ test('UUID run recovery passes shared command validation and replays durably',as
   assert.equal(await driver.drive({id:'card'},f.run),'launch_fenced');assert.equal(f.run.swarm.broker.recovered,true);
   assert.equal(f.aggregate.internalRevision,1);assert.ok(ids[0].length<=128);assert.ok(f.aggregate.commands['i:'+ids[0]]);
   assert.equal(await driver.drive({id:'card'},f.run),'launch_fenced');assert.equal(ids[1],ids[0]);assert.equal(f.aggregate.internalRevision,1);
+ }finally{await f.cleanup();}
+});
+
+test('prompt supplies executable coordination commands and exact current ack',async()=>{
+ const f=await fixture();try{
+  const p=f.run.swarm.participants[0];f.run.inputs={requirements:{},plan:{}};
+  const protocol=createSwarmProtocol({initialState:f.run.swarm.protocol,runId:f.run.id});
+  const lease=protocol.getState().participants.a.activeTurn;
+  protocol.dispatch({type:'open_decision',id:'allocation',scope:{kind:'global'},text:'a owns a.txt; b owns tests',auth:lease});
+  f.run.swarm.protocol=protocol.getState();
+  const prompt=buildSwarmPrompt({run:f.run,participant:p,requirements:'req',plan:'plan'});
+  const examples=JSON.parse(prompt.split('Command examples (alternatives; select only relevant commands):\n')[1].split('\n')[0]);
+  protocol.dispatch({...examples.message,auth:lease});assert.equal(protocol.getState().messages.at(-1).body,examples.message.body);
+  protocol.dispatch({...examples.reserve,auth:lease});assert.equal(protocol.getState().files[examples.reserve.path].reservedBy,'a');
+  protocol.dispatch({...examples.openDecision,auth:lease});assert.equal(protocol.getState().decisions[examples.openDecision.id].scope.kind,'global');
+  protocol.dispatch({...examples.ackCurrent,auth:lease});assert.ok(protocol.getState().decisions.allocation.acks[1].a);
+  assert.equal(examples.create.ops[0].mode,0o100644);assert.deepEqual(examples.create.ops[0].expected,{absent:true});
+  assert.match(prompt,/UTF-8 text/);assert.match(prompt,/next turn/);assert.match(prompt,/question.*user/);
  }finally{await f.cleanup();}
 });
