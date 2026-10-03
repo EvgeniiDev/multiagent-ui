@@ -6,7 +6,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fsp, constants as fsconst, existsSync, readFileSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
-export const BROKER_VERSION = 2;
+export const BROKER_VERSION = 3;
 const OP_KINDS = new Set(['write', 'create', 'delete', 'rename', 'chmod']);
 const FILE_MODES = new Set([0o100644, 0o100755]);
 const WRITE_PHASES = new Set(['implement', 'catch_up']);
@@ -89,6 +89,8 @@ async function anchorTree(treeDir, paths) {
     try {
         const root = await fsp.open(treeDir, fsconst.O_RDONLY | fsconst.O_DIRECTORY | fsconst.O_NOFOLLOW);
         handles.push(root);
+        const rootStat = await root.stat({ bigint:true });
+        const identities = { root: `${rootStat.dev}:${rootStat.ino}`, parents: {} };
         for (const path of new Set(paths)) {
             const parts = splitPath(path);
             let parent = root;
@@ -106,8 +108,10 @@ async function anchorTree(treeDir, paths) {
                 }
             }
             anchors.set(path, { parent, leaf: parts.at(-1), path: `/proc/self/fd/${parent.fd}/${parts.at(-1)}` });
+            const stat = await parent.stat({ bigint:true });
+            identities.parents[path] = `${stat.dev}:${stat.ino}`;
         }
-        return { get: path => anchors.get(path), close: async () => { for (const h of handles.reverse())
+        return { identities, get: path => anchors.get(path), close: async () => { for (const h of handles.reverse())
                 await h.close(); } };
     }
     catch (e) {
@@ -115,6 +119,26 @@ async function anchorTree(treeDir, paths) {
             await h.close().catch(() => { });
         throw e;
     }
+}
+// Held descriptors prevent redirection, but may refer to detached directories.
+// Rewalk the live root without following links and require the persisted inode
+// bindings before claiming or restoring any edit on the visible canonical tree.
+async function assertTreeIdentity(treeDir, anchors, expected) {
+    if (!isObj(expected) || typeof expected.root !== 'string' || !isObj(expected.parents)
+        || !Object.keys(expected.parents).length || Object.values(expected.parents).some(v => typeof v !== 'string'))
+        throw bad(500, 'anchor_identity_changed', 'missing original tree identity');
+    let fresh;
+    try {
+        fresh = await anchorTree(treeDir, Object.keys(expected.parents));
+        for (const identity of [anchors.identities, fresh.identities]) {
+            if (identity.root !== expected.root || Object.keys(identity.parents).length !== Object.keys(expected.parents).length
+                || Object.entries(expected.parents).some(([path, value]) => identity.parents[path] !== value))
+                throw bad(409, 'anchor_identity_changed', 'canonical root or parent directory was replaced');
+        }
+    } catch (e) {
+        if (e.code === 'anchor_identity_changed') throw e;
+        throw bad(409, 'anchor_identity_changed', 'canonical root or parent directory is no longer reachable safely', { cause: String(e) });
+    } finally { await fresh?.close(); }
 }
 async function readLeaf(anchor) {
     let fd;
@@ -140,8 +164,9 @@ async function readLeaf(anchor) {
         await fd.close();
     }
 }
-async function replaceLeaf(anchor, bytes, mode) {
+async function replaceLeaf(anchor, bytes, mode, verify = async () => {}) {
     // Atomic replacement avoids truncate-after-open and external hardlink writes.
+    await verify();
     const tmp = `/proc/self/fd/${anchor.parent.fd}/.swarm-${randomUUID()}`;
     const fd = await fsp.open(tmp, fsconst.O_WRONLY | fsconst.O_CREAT | fsconst.O_EXCL | fsconst.O_NOFOLLOW, mode);
     try {
@@ -152,10 +177,13 @@ async function replaceLeaf(anchor, bytes, mode) {
     finally {
         await fd.close();
     }
+    await verify();
     await fsp.rename(tmp, anchor.path);
+    await verify();
     await anchor.parent.sync();
 }
-async function unlinkLeaf(anchor) {
+async function unlinkLeaf(anchor, verify = async () => {}) {
+    await verify();
     try {
         await fsp.unlink(anchor.path);
     }
@@ -163,11 +191,12 @@ async function unlinkLeaf(anchor) {
         if (e.code !== 'ENOENT')
             throw e;
     }
+    await verify();
     await anchor.parent.sync();
 }
 // .swarm- is reserved by the broker. A process can die after creating its
 // replacement file but before rename; recovery removes those anchored entries.
-async function cleanupTemps(anchors, paths) {
+async function cleanupTemps(anchors, paths, verify = async () => {}) {
     const parents = new Map();
     for (const path of paths) {
         const parent = anchors.get(path).parent;
@@ -178,7 +207,9 @@ async function cleanupTemps(anchors, paths) {
         const path = `/proc/self/fd/${parent.fd}`;
         for (const leaf of await fsp.readdir(path)) {
             if (/^\.swarm-[0-9a-f-]{36}$/.test(leaf)) {
+                await verify();
                 await fsp.unlink(`${path}/${leaf}`);
+                await verify();
             }
         }
         await parent.sync();
@@ -334,20 +365,27 @@ export function createEditBroker(opts) {
     async function restore(txnDir, intent, anchors = null) {
         inject('rollback');
         const ownAnchors = anchors ?? await anchorTree(treeDir, intent.before.map(r => r.path));
+        const verify = () => assertTreeIdentity(treeDir, ownAnchors, intent.identities);
         try {
+            await assertTreeIdentity(treeDir, ownAnchors, intent.identities);
             // Beforeimages cover BOTH rename endpoints and every touched path.
             for (const image of [...intent.before].reverse()) {
+                await assertTreeIdentity(treeDir, ownAnchors, intent.identities);
                 const anchor = ownAnchors.get(image.path);
                 if (image.absent) {
-                    await unlinkLeaf(anchor);
+                    await unlinkLeaf(anchor, verify);
+                    await assertTreeIdentity(treeDir, ownAnchors, intent.identities);
                     continue;
                 }
                 const bytes = await fsp.readFile(join(txnDir, image.file));
                 if (sha256Bytes(bytes) !== image.sha256)
                     throw Error('beforeimage hash mismatch');
-                await replaceLeaf(anchor, bytes, image.mode);
+                await replaceLeaf(anchor, bytes, image.mode, verify);
+                await assertTreeIdentity(treeDir, ownAnchors, intent.identities);
             }
-            await cleanupTemps(ownAnchors, intent.before.map(image => image.path));
+            await assertTreeIdentity(treeDir, ownAnchors, intent.identities);
+            await cleanupTemps(ownAnchors, intent.before.map(image => image.path), () => assertTreeIdentity(treeDir, ownAnchors, intent.identities));
+            await assertTreeIdentity(treeDir, ownAnchors, intent.identities);
             await atomicWrite(join(txnDir, 'rolledback.json'), JSON.stringify({ at: now(), ops: intent.ops.length }));
             await fsp.unlink(join(txnDir, 'blocked.json')).catch(e => { if (e.code !== 'ENOENT')
                 throw e; });
@@ -398,6 +436,9 @@ export function createEditBroker(opts) {
                 if (result) {
                     await syncDir(txnDir);
                     await freezeReaders();
+                    const anchors = await anchorTree(treeDir, intent.before.map(image => image.path));
+                    try { await assertTreeIdentity(treeDir, anchors, intent.identities); }
+                    finally { await anchors.close(); }
                     await finalize(txnDir, intent, result);
                     recovered.push({ txnId: name, commandId: intent.commandId, outcome: 'already_applied' });
                     continue;
@@ -407,12 +448,18 @@ export function createEditBroker(opts) {
                     continue;
                 }
                 const started = await optionalJson(join(txnDir, 'started.json'));
-                if (started) {
+                if (started || await optionalJson(join(txnDir, 'blocked.json'))) {
                     await freezeReaders();
                     await restore(txnDir, intent);
                     recovered.push({ txnId: name, commandId: intent.commandId, outcome: 'rolled_back' });
                 }
                 else {
+                    // A crash under the barrier can precede started.json and
+                    // blocked.json. Admission must still prove the original tree.
+                    await freezeReaders();
+                    const anchors = await anchorTree(treeDir, intent.before.map(image => image.path));
+                    try { await assertTreeIdentity(treeDir, anchors, intent.identities); }
+                    finally { await anchors.close(); }
                     await atomicWrite(join(txnDir, 'rolledback.json'), JSON.stringify({ at: now(), ops: 0 }));
                     recovered.push({ txnId: name, commandId: intent.commandId, outcome: 'rolled_back_noop' });
                 }
@@ -452,7 +499,7 @@ export function createEditBroker(opts) {
                 await atomicWrite(join(txnDir, file), leaf.bytes);
                 before.push({ path, file, mode: leaf.mode, sha256: sha256Bytes(leaf.bytes) });
             }
-            intent = { v: BROKER_VERSION, txnId, commandId: cmd.commandId, payloadHash: hash(cmd), ops: cmd.ops, before, at: now() };
+            intent = { v: BROKER_VERSION, txnId, commandId: cmd.commandId, payloadHash: hash(cmd), ops: cmd.ops, before, identities: anchors.identities, at: now() };
             await atomicWrite(join(txnDir, 'intent.json'), JSON.stringify(intent));
             inject('after_intent');
             await atomicWrite(join(txnDir, 'staged.json'), JSON.stringify(cmd.ops));
@@ -461,6 +508,7 @@ export function createEditBroker(opts) {
             inject('after_freeze');
             // Freeze callbacks may change leases/claims or the tree: revalidate under barrier.
             await checkGuards(cmd, gate);
+            await assertTreeIdentity(treeDir, anchors, intent.identities);
             await preconditions(cmd, anchors);
             for (const image of before) {
                 const leaf = await readLeaf(anchors.get(image.path));
@@ -471,26 +519,30 @@ export function createEditBroker(opts) {
             await atomicWrite(join(txnDir, 'started.json'), JSON.stringify({ at: now() }));
             started = true;
             const results = [];
+            const verify = () => assertTreeIdentity(treeDir, anchors, intent.identities);
             for (const [i, op] of cmd.ops.entries()) {
+                await assertTreeIdentity(treeDir, anchors, intent.identities);
                 const a = anchors.get(op.path);
                 const previous = await readLeaf(a);
                 switch (op.kind) {
                     case 'write':
                         inject('write');
-                        await replaceLeaf(a, Buffer.from(op.bytes, 'utf8'), op.mode === undefined ? previous.mode : op.mode & 0o777);
+                        await replaceLeaf(a, Buffer.from(op.bytes, 'utf8'), op.mode === undefined ? previous.mode : op.mode & 0o777, verify);
                         break;
                     case 'create':
                         inject('write');
-                        await replaceLeaf(a, Buffer.from(op.bytes, 'utf8'), (op.mode ?? 0o100644) & 0o777);
+                        await replaceLeaf(a, Buffer.from(op.bytes, 'utf8'), (op.mode ?? 0o100644) & 0o777, verify);
                         break;
                     case 'delete':
                         inject('delete');
-                        await unlinkLeaf(a);
+                        await unlinkLeaf(a, verify);
                         break;
                     case 'rename': {
                         inject('rename');
                         const dst = anchors.get(op.to);
+                        await verify();
                         await fsp.rename(a.path, dst.path);
+                        await verify();
                         await a.parent.sync();
                         await dst.parent.sync();
                         break;
@@ -501,7 +553,9 @@ export function createEditBroker(opts) {
                             const st = await fd.stat();
                             if (!st.isFile() || st.nlink !== 1)
                                 throw bad(422, 'not_a_file', 'unsafe chmod target');
+                            await verify();
                             await fd.chmod(op.mode & 0o777);
+                            await verify();
                             await fd.sync();
                         }
                         finally {
@@ -512,12 +566,14 @@ export function createEditBroker(opts) {
                     }
                 }
                 inject(`after_mutation_${i}`);
+                await assertTreeIdentity(treeDir, anchors, intent.identities);
                 await atomicWrite(join(txnDir, `applied-${i}.json`), JSON.stringify({ i, at: now() }));
                 inject(`after_op_${i}`);
                 const after = op.kind === 'delete' ? null : await readLeaf(anchors.get(op.kind === 'rename' ? op.to : op.path));
                 results.push({ kind: op.kind, path: op.path, ...(op.to ? { to: op.to } : {}), afterHash: after ? sha256Bytes(after.bytes) : null });
             }
             inject('before_result');
+            await assertTreeIdentity(treeDir, anchors, intent.identities);
             const result = { v: BROKER_VERSION, commandId: cmd.commandId, txnId, status: 'applied', ops: results, payloadHash: intent.payloadHash, eventId: `swarm-edit-${sha256Hex(cmd.commandId)}`, at: now() };
             await atomicWrite(join(txnDir, 'result.json'), JSON.stringify(result));
             committed = true;
@@ -533,6 +589,10 @@ export function createEditBroker(opts) {
                 committed = true;
             if (committed || /^injected crash/.test(e.message))
                 throw e;
+            if (e.code === 'anchor_identity_changed' && frozen) {
+                await atomicWrite(join(txnDir, 'blocked.json'), JSON.stringify({ at: now(), code:e.code, error:String(e), identities:intent.identities }));
+                throw e;
+            }
             if (started) {
                 try {
                     await restore(txnDir, intent, anchors);
