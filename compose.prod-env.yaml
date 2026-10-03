@@ -1,0 +1,59 @@
+# compose.prod-env.yaml — PRODUCTION enablement for managed execution + F1
+# fusion environment + idea preparation. Stacked on compose.yaml ONLY:
+#
+#   docker compose -p acp-ui -f compose.yaml -f compose.prod-env.yaml up -d --no-deps state runner
+#
+# Preconditions (parent deploys; this file changes nothing by itself):
+#   * unified branch source checked out at /home/hermes/projects/acp-ui so
+#     /repo/deploy/execution/environment.config.json exists in BOTH
+#     containers (prod /repo mount is that checkout, read-only).
+#   * real production STATE_DIR is kept: /home/hermes/.hermes/acp-ui-state
+#     (no isolated -u7 tree here — this overlay never redirects state).
+#   * F1 controller + egress-gw already up in project acp-ui-agent-modes
+#     (profile f1); f1-env root at /home/hermes/.hermes/acp-ui-state/f1-env
+#     is reachable through the existing ~/.hermes rw mount (verified
+#     2026-10-03: prod runner uid reads token + socket at that path).
+#   * host provisioning done per deploy/COMPOSE.md (ops token, ce scratch).
+#
+# Scope: state + runner ONLY. Every other service untouched
+# (--no-deps, never --remove-orphans, never down). Toggling back is
+# `up -d --no-deps state runner` without this file.
+
+services:
+  state:
+    environment:
+      ACP_EXEC_START: "1"
+      ACP_EXEC_VALIDATION: "1"
+      ACP_EXEC_FUSION: "1"
+      ACP_EXEC_PREPARATION: "1"
+    volumes:
+      # Pinned ce-* bindings keep skill resources under the ~/.codex plugin
+      # cache. Base state has no .codex entry — without this mount
+      # preparationVerify refuses every codex-cached binding as
+      # resource_missing. Read-only: state only re-hashes, never writes.
+      # Host dir is 0700 hermes:1001; state runs 1001:1001 so ro holds.
+      - /home/hermes/.codex:/home/hermes/.codex:ro
+
+  runner:
+    environment:
+      ACP_EXEC_START: "1"
+      ACP_EXEC_VALIDATION: "1"
+      ACP_EXEC_FUSION: "1"
+      ACP_EXEC_PREPARATION: "1"
+      # F1 client view: socket + token resolve to host paths reachable
+      # through the runner's existing ~/.hermes mount. No new mount needed.
+      ACP_F1_CONFIG: /repo/deploy/execution/environment.config.json
+      # Preparation lead identity: the runner's mounted host pi profile is
+      # COPIED into each session's private agent dir; the source is never
+      # written. Pinned so the lead never follows settings.json drift.
+      ACP_PREP_PI_AGENT_DIR: /home/hermes/.pi/agent
+      ACP_PREP_PROVIDER: "zen-relay"
+      ACP_PREP_MODEL: "muse-spark-1.3-contributor-free"
+      ACP_PREP_THINKING: "low"
+      # Route porch pi-cli spawns through the repo-owned RPC boundary
+      # wrapper (same as the U7 ON stack).
+      ACP_PORCH_CLI: /repo/deploy/porch-pi-boundary.sh
+    volumes:
+      # Lead turns materialize runs under the plugin cache tree; the runner
+      # needs write access. State gets ro (above) — never rw.
+      - /home/hermes/.codex:/home/hermes/.codex:rw
