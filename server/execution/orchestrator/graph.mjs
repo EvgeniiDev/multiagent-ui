@@ -31,7 +31,7 @@ export const COMMIT_RE = /^[0-9a-f]{40}$/;
 export const TASK_STATUSES = Object.freeze([
   'pending', 'ready', 'running', 'failed', 'blocked', 'accepted', 'cancelled',
 ]);
-export const TASK_TERMINAL = new Set(['accepted', 'cancelled']);
+const TASK_TERMINAL = new Set(['accepted', 'cancelled']);
 
 // The complete legal transition edge set — anything absent is an invalid
 // transition, with no implicit edges:

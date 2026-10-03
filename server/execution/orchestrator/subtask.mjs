@@ -29,7 +29,7 @@ import { invalid } from './errors.mjs';
 
 export const BOUNDARY_PATH_RE = /^[A-Za-z0-9*][A-Za-z0-9._/*-]{0,300}$/;
 export const SECRET_KEY_RE =
-  /secret|passwor?d|passwd|token|credential|api[_-]?key|private[_-]?key|access[_-]?key|session[_-]?key|auth[_-]?header/i;
+  /secret|passwor?d|passwd|token|credential|api[_-]?key|private[_-]?key|access[_-]?key|session[_-]?key|auth[_-]?header|authorization|bearer/i;
 export const DEFAULT_LIMITS = Object.freeze({ maxAttempts: 2, maxFixCycles: 3 });
 export const MAX_SUBTASKS = 200;
 

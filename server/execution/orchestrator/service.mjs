@@ -21,6 +21,7 @@ import { invalid, conflict } from './errors.mjs';
 import { isObj, assertOnlyKeys, assertNoSecrets } from './subtask.mjs';
 import {
   decompose, proposeInputChange, decideInputChange, transitionTask, stopGraph,
+  deepFreeze,
 } from './graph.mjs';
 
 const COMMAND_KEYS = new Set(['commandId', 'type', 'payload']);
@@ -92,15 +93,24 @@ export function createOrchestratorService({ now } = {}) {
       return { ...structuredClone(seen.result), replayed: true };
     }
     const result = handle(ctx, runId, raw.type, payload, raw.commandId);
-    ctx.commands.set(raw.commandId, { fingerprint, result });
+    // The ledger stores a detached copy — mutating the returned result can
+    // never rewrite what an identical replay serves back.
+    ctx.commands.set(raw.commandId, { fingerprint, result: structuredClone(result) });
     return { ...result, replayed: false };
   }
 
   return {
     dispatch,
-    graph: (runId) => runs.get(runId)?.graph ?? null,
+    // Reads hand out detached frozen snapshots — never live internals: a
+    // caller that edits what it got back cannot rewrite the run.
+    graph: (runId) => {
+      const g = runs.get(runId)?.graph;
+      return g ? deepFreeze(structuredClone(g)) : null;
+    },
     events: (runId, fromSeq = 0) =>
-      (runs.get(runId)?.events ?? []).filter((e) => e.seq > fromSeq),
+      (runs.get(runId)?.events ?? [])
+        .filter((e) => e.seq > fromSeq)
+        .map((e) => deepFreeze(structuredClone(e))),
     runIds: () => [...runs.keys()],
   };
 }

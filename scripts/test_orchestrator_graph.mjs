@@ -9,7 +9,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { SAFE_ID_RE } from '../server/execution/common.mjs';
 import { createOrchestratorService } from '../server/execution/orchestrator/service.mjs';
+import * as graphMod from '../server/execution/orchestrator/graph.mjs';
 
 const FIXED = () => '2026-10-03T00:00:00.000Z';
 const mk = () => createOrchestratorService({ now: FIXED });
@@ -173,6 +176,15 @@ test('secret-shaped keys are never stored', () => {
   assert.equal(e.code, 'secrets_forbidden');
   e = err(() => transition(svc, 'run_s', { taskId: 'a', to: 'cancelled', apiKey: 'k' }));
   assert.equal(e.code, 'secrets_forbidden');
+  // bare credential keys are caught too — not just *_key / auth_* shapes
+  e = err(() => transition(svc, 'run_s', { taskId: 'a', to: 'cancelled', authorization: 'Bearer x' }));
+  assert.equal(e.code, 'secrets_forbidden');
+  e = err(() => transition(svc, 'run_s', { taskId: 'a', to: 'cancelled', bearer: 'x' }));
+  assert.equal(e.code, 'secrets_forbidden');
+  e = err(() => decompose(svc, 'run_s2', {
+    subs: [task('a', { worker: { profileId: 'w', authorization: 'x' } })],
+  }));
+  assert.equal(e.code, 'secrets_forbidden');
   assert.equal(svc.graph('run_s'), null);
 });
 
@@ -261,10 +273,11 @@ test('decompose with proposed changes parks at approval_pending; inputs immutabl
     payload: { proposalId: 'prop_1', decision: 'approve' },
   });
   assert.equal(a.status, 'active');
-  assert.equal(g.revision, 2);
-  assert.equal(g.inputs.plan.sha256, sha('d'));
-  assert.equal(g.inputs.requirements.sha256, sha('a')); // untouched fields preserved
-  assert.equal(g.tasks.length, 4);
+  const g2 = svc.graph('run_3'); // snapshots must be re-read after a mutation
+  assert.equal(g2.revision, 2);
+  assert.equal(g2.inputs.plan.sha256, sha('d'));
+  assert.equal(g2.inputs.requirements.sha256, sha('a')); // untouched fields preserved
+  assert.equal(g2.tasks.length, 4);
   assert.equal(statusOf(svc, 'run_3', 'a'), 'ready');
   assert.deepEqual(evTypes(svc, 'run_3').slice(0, 4),
     ['graph_created', 'input_change_proposed', 'input_change_approved', 'inputs_changed']);
@@ -324,8 +337,9 @@ test('amending inputs on a live graph reverts work under a new revision', () => 
     payload: { proposalId: 'prop_1', decision: 'approve' },
   });
   assert.equal(a.status, 'active');
-  assert.equal(g.revision, 2);
-  assert.equal(g.inputs.requirements.sha256, sha('e'));
+  const g2 = svc.graph('run_5'); // snapshots must be re-read after a mutation
+  assert.equal(g2.revision, 2);
+  assert.equal(g2.inputs.requirements.sha256, sha('e'));
   // all live tasks reverted to the new basis; accepted evidence did not carry
   assert.equal(taskOf(svc, 'run_5', 'a').state.acceptedResult, null);
   assert.equal(statusOf(svc, 'run_5', 'a'), 'ready');
@@ -430,4 +444,90 @@ test('stop cancels live work and forbids new transitions', () => {
   assert.equal(statusOf(svc, 'run_7', 'd'), 'cancelled');
   const e = err(() => transition(svc, 'run_7', { taskId: 'a', to: 'failed' }));
   assert.equal(e.code, 'graph_not_active');
+});
+
+// ---- snapshot isolation ------------------------------------------------------
+// graph()/events() hand out detached read-only snapshots: editing what a read
+// returned can never rewrite the run's graph or its event log.
+
+test('graph() returns a detached frozen snapshot — edits cannot rewrite the run', () => {
+  const svc = mk();
+  decompose(svc, 'run_iso');
+  const snap = svc.graph('run_iso');
+  assert.notEqual(snap, svc.graph('run_iso')); // every read is a fresh copy
+  const taskA = snap.tasks.find((t) => t.id === 'a');
+  assert.throws(() => { snap.status = 'stopped'; }, TypeError);
+  assert.throws(() => { taskA.state.status = 'accepted'; }, TypeError);
+  assert.throws(() => { taskA.state.attemptsUsed = 9; }, TypeError);
+  assert.throws(() => { snap.order.push('ghost'); }, TypeError);
+  assert.throws(() => { snap.tasks.push({ id: 'ghost' }); }, TypeError);
+  assert.throws(() => { snap.inputs.baseCommit = 'f'.repeat(40); }, TypeError);
+  // a fresh read shows the run untouched by the tamper attempt
+  const g = svc.graph('run_iso');
+  assert.equal(g.status, 'active');
+  assert.equal(g.tasks.find((t) => t.id === 'a').state.status, 'ready');
+  assert.deepEqual(g.order, ['a', 'c', 'b', 'd']);
+  assert.equal(g.inputs.baseCommit, COMMIT);
+  // command validation still sees the true state: ready → running is only
+  // legal because the forged 'accepted' never reached the graph
+  const r = transition(svc, 'run_iso', { taskId: 'a', to: 'running' });
+  assert.equal(r.status, 'running');
+  assert.equal(statusOf(svc, 'run_iso', 'a'), 'running');
+});
+
+test('events() returns detached frozen events — edits cannot rewrite the log', () => {
+  const svc = mk();
+  decompose(svc, 'run_ev');
+  const list = svc.events('run_ev');
+  const created = list[0];
+  assert.throws(() => { created.type = 'tampered'; }, TypeError);
+  assert.throws(() => { created.subtasks.push('ghost'); }, TypeError);
+  const regA = list.find((e) => e.type === 'task_registered' && e.taskId === 'a');
+  assert.throws(() => { regA.status = 'accepted'; }, TypeError);
+  assert.throws(() => { regA.dependsOn.push('ghost'); }, TypeError);
+  // the returned list itself is a fresh array — local edits to it are inert
+  list.push({ seq: 999, type: 'forged' });
+  list.length = 0;
+  const again = svc.events('run_ev');
+  assert.deepEqual(again.map((e) => e.type),
+    ['graph_created', 'task_registered', 'task_registered', 'task_registered', 'task_registered']);
+  assert.deepEqual(again[0].subtasks, ['a', 'c', 'b', 'd']);
+  assert.equal(again.find((e) => e.taskId === 'a').status, 'ready');
+  // the seq filter still applies to the true log
+  assert.deepEqual(svc.events('run_ev', 4).map((e) => e.seq), [5]);
+});
+
+test('mutating a dispatch result cannot rewrite the recorded replay', () => {
+  const svc = mk();
+  const cmd = {
+    commandId: 'led1', type: 'decompose',
+    payload: { inputs: inputs(), decomposition: { subtasks: diamond() } },
+  };
+  const r1 = svc.dispatch('run_led', cmd);
+  r1.status = 'forged';
+  r1.subtasks = 999;
+  const r2 = svc.dispatch('run_led', cmd);
+  assert.equal(r2.replayed, true);
+  assert.equal(r2.status, 'active');
+  assert.equal(r2.subtasks, 4);
+});
+
+test('the terminal-state set is not reachable through module exports', () => {
+  assert.ok(!('TASK_TERMINAL' in graphMod), 'TASK_TERMINAL must stay module-private');
+  for (const [name, v] of Object.entries(graphMod)) {
+    assert.ok(!(v instanceof Set) && !(v instanceof Map),
+      `export "${name}" leaks a mutable collection`);
+  }
+  // the public status tables stay frozen
+  for (const name of ['TASK_STATUSES', 'TASK_TRANSITIONS', 'GRAPH_STATUSES']) {
+    assert.ok(Object.isFrozen(graphMod[name]), `${name} must be frozen`);
+    for (const v of Object.values(graphMod[name])) assert.ok(Object.isFrozen(v));
+  }
+});
+
+test('the decompose prompt documents the exact server id rule', () => {
+  const doc = readFileSync(
+    new URL('../prompts/execution/orchestrator/decompose.md', import.meta.url), 'utf8');
+  assert.ok(doc.includes(SAFE_ID_RE.source),
+    `decompose.md must state the server id rule exactly: ${SAFE_ID_RE}`);
 });
