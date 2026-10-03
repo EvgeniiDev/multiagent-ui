@@ -93,6 +93,7 @@ async function execute(repo,args,opts){
    const rebuilt=await run(repo,[`--git-dir=${shadow}`,`--work-tree=${repo}`,...options,'read-tree','HEAD'],{env:gitEnv});
    if(rebuilt.code!==0){const empty=await run(repo,[`--git-dir=${shadow}`,`--work-tree=${repo}`,...options,'read-tree','--empty'],{env:gitEnv});if(empty.code!==0)throw new Error(empty.stderr);}
   }
+  if(command==='archive'){await fs.mkdir(path.join(shadow,'info'),{recursive:true});await fs.writeFile(path.join(shadow,'info','attributes'),'** -export-ignore -export-subst\n');}
   const actual=command==='diff'?[...args.slice(0,commandIndex),command,'--no-ext-diff','--no-textconv',...args.slice(commandIndex+1)]:args;
   const result=await run(repo,[`--git-dir=${shadow}`,`--work-tree=${repo}`,...options,'-c','core.bare=false',...actual],{...opts,env:gitEnv});
   // Preserve normal Git autonomy only for successful trusted mutation calls.
