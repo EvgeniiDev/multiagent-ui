@@ -242,3 +242,20 @@ test('owner transfer and global registration invalidate exact decision bindings'
  p.dispatch({type:'register_participant',participantId:'c',callsign:'gamma'});
  const g=p.getState().decisions[global.decisionId];assert.equal(g.revisions.at(-1).rev,2);assert.deepEqual(g.acks[2],{});assert.ok(g.affected.includes('c'));
 });
+
+test('trusted broker refresh derives new immutable revisions without participant auth',async()=>{
+ const {refreshSwarmDecisionBindings}=await import('../server/execution/swarm/protocol.mjs');
+ const p=setup(),a=turn(p,'a');p.dispatch({type:'claim_file',auth:a,path:'src/a.js'});
+ const d=p.dispatch({type:'open_decision',auth:a,text:'contract',scope:{kind:'file',path:'src/a.js'}});
+ p.dispatch({type:'ack_decision',auth:a,decisionId:d.decisionId,rev:1,revHash:d.revHash});
+ const state=JSON.parse(p.toJSON());state.files['src/a.js'].version+=1;
+ const next=refreshSwarmDecisionBindings(state,2000);
+ assert.equal(state.decisions[d.decisionId].revisions.length,1);
+ assert.equal(next.state.decisions[d.decisionId].revisions.at(-1).rev,2);
+ assert.deepEqual(next.state.decisions[d.decisionId].acks[2],{});
+ assert.equal(next.events[0].type,'decision_readiness_cancelled');
+ const deleted=structuredClone(next.state);deleted.files['src/a.js'].owner=null;deleted.files['src/a.js'].version+=1;
+ const final=refreshSwarmDecisionBindings(deleted,3000);
+ assert.equal(final.state.decisions[d.decisionId].status,'superseded');
+ assert.equal(final.state.decisions[d.decisionId].agreedRev,null);
+});
