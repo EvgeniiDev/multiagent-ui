@@ -15,8 +15,7 @@
 // runtime or compose.
 
 import { SAFE_ID_RE } from '../common.mjs';
-import { sha256 } from '../execution-store.mjs';
-import { canonicalJson } from '../environment/agent-profile.mjs';
+import { sha256, canonicalJson } from './canonical.mjs';
 import { invalid, conflict } from './errors.mjs';
 import { isObj, assertOnlyKeys, assertNoSecrets } from './subtask.mjs';
 import {

@@ -13,6 +13,8 @@ import { readFileSync } from 'node:fs';
 import { SAFE_ID_RE } from '../server/execution/common.mjs';
 import { createOrchestratorService } from '../server/execution/orchestrator/service.mjs';
 import * as graphMod from '../server/execution/orchestrator/graph.mjs';
+import { canonicalJson, sha256, SHA256_RE }
+  from '../server/execution/orchestrator/canonical.mjs';
 
 const FIXED = () => '2026-10-03T00:00:00.000Z';
 const mk = () => createOrchestratorService({ now: FIXED });
@@ -530,4 +532,74 @@ test('the decompose prompt documents the exact server id rule', () => {
     new URL('../prompts/execution/orchestrator/decompose.md', import.meta.url), 'utf8');
   assert.ok(doc.includes(SAFE_ID_RE.source),
     `decompose.md must state the server id rule exactly: ${SAFE_ID_RE}`);
+});
+
+// ---- canonical codec --------------------------------------------------------------
+// The O1-owned codec (orchestrator/canonical.mjs): recursively sorted object
+// keys, compact separators, array order preserved, JSON scalar semantics — the
+// fingerprint basis for command idempotency and the no-op change check.
+
+test('canonicalJson sorts object keys recursively and preserves array order', () => {
+  assert.equal(
+    canonicalJson({ b: { d: 1, c: 2 }, a: [{ y: 1, x: 2 }] }),
+    '{"a":[{"x":2,"y":1}],"b":{"c":2,"d":1}}',
+  );
+  // array order is semantic — never sorted
+  assert.equal(canonicalJson({ a: [3, 1, 2] }), '{"a":[3,1,2]}');
+  assert.equal(canonicalJson([[2, 1], [1, 2]]), '[[2,1],[1,2]]');
+  // the same value under any key order is byte-identical
+  assert.equal(
+    canonicalJson({ plan: { sha256: 's', versionId: 'v' }, baseCommit: 'c' }),
+    canonicalJson({ baseCommit: 'c', plan: { versionId: 'v', sha256: 's' } }),
+  );
+});
+
+test('canonicalJson keeps JSON scalar serialization', () => {
+  assert.equal(canonicalJson(null), 'null');
+  assert.equal(canonicalJson(true), 'true');
+  assert.equal(canonicalJson(1.5), '1.5');
+  assert.equal(canonicalJson('a"b\\c'), '"a\\"b\\\\c"');
+  for (const v of [0, -0, 1e21, 'line\nbreak', 'éllo']) {
+    assert.equal(canonicalJson(v), JSON.stringify(v), `scalar ${JSON.stringify(v)}`);
+  }
+  // undefined object properties drop and array holes become null — exactly
+  // like JSON.stringify, so canonical output stays parseable JSON
+  assert.equal(canonicalJson({ a: undefined, b: 1 }), '{"b":1}');
+  assert.equal(canonicalJson([undefined]), '[null]');
+  assert.equal(canonicalJson(undefined), JSON.stringify(undefined));
+});
+
+test('sha256 digests and SHA256_RE implement the 64-hex contract', () => {
+  assert.equal(
+    sha256('abc'),
+    'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+  );
+  assert.equal(
+    sha256(''),
+    'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+  );
+  assert.ok(SHA256_RE.test(sha256(canonicalJson({ type: 'stop', payload: {} }))));
+  assert.ok(SHA256_RE.test('a'.repeat(64)));
+  assert.ok(!SHA256_RE.test('A'.repeat(64)));
+  assert.ok(!SHA256_RE.test('g'.repeat(64)));
+  assert.ok(!SHA256_RE.test('a'.repeat(63)));
+  assert.ok(!SHA256_RE.test('a'.repeat(65)));
+});
+
+test('command fingerprint is canonical — reordered keys replay, not conflict', () => {
+  const svc = mk();
+  const r1 = svc.dispatch('run_fp', {
+    commandId: 'k1', type: 'decompose',
+    payload: { inputs: inputs(), decomposition: { subtasks: diamond() } },
+  });
+  // the same logical command under a different key order has the SAME
+  // fingerprint — a non-canonical fingerprint would 409 command_conflict here
+  const r2 = svc.dispatch('run_fp', {
+    type: 'decompose', commandId: 'k1',
+    payload: { decomposition: { subtasks: diamond() }, inputs: inputs() },
+  });
+  assert.equal(r2.replayed, true);
+  assert.equal(r2.status, r1.status);
+  assert.equal(r2.subtasks, r1.subtasks);
+  assert.equal(svc.events('run_fp').length, 5); // replay recorded nothing new
 });
