@@ -290,3 +290,21 @@ test('fromCanonical rejects stale HEAD and mismatched registered source bindings
   await assert.rejects(f.prepare('w-dirty', { canonicalId:canonical.id, snapshotSha:head, fromCanonical:true },'integrator'), { code:'canonical_dirty' });
   assert.equal(f.created.length,0,'unproven sources never launch a worker');
 });
+
+test('worker import ignores executable Git configuration and imports raw binary bytes', async () => {
+  const f = await fixture(); const canonical = await f.canonical();
+  f.config.roles.integrator = { name:'integrator', projectMode:'private-repo', inputs:[], canonical:true };
+  const { worker } = await f.prepare('w-import-safe', { canonicalId:canonical.id }, 'integrator');
+  const priv = path.join(worker.workerDir,'project');
+  const marker = path.join(f.root,'worker-config-executed');
+  const script = path.join(f.root,'worker-filter');
+  await fs.writeFile(script, `#!/bin/sh\ntouch '${marker}'\ncat\n`, { mode:0o755 });
+  git(priv,'config','filter.arbitrary.clean',script);
+  git(priv,'config','filter.arbitrary.required','true');
+  await fs.writeFile(path.join(priv,'.gitattributes'),'*.dat filter=arbitrary\n');
+  const bytes = Buffer.from([0,255,10,13]); await fs.writeFile(path.join(priv,'new.dat'),bytes);
+  const result = await f.controller.handle('repo.import', { workerId:worker.workerId });
+  assert.equal(result.ok,true);
+  await assert.rejects(fs.stat(marker), { code:'ENOENT' });
+  assert.deepEqual(await fs.readFile(path.join(canonical.worktree,'new.dat')),bytes);
+});

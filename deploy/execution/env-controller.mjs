@@ -39,7 +39,8 @@ import {
   profileDigest, usesDuckDuckGoTransport,
 } from '../../server/execution/environment/agent-profile.mjs';
 import { createDockerApi } from './docker-api.mjs';
-import { gitArchiveExtract } from './tarx.mjs';
+import { gitArchiveExtract, extractTarBuffer } from './tarx.mjs';
+import { safeGit } from '../../server/execution/orchestrator/safe-git.mjs';
 import { duckDuckGoExtensionSource } from './duckduckgo-transport.mjs';
 
 const SHA_RE = /^[0-9a-f]{40}$/;
@@ -1007,11 +1008,16 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
     const priv = path.join(wrec.workerDir, 'project');
     // Stage the ENTIRE private worktree (add -A covers new+modified+deleted)
     // and materialize it as a tree — works for uncommitted leftovers too.
-    const add = await git(priv, ['add', '-A']);
+    const add = await safeGit(priv, ['add', '-A']);
     if (add.code !== 0) {
       throw new RuntimeError('import_stage_failed', `git add -A: ${add.stderr.slice(0, 300)}`);
     }
-    const treeSha = await gitStdout(priv, ['write-tree'], 'import_tree_failed', 'write-tree');
+    const tree = await safeGit(priv, ['write-tree']);
+    if (tree.code !== 0) throw new RuntimeError('import_tree_failed', tree.stderr.slice(0, 300));
+    const treeSha = tree.stdout.trim();
+    const archive = await safeGit(priv, ['archive', '--format=tar', treeSha], { binary: true });
+    if (archive.code !== 0) throw new RuntimeError('import_archive_failed', archive.stderr.slice(0, 300));
+    if (archive.stdout.length > 512 * 1024 * 1024) throw new RuntimeError('import_archive_too_large', 'Worker archive exceeds limit');
     const wt = canon.worktree;
     // Replace worktree content with exactly the tree: clear all entries
     // except .git, extract the archive, stage, commit.
@@ -1019,7 +1025,7 @@ export function createEnvController({ config, docker, hostExec = spawnBounded })
       if (e === '.git') continue;
       await fs.rm(path.join(wt, e), { recursive: true, force: true });
     }
-    await gitArchiveExtract(priv, treeSha, wt);
+    await extractTarBuffer(archive.stdout, wt);
     const add2 = await git(wt, ['add', '-A']);
     if (add2.code !== 0) {
       throw new RuntimeError('import_commit_failed', `git add: ${add2.stderr.slice(0, 300)}`);

@@ -62,7 +62,7 @@ async function publishObjects(source,target){
 
 async function execute(repo,args,opts){
  let commandIndex=0;while(args[commandIndex]==='-c')commandIndex+=2;const command=args[commandIndex];
- const mutation=['add','commit','reset','update-index','update-ref','checkout','branch','fetch','clean'].includes(command);
+ const mutation=['add','commit','write-tree','reset','update-index','update-ref','checkout','branch','fetch','clean'].includes(command);
  const env=environment(opts.env);const options=['-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false','-c','commit.gpgSign=false','-c','tag.gpgSign=false'];
  if(command==='init'){
   if(await optional(path.join(repo,'.git')))throw new Error('Existing Git directory cannot be reinitialized');
