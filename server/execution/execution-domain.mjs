@@ -77,7 +77,7 @@ import {
 } from './preparation/session.mjs';
 import {
   ORCH_COMMANDS, ORCH_INTERNAL_COMMANDS, ORCH_ATTEMPT_ROLES,
-  buildOrchestratorRun,
+  buildOrchestratorRun, buildOrchestratorContinuation,
   cmdOrchClaim, cmdOrchDecomposeBegin,
   checkDecompositionSpec, onDecomposerResolved,
   cmdOrchTaskBegin, cmdOrchTaskSettle,
@@ -1664,6 +1664,24 @@ async function cmdContinue(ctx, aggregate, payload, now) {
       aggregate,
       refreshProjection: true,
       result: { runId: swarmRun.id, status: swarmRun.status, continuedFrom: prev.id },
+    };
+  }
+  if (prev.mode === 'orchestrator') {
+    if (ctx.features?.orchestrator !== true) {
+      throw new CommandError(501, 'command_unavailable',
+        'orchestrator mode is gated off — enable ACP_EXEC_ORCHESTRATOR');
+    }
+    const run = await buildOrchestratorContinuation(
+      ORCH_DEPS, ctx, aggregate, payload, prev, now);
+    aggregate.runs.push(run);
+    aggregate.currentRunId = run.id;
+    stageRun(aggregate, run, ctx);
+    bumpControl(aggregate, now);
+    return {
+      aggregate,
+      refreshProjection: true,
+      result: { runId: run.id, status: run.status, phase: run.phase,
+        continuedFrom: prev.id, inputs: run.inputs },
     };
   }
   const { reqA, planA } = await requireApprovedInputs(ctx, aggregate, 'continue');
