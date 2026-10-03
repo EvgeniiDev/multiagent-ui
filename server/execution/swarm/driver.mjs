@@ -10,7 +10,7 @@ export function createSwarmDriver(deps) {
  const {runtime,send,getRun,getDocument,ensureWorkspace,self,stateDir,canLaunch=()=>true,adoptionProofFor=()=>null,now=Date.now,brokerFactory=createEditBroker}=deps;
  const _inflight=new Map(),brokers=new Map();let closed=false;
  const fresh=id=>getRun(id), own=r=>({...self(),runId:r.id});
- const command=(card,run,type,payload,key)=>send(card,type,{...own(run),...payload},`sw-${run.id}-${key}`);
+ const command=(card,run,type,payload,key)=>send(card,type,{...own(run),...payload},`sw-${sha256(JSON.stringify([run.id,type,key]))}`);
  const ours=o=>o?.runnerId===self().runnerId && (!o.instanceId||o.instanceId===self().instanceId);
  const launchable=r=>!closed&&canLaunch()&&!r.stopIntent&&['queued','active'].includes(r.status);
  const workerId=a=>a.launch?.workerId??runtime.workerIdForAttempt?.(a.id)??`w-${a.id}`;
