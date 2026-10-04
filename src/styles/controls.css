@@ -19,3 +19,15 @@ textarea.ui-input { resize: vertical; }
 .ui-note { margin: 0; font-size: 0.75rem; line-height: 1.5; color: var(--text-secondary, #6b6259); }
 .ui-label { font-size: 0.625rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted, #786d62); }
 @media (max-width: 800px), (pointer: coarse) { .ui-input { min-height: 44px; } }
+
+/* Group related content separately from neighboring sections. */
+.ui-surface {
+  padding: 0.625rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-main);
+}
+.ui-surface-accent {
+  border-left: 3px solid var(--text-accent);
+  background: var(--bg-assistant);
+}

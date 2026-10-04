@@ -7,7 +7,8 @@
   светлой/тёмной темы. Подключается в App.vue; существующая палитра сохранена.
 - `src/components/ui/UiButton.vue` — кнопки действий, вкладки и кнопки с иконкой.
 - `src/styles/controls.css` — классы `ui-input` для input/select/textarea,
-  `ui-note` для пояснений и `ui-label` для подписей. Подключается в App.vue.
+  `ui-note` для пояснений, `ui-label` для подписей и `ui-surface` для отдельных
+  смысловых блоков. Вариант `ui-surface-accent` выделяет результат для согласования. Подключается в App.vue.
 
 ## Кнопки
 

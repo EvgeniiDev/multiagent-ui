@@ -472,7 +472,7 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
         </p>
 
         <!-- one durable discussion -->
-        <div ref="discussionEl" class="prep-discussion" data-testid="prep-discussion">
+        <div ref="discussionEl" class="prep-discussion prep-section ui-surface" data-testid="prep-discussion">
           <div class="exec-subtitle">Discussion</div>
           <div v-if="!questions.length && !leadWorking" class="exec-line" data-testid="prep-no-questions">
             No questions recorded yet. Check the lead status above.
@@ -488,7 +488,7 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
               <span class="exec-role" data-testid="prep-qchip">Q</span>
               {{ q.text }}
             </p>
-            <p v-if="q.status === 'answered'" class="exec-line" :data-testid="`prep-a-${q.questionId}`">
+            <p v-if="q.status === 'answered'" class="exec-line prep-answer" :data-testid="`prep-a-${q.questionId}`">
               → {{ q.answer }}
             </p>
             <p v-else-if="q.status !== 'open'" class="exec-line">
@@ -521,18 +521,6 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
               >Answer</UiButton>
             </div>
           </div>
-          <div v-if="session.checkpoint.decisions.length" class="exec-detail" data-testid="prep-decisions">
-            <div class="exec-subtitle">Decisions</div>
-            <p v-for="(d, i) in session.checkpoint.decisions" :key="`d-${i}`" class="exec-line">
-              · {{ d.text }}
-            </p>
-          </div>
-          <div v-if="session.checkpoint.assumptions.length" class="exec-detail" data-testid="prep-assumptions">
-            <div class="exec-subtitle">Assumptions</div>
-            <p v-for="(a, i) in session.checkpoint.assumptions" :key="`a-${i}`" class="exec-line">
-              ~ {{ a.text }}
-            </p>
-          </div>
           <div class="exec-startrow">
             <input
               v-model="continueDraft"
@@ -551,14 +539,27 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
           </div>
         </div>
 
-        <div v-if="!openQuestionCount && session.intent.proposal" class="exec-detail" data-testid="prep-intent-review">
+          <div v-if="session.checkpoint.decisions.length" class="exec-detail prep-section ui-surface" data-testid="prep-decisions">
+            <div class="exec-subtitle">Decisions</div>
+            <p v-for="(d, i) in session.checkpoint.decisions" :key="`d-${i}`" class="exec-line">
+              · {{ d.text }}
+            </p>
+          </div>
+          <div v-if="session.checkpoint.assumptions.length" class="exec-detail prep-section ui-surface" data-testid="prep-assumptions">
+            <div class="exec-subtitle">Assumptions</div>
+            <p v-for="(a, i) in session.checkpoint.assumptions" :key="`a-${i}`" class="exec-line">
+              ~ {{ a.text }}
+            </p>
+          </div>
+
+        <div v-if="!openQuestionCount && session.intent.proposal" class="exec-detail prep-section ui-surface ui-surface-accent" data-testid="prep-intent-review">
           <div class="exec-subtitle">Review the clarified idea</div>
           <p class="exec-sumtext">{{ session.intent.proposal.text }}</p>
           <UiButton v-for="g in gatesAll.filter(g => g.type === 'intent_confirm' && g.status === 'pending')"
             :key="g.gateId" :disabled="gated(canConfirmGate(view!, g)).disabled"
             @click="onConfirmGate(g)">Confirm idea</UiButton>
         </div>
-        <div v-if="DOC_KINDS.some(k => !!session?.presented[k])" class="exec-detail" data-testid="prep-document-review">
+        <div v-if="DOC_KINDS.some(k => !!session?.presented[k])" class="exec-detail prep-section ui-surface" data-testid="prep-document-review">
           <div class="exec-subtitle">Documents for review</div>
           <p v-for="k in DOC_KINDS.filter(k => !!session?.presented[k])" :key="k" class="exec-line">
             {{ docKindLabel(k) }} · {{ presentedLine(k) }}
@@ -802,17 +803,33 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
   color: var(--text-primary, #2b2723);
   white-space: pre-wrap;
 }
+.prep-section {
+  margin-top: 0.375rem;
+  gap: 0.5rem;
+  overflow-wrap: anywhere;
+}
 .prep-discussion {
   display: flex;
   flex-direction: column;
-  gap: 0.375rem;
+}
+.prep-discussion > .exec-startrow {
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border-color);
+}
+.prep-answer {
+  padding: 0.375rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-user);
+  color: var(--text-primary);
 }
 .prep-q {
   border-left: 2px solid var(--border-faint, rgba(43, 39, 35, 0.15));
   padding-left: 0.375rem;
   display: flex;
   flex-direction: column;
-  gap: 0.125rem;
+  gap: 0.375rem;
+  padding-top: 0.375rem;
+  padding-bottom: 0.375rem;
 }
 .prep-q-open {
   border-left-color: var(--text-accent, #c2532f);
