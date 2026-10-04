@@ -464,26 +464,12 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
             <UiButton size="xs" data-testid="prep-discussion-jump" @click="showDiscussion">Answer the lead</UiButton>
           </template>
         </div>
-        <p class="exec-line mono" data-testid="prep-meta">
-          {{ session.sessionId }} · discussion “{{ session.discussion ?? 'prep' }}” · updated {{ fmtTs(session.updatedAt) }}
-        </p>
         <p v-if="session.blocker" class="exec-line exec-warn" data-testid="prep-blocker">
           lead blocker: {{ session.blocker }}
         </p>
         <p v-if="typeof lastAttempt?.progress === 'string' && lastAttempt.progress" class="exec-line" data-testid="prep-progress">
           {{ lastAttempt.progress }}
         </p>
-
-        <!-- readiness blockers — named, never a confidence number -->
-        <ul v-if="session.blockers.length" class="exec-checks" data-testid="prep-blockers">
-          <li
-            v-for="(b, i) in session.blockers"
-            :key="i"
-            class="exec-checkline exec-blocking"
-            data-testid="prep-blocker-item"
-          >{{ prepBlockerText(b) }}</li>
-        </ul>
-        <p v-else class="exec-line" data-testid="prep-ready">ready — all approvals and gates hold</p>
 
         <!-- one durable discussion -->
         <div ref="discussionEl" class="prep-discussion" data-testid="prep-discussion">
@@ -671,6 +657,24 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
             {{ handoffModeStartGate.reason }}
           </p>
         </div>
+
+        <details class="prep-bindings-detail" data-testid="prep-diagnostics">
+          <summary class="exec-line">Diagnostics</summary>
+        <p class="exec-line mono" data-testid="prep-meta">
+          {{ session.sessionId }} · discussion “{{ session.discussion ?? 'prep' }}” · updated {{ fmtTs(session.updatedAt) }}
+        </p>
+        <!-- readiness blockers — named, never a confidence number -->
+        <ul v-if="session.blockers.length" class="exec-checks" data-testid="prep-blockers">
+          <li
+            v-for="(b, i) in session.blockers"
+            :key="i"
+            class="exec-checkline exec-blocking"
+            data-testid="prep-blocker-item"
+          >{{ prepBlockerText(b) }}</li>
+        </ul>
+        <p v-else class="exec-line" data-testid="prep-ready">ready — all approvals and gates hold</p>
+
+        </details>
 
         <div class="exec-btnrow">
           <UiButton
