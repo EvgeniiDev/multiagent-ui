@@ -19,12 +19,14 @@ export function sessionUrlKey(agentName: string, sessionId: string): string {
 export function setSessionInUrl(agentName: string, sessionId: string | null): void {
   if (typeof history === 'undefined' || typeof location === 'undefined') return;
   const url = new URL(location.href);
+  // Background restoration must not rewrite a direct non-chat page URL.
+  if (['/board', '/projects', '/dashboard'].includes(url.pathname.replace(/\/$/, ''))) return;
   if (!agentName || !sessionId) {
     url.searchParams.delete('s');
   } else {
     url.searchParams.set('s', sessionUrlKey(agentName, sessionId));
   }
-  history.replaceState(null, '', url);
+  history.replaceState(history.state, '', url);
 }
 
 /** The session key from the current URL, or null. */

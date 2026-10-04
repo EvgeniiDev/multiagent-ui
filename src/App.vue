@@ -25,6 +25,7 @@ import { useClaimsStore } from './stores/claims';
 import { useProjectsStore } from './features/scope/registry';
 import type { SavedSession } from './lib/types';
 import { setSessionInUrl, sessionFromUrl } from './lib/sessionUrl';
+import { viewFromUrl } from './lib/viewUrl';
 import type { ViewId } from './stores/ui';
 
 const configStore = useConfigStore();
@@ -143,6 +144,7 @@ const pendingAuthMethods = computed(() => sessionStore.pendingAuthMethods);
 const pendingAuthAgentName = computed(() => sessionStore.pendingAuthAgentName);
 
 onMounted(async () => {
+  window.addEventListener('popstate', restoreSessionFromHistory);
   // Track viewport width so the sidebar can default-collapse into a drawer
   // on phones / narrow windows. We watch a MediaQueryList rather than
   // resize for correctness across orientation changes on iOS.
@@ -284,6 +286,18 @@ async function handleNewSession() {
   }
 }
 
+function restoreSessionFromHistory(): void {
+  if (viewFromUrl() !== 'chat') return;
+  const target = sessionFromUrl();
+  if (!target) return;
+  const active = sessionStore.activeRuntime?.descriptor;
+  if (active?.agentName === target.agentName && active.sessionId === target.sessionId) return;
+  const saved = sessionStore.savedSessions.find(
+    (s) => s.agentName === target.agentName && s.sessionId === target.sessionId,
+  );
+  if (saved) void handleResumeSession(saved);
+}
+
 async function handleResumeSession(session: SavedSession) {
   selectedAgent.value = session.agentName;
   // The URL carries the user's intent at click time — F5 restores exactly this
@@ -370,6 +384,7 @@ function handleDrawerViewClick(view: ViewId) {
 }
 
 onBeforeUnmount(() => {
+  window.removeEventListener('popstate', restoreSessionFromHistory);
   if (narrowMql) {
     narrowMql.removeEventListener('change', syncNarrowLayout);
     narrowMql = null;

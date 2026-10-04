@@ -12,6 +12,8 @@ import { computed, ref } from 'vue';
 import { loadKvStore, type KVStore } from '../lib/host/storage';
 import { useProjectsStore } from '../features/scope/registry';
 import { useSessionStore } from './session';
+import { viewFromUrl, setViewInUrl } from '../lib/viewUrl';
+import { setSessionInUrl } from '../lib/sessionUrl';
 
 export type ViewId = 'chat' | 'projects' | 'board' | 'dashboard';
 
@@ -27,12 +29,17 @@ const KEY = 'activeView';
 
 export const useUiStore = defineStore('ui', () => {
   const projectsStore = useProjectsStore();
-  const activeView = ref<ViewId>('chat');
-  const ready = ref(false);
+  const initialView = viewFromUrl();
+  const activeView = ref<ViewId>(initialView ?? 'chat');
+  const ready = ref(initialView !== null);
   const showSettings = ref(false);
   const showTraffic = ref(false);
   let store: KVStore | null = null;
-  let viewPicked = false;
+  let viewPicked = initialView !== null;
+  if (typeof window !== 'undefined') window.addEventListener('popstate', () => {
+    const view = viewFromUrl();
+    if (view) void setView(view, false);
+  });
 
   // Global project scope ('all' | project id). Reads/writes delegate to the
   // registry — persistence, validation and the Common default live there.
@@ -55,13 +62,20 @@ export const useUiStore = defineStore('ui', () => {
       activeView.value = saved;
     }
     ready.value = true;
+    setViewInUrl(activeView.value, true);
     bindShortcuts();
   }
 
-  async function setView(view: ViewId): Promise<void> {
+  async function setView(view: ViewId, updateUrl = true): Promise<void> {
     viewPicked = true;
     activeView.value = view;
     ready.value = true;
+    if (updateUrl) {
+      setViewInUrl(view);
+      const sessions = useSessionStore();
+      const session = sessions.activeRuntime?.descriptor ?? sessions.currentSession;
+      if (view === 'chat' && session) setSessionInUrl(session.agentName, session.sessionId);
+    }
     if (store) {
       await store.set(KEY, view);
       await store.save();

@@ -163,9 +163,10 @@ services:
     image: python:3.12-slim
     network_mode: host
     working_dir: /repo/dist-web
-    command: ["python3", "-m", "http.server", "25808", "--bind", "127.0.0.1"]
+    command: ["python3", "/repo/server/web-server.py"]
     volumes:
       - ./dist-web:/repo/dist-web:ro
+      - ./server/web-server.py:/repo/server/web-server.py:ro
     restart: unless-stopped
 
   stt:
