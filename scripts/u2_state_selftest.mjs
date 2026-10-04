@@ -684,6 +684,48 @@ test('blob evidence: reuse verifies hash; missing/corrupt blocks approval+serve'
 // ==========================================================================
 // injected persistence failures + restart recovery
 
+test('repair: one aggregate read per pass still drains failed effects and refreshes projections', async (t) => {
+  const docNames = new Set();
+  const { stateDir, projectDir, svc } = await mkEnv({ faults: { docNames } });
+  await seedBase(svc, projectDir);
+  await putDoc(svc, 'board.json', { version: 2, cards: [cardA(), cardA({ id: 'card-b' })] });
+  assert.equal((await cmd(svc, 'card-b', { commandId: 'enable-b', type: 'enable' })).status, 200);
+  await plantDoc(stateDir, 'claims.json', {
+    claims: { 'card-a': { agentName: 'old', leaseUntil: 1 } },
+    attempts: { 'card-a': 3 },
+  });
+  docNames.add('claims.json');
+  assert.equal((await enable(svc, 'enable-a-crash')).status, 500);
+  docNames.clear();
+
+  const fileReads = new Map();
+  const readFile = fs.readFile;
+  const spy = t.mock.method(fs, 'readFile', async function (file, ...args) {
+    const path = String(file);
+    if (path.startsWith(paths(stateDir).cardsDir + '/')) {
+      fileReads.set(path, (fileReads.get(path) || 0) + 1);
+    }
+    return readFile.call(this, file, ...args);
+  });
+  await svc.repairNow();
+  spy.mock.restore();
+  assert.deepEqual([...fileReads.values()], [1, 1], 'unrelated run history must not be parsed twice');
+  const aggregate = await loadAggregate(stateDir, 'card-a');
+  assert.equal(aggregate.pendingWrites, null);
+  const claims = (await readDoc(stateDir, 'claims.json')).data;
+  assert.equal(claims.claims['card-a'], undefined);
+  assert.equal(claims.attempts['card-a'], undefined);
+  const board = (await readDoc(stateDir, 'board.json')).data;
+  for (const row of board.cards) {
+    assert.equal(row.execution.managed, true);
+    assert.equal(row.execution.controlRevision, 1);
+  }
+
+  // The optimization is confined to one repair: later disk corruption still fails closed.
+  await fs.writeFile(aggregateFile(stateDir, 'card-b'), '{broken');
+  await assert.rejects(svc.repairNow(), /unreadable/);
+});
+
 test('crash: enable committed but claims purge failed — restart drains intent', async () => {
   const { root, stateDir, projectDir } = await mkEnv();
   // Seed claims with a bare expired marker directly (before any service).

@@ -1158,7 +1158,8 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
         class="art-refresh"
         data-testid="exec-refresh"
         title="Reload the managed state now"
-        :disabled="st.phase === 'loading'"
+        :disabled="!!st.cardInflight"
+        :aria-busy="!!st.cardInflight"
         @click="exec.refreshCard(props.cardId)"
       >↻</button>
     </div>
@@ -1188,7 +1189,11 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
       >{{ st.busy === 'enable' ? 'Enabling…' : 'Enable managed execution' }}</button>
     </template>
 
-    <p v-else-if="!view" class="art-note">Loading managed state…</p>
+    <p v-else-if="!view && st.error" class="art-note" data-testid="exec-unavailable">
+      <span v-if="st.cardInflight" role="status">Retrying managed state…</span>
+      <span v-else>Managed state could not be loaded. Use ↻ to retry; this panel also retries automatically.</span>
+    </p>
+    <p v-else-if="!view" class="art-note" role="status" data-testid="exec-loading">Loading managed state…</p>
 
     <template v-else>
       <!-- authoritative snapshot line -->

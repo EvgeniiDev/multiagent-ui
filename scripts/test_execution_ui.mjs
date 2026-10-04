@@ -1149,6 +1149,27 @@ describe('CardDrawer/ExecutionPanel setup+render (SSR)', () => {
     assert.ok(html.includes('data-testid="exec-enable"'), 'confirmed unmanaged card offers enable');
   });
 
+  test('failed initial read stops loading, and retry waits for fresh state', async () => {
+    const { createSSRApp, markRaw } = await import('vue');
+    const { renderToString } = await import('@vue/server-renderer');
+    const ExecutionPanel = (await import('../src/features/board/ExecutionPanel.vue')).default;
+    const st = useExecutionStore().stateFor('timeout-card');
+    st.phase = 'error';
+    st.error = 'state server did not finish responding within 8000ms';
+    let html = await renderToString(createSSRApp(ExecutionPanel, { cardId: 'timeout-card' }));
+    assert.ok(html.includes(st.error));
+    assert.ok(!html.includes('Loading managed state…'), 'failed read is not still loading');
+    assert.ok(html.includes('data-testid="exec-unavailable"'));
+    assert.ok(!html.includes('data-testid="exec-enable"'));
+    st.cardInflight = markRaw(new Promise(() => {}));
+    html = await renderToString(createSSRApp(ExecutionPanel, { cardId: 'timeout-card' }));
+    assert.ok(html.includes('Retrying managed state…'));
+    assert.ok(!html.includes('Loading managed state…'));
+    const retry = html.match(/<button[^>]*data-testid="exec-refresh"[^>]*>/)?.[0];
+    assert.ok(retry.includes('disabled'));
+    assert.ok(retry.includes('aria-busy="true"'));
+  });
+
   test('enable button explains the command in flight and exposes busy state', async () => {
     const { createSSRApp } = await import('vue');
     const { renderToString } = await import('@vue/server-renderer');

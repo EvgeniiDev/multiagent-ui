@@ -624,10 +624,16 @@ export async function createStateService({ stateDir, env = process.env, faults, 
   //                   replayed)
   async function repairState() {
     const managedIds = await listManagedCardIds(stateDir);
+    // This pass runs inside the write queue (or startup before serving).
+    // Reuse its verified aggregates for projection repair: loading unrelated
+    // run history twice on every poll otherwise doubles parsing/IO cost.
+    // Keep this local so the next pass still observes disk changes/corruption.
+    const aggregates = new Map();
     for (const cardId of managedIds) {
       // A corrupt aggregate propagates (fails closed) — repair must not
       // silently skip the one card that needs its intents drained.
       const agg = await loadAggregate(stateDir, cardId);
+      aggregates.set(cardId, agg);
       if (!agg || !Array.isArray(agg.pendingWrites) || !agg.pendingWrites.length) continue;
       const ctx = makeCtx();
       for (const intent of agg.pendingWrites) {
@@ -677,6 +683,9 @@ export async function createStateService({ stateDir, env = process.env, faults, 
       await saveAggregate(stateDir, agg);
     }
     const ctx = makeCtx();
+    ctx.loadAggregate = (cardId) => aggregates.has(cardId)
+      ? Promise.resolve(aggregates.get(cardId))
+      : loadAggregate(stateDir, cardId);
     await repairBoardProjections(ctx);
     await ctx.flushStaged();
   }
