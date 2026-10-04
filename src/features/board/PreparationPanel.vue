@@ -9,7 +9,7 @@
 // one POST through execStore.sendCommand (busy-guarded, revision-checked).
 // Offline, every control is disabled with its reason; the server remains
 // authoritative for every gate mirrored here.
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import UiButton from '../../components/ui/UiButton.vue';
 import { useBoardStore } from '../../stores/board';
 import { useExecutionStore } from '../../stores/execution';
@@ -105,6 +105,21 @@ const lastAttempt = computed(() => {
   const list = session.value?.attempts ?? [];
   return list.length ? list[list.length - 1] : null;
 });
+const discussionEl = ref<HTMLElement | null>(null);
+const focusSessionForCard = ref<string | null>(null);
+watch(() => session.value?.sessionId, (id) => {
+  if (id && focusSessionForCard.value === props.cardId) {
+    focusSessionForCard.value = null;
+    void showDiscussion();
+  }
+}, { flush: 'post' });
+const openQuestionCount = computed(() => questions.value.filter(q => q.status === 'open').length);
+const leadWorking = computed(() => session.value?.status === 'active' && lastAttempt.value?.status === 'running');
+const firstTurn = computed(() => !questions.value.length && lastAttempt.value?.kind === 'kickoff');
+async function showDiscussion() {
+  await nextTick();
+  discussionEl.value?.scrollIntoView({ block: 'start', behavior: 'auto' });
+}
 const handoffMode = ref('solo');
 const handoffTargets = computed(() => session.value?.handoffTargets ?? []);
 // Modes whose run backend the card view's `features` advertises — a
@@ -175,10 +190,17 @@ async function onStartPrep() {
       const binding = effectiveStartBinding(stage);
       if (binding) selected[stage] = binding;
     }
+    focusSessionForCard.value = cardId;
     const ok = await send('start_preparation', prepStartPayload(undefined, selected));
     if (ok && stillCurrent(cardId, seq)) {
       startBindings.value = {};
       startBindingsOpen.value = false;
+      if (session.value?.status === 'active') {
+        focusSessionForCard.value = null;
+        await showDiscussion();
+      }
+    } else if (focusSessionForCard.value === cardId) {
+      focusSessionForCard.value = null;
     }
   } catch (e) {
     if (stillCurrent(cardId, seq)) startError.value = e instanceof Error ? e.message : String(e);
@@ -432,13 +454,23 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
 
       <!-- ── the live session ───────────────────────────────────────────── -->
       <template v-else-if="session">
+        <div v-if="leadWorking || openQuestionCount" class="prep-turn-status" role="status" aria-live="polite" :aria-busy="leadWorking">
+          <span v-if="leadWorking" data-testid="prep-lead-waiting">
+            <span class="prep-spinner" aria-hidden="true"></span>
+            {{ firstTurn ? 'The lead is reading your card and preparing the first question…' : 'The lead is considering your answer and preparing the next turn…' }}
+          </span>
+          <template v-else>
+            <span>The lead is waiting for your answer.</span>
+            <UiButton size="xs" data-testid="prep-discussion-jump" @click="showDiscussion">Answer the lead</UiButton>
+          </template>
+        </div>
         <p class="exec-line mono" data-testid="prep-meta">
           {{ session.sessionId }} · discussion “{{ session.discussion ?? 'prep' }}” · updated {{ fmtTs(session.updatedAt) }}
         </p>
         <p v-if="session.blocker" class="exec-line exec-warn" data-testid="prep-blocker">
           lead blocker: {{ session.blocker }}
         </p>
-        <p v-if="lastAttempt?.progress" class="exec-line" data-testid="prep-progress">
+        <p v-if="typeof lastAttempt?.progress === 'string' && lastAttempt.progress" class="exec-line" data-testid="prep-progress">
           {{ lastAttempt.progress }}
         </p>
 
@@ -454,10 +486,10 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
         <p v-else class="exec-line" data-testid="prep-ready">ready — all approvals and gates hold</p>
 
         <!-- one durable discussion -->
-        <div class="prep-discussion" data-testid="prep-discussion">
+        <div ref="discussionEl" class="prep-discussion" data-testid="prep-discussion">
           <div class="exec-subtitle">Discussion</div>
-          <div v-if="!questions.length" class="exec-line" data-testid="prep-no-questions">
-            no questions yet — the lead is composing its first turn
+          <div v-if="!questions.length && !leadWorking" class="exec-line" data-testid="prep-no-questions">
+            No questions recorded yet. Check the lead status above.
           </div>
           <div
             v-for="q in questions"
@@ -783,4 +815,30 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
   color: var(--text-accent, #c2532f);
   text-decoration: line-through;
 }
+.prep-turn-status {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border: 1px solid var(--border-faint);
+  border-radius: 6px;
+  background: var(--bg-main);
+  color: var(--text-primary);
+  font-size: 0.75rem;
+}
+.prep-spinner {
+  display: inline-block;
+  width: 0.75rem;
+  height: 0.75rem;
+  margin-right: 0.25rem;
+  border: 2px solid var(--border-faint);
+  border-top-color: var(--text-accent);
+  border-radius: 50%;
+  animation: prep-spin 1s linear infinite;
+}
+@keyframes prep-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .prep-spinner { animation: none; } }
 </style>

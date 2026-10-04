@@ -635,6 +635,23 @@ describe('PreparationPanel SSR — discussion, drafts, gates, handoff', () => {
     assert.ok(!html.includes('describe the idea first'));
   });
 
+  test('running kickoff shows explicit waiting status instead of a blank discussion', async () => {
+    const html = await renderPrepPanel('pc-wait', {}, {
+      attempts: [{ attemptId: 'pa-start', kind: 'kickoff', status: 'running', progress: null }],
+      checkpoint: { decisions: [], assumptions: [], openQuestions: [] },
+    });
+    assert.ok(html.includes('data-testid="prep-lead-waiting"'));
+    assert.ok(html.includes('The lead is reading your card and preparing the first question'));
+    assert.ok(html.includes('aria-busy="true"'));
+    assert.ok(!html.includes('no questions yet'));
+  });
+
+  test('a pending question has a visible jump back to the discussion', async () => {
+    const html = await renderPrepPanel('pc-jump', {}, {});
+    assert.ok(html.includes('data-testid="prep-discussion-jump"'));
+    assert.ok(html.includes('Answer the lead'));
+  });
+
   test('live discussion renders questions, answers, decisions, gates', async () => {
     const html = await renderPrepPanel('pc1', {}, {
       gates: [
