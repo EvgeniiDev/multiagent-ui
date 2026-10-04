@@ -75,6 +75,28 @@ describe('ui store init race', () => {
       'picked view must be persisted after init');
   });
 
+  test('initial view remains pending until saved navigation has loaded', async () => {
+    restoreFetch = stubRemote({ savedView: 'board', delayMs: 50 });
+    const ui = useUiStore();
+    assert.equal(ui.ready, false);
+    const init = ui.initUiStore();
+    await sleep(5);
+    assert.equal(ui.ready, false);
+    await init;
+    assert.equal(ui.activeView, 'board');
+    assert.equal(ui.ready, true);
+  });
+
+  test('an explicit navigation choice makes the view ready before remote initialization', async () => {
+    restoreFetch = stubRemote({ savedView: 'chat', delayMs: 50 });
+    const ui = useUiStore();
+    const init = ui.initUiStore();
+    await ui.setView('board');
+    assert.equal(ui.ready, true);
+    await init;
+    assert.equal(ui.activeView, 'board');
+  });
+
   test('with no pick during init the saved view applies', async () => {
     restoreFetch = stubRemote({ savedView: 'board' });
     const ui = useUiStore();

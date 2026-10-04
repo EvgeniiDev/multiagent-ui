@@ -359,7 +359,7 @@ function handleBackdropClick() {
 
 /** Current view name for the drawer's view-switcher label (narrow only). */
 const drawerViewLabel = computed(
-  () => VIEWS.find((v) => v.id === uiStore.activeView)?.label ?? 'Chat'
+  () => uiStore.ready ? (VIEWS.find((v) => v.id === uiStore.activeView)?.label ?? 'Chat') : 'Loading…'
 );
 
 /** Pick a view from the drawer's view row (narrow only): switch, then close
@@ -401,10 +401,10 @@ function clearError() {
         v-for="view in VIEWS"
         :key="view.id"
         class="rail-btn"
-        :class="{ active: uiStore.activeView === view.id }"
+        :class="{ active: uiStore.ready && uiStore.activeView === view.id }"
         :title="`${view.label} (${view.key})`"
         :aria-label="view.label"
-        :aria-current="uiStore.activeView === view.id ? 'page' : undefined"
+        :aria-current="uiStore.ready && uiStore.activeView === view.id ? 'page' : undefined"
         @click="uiStore.setView(view.id)"
       >
         <svg
@@ -440,7 +440,7 @@ function clearError() {
          chat — the hamburger in the scope-bar is the opener on all of them.
          On desktop unchanged: only the chat view shows the sidebar. -->
     <aside
-      v-show="showSidebar && (isNarrowLayout || uiStore.activeView === 'chat')"
+      v-show="uiStore.ready && showSidebar && (isNarrowLayout || uiStore.activeView === 'chat')"
       class="sidebar"
       :class="{ 'is-drawer': isNarrowLayout }"
     >
@@ -476,10 +476,10 @@ function clearError() {
             v-for="view in VIEWS"
             :key="view.id"
             class="rail-btn"
-            :class="{ active: uiStore.activeView === view.id }"
+            :class="{ active: uiStore.ready && uiStore.activeView === view.id }"
             :title="`${view.label} (${view.key})`"
             :aria-label="view.label"
-            :aria-current="uiStore.activeView === view.id ? 'page' : undefined"
+            :aria-current="uiStore.ready && uiStore.activeView === view.id ? 'page' : undefined"
             @click="handleDrawerViewClick(view.id)"
           >
             <svg
@@ -640,6 +640,11 @@ function clearError() {
           <button class="error-close" @click="clearError" title="Dismiss">×</button>
         </div>
         
+        <div v-if="!uiStore.ready" class="welcome-screen" role="status" data-testid="view-loading">
+          <span class="reconnect-spinner" aria-hidden="true"></span>
+          <p>Restoring view…</p>
+        </div>
+        <template v-else>
         <!-- IDE-style tab strip: one tab per open session, each with its own
              live connection — background tabs keep streaming and flag unread
              output, pending permissions and dropped transports. On narrow
@@ -687,6 +692,7 @@ function clearError() {
         <ProjectsView v-if="uiStore.activeView === 'projects'" />
         <BoardView v-if="uiStore.activeView === 'board'" />
         <DashboardView v-if="uiStore.activeView === 'dashboard'" />
+        </template>
       </main>
       
       <!-- Traffic Monitor Panel -->

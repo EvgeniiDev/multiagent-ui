@@ -28,6 +28,7 @@ const KEY = 'activeView';
 export const useUiStore = defineStore('ui', () => {
   const projectsStore = useProjectsStore();
   const activeView = ref<ViewId>('chat');
+  const ready = ref(false);
   const showSettings = ref(false);
   const showTraffic = ref(false);
   let store: KVStore | null = null;
@@ -53,12 +54,14 @@ export const useUiStore = defineStore('ui', () => {
     } else if (saved && VIEWS.some((v) => v.id === saved)) {
       activeView.value = saved;
     }
+    ready.value = true;
     bindShortcuts();
   }
 
   async function setView(view: ViewId): Promise<void> {
     viewPicked = true;
     activeView.value = view;
+    ready.value = true;
     if (store) {
       await store.set(KEY, view);
       await store.save();
@@ -102,6 +105,7 @@ export const useUiStore = defineStore('ui', () => {
 
   return {
     activeView,
+    ready,
     showSettings,
     showTraffic,
     activeProjectId,
