@@ -1943,12 +1943,30 @@ async function cmdPrepResult(D, ctx, aggregate, payload, now) {
     questions: applied.questions.length, deduped: applied.deduped,
     document: applied.document?.kind ?? null, progress,
   });
+  // A repeated answered question is filtered above, but filtering must not
+  // silently terminate the discussion after the user's answer. Schedule a
+  // corrective turn atomically with the rejected repeat. Completed attempts
+  // retain progress=false, so the lead's durable no-progress bound stops a
+  // model that keeps repeating instead of spending indefinitely. A bare
+  // completion, an actual decision/proposal/document, or an open question
+  // does not trigger another turn. Native dialog answers keep their routing.
+  let continuationAttemptId = null;
+  if (!progress && attempt.status === 'completed' && applied.deduped > 0
+      && !session.checkpoint.openQuestions.some((q) => q.status === 'open')) {
+    const followup = mintAttempt(session, 'turn', now, {
+      input: 'Your previous result repeated an already answered question and was discarded. ' +
+        'Read the recorded questions and answers in the checkpoint. Continue from the recorded user ' +
+        'answer: ask the next unresolved question, or propose the clarified intent for explicit ' +
+        'confirmation. Do not repeat an answered question or start implementation.',
+    });
+    continuationAttemptId = followup.attemptId;
+  }
   bumpCheckpoint(session, now);
   session.phase = derivePhase(aggregate);
   return {
     aggregate,
     refreshProjection: true,
-    result: { applied: true, attemptId, status: attempt.status, ...applied },
+    result: { applied: true, attemptId, status: attempt.status, ...applied, continuationAttemptId },
   };
 }
 

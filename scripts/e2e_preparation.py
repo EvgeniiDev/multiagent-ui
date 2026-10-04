@@ -496,6 +496,9 @@ def phase_small(pw):
         # already-active lead-only session) — bind the intent stage through
         # the UI now: the minted gate is the change's proof.
         if not fresh and gate is None:
+            controls = tab2.locator('[data-testid="prep-controls"]')
+            if not controls.evaluate("e => e.open"):
+                controls.locator("summary").click()
             tab2.locator('[data-testid="prep-bind-intent"]').select_option(
                 "grill-me-intent")
             tab2.locator('[data-testid="prep-bind-apply-intent"]').click()

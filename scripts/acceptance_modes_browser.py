@@ -750,6 +750,9 @@ def mode_preparation(pw, args, outdir, card_id, exec_ctx):
             return False
         # Documents: generated ONLY via the real prep-draft-* buttons
         # (request_draft). Hand-typed doc text is forbidden — no fake docs.
+        controls = page.locator('[data-testid="prep-controls"]')
+        if not controls.evaluate("e => e.open"):
+            controls.locator("summary").click()
         for kind in ("requirements", "plan"):
             before = ((prep.get("presented") or {}).get(kind) or {}).get("versionId")
             page.locator(f'[data-testid="prep-draft-{kind}"]').click()

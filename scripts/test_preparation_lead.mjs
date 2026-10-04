@@ -450,6 +450,59 @@ test('S3: re-asked answered question dedupes — recorded answer, no second ques
   await lead.dispose();
 });
 
+test('answered prompt duplicate triggers a durable corrective turn and next question', async () => {
+  const { svc, projectDir, root, registryPath } = await mkEnv();
+  await seedBase(svc, projectDir); await enable(svc);
+  await startPrep(svc, 'card-a', { intent: 'Extract full Reddit posts with comments.' });
+  const first = 'Which Reddit fields do you need?';
+  const next = 'How many comments must each post include?';
+  const { lead, spawns } = mkLead(svc, {
+    root, registryPath, spawnScripts: [[
+      { type: 'settle', text: PREP({ questions: [{ text: first, blocking: true }] }) },
+      { type: 'settle', text: PREP({ questions: [{ text: first, blocking: true }] }) },
+      { type: 'settle', text: PREP({ questions: [{ text: next, blocking: true }] }) },
+    ]],
+  });
+  assert.equal((await lead.drive('card-a')).status, 'awaiting_user');
+  let view = await prepView(svc, 'card-a');
+  await answerQ(svc, 'card-a', openQ(view)[0].questionId, 'Title, body, and all comments.');
+  const out = await lead.drive('card-a');
+  assert.equal(out.status, 'awaiting_user', J(out));
+  view = await prepView(svc, 'card-a');
+  assert.equal(openQ(view).length, 1); assert.equal(openQ(view)[0].text, next);
+  assert.equal(view.checkpoint.openQuestions.filter(q => q.text === first).length, 1);
+  assert.equal(view.attempts.length, 2);
+  assert.equal(spawns.length, 1, 'same discussion transport survives corrective turn');
+  assert.match(spawns[0].prompts[1], /Continue after the recorded user answer/);
+  assert.match(spawns[0].prompts[1], /Title, body, and all comments/);
+  assert.match(spawns[0].prompts[2], /Your previous result repeated an already answered question/);
+  await lead.dispose();
+});
+
+test('answered prompt duplicates are retried only up to the no-progress bound', async () => {
+  const { svc, projectDir, root, registryPath } = await mkEnv();
+  await seedBase(svc, projectDir); await enable(svc);
+  await startPrep(svc, 'card-a', { intent: 'A reading queue.' });
+  const question = PREP({ questions: [{ text: 'Which browser?', blocking: true }] });
+  const { lead, spawns } = mkLead(svc, {
+    root, registryPath, spawnScripts: [[
+      { type: 'settle', text: question }, { type: 'settle', text: question },
+      { type: 'settle', text: question },
+    ]],
+  });
+  await lead.drive('card-a');
+  const before = await prepView(svc, 'card-a');
+  await answerQ(svc, 'card-a', openQ(before)[0].questionId, 'Chrome');
+  const out = await lead.drive('card-a');
+  assert.equal(out.status, 'blocked', J(out)); assert.equal(out.reason, 'no_progress');
+  const view = await prepView(svc, 'card-a');
+  assert.equal(view.blocker.code, 'no_progress');
+  assert.equal(view.checkpoint.openQuestions.length, 1);
+  assert.equal(view.checkpoint.openQuestions[0].answer, 'Chrome');
+  assert.equal(spawns[0].prompts.length, 3, 'no fourth paid prompt');
+  await lead.dispose();
+});
+
 // ============================================================================
 // S4 — repeated no-progress turns end with an explicit blocker, no new spawn
 // ============================================================================

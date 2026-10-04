@@ -372,6 +372,11 @@ export function composeLeadPrompt({
   }
 
   if (newAnswers.length) {
+    pushSection(lines, 'Continue after the recorded user answer',
+      'This is a continuation of the discussion, not the initial interview. ' +
+      'Use the recorded answer below to move to the next unresolved question, ' +
+      'or propose the refined intent for explicit confirmation if the idea is clear. ' +
+      'Do not repeat the opening question or merely acknowledge the answer.');
     pushSection(lines, 'Answers recorded since your last turn',
       newAnswers.map((q) => `- ${q.text}\n  → ${q.answer}`).join('\n'));
   }

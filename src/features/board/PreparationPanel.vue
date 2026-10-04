@@ -551,6 +551,9 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
           </div>
         </div>
 
+        <details class="prep-bindings-detail prep-controls" data-testid="prep-controls"
+          :open="!openQuestionCount && (session.ready || !!session.intent.proposal || DOC_KINDS.some(k => !!session?.presented[k]))">
+          <summary class="exec-line">Documents, approvals and settings</summary>
         <!-- documents + drafts -->
         <div class="exec-detail" data-testid="prep-docs">
           <div class="exec-subtitle">Documents</div>
@@ -657,6 +660,8 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
             {{ handoffModeStartGate.reason }}
           </p>
         </div>
+
+        </details>
 
         <details class="prep-bindings-detail" data-testid="prep-diagnostics">
           <summary class="exec-line">Diagnostics</summary>
@@ -811,6 +816,9 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
 }
 .prep-bindings-detail summary {
   cursor: pointer;
+}
+.prep-controls > .exec-detail {
+  margin-top: 0.625rem;
 }
 .prep-gate-confirmed {
   color: var(--text-secondary, #6b6259);
