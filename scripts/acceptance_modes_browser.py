@@ -750,6 +750,9 @@ def mode_preparation(pw, args, outdir, card_id, exec_ctx):
             return False
         # Documents: generated ONLY via the real prep-draft-* buttons
         # (request_draft). Hand-typed doc text is forbidden — no fake docs.
+        diagnostics = page.locator('[data-testid="prep-diagnostics"]')
+        if not diagnostics.evaluate("e => e.open"):
+            diagnostics.locator("summary").first.click()
         controls = page.locator('[data-testid="prep-controls"]')
         if not controls.evaluate("e => e.open"):
             controls.locator("summary").click()

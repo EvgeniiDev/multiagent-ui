@@ -706,11 +706,25 @@ describe('PreparationPanel SSR — discussion, drafts, gates, handoff', () => {
     assert.ok(html.includes('solo, fusion'), 'solo+fusion startable on this deployment');
   });
 
+  test('review and handoff controls appear only when their subject is ready', async () => {
+    const interviewing = await renderPrepPanel('pc-interview', {}, {});
+    assert.ok(!interviewing.includes('data-testid="prep-handoff"'));
+    assert.ok(!interviewing.includes('data-testid="prep-intent-review"'));
+    assert.ok(!interviewing.includes('data-testid="prep-document-review"'));
+    const clarified = await renderPrepPanel('pc-clarified', {}, {
+      intent: { proposal: { text: 'A local reading queue.' } },
+      checkpoint: { openQuestions: [], decisions: [], assumptions: [] },
+    });
+    assert.ok(clarified.includes('data-testid="prep-intent-review"'));
+    assert.ok(clarified.includes('A local reading queue.'));
+    assert.ok(!clarified.includes('data-testid="prep-handoff"'));
+  });
+
   test('flagged orchestrator/swarm appear in the startable-mode line', async () => {
     const html = await renderPrepPanel(
       'pc3',
       { features: { start: true, orchestrator: true, swarm: true, preparation: true } },
-      {},
+      { ready: true },
     );
     assert.ok(html.includes('prep-modes-available'), 'startable-mode line renders');
     assert.ok(html.includes('orchestrator'), 'flagged orchestrator is named startable');

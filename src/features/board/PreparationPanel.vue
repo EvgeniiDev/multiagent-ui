@@ -551,9 +551,57 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
           </div>
         </div>
 
-        <details class="prep-bindings-detail prep-controls" data-testid="prep-controls"
-          :open="!openQuestionCount && (session.ready || !!session.intent.proposal || DOC_KINDS.some(k => !!session?.presented[k]))">
-          <summary class="exec-line">Documents, approvals and settings</summary>
+        <div v-if="!openQuestionCount && session.intent.proposal" class="exec-detail" data-testid="prep-intent-review">
+          <div class="exec-subtitle">Review the clarified idea</div>
+          <p class="exec-sumtext">{{ session.intent.proposal.text }}</p>
+          <UiButton v-for="g in gatesAll.filter(g => g.type === 'intent_confirm' && g.status === 'pending')"
+            :key="g.gateId" :disabled="gated(canConfirmGate(view!, g)).disabled"
+            @click="onConfirmGate(g)">Confirm idea</UiButton>
+        </div>
+        <div v-if="DOC_KINDS.some(k => !!session?.presented[k])" class="exec-detail" data-testid="prep-document-review">
+          <div class="exec-subtitle">Documents for review</div>
+          <p v-for="k in DOC_KINDS.filter(k => !!session?.presented[k])" :key="k" class="exec-line">
+            {{ docKindLabel(k) }} · {{ presentedLine(k) }}
+          </p>
+          <UiButton v-for="g in gatesAll.filter(g => g.type !== 'intent_confirm' && g.status === 'pending' && !!g.subject)"
+            :key="g.gateId" :disabled="gated(canConfirmGate(view!, g)).disabled"
+            @click="onConfirmGate(g)">{{ prepGateLabel(g) }}</UiButton>
+        </div>
+        <!-- handoff — records the offer; implementation start stays a
+             separate action in the run section below -->
+        <div v-if="session.ready" class="exec-detail" data-testid="prep-handoff">
+          <div class="exec-subtitle">Handoff</div>
+          <div class="exec-actionrow">
+            <select v-model="handoffMode" class="f-input ui-input exec-select" data-testid="prep-handoff-mode">
+              <option
+                v-for="t in handoffTargets"
+                :key="t.mode"
+                :value="t.mode"
+              >{{ t.mode }}{{ t.implemented ? '' : ' (not implemented)' }}</option>
+            </select>
+            <UiButton
+              class="exec-actionbtn"
+              data-testid="prep-handoff-btn"
+              :disabled="gated(handoffGate).disabled"
+              :title="gated(handoffGate).title"
+              @click="onHandoff"
+            >Record handoff offer</UiButton>
+          </div>
+          <p class="exec-line mono" data-testid="prep-modes-available">
+            startable on this deployment: {{ availableModes.join(', ') || '—' }}
+          </p>
+          <div v-for="h in session.handoffs" :key="h.handoffId" class="exec-line" :data-testid="`prep-handoff-${h.handoffId}`">
+            → {{ h.mode }} @ {{ fmtTs(h.at) }}{{ h.stale ? ' — stale (inputs changed)' : '' }}{{ h.implemented === false ? ' — mode not implemented' : '' }}
+          </div>
+          <p v-if="!handoffModeStartGate.ok" class="exec-line exec-warn" data-testid="prep-handoff-start-note">
+            {{ handoffModeStartGate.reason }}
+          </p>
+        </div>
+
+        <details class="prep-bindings-detail" data-testid="prep-diagnostics">
+          <summary class="exec-line">Diagnostics</summary>
+        <details class="prep-bindings-detail prep-controls" data-testid="prep-controls">
+          <summary class="exec-line">Advanced controls</summary>
         <!-- documents + drafts -->
         <div class="exec-detail" data-testid="prep-docs">
           <div class="exec-subtitle">Documents</div>
@@ -630,41 +678,8 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
           </p>
         </div>
 
-        <!-- handoff — records the offer; implementation start stays a
-             separate action in the run section below -->
-        <div class="exec-detail" data-testid="prep-handoff">
-          <div class="exec-subtitle">Handoff</div>
-          <div class="exec-actionrow">
-            <select v-model="handoffMode" class="f-input ui-input exec-select" data-testid="prep-handoff-mode">
-              <option
-                v-for="t in handoffTargets"
-                :key="t.mode"
-                :value="t.mode"
-              >{{ t.mode }}{{ t.implemented ? '' : ' (not implemented)' }}</option>
-            </select>
-            <UiButton
-              class="exec-actionbtn"
-              data-testid="prep-handoff-btn"
-              :disabled="gated(handoffGate).disabled"
-              :title="gated(handoffGate).title"
-              @click="onHandoff"
-            >Record handoff offer</UiButton>
-          </div>
-          <p class="exec-line mono" data-testid="prep-modes-available">
-            startable on this deployment: {{ availableModes.join(', ') || '—' }}
-          </p>
-          <div v-for="h in session.handoffs" :key="h.handoffId" class="exec-line" :data-testid="`prep-handoff-${h.handoffId}`">
-            → {{ h.mode }} @ {{ fmtTs(h.at) }}{{ h.stale ? ' — stale (inputs changed)' : '' }}{{ h.implemented === false ? ' — mode not implemented' : '' }}
-          </div>
-          <p v-if="!handoffModeStartGate.ok" class="exec-line exec-warn" data-testid="prep-handoff-start-note">
-            {{ handoffModeStartGate.reason }}
-          </p>
-        </div>
-
         </details>
 
-        <details class="prep-bindings-detail" data-testid="prep-diagnostics">
-          <summary class="exec-line">Diagnostics</summary>
         <p class="exec-line mono" data-testid="prep-meta">
           {{ session.sessionId }} · discussion “{{ session.discussion ?? 'prep' }}” · updated {{ fmtTs(session.updatedAt) }}
         </p>

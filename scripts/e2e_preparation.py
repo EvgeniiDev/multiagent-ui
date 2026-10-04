@@ -496,6 +496,9 @@ def phase_small(pw):
         # already-active lead-only session) — bind the intent stage through
         # the UI now: the minted gate is the change's proof.
         if not fresh and gate is None:
+            diagnostics = tab2.locator('[data-testid="prep-diagnostics"]')
+            if not diagnostics.evaluate("e => e.open"):
+                diagnostics.locator("summary").first.click()
             controls = tab2.locator('[data-testid="prep-controls"]')
             if not controls.evaluate("e => e.open"):
                 controls.locator("summary").click()
