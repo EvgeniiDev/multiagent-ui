@@ -1,5 +1,12 @@
 # acp-ui — agent rules
 
+## Testing and release verification
+
+Read and follow [TESTING.md](TESTING.md) before changing behavior, testing,
+or deploying. Select checks by the affected user flow; documentation-only
+changes require content/link/diff checks. Do not claim production readiness
+without verifying the actual deployed artifacts and affected user flow.
+
 ## Runtime: docker compose only
 
 The stack lives in `compose.yaml` (repo root). Control it with
