@@ -1172,7 +1172,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
     </p>
 
     <!-- Unmanaged card: explicit opt-in only — never auto-enabled. -->
-    <template v-if="st.phase === 'unmanaged' || (!view && st.phase !== 'loading' && st.phase !== 'error')">
+    <template v-if="st.phase === 'unmanaged'">
       <p class="art-note" data-testid="exec-unmanaged">
         This card is not managed yet. Enabling hands its stage, status, flags,
         project and session to the execution engine — they become read-only here.
@@ -1181,10 +1181,11 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
       <button
         class="btn primary exec-btn"
         data-testid="exec-enable"
+        :aria-busy="st.busy === 'enable'"
         :disabled="offline || busy || !eligibility.ok"
         :title="!eligibility.ok ? eligibility.reasons.join('; ') : ''"
         @click="onEnable"
-      >Enable managed execution</button>
+      >{{ st.busy === 'enable' ? 'Enabling…' : 'Enable managed execution' }}</button>
     </template>
 
     <p v-else-if="!view" class="art-note">Loading managed state…</p>

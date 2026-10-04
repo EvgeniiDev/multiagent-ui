@@ -619,6 +619,41 @@ describe('execution store', () => {
     exec.unwatchCard('card_raw'); // drops the entry (watchers 0→0)
   });
 
+  test('enable consumes unmanaged 404, issues one POST and releases busy on success', async () => {
+    const { exec, client } = freshPinia();
+    let managed = false;
+    client.on('getCard', () => {
+      if (!managed) throw new ExecApiError(404, { code: 'card_not_found', error: 'card is not managed' });
+      return cardView();
+    });
+    const post = deferred();
+    const posts = [];
+    client.on('sendCommand', (_id, envelope) => {
+      posts.push(envelope);
+      return post.p;
+    });
+    exec.watchCard('card_1');
+    await sleep(0);
+    assert.equal(exec.stateFor('card_1').phase, 'unmanaged');
+    const enabling = exec.sendCommand('card_1', 'enable');
+    await sleep(0);
+    assert.equal(exec.stateFor('card_1').busy, 'enable');
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].type, 'enable');
+    assert.equal(exec.stateFor('card_1').error, null);
+    assert.equal((await exec.sendCommand('card_1', 'enable')).code, 'busy');
+    managed = true;
+    post.res({ ok: true, result: { managed: true } });
+    assert.equal((await enabling).ok, true);
+    await sleep(0);
+    const st = exec.stateFor('card_1');
+    assert.equal(st.busy, null);
+    assert.equal(st.commandError, null);
+    assert.equal(st.phase, 'ready');
+    assert.equal(posts.length, 1);
+    exec.unwatchCard('card_1');
+  });
+
   test('double command click issues exactly one POST', async () => {
     const { exec, client } = freshPinia();
     client.on('getCard', () => cardView());
@@ -1094,6 +1129,41 @@ describe('CardDrawer/ExecutionPanel setup+render (SSR)', () => {
     const html = await renderToString(app);
     assert.ok(html.includes('card-drawer'));
     assert.ok(html.includes('plain card'));
+  });
+
+  test('opening a card waits for authoritative state before offering enable', async () => {
+    const { createSSRApp } = await import('vue');
+    const { renderToString } = await import('@vue/server-renderer');
+    const ExecutionPanel = (await import('../src/features/board/ExecutionPanel.vue')).default;
+    const exec = useExecutionStore();
+    useBoardStore().cards = [mkCard({ id: 'opening-card', execution: managedMarker() })];
+    for (const phase of ['idle', 'loading', 'error']) {
+      const st = exec.stateFor('opening-card');
+      st.phase = phase;
+      const html = await renderToString(createSSRApp(ExecutionPanel, { cardId: 'opening-card' }));
+      assert.ok(!html.includes('data-testid="exec-enable"'), `${phase} must not offer enable before server truth`);
+    }
+    const st = exec.stateFor('opening-card');
+    st.phase = 'unmanaged';
+    const html = await renderToString(createSSRApp(ExecutionPanel, { cardId: 'opening-card' }));
+    assert.ok(html.includes('data-testid="exec-enable"'), 'confirmed unmanaged card offers enable');
+  });
+
+  test('enable button explains the command in flight and exposes busy state', async () => {
+    const { createSSRApp } = await import('vue');
+    const { renderToString } = await import('@vue/server-renderer');
+    const ExecutionPanel = (await import('../src/features/board/ExecutionPanel.vue')).default;
+    const exec = useExecutionStore();
+    useBoardStore().cards = [mkCard({ id: 'enabling-card' })];
+    const st = exec.stateFor('enabling-card');
+    st.phase = 'unmanaged';
+    st.busy = 'enable';
+    const html = await renderToString(createSSRApp(ExecutionPanel, { cardId: 'enabling-card' }));
+    const button = html.match(/<button[^>]*data-testid="exec-enable"[^>]*>[\s\S]*?<\/button>/)?.[0];
+    assert.ok(button);
+    assert.match(button, /disabled/);
+    assert.match(button, /aria-busy="true"/);
+    assert.match(button, /Enabling…/);
   });
 
   test('CardDrawer mounts a managed card — ExecutionPanel renders unmanaged→managed states', async () => {

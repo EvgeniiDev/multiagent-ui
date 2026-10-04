@@ -1293,7 +1293,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     options?: { autonomous?: boolean }
   ): Promise<void> {
     isLoading.value = true;
-    error.value = null;
+    // Keep the previous failure until session/load verifies recovery. A
+    // reconnect attempt alone is not evidence that the fault disappeared.
     // A fresh resume supersedes any earlier cancel — without the reset, a
     // tab resumed after cancelConnection would carry the aborted flag
     // forever and the auto-reconnect loop would never arm for it.
@@ -1417,6 +1418,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       }
 
       isConnected.value = true;
+      error.value = null;
       autoReconnectAttempts = 0;
       // Messages already populated by session/update notifications during loadSession
 
@@ -1792,10 +1794,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       return false;
     }
 
-    // Clear the stale "Connection lost" banner up-front so the UI shows
-    // an honest "Reconnecting…" state instead of a contradictory red
-    // banner during the attempt.
-    error.value = null;
+    // The reconnect indicator owns the pending UI. Retain the last error
+    // until resume confirms recovery, rather than clearing a failed attempt.
     isReconnecting.value = true;
     try {
       await resume(s);

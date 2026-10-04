@@ -1,0 +1,7 @@
+.git
+.agent-tmp
+node_modules
+dist
+dist-web
+src-tauri/target
+**/__pycache__

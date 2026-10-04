@@ -942,7 +942,8 @@ textarea.f-input {
   margin-right: auto;
 }
 
-.btn {
+.btn,
+:deep(.btn) {
   min-height: 28px;
   padding: 0 0.625rem;
   border: 1px solid var(--border-color, #e3dbcf);
@@ -954,25 +955,35 @@ textarea.f-input {
   cursor: pointer;
 }
 
-.btn:hover {
+.btn:hover,
+:deep(.btn:hover) {
   background: var(--tint-hover, rgba(43, 39, 35, 0.045));
 }
 
-.btn.primary {
+.btn.primary,
+:deep(.btn.primary) {
   background: var(--bg-primary, #c2532f);
   border-color: var(--bg-primary, #c2532f);
   color: var(--text-on-accent, #fbf8f3);
 }
 
-.btn.primary:hover {
+.btn.primary:hover,
+:deep(.btn.primary:hover) {
   background: var(--bg-primary-hover, #a8431f);
 }
 
-.btn.danger {
+:deep(.btn:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn.danger,
+:deep(.btn.danger) {
   color: var(--bg-danger, #b3402e);
 }
 
 .btn:focus-visible,
+:deep(.btn:focus-visible),
 .seg-btn:focus-visible,
 .link-add:focus-visible,
 .link-del:focus-visible,
@@ -1297,7 +1308,8 @@ textarea.f-input {
 @media (max-width: 800px) {
   .art-refresh,
   .art-row,
-  .art-proposal .btn {
+  .art-proposal .btn,
+  :deep(.art-proposal .btn) {
     min-height: 44px;
   }
 }
@@ -1309,6 +1321,7 @@ textarea.f-input {
   }
 
   .btn,
+  :deep(.btn),
   .seg-btn,
   .f-input,
   .link-add,

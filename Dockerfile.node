@@ -10,5 +10,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 RUN npm install -g ws \
  && npm install -g @earendil-works/pi-coding-agent@0.85.1 pi-acp@0.0.33
+# The shared bridge must retain independent Pi tabs instead of killing peers.
+COPY deploy/patch-pi-acp-multisession.mjs /opt/acp-ui/patch-pi-acp-multisession.mjs
+RUN node /opt/acp-ui/patch-pi-acp-multisession.mjs /usr/local/lib/node_modules/pi-acp
 WORKDIR /repo
 CMD ["node", "--version"]

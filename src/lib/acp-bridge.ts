@@ -239,7 +239,14 @@ export class AcpClientBridge implements Client {
           this.messageRejecters.delete(parsed.id);
           if (parsed.error) {
             console.error('JSON-RPC error:', parsed.error);
-            rejecter(new Error(parsed.error.message || 'Unknown error'));
+            // The ACP adapter puts the concrete cause (e.g. a stopped Pi
+            // process) in data.details. Retain that text in the session banner
+            // instead of reducing every adapter failure to 'Internal error'.
+            const message = typeof parsed.error.message === 'string' && parsed.error.message
+              ? parsed.error.message : 'Unknown error';
+            const details = typeof parsed.error.data?.details === 'string'
+              ? parsed.error.data.details.trim() : '';
+            rejecter(new Error(details && details !== message ? `${message}: ${details}` : message));
           } else {
             resolver(parsed.result);
           }
