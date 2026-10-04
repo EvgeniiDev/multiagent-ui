@@ -300,7 +300,8 @@ export interface PrepAttempt {
   status: string;
   docKind?: string | null;
   input?: string | null;
-  progress?: string | null;
+  progress?: boolean | string | null;
+  progressEpoch?: number;
   createdAt: number;
   finishedAt?: number | null;
   questionIds?: string[];
@@ -382,7 +383,8 @@ export interface ExecPrepView {
   updatedAt: number;
   stoppedAt?: number | null;
   stopReason?: string | null;
-  blocker?: string | null;
+  blocker?: string | { code: string; detail?: string; retryable?: boolean; attemptId?: string; at?: number } | null;
+  noProgressEpoch?: number;
   discussion: string | null;
   projectPath?: string | null;
   intent: {

@@ -993,6 +993,8 @@ async function cmdStartPreparation(D, ctx, aggregate, payload, now, cardId) {
     presented: { requirements: null, design: null, plan: null },
     gates: [],
     attempts: [],
+    // Only accepted human input resets the bounded automatic retry window.
+    noProgressEpoch: 0,
     // P4: durable handoff offers — one per (mode, accepted-inputs) pair.
     // Evidence only: nothing here mints a run or dispatches a mode.
     handoffs: [],
@@ -1110,6 +1112,7 @@ async function cmdAnswerQuestion(D, ctx, aggregate, payload, now) {
   q.status = 'answered';
   q.answer = answerText;
   q.answeredAt = now;
+  session.noProgressEpoch = (session.noProgressEpoch ?? 0) + 1;
   if (attempt) {
     attempt.answers[questionId] = answerText;
     if (attempt.status === 'awaiting_answer') attempt.status = 'running';
@@ -1243,6 +1246,7 @@ async function cmdContinueDiscussion(D, ctx, aggregate, payload, now) {
       id: `d_${session.checkpoint.nextSeq}`, text: t, at: now, source: 'user',
     });
   }
+  session.noProgressEpoch = (session.noProgressEpoch ?? 0) + 1;
   // A message or a restatement is new conversational input — it mints the
   // next lead turn (superseding every still-live prior attempt). Pure
   // bookkeeping (reaffirm/defer/decisions alone) does not consume an
@@ -1924,7 +1928,7 @@ async function cmdPrepResult(D, ctx, aggregate, payload, now) {
   attempt.status = applied.openQuestionIds.length ? 'awaiting_answer' : 'completed';
   attempt.finishedAt = attempt.status === 'completed' ? now : null;
   // P3: `progress` is the durable no-progress accounting the lead driver
-  // reads — a turn counts as progress only when it added something NEW
+  // reads — an attempt counts as progress when any of its turns added something NEW
   // (a minted question, a document, a proposal, decisions/assumptions, a
   // handoff). A bare note or all-deduped questions do not advance the
   // discussion.
@@ -1936,7 +1940,10 @@ async function cmdPrepResult(D, ctx, aggregate, payload, now) {
     questions: applied.questions,
     deduped: applied.deduped,
     document: applied.document,
-    progress,
+    // An attempt can span question/answer turns. Never erase substantive
+    // progress from an earlier turn when its continuation repeats or is empty.
+    progress: attempt.result?.progress === true || progress,
+    progressEpoch: session.noProgressEpoch ?? 0,
   };
   logEvent(session, now, 'result_applied', {
     attemptId, status: attempt.status,
@@ -1945,8 +1952,8 @@ async function cmdPrepResult(D, ctx, aggregate, payload, now) {
   });
   // A repeated answered question is filtered above, but filtering must not
   // silently terminate the discussion after the user's answer. Schedule a
-  // corrective turn atomically with the rejected repeat. Completed attempts
-  // retain progress=false, so the lead's durable no-progress bound stops a
+  // corrective turn atomically with the rejected repeat. Attempts containing
+  // only repeats retain progress=false, so the durable no-progress bound stops a
   // model that keeps repeating instead of spending indefinitely. A bare
   // completion, an actual decision/proposal/document, or an open question
   // does not trigger another turn. Native dialog answers keep their routing.
@@ -2087,6 +2094,7 @@ async function cmdPrepQuestion(D, ctx, aggregate, payload, now) {
   };
   session.checkpoint.openQuestions.push(rec);
   attempt.questionIds.push(rec.questionId);
+  attempt.result = { ...attempt.result, progress: true, progressEpoch: session.noProgressEpoch ?? 0 };
   logEvent(session, now, 'question_opened',
     { questionId: rec.questionId, attemptId, blocking, channel, text: qt.slice(0, 500) });
   bumpCheckpoint(session, now);
@@ -2211,6 +2219,7 @@ export async function preparationView(D, ctx, aggregate) {
     stoppedAt: s.stoppedAt ?? null,
     stopReason: s.stopReason ?? null,
     blocker: s.blocker ?? null,
+    noProgressEpoch: s.noProgressEpoch ?? 0,
     discussion: s.discussion ?? null,
     // P5: the card's registered project root — the lead read-mounts it into
     // its turns (preparation reads project context, never writes it), and
@@ -2231,6 +2240,7 @@ export async function preparationView(D, ctx, aggregate) {
       docKind: a.docKind ?? null,
       input: typeof a.input === 'string' ? a.input : null,
       progress: a.result?.progress ?? null,
+      progressEpoch: a.result?.progressEpoch ?? 0,
       createdAt: a.createdAt, finishedAt: a.finishedAt,
       questionIds: a.questionIds, cancelled: !!a.cancel,
     })),

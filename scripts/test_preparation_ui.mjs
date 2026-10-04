@@ -706,6 +706,16 @@ describe('PreparationPanel SSR — discussion, drafts, gates, handoff', () => {
     assert.ok(html.includes('solo, fusion'), 'solo+fusion startable on this deployment');
   });
 
+  test('structured no-progress blocker gives a recoverable message, not raw JSON', async () => {
+    const html = await renderPrepPanel('pc-blocked', {}, {
+      blocker: { code: 'no_progress', detail: '3 consecutive turns', retryable: true },
+    });
+    const message = html.match(/data-testid="prep-blocker"[^>]*>([\s\S]*?)<\/p>/)?.[1];
+    assert.ok(message?.includes('Your answers are saved'));
+    assert.ok(!message.includes('no_progress'));
+    assert.ok(!message.includes('retryable'));
+  });
+
   test('review and handoff controls appear only when their subject is ready', async () => {
     const interviewing = await renderPrepPanel('pc-interview', {}, {});
     assert.ok(!interviewing.includes('data-testid="prep-handoff"'));

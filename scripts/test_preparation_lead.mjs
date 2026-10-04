@@ -52,7 +52,7 @@ import { createStateService } from '../server/execution/state-service.mjs';
 import { loadAggregate } from '../server/execution/execution-store.mjs';
 import { loadRegistry, buildManifest, verifyManifest } from '../server/execution/preparation/skills/registry.mjs';
 import {
-  createPreparationLead, serviceFromService, prepRunDirs, composeLeadPrompt,
+  createPreparationLead, serviceFromService, prepRunDirs, composeLeadPrompt, trailingNoProgress,
 } from '../server/execution/preparation/lead.mjs';
 import { createFakePiTransport, fakeTransportFactory } from './fixtures/fake-pi-rpc.mjs';
 
@@ -73,6 +73,13 @@ test('clarification prompt starts focused grilling from the existing card idea',
   assert.match(prompt, /Challenge weak assumptions/);
   assert.match(prompt, /question-and-answer discussion, one question at a time/);
   assert.match(prompt, /Never start implementation/);
+});
+
+test('legacy no-progress history is bounded and fresh human input starts a new window', () => {
+  const attempts = [{ status: 'completed', progress: false }, { status: 'completed', progress: false }];
+  assert.equal(trailingNoProgress({ attempts }), 2);
+  assert.equal(trailingNoProgress({ attempts, noProgressEpoch: 1 }), 0);
+  assert.equal(trailingNoProgress({ attempts: [...attempts, { status: 'completed', progress: false, progressEpoch: 1 }], noProgressEpoch: 1 }), 1);
 });
 
 // ---- fixtures ---------------------------------------------------------------
@@ -487,7 +494,7 @@ test('answered prompt duplicates are retried only up to the no-progress bound', 
   const { lead, spawns } = mkLead(svc, {
     root, registryPath, spawnScripts: [[
       { type: 'settle', text: question }, { type: 'settle', text: question },
-      { type: 'settle', text: question },
+      { type: 'settle', text: question }, { type: 'settle', text: question },
     ]],
   });
   await lead.drive('card-a');
@@ -499,7 +506,7 @@ test('answered prompt duplicates are retried only up to the no-progress bound', 
   assert.equal(view.blocker.code, 'no_progress');
   assert.equal(view.checkpoint.openQuestions.length, 1);
   assert.equal(view.checkpoint.openQuestions[0].answer, 'Chrome');
-  assert.equal(spawns[0].prompts.length, 3, 'no fourth paid prompt');
+  assert.equal(spawns[0].prompts.length, 4, 'one successful question and bounded duplicate corrections; no fifth paid prompt');
   await lead.dispose();
 });
 
@@ -507,49 +514,51 @@ test('answered prompt duplicates are retried only up to the no-progress bound', 
 // S4 — repeated no-progress turns end with an explicit blocker, no new spawn
 // ============================================================================
 
-test('S4: consecutive no-progress turns → no_progress blocker, no further spawn', async () => {
+test('completed answer continuation preserves earlier question progress', async () => {
   const { svc, projectDir, root, registryPath } = await mkEnv();
-  await seedBase(svc, projectDir);
-  await enable(svc);
-  await startPrep(svc, 'card-a', { intent: 'Something ambiguous.' });
+  await seedBase(svc, projectDir); await enable(svc);
+  await startPrep(svc, 'card-a', { intent: 'Reddit extraction.' });
+  const question = PREP({ questions: [{ text: 'Which fields?', blocking: true }] });
+  const { lead } = mkLead(svc, { root, registryPath, spawnScripts: [[
+    { type: 'settle', text: question },
+    { type: 'settle', text: PREP({ note: 'Understood.' }) },
+  ]] });
+  await lead.drive('card-a');
+  const before = await prepView(svc, 'card-a');
+  assert.equal(before.attempts[0].progress, true);
+  await answerQ(svc, 'card-a', openQ(before)[0].questionId, 'Title and comments');
+  assert.equal((await lead.drive('card-a')).status, 'idle');
+  const after = await prepView(svc, 'card-a');
+  assert.equal(after.attempts[0].progress, true, 'a valid earlier question cannot become a no-progress attempt');
+  await lead.dispose();
+});
 
-  const { lead, spawns } = mkLead(svc, {
-    root, registryPath,
-    spawnScripts: [[
-      // every turn reports a bare note — nothing new (progress=false)
-      { type: 'settle', text: PREP({ note: 'still thinking' }) },
-      { type: 'settle', text: PREP({ note: 'still thinking' }) },
-    ]],
-  });
-
-  let out = await lead.drive('card-a');
-  assert.equal(out.status, 'idle', J(out));
-  let view = await prepView(svc, 'card-a');
-  assert.equal(view.attempts[0].status, 'completed');
-  assert.equal(view.attempts[0].progress, false);
-
-  // user nudges → turn 2, also empty
-  const r1 = await ucmd(svc, 'card-a', 'continue_discussion', { text: 'any progress?' });
-  assert.equal(r1.status, 200, J(r1.json));
-  out = await lead.drive('card-a');
-  assert.equal(out.status, 'idle', J(out));
-  view = await prepView(svc, 'card-a');
-  assert.equal(view.attempts[1].progress, false);
-
-  // third attempt — the driver must refuse to burn another turn:
-  // no_progress blocker, delivered WITHOUT spawning a new process
-  const r2 = await ucmd(svc, 'card-a', 'continue_discussion', { text: 'still?' });
-  assert.equal(r2.status, 200, J(r2.json));
-  const nSpawns = spawns.length;
-  out = await lead.drive('card-a');
-  assert.equal(out.status, 'blocked', J(out));
-  assert.equal(out.reason, 'no_progress');
-  assert.equal(spawns.length, nSpawns, 'no new CLI process for the blocked turn');
-
-  view = await prepView(svc, 'card-a');
-  assert.equal(view.attempts[2].status, 'blocked');
-  assert.equal(view.blocker?.code, 'no_progress');
-  assert.match(view.blocker.detail, /no new/);
+test('explicit human input resets a durable no-progress blocker; automatic correction remains bounded', async () => {
+  const { svc, projectDir, root, registryPath } = await mkEnv();
+  await seedBase(svc, projectDir); await enable(svc);
+  await startPrep(svc, 'card-a', { intent: 'A reading queue.' });
+  const question = PREP({ questions: [{ text: 'Which browser?', blocking: true }] });
+  const { lead, spawns } = mkLead(svc, { root, registryPath, spawnScripts: [[
+    { type: 'settle', text: question },
+    { type: 'settle', text: question },
+    { type: 'settle', text: question },
+    { type: 'settle', text: question },
+  ], [
+    { type: 'settle', text: PREP({ questions: [{ text: 'Should links survive restart?', blocking: true }] }) },
+  ]] });
+  await lead.drive('card-a');
+  const before = await prepView(svc, 'card-a');
+  await answerQ(svc, 'card-a', openQ(before)[0].questionId, 'Chrome');
+  assert.equal((await lead.drive('card-a')).reason, 'no_progress');
+  const promptsAtBlock = spawns[0].prompts.length;
+  const r = await ucmd(svc, 'card-a', 'continue_discussion', { text: 'We settled the browser. Ask about persistence.' });
+  assert.equal(r.status, 200, J(r.json));
+  const out = await lead.drive('card-a');
+  assert.equal(out.status, 'awaiting_user', J(out));
+  const recovered = await prepView(svc, 'card-a');
+  assert.equal(openQ(recovered)[0].text, 'Should links survive restart?');
+  assert.equal(recovered.blocker, null);
+  assert.equal(spawns.reduce((n, spawn) => n + spawn.prompts.length, 0), promptsAtBlock + 1);
   await lead.dispose();
 });
 

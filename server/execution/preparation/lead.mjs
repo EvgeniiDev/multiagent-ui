@@ -165,6 +165,9 @@ export function trailingNoProgress(view) {
   // the completed turns themselves.
   for (const a of [...(view?.attempts ?? [])].reverse()) {
     if (a.status === 'completed') {
+      // Epochs survive driver restarts. Human commands reset this window;
+      // automatic corrective attempts cannot reset their own retry budget.
+      if ((a.progressEpoch ?? 0) !== (view?.noProgressEpoch ?? 0)) break;
       if (a.progress === false) n += 1;
       else break;
     }

@@ -98,6 +98,13 @@ const session = computed(() => prep.value);
 const loading = computed(
   () => featureOn.value && !session.value && !!view.value?.preparation,
 );
+const leadBlockerMessage = computed(() => {
+  const blocker = session.value?.blocker;
+  if (!blocker) return '';
+  if (typeof blocker === 'string') return blocker;
+  if (blocker.code === 'no_progress') return 'The discussion paused because the lead could not make progress. Your answers are saved. Send a message below to continue.';
+  return blocker.detail || 'The lead could not continue. Your discussion is saved.';
+});
 const stopped = computed(() => session.value?.status === 'stopped');
 const questions = computed(() => session.value?.checkpoint?.openQuestions ?? []);
 const gatesAll = computed(() => session.value?.gates ?? []);
@@ -465,7 +472,7 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
           </template>
         </div>
         <p v-if="session.blocker" class="exec-line exec-warn" data-testid="prep-blocker">
-          lead blocker: {{ session.blocker }}
+          {{ leadBlockerMessage }}
         </p>
         <p v-if="typeof lastAttempt?.progress === 'string' && lastAttempt.progress" class="exec-line" data-testid="prep-progress">
           {{ lastAttempt.progress }}
@@ -601,6 +608,7 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
 
         <details class="prep-bindings-detail" data-testid="prep-diagnostics">
           <summary class="exec-line">Diagnostics</summary>
+          <pre v-if="session.blocker" class="exec-line prep-blocker-detail">{{ session.blocker }}</pre>
         <details class="prep-bindings-detail prep-controls" data-testid="prep-controls">
           <summary class="exec-line">Advanced controls</summary>
         <!-- documents + drafts -->
@@ -803,6 +811,7 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
   color: var(--text-primary, #2b2723);
   white-space: pre-wrap;
 }
+.prep-blocker-detail { white-space: pre-wrap; overflow-wrap: anywhere; }
 .prep-section {
   margin-top: 0.375rem;
   gap: 0.5rem;
