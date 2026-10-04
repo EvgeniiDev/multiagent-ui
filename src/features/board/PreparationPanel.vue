@@ -10,6 +10,7 @@
 // Offline, every control is disabled with its reason; the server remains
 // authoritative for every gate mirrored here.
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import UiButton from '../../components/ui/UiButton.vue';
 import { useExecutionStore } from '../../stores/execution';
 import {
   canChangePrepBinding,
@@ -341,7 +342,7 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
         </p>
         <textarea
           v-model="intentDraft"
-          class="f-input exec-area"
+          class="f-input ui-input exec-area"
           rows="3"
           data-testid="prep-intent"
           placeholder="Describe the idea for this card — the lead will interview you."
@@ -357,7 +358,7 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
             <span class="exec-role">{{ prepStageLabel(stage) }}</span>
             <select
               v-model="startBindings[stage]"
-              class="f-input exec-select exec-grow"
+              class="f-input ui-input exec-select exec-grow"
               :data-testid="`prep-start-bind-${stage}`"
             >
               <option value="">lead only (no skill)</option>
@@ -374,13 +375,14 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
           </p>
         </details>
         <div class="exec-btnrow">
-          <button
-            class="btn exec-btn"
+          <UiButton
+            class="exec-btn"
+            variant="primary"
             data-testid="prep-start"
             :disabled="gated(startGate).disabled"
             :title="gated(startGate).title"
             @click="onStartPrep"
-          >Start preparation</button>
+          >Start preparation</UiButton>
         </div>
       </template>
 
@@ -394,18 +396,19 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
         <div class="exec-startrow">
           <input
             v-model="intentDraft"
-            class="f-input exec-grow"
+            class="f-input ui-input exec-grow"
             data-testid="prep-restart-intent"
             placeholder="intent for the new session…"
             @keydown.enter="onStartPrep"
           />
-          <button
-            class="btn exec-actionbtn"
+          <UiButton
+            class="exec-actionbtn"
+            variant="primary"
             data-testid="prep-restart"
             :disabled="gated(startGate).disabled"
             :title="gated(startGate).title"
             @click="onStartPrep"
-          >Start new session</button>
+          >Start new session</UiButton>
         </div>
       </template>
 
@@ -459,7 +462,7 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
               <select
                 v-if="q.dialog?.options?.length"
                 v-model="answerSelects[q.questionId]"
-                class="f-input exec-select exec-grow"
+                class="f-input ui-input exec-select exec-grow"
                 :data-testid="`prep-answer-select-${q.questionId}`"
               >
                 <option value="" disabled>choose…</option>
@@ -468,18 +471,18 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
               <input
                 v-else
                 v-model="answerDrafts[q.questionId]"
-                class="f-input exec-grow"
+                class="f-input ui-input exec-grow"
                 :data-testid="`prep-answer-${q.questionId}`"
                 placeholder="your answer…"
                 @keydown.enter="onAnswer(q)"
               />
-              <button
-                class="btn exec-actionbtn"
+              <UiButton
+                class="exec-actionbtn"
                 :data-testid="`prep-send-${q.questionId}`"
                 :disabled="gated(questionGate(q)).disabled"
                 :title="gated(questionGate(q)).title"
                 @click="onAnswer(q)"
-              >Answer</button>
+              >Answer</UiButton>
             </div>
           </div>
           <div v-if="session.checkpoint.decisions.length" class="exec-detail" data-testid="prep-decisions">
@@ -497,18 +500,18 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
           <div class="exec-startrow">
             <input
               v-model="continueDraft"
-              class="f-input exec-grow"
+              class="f-input ui-input exec-grow"
               data-testid="prep-continue-text"
               placeholder="say something to the lead — steer, correct, add context…"
               @keydown.enter="onContinue"
             />
-            <button
-              class="btn exec-actionbtn"
+            <UiButton
+              class="exec-actionbtn"
               data-testid="prep-continue"
               :disabled="gated(continueGate).disabled"
               :title="gated(continueGate).title"
               @click="onContinue"
-            >Send</button>
+            >Send</UiButton>
           </div>
         </div>
 
@@ -519,13 +522,13 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
           <div v-for="k in DOC_KINDS" :key="k" class="exec-actionrow">
             <span class="exec-role">{{ docKindLabel(k) }}</span>
             <span class="exec-line exec-grow mono" :data-testid="`prep-doc-${k}`">{{ presentedLine(k) }}</span>
-            <button
-              class="btn exec-actionbtn"
+            <UiButton
+              class="exec-actionbtn"
               :data-testid="`prep-draft-${k}`"
               :disabled="gated(draftGate).disabled"
               :title="gated(draftGate).title"
               @click="onRequestDraft(k)"
-            >Draft {{ k }}</button>
+            >Draft {{ k }}</UiButton>
           </div>
         </div>
 
@@ -541,14 +544,14 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
             <span class="exec-line exec-grow" :class="gateStatusClass(g)">
               {{ prepGateLabel(g) }}<template v-if="g.status !== 'pending'"> — {{ g.status }}<template v-if="g.invalidationReason"> ({{ g.invalidationReason }})</template></template>
             </span>
-            <button
+            <UiButton
               v-if="g.status === 'pending'"
-              class="btn exec-actionbtn"
+              class="exec-actionbtn"
               :data-testid="`prep-gate-confirm-${g.gateId}`"
               :disabled="gated(canConfirmGate(view!, g)).disabled"
               :title="gated(canConfirmGate(view!, g)).title"
               @click="onConfirmGate(g)"
-            >Confirm</button>
+            >Confirm</UiButton>
           </div>
         </div>
 
@@ -560,7 +563,7 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
               <span class="exec-role">{{ prepStageLabel(stage) }}</span>
               <select
                 v-model="bindPicks[stage]"
-                class="f-input exec-select exec-grow"
+                class="f-input ui-input exec-select exec-grow"
                 :data-testid="`prep-bind-${stage}`"
               >
                 <option value="">{{ session.bindings[stage]?.bindingId ?? 'lead only' }}</option>
@@ -571,13 +574,13 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
                   :disabled="b.status !== 'available'"
                 >{{ b.bindingId }}{{ b.status !== 'available' ? ` — unavailable: ${b.unsupported?.reason ?? b.status}` : '' }}</option>
               </select>
-              <button
-                class="btn exec-actionbtn"
+              <UiButton
+                class="exec-actionbtn"
                 :data-testid="`prep-bind-apply-${stage}`"
                 :disabled="gated(canChangePrepBinding(view!, stage, bindPicks[stage] || null)).disabled"
                 :title="gated(canChangePrepBinding(view!, stage, bindPicks[stage] || null)).title"
                 @click="onApplyBinding(stage)"
-              >Set</button>
+              >Set</UiButton>
             </div>
             <p v-if="stageProblem(stage)" class="exec-line exec-warn" :data-testid="`prep-bind-problem-${stage}`">
               {{ stageProblem(stage) }}
@@ -593,20 +596,20 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
         <div class="exec-detail" data-testid="prep-handoff">
           <div class="exec-subtitle">Handoff</div>
           <div class="exec-actionrow">
-            <select v-model="handoffMode" class="f-input exec-select" data-testid="prep-handoff-mode">
+            <select v-model="handoffMode" class="f-input ui-input exec-select" data-testid="prep-handoff-mode">
               <option
                 v-for="t in handoffTargets"
                 :key="t.mode"
                 :value="t.mode"
               >{{ t.mode }}{{ t.implemented ? '' : ' (not implemented)' }}</option>
             </select>
-            <button
-              class="btn exec-actionbtn"
+            <UiButton
+              class="exec-actionbtn"
               data-testid="prep-handoff-btn"
               :disabled="gated(handoffGate).disabled"
               :title="gated(handoffGate).title"
               @click="onHandoff"
-            >Record handoff offer</button>
+            >Record handoff offer</UiButton>
           </div>
           <p class="exec-line mono" data-testid="prep-modes-available">
             startable on this deployment: {{ availableModes.join(', ') || '—' }}
@@ -620,13 +623,14 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
         </div>
 
         <div class="exec-btnrow">
-          <button
-            class="btn exec-btn"
+          <UiButton
+            class="exec-btn"
+            variant="danger"
             data-testid="prep-stop"
             :disabled="gated(canStopPrep(view!)).disabled"
             :title="gated(canStopPrep(view!)).title"
             @click="onStopPrep"
-          >Stop preparation</button>
+          >Stop preparation</UiButton>
         </div>
       </template>
     </div>
@@ -670,12 +674,6 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
   color: var(--text-secondary, #6b6259);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-}
-.exec-select {
-  font-size: 0.6875rem;
-}
-.exec-area {
-  font-size: 0.6875rem;
 }
 .exec-btnrow,
 .exec-actionrow {

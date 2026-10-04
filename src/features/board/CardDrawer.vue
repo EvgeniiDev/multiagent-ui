@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from '../../components/ui/UiButton.vue';
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { useBoardStore, type BoardCard } from '../../stores/board';
 import { useSessionStore } from '../../stores/session';
@@ -638,7 +639,7 @@ onBeforeUnmount(() => {
 
           <div v-if="proposal.kind !== 'none'" class="art-proposal" data-testid="transition-proposal">
             <span class="art-proposal-label">{{ proposal.label }}</span>
-            <button class="btn primary" data-testid="apply-transition" @click="onApplyTransition">Apply</button>
+            <UiButton variant="primary" class="btn primary" data-testid="apply-transition" @click="onApplyTransition">Apply</UiButton>
           </div>
           <p v-else-if="artState.phase === 'ready' && tokenArtifact" class="art-note" data-testid="transition-none">
             {{ proposal.label }}
@@ -652,15 +653,15 @@ onBeforeUnmount(() => {
     </div>
 
     <footer class="drawer-foot">
-      <button
+      <UiButton variant="primary"
         v-if="attachedSession"
         class="btn primary"
         @click="onOpenSession"
-      >Open session</button>
+      >Open session</UiButton>
       <span v-else class="foot-spacer" />
-      <button class="btn" @click="onDuplicate">Duplicate</button>
-      <button class="btn danger" @click="onRemove">Delete</button>
-      <button class="btn" @click="emit('close')">Done</button>
+      <UiButton class="btn" @click="onDuplicate">Duplicate</UiButton>
+      <UiButton variant="danger" class="btn danger" @click="onRemove">Delete</UiButton>
+      <UiButton class="btn" @click="emit('close')">Done</UiButton>
     </footer>
   </aside>
 </template>
@@ -942,48 +943,6 @@ textarea.f-input {
   margin-right: auto;
 }
 
-.btn,
-:deep(.btn) {
-  min-height: 28px;
-  padding: 0 0.625rem;
-  border: 1px solid var(--border-color, #e3dbcf);
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-primary, #2b2723);
-  font-family: inherit;
-  font-size: 0.75rem;
-  cursor: pointer;
-}
-
-.btn:hover,
-:deep(.btn:hover) {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-}
-
-.btn.primary,
-:deep(.btn.primary) {
-  background: var(--bg-primary, #c2532f);
-  border-color: var(--bg-primary, #c2532f);
-  color: var(--text-on-accent, #fbf8f3);
-}
-
-.btn.primary:hover,
-:deep(.btn.primary:hover) {
-  background: var(--bg-primary-hover, #a8431f);
-}
-
-:deep(.btn:disabled) {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.btn.danger,
-:deep(.btn.danger) {
-  color: var(--bg-danger, #b3402e);
-}
-
-.btn:focus-visible,
-:deep(.btn:focus-visible),
 .seg-btn:focus-visible,
 .link-add:focus-visible,
 .link-del:focus-visible,
@@ -1320,8 +1279,6 @@ textarea.f-input {
     border-left: none;
   }
 
-  .btn,
-  :deep(.btn),
   .seg-btn,
   .f-input,
   .link-add,

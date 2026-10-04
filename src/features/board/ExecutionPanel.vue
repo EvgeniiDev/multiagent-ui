@@ -105,6 +105,7 @@ import {
   type SwarmDraft,
 } from '../../lib/execution/ui-model';
 import type { ExecCheck, ExecDocKind, ExecPresetInput, ExecRole, FusionWorkOrder } from '../../lib/execution/api';
+import UiButton from '../../components/ui/UiButton.vue';
 import ManagedRunEvents from './ManagedRunEvents.vue';
 
 const props = defineProps<{ cardId: string }>();
@@ -1147,26 +1148,27 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
 <template>
   <div class="field exec-panel" data-testid="execution-panel">
     <div class="art-head">
-      <span class="field-label">Managed execution</span>
+      <span class="field-label ui-label">Managed execution</span>
       <span
         class="status-token mono"
         :class="offline ? 'tok-blocked' : 'tok-none'"
         data-testid="exec-online"
         :title="offline ? 'the state server is unreachable — every action is disabled until it answers again' : 'connected to the state server'"
       >{{ offline ? 'offline' : 'online' }}</span>
-      <button
+      <UiButton icon
         class="art-refresh"
         data-testid="exec-refresh"
         title="Reload the managed state now"
+        aria-label="Reload managed state"
         :disabled="!!st.cardInflight"
         :aria-busy="!!st.cardInflight"
         @click="exec.refreshCard(props.cardId)"
-      >↻</button>
+      >↻</UiButton>
     </div>
 
     <p v-if="st.commandError" class="art-error" data-testid="exec-command-error">
       {{ st.commandError.error }}
-      <button class="exec-dismiss" title="dismiss" @click="exec.clearCommandError(props.cardId)">×</button>
+      <UiButton variant="ghost" icon class="exec-dismiss" aria-label="Dismiss error" title="dismiss" @click="exec.clearCommandError(props.cardId)">×</UiButton>
     </p>
     <p v-else-if="st.error && st.phase !== 'unmanaged'" class="art-error" data-testid="exec-error">
       {{ st.error }}
@@ -1174,26 +1176,26 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
 
     <!-- Unmanaged card: explicit opt-in only — never auto-enabled. -->
     <template v-if="st.phase === 'unmanaged'">
-      <p class="art-note" data-testid="exec-unmanaged">
+      <p class="art-note ui-note" data-testid="exec-unmanaged">
         This card is not managed yet. Enabling hands its stage, status, flags,
         project and session to the execution engine — they become read-only here.
       </p>
-      <p v-for="r in eligibility.reasons" :key="r" class="art-note exec-warn">{{ r }}</p>
-      <button
+      <p v-for="r in eligibility.reasons" :key="r" class="art-note ui-note exec-warn">{{ r }}</p>
+      <UiButton variant="primary"
         class="btn primary exec-btn"
         data-testid="exec-enable"
         :aria-busy="st.busy === 'enable'"
         :disabled="offline || busy || !eligibility.ok"
         :title="!eligibility.ok ? eligibility.reasons.join('; ') : ''"
         @click="onEnable"
-      >{{ st.busy === 'enable' ? 'Enabling…' : 'Enable managed execution' }}</button>
+      >{{ st.busy === 'enable' ? 'Enabling…' : 'Enable managed execution' }}</UiButton>
     </template>
 
-    <p v-else-if="!view && st.error" class="art-note" data-testid="exec-unavailable">
+    <p v-else-if="!view && st.error" class="art-note ui-note" data-testid="exec-unavailable">
       <span v-if="st.cardInflight" role="status">Retrying managed state…</span>
       <span v-else>Managed state could not be loaded. Use ↻ to retry; this panel also retries automatically.</span>
     </p>
-    <p v-else-if="!view" class="art-note" role="status" data-testid="exec-loading">Loading managed state…</p>
+    <p v-else-if="!view" class="art-note ui-note" role="status" data-testid="exec-loading">Loading managed state…</p>
 
     <template v-else>
       <!-- authoritative snapshot line -->
@@ -1209,7 +1211,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
         <div class="exec-blockhead">
           <span class="exec-blocktitle">Documents</span>
           <div class="exec-doc-tabs" role="tablist">
-            <button
+            <UiButton variant="ghost" size="xs"
               v-for="k in DOC_KINDS"
               :key="k"
               class="tab-btn"
@@ -1217,12 +1219,12 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
               role="tab"
               :aria-selected="docTab === k"
               @click="docTab = k"
-            >{{ docKindLabel(k) }}</button>
+            >{{ docKindLabel(k) }}</UiButton>
           </div>
         </div>
 
         <template v-if="docVersions.length">
-          <select v-model="docSelectedId" class="f-input exec-select" data-testid="doc-version-pick">
+          <select v-model="docSelectedId" class="f-input ui-input exec-select" data-testid="doc-version-pick">
             <option :value="null">current ({{ shortId(docState(view, docTab).current) }})</option>
             <option v-for="v in docVersions" :key="v.versionId" :value="v.versionId">
               {{ shortId(v.versionId) }} · {{ fmtTs(v.createdAt) }} · {{ fmtSha(v.sha256, 8) }}
@@ -1241,25 +1243,25 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
             checks: {{ planCheckHint.checks.length ? `${planCheckHint.checks.length} (${planCheckHint.source.replace(/_/g, ' ')})` : 'none — required for approval' }}
           </p>
           <div class="exec-btnrow">
-            <button class="btn" data-testid="doc-view" :disabled="docViewLoading" @click="onViewDoc">
+            <UiButton class="btn" data-testid="doc-view" :disabled="docViewLoading" @click="onViewDoc">
               {{ docViewLoading ? 'Loading…' : 'View' }}
-            </button>
-            <button class="btn" data-testid="doc-edit" @click="onEditDoc">New version from this</button>
-            <button
+            </UiButton>
+            <UiButton class="btn" data-testid="doc-edit" @click="onEditDoc">New version from this</UiButton>
+            <UiButton variant="primary"
               v-if="docTab !== 'design'"
               class="btn primary"
               data-testid="doc-approve"
               :disabled="offline || busy || !selectedVersion || selectedApproved"
               :title="selectedApproved ? 'this exact version is already approved' : ''"
               @click="onApproveDoc"
-            >Approve {{ docKindLabel(docTab).toLowerCase() }}</button>
+            >Approve {{ docKindLabel(docTab).toLowerCase() }}</UiButton>
           </div>
           <p v-if="docViewFor === selectedVersion?.versionId && docViewError" class="art-error" data-testid="doc-load-error">
             could not load the document: {{ docViewError }}
           </p>
           <pre v-else-if="docViewFor === selectedVersion?.versionId && docViewText !== null" class="exec-docview mono" data-testid="doc-content">{{ docViewText }}</pre>
         </template>
-        <p v-else class="art-note">No {{ docKindLabel(docTab).toLowerCase() }} yet.</p>
+        <p v-else class="art-note ui-note">No {{ docKindLabel(docTab).toLowerCase() }} yet.</p>
 
         <!-- attach editor — while a command is in flight the editor is
              frozen: text typed during the POST can never be silently
@@ -1267,7 +1269,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
         <div v-if="docEditorOpen" class="exec-editor" data-testid="doc-editor">
           <textarea
             v-model="docDraft"
-            class="f-input exec-area mono"
+            class="f-input ui-input exec-area mono"
             rows="8"
             :disabled="busy"
             :placeholder="`${docKindLabel(docTab)} markdown — or leave empty and give an import path below`"
@@ -1277,7 +1279,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
           <div class="exec-importrow">
             <input
               v-model="docImportPath"
-              class="f-input mono"
+              class="f-input ui-input mono"
               :disabled="busy"
               placeholder="or import from project-relative path (e.g. docs/reqs.md)"
               data-testid="doc-import-path"
@@ -1287,32 +1289,32 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
           <!-- plan check editor -->
           <template v-if="docTab === 'plan'">
             <div class="exec-checks" data-testid="plan-checks">
-              <span class="field-label">Check commands (confirmed at approval)</span>
+              <span class="field-label ui-label">Check commands (confirmed at approval)</span>
               <div v-for="(row, i) in planCheckRows ?? []" :key="i" class="check-editrow">
-                <input v-model="row.run" class="f-input mono" placeholder="npm run test" aria-label="check command" :disabled="busy" />
-                <input v-model="row.cwd" class="f-input mono check-cwd" placeholder="cwd" aria-label="check cwd" :disabled="busy" />
-                <input v-model="row.timeoutSec" class="f-input check-tmo" placeholder="sec" aria-label="check timeout" :disabled="busy" />
+                <input v-model="row.run" class="f-input ui-input mono" placeholder="npm run test" aria-label="check command" :disabled="busy" />
+                <input v-model="row.cwd" class="f-input ui-input mono check-cwd" placeholder="cwd" aria-label="check cwd" :disabled="busy" />
+                <input v-model="row.timeoutSec" class="f-input ui-input check-tmo" placeholder="sec" aria-label="check timeout" :disabled="busy" />
                 <label class="check-setup"><input v-model="row.setup" type="checkbox" :disabled="busy" /> setup</label>
-                <button class="link-del" aria-label="remove check" :disabled="busy" @click="planCheckRows!.splice(i, 1)">×</button>
+                <UiButton icon class="link-del" aria-label="remove check" :disabled="busy" @click="planCheckRows!.splice(i, 1)">×</UiButton>
               </div>
-              <button class="link-add" data-testid="add-check" :disabled="busy" @click="addCheckRow">+ Add check</button>
+              <UiButton class="link-add" data-testid="add-check" :disabled="busy" @click="addCheckRow">+ Add check</UiButton>
             </div>
           </template>
 
           <div class="exec-btnrow">
-            <button
+            <UiButton variant="primary"
               class="btn primary"
               data-testid="doc-attach"
               :disabled="offline || busy || (!docDraft.trim() && !docImportPath.trim())"
               @click="onAttachDoc"
-            >{{ st.busy === 'attach_document' ? 'Attaching…' : 'Attach new version' }}</button>
-            <button class="btn" :disabled="busy" @click="docEditorOpen = false">Close</button>
+            >{{ st.busy === 'attach_document' ? 'Attaching…' : 'Attach new version' }}</UiButton>
+            <UiButton class="btn" :disabled="busy" @click="docEditorOpen = false">Close</UiButton>
           </div>
-          <p v-if="busy" class="art-note">command in flight — the editor is frozen until it lands</p>
+          <p v-if="busy" class="art-note ui-note">command in flight — the editor is frozen until it lands</p>
         </div>
-        <button v-else class="link-add" data-testid="doc-new" @click="docEditorOpen = true">
+        <UiButton v-else class="link-add" data-testid="doc-new" @click="docEditorOpen = true">
           + New {{ docKindLabel(docTab).toLowerCase() }} version
-        </button>
+        </UiButton>
       </div>
 
       <!-- composition -->
@@ -1323,49 +1325,49 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
         <p v-if="compositionLine" class="exec-line mono" data-testid="composition-line">
           {{ view.composition!.preset.name }} — {{ compositionLine }}
         </p>
-        <p v-else class="art-note" data-testid="composition-missing">
+        <p v-else class="art-note ui-note" data-testid="composition-missing">
           No execution team saved for this card — pick or create a preset below.
         </p>
 
         <div v-if="exec.presets.length" class="exec-btnrow">
-          <select v-model="presetBindId" class="f-input exec-select" data-testid="preset-pick">
+          <select v-model="presetBindId" class="f-input ui-input exec-select" data-testid="preset-pick">
             <option value="">choose a preset…</option>
             <option v-for="p in exec.presets" :key="p.id" :value="p.id">{{ p.name }}</option>
           </select>
-          <button
+          <UiButton
             class="btn"
             data-testid="preset-apply"
             :disabled="offline || busy || !presetBindId"
             title="Bind this preset's snapshot to the card"
             @click="onBindPreset"
-          >Use for this card</button>
-          <button
+          >Use for this card</UiButton>
+          <UiButton
             class="btn"
             data-testid="preset-edit"
             :disabled="!presetBindId"
             @click="loadPresetIntoEditor(presetBindId)"
-          >Edit</button>
-          <button
+          >Edit</UiButton>
+          <UiButton variant="danger"
             class="btn danger"
             :disabled="!presetBindId || offline || busy"
             @click="onDeletePreset(presetBindId)"
-          >Delete</button>
+          >Delete</UiButton>
         </div>
-        <button
+        <UiButton
           v-if="!presetEditorOpen"
           class="link-add"
           data-testid="preset-new"
           @click="presetDraft = emptyPresetDraft(); presetEditorOpen = true"
-        >+ New preset</button>
+        >+ New preset</UiButton>
 
         <div v-if="presetEditorOpen" class="exec-editor" data-testid="preset-editor">
-          <input v-model="presetDraft.name" class="f-input" placeholder="Preset name" data-testid="preset-name" />
+          <input v-model="presetDraft.name" class="f-input ui-input" placeholder="Preset name" data-testid="preset-name" />
           <div v-for="role in ROLES" :key="role" class="exec-member">
             <span class="exec-role mono">{{ role }}</span>
-            <select v-model="presetDraft.members[role].cli" class="f-input" :aria-label="`${role} cli`">
+            <select v-model="presetDraft.members[role].cli" class="f-input ui-input" :aria-label="`${role} cli`">
               <option v-for="cli in Object.keys(exec.compatibility ?? {})" :key="cli" :value="cli">{{ cli }}</option>
             </select>
-            <select v-model="presetDraft.members[role].model" class="f-input" :aria-label="`${role} model`">
+            <select v-model="presetDraft.members[role].model" class="f-input ui-input" :aria-label="`${role} model`">
               <option value="">model…</option>
               <option
                 v-for="m in exec.compatibility?.[presetDraft.members[role].cli]?.models ?? []"
@@ -1376,7 +1378,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
             <select
               v-if="exec.compatibility?.[presetDraft.members[role].cli]?.effort?.length"
               v-model="presetDraft.members[role].effort"
-              class="f-input"
+              class="f-input ui-input"
               :aria-label="`${role} effort`"
             >
               <option value="">effort…</option>
@@ -1388,24 +1390,24 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
             </select>
             <input
               v-model="presetDraft.members[role].params"
-              class="f-input mono"
+              class="f-input ui-input mono"
               placeholder='params {"key":"value"}'
               :aria-label="`${role} params`"
             />
           </div>
           <div class="exec-limits">
-            <label>attempts/role <input v-model="presetDraft.limits.maxAttemptsPerRole" class="f-input exec-num" /></label>
-            <label>timeout min <input v-model="presetDraft.limits.timeoutMin" class="f-input exec-num" /></label>
-            <label>review rounds <input v-model="presetDraft.limits.maxReviewRounds" class="f-input exec-num" /></label>
+            <label>attempts/role <input v-model="presetDraft.limits.maxAttemptsPerRole" class="f-input ui-input exec-num" /></label>
+            <label>timeout min <input v-model="presetDraft.limits.timeoutMin" class="f-input ui-input exec-num" /></label>
+            <label>review rounds <input v-model="presetDraft.limits.maxReviewRounds" class="f-input ui-input exec-num" /></label>
           </div>
           <div class="exec-btnrow">
-            <button
+            <UiButton variant="primary"
               class="btn primary"
               data-testid="preset-save"
               :disabled="offline || busy"
               @click="onSavePreset"
-            >Save preset + bind to card</button>
-            <button class="btn" @click="presetEditorOpen = false">Close</button>
+            >Save preset + bind to card</UiButton>
+            <UiButton class="btn" @click="presetEditorOpen = false">Close</UiButton>
           </div>
           <p v-if="exec.presetsError" class="art-error">{{ exec.presetsError }}</p>
         </div>
@@ -1426,42 +1428,42 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
         <template v-if="fusionEditorOpen">
           <div class="exec-editor" data-testid="fusion-editor">
             <div class="exec-btnrow">
-              <select v-model="fusionKind" class="f-input" data-testid="fusion-kind" aria-label="result kind">
+              <select v-model="fusionKind" class="f-input ui-input" data-testid="fusion-kind" aria-label="result kind">
                 <option value="document">document — the work order is the result</option>
                 <option value="implementation">implementation — integrate + gates</option>
               </select>
               <label class="check-setup">
                 <input v-model="fusionSearch" type="checkbox" data-testid="fusion-search" /> web search
               </label>
-              <input v-model="fusionBaseRef" class="f-input mono exec-grow" placeholder="base ref (default HEAD)" data-testid="fusion-baseref" />
+              <input v-model="fusionBaseRef" class="f-input ui-input mono exec-grow" placeholder="base ref (default HEAD)" data-testid="fusion-baseref" />
             </div>
 
             <div class="exec-members" data-testid="fusion-panelists">
               <div v-for="(p, i) in fusionPanelists" :key="i" class="exec-member exec-member4">
-                <input v-model="p.label" class="f-input" :aria-label="`panelist ${p.id} label`" :data-testid="`fusion-plabel-${p.id}`" />
-                <select v-model="p.model" class="f-input mono" :aria-label="`panelist ${p.id} model`" :data-testid="`fusion-pmodel-${p.id}`">
+                <input v-model="p.label" class="f-input ui-input" :aria-label="`panelist ${p.id} label`" :data-testid="`fusion-plabel-${p.id}`" />
+                <select v-model="p.model" class="f-input ui-input mono" :aria-label="`panelist ${p.id} model`" :data-testid="`fusion-pmodel-${p.id}`">
                   <option value="">model…</option>
                   <option v-for="m in fusionModels" :key="m" :value="m">{{ m }}</option>
                 </select>
-                <button
+                <UiButton
                   v-if="fusionPanelists.length > 2"
                   class="link-del"
                   :aria-label="`remove panelist ${p.id}`"
                   @click="fusionPanelists.splice(i, 1)"
-                >×</button>
+                >×</UiButton>
                 <span v-else />
               </div>
-              <button class="link-add" data-testid="fusion-add-panelist" @click="addFusionPanelist">+ panelist</button>
+              <UiButton class="link-add" data-testid="fusion-add-panelist" @click="addFusionPanelist">+ panelist</UiButton>
             </div>
 
             <!-- task binding (document runs pin a version; implementation
                  defaults to the approved requirements server-side) -->
             <div class="exec-btnrow" data-testid="fusion-taskrow">
-              <select v-model="fusionTaskKind" class="f-input" data-testid="fusion-task-kind" aria-label="task document kind">
+              <select v-model="fusionTaskKind" class="f-input ui-input" data-testid="fusion-task-kind" aria-label="task document kind">
                 <option value="requirements">task: requirements</option>
                 <option value="design">task: design</option>
               </select>
-              <select v-model="fusionTaskVersionId" class="f-input mono exec-grow" data-testid="fusion-task-version" aria-label="task version">
+              <select v-model="fusionTaskVersionId" class="f-input ui-input mono exec-grow" data-testid="fusion-task-version" aria-label="task version">
                 <option :value="null">current version ({{ shortId(docState(view, fusionTaskKind).current) }})</option>
                 <option v-for="v in fusionTaskVersions" :key="v.versionId" :value="v.versionId">
                   {{ shortId(v.versionId) }} · {{ fmtSha(v.sha256, 8) }}
@@ -1471,7 +1473,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
 
             <div class="exec-member" data-testid="fusion-judge-row">
               <span class="exec-role mono">judge{{ fusionKind === 'implementation' ? ' *' : ' (opt)' }}</span>
-              <select v-model="fusionJudgeModel" class="f-input mono" data-testid="fusion-judge" aria-label="judge model">
+              <select v-model="fusionJudgeModel" class="f-input ui-input mono" data-testid="fusion-judge" aria-label="judge model">
                 <option value="">model…</option>
                 <option v-for="m in fusionModels" :key="m" :value="m">{{ m }}</option>
               </select>
@@ -1480,32 +1482,32 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
             <template v-if="fusionKind === 'implementation'">
               <div class="exec-member" data-testid="fusion-integrator-row">
                 <span class="exec-role mono">integrator *</span>
-                <select v-model="fusionIntegratorModel" class="f-input mono" data-testid="fusion-integrator" aria-label="integrator model">
+                <select v-model="fusionIntegratorModel" class="f-input ui-input mono" data-testid="fusion-integrator" aria-label="integrator model">
                   <option value="">model…</option>
                   <option v-for="m in fusionModels" :key="m" :value="m">{{ m }}</option>
                 </select>
               </div>
               <label class="exec-member">
                 Dependency setup (optional)
-                <input v-model="fusionSetupId" class="f-input mono" data-testid="fusion-setup-id"
+                <input v-model="fusionSetupId" class="f-input ui-input mono" data-testid="fusion-setup-id"
                   placeholder="registered setup ID, e.g. node-deps" aria-label="dependency setup ID" />
               </label>
               <div class="exec-member" data-testid="fusion-reviewer-row">
                 <span class="exec-role mono">reviewer *</span>
-                <select v-model="fusionReviewer.cli" class="f-input" data-testid="fusion-reviewer-cli" aria-label="reviewer cli">
+                <select v-model="fusionReviewer.cli" class="f-input ui-input" data-testid="fusion-reviewer-cli" aria-label="reviewer cli">
                   <option v-for="cli in Object.keys(exec.compatibility ?? {})" :key="cli" :value="cli">{{ cli }}</option>
                 </select>
-                <select v-model="fusionReviewer.model" class="f-input mono" data-testid="fusion-reviewer-model" aria-label="reviewer model">
+                <select v-model="fusionReviewer.model" class="f-input ui-input mono" data-testid="fusion-reviewer-model" aria-label="reviewer model">
                   <option value="">model…</option>
                   <option v-for="m in exec.compatibility?.[fusionReviewer.cli]?.models ?? []" :key="m" :value="m">{{ m }}</option>
                 </select>
               </div>
               <div class="exec-member" data-testid="fusion-checker-row">
                 <span class="exec-role mono">checker *</span>
-                <select v-model="fusionChecker.cli" class="f-input" data-testid="fusion-checker-cli" aria-label="checker cli">
+                <select v-model="fusionChecker.cli" class="f-input ui-input" data-testid="fusion-checker-cli" aria-label="checker cli">
                   <option v-for="cli in Object.keys(exec.compatibility ?? {})" :key="cli" :value="cli">{{ cli }}</option>
                 </select>
-                <select v-model="fusionChecker.model" class="f-input mono" data-testid="fusion-checker-model" aria-label="checker model">
+                <select v-model="fusionChecker.model" class="f-input ui-input mono" data-testid="fusion-checker-model" aria-label="checker model">
                   <option value="">model…</option>
                   <option v-for="m in exec.compatibility?.[fusionChecker.cli]?.models ?? []" :key="m" :value="m">{{ m }}</option>
                 </select>
@@ -1513,31 +1515,31 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
             </template>
 
             <div class="exec-limits">
-              <label>attempts/panelist <input v-model="fusionAttempts" class="f-input exec-num" data-testid="fusion-attempts" /></label>
-              <label>timeout min <input v-model="fusionTimeoutMin" class="f-input exec-num" data-testid="fusion-timeout" /></label>
+              <label>attempts/panelist <input v-model="fusionAttempts" class="f-input ui-input exec-num" data-testid="fusion-attempts" /></label>
+              <label>timeout min <input v-model="fusionTimeoutMin" class="f-input ui-input exec-num" data-testid="fusion-timeout" /></label>
             </div>
 
             <p v-if="fusionProblems.length" class="exec-warn" data-testid="fusion-problems">
               {{ fusionProblems.join(' · ') }}
             </p>
             <div class="exec-btnrow">
-              <button
+              <UiButton variant="primary"
                 class="btn primary"
                 data-testid="fusion-start"
                 :disabled="gated(fusionStartGate).disabled"
                 :title="gated(fusionStartGate).title || 'Start a fusion panel run with this composition'"
                 @click="onStartFusion"
-              >{{ st.busy === 'start' ? 'Starting…' : 'Start fusion run' }}</button>
-              <button class="btn" data-testid="fusion-cancel" @click="fusionEditorOpen = false">Close</button>
+              >{{ st.busy === 'start' ? 'Starting…' : 'Start fusion run' }}</UiButton>
+              <UiButton class="btn" data-testid="fusion-cancel" @click="fusionEditorOpen = false">Close</UiButton>
             </div>
           </div>
         </template>
-        <button
+        <UiButton
           v-else
           class="link-add"
           data-testid="fusion-configure"
           @click="openFusionEditor"
-        >+ New fusion run</button>
+        >+ New fusion run</UiButton>
       </div>
 
       <!-- orchestrator (backend-ui-contract §§3–5): compose a decomposed run.
@@ -1556,74 +1558,74 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
           <div class="exec-editor" data-testid="orch-editor">
             <div class="exec-member" data-testid="orch-decomposer-row">
               <span class="exec-role mono">decomposer *</span>
-              <select v-model="orchDecomposer" class="f-input mono exec-grow" data-testid="orch-decomposer" aria-label="decomposer profile">
+              <select v-model="orchDecomposer" class="f-input ui-input mono exec-grow" data-testid="orch-decomposer" aria-label="decomposer profile">
                 <option value="">profile…</option>
                 <option v-for="m in orchProfiles" :key="m" :value="m">{{ m }}</option>
               </select>
             </div>
             <div class="exec-member" data-testid="orch-verifier-row">
               <span class="exec-role mono">verifier *</span>
-              <select v-model="orchVerifier" class="f-input mono exec-grow" data-testid="orch-verifier" aria-label="verifier profile">
+              <select v-model="orchVerifier" class="f-input ui-input mono exec-grow" data-testid="orch-verifier" aria-label="verifier profile">
                 <option value="">profile…</option>
                 <option v-for="m in orchProfiles" :key="m" :value="m">{{ m }}</option>
               </select>
             </div>
             <div class="exec-member" data-testid="orch-integrator-row">
               <span class="exec-role mono">integrator *</span>
-              <select v-model="orchIntegrator" class="f-input mono exec-grow" data-testid="orch-integrator" aria-label="integrator profile">
+              <select v-model="orchIntegrator" class="f-input ui-input mono exec-grow" data-testid="orch-integrator" aria-label="integrator profile">
                 <option value="">profile…</option>
                 <option v-for="m in orchProfiles" :key="m" :value="m">{{ m }}</option>
               </select>
             </div>
             <div class="exec-members" data-testid="orch-workers">
               <div v-for="(w, i) in orchWorkers" :key="i" class="exec-member exec-member4">
-                <input v-model="w.name" class="f-input mono" :aria-label="`worker ${i} name`" :data-testid="`orch-worker-name-${i}`" placeholder="pool name" />
-                <select v-model="w.profileId" class="f-input mono" :aria-label="`worker ${i} profile`" :data-testid="`orch-worker-profile-${i}`">
+                <input v-model="w.name" class="f-input ui-input mono" :aria-label="`worker ${i} name`" :data-testid="`orch-worker-name-${i}`" placeholder="pool name" />
+                <select v-model="w.profileId" class="f-input ui-input mono" :aria-label="`worker ${i} profile`" :data-testid="`orch-worker-profile-${i}`">
                   <option value="">profile…</option>
                   <option v-for="m in orchProfiles" :key="m" :value="m">{{ m }}</option>
                 </select>
-                <button
+                <UiButton
                   v-if="orchWorkers.length > 1"
                   class="link-del"
                   :aria-label="`remove worker ${i}`"
                   @click="orchWorkers.splice(i, 1)"
-                >×</button>
+                >×</UiButton>
                 <span v-else />
               </div>
-              <button class="link-add" data-testid="orch-add-worker" @click="orchWorkers.push({ name: '', profileId: orchProfiles[0] ?? '' })">+ worker pool</button>
+              <UiButton class="link-add" data-testid="orch-add-worker" @click="orchWorkers.push({ name: '', profileId: orchProfiles[0] ?? '' })">+ worker pool</UiButton>
             </div>
             <div class="exec-btnrow">
-              <input v-model="orchBaseRef" class="f-input mono exec-grow" placeholder="base ref (default HEAD)" data-testid="orch-baseref" />
+              <input v-model="orchBaseRef" class="f-input ui-input mono exec-grow" placeholder="base ref (default HEAD)" data-testid="orch-baseref" />
               <label class="check-setup">
                 <input v-model="orchSpecApproval" type="checkbox" data-testid="orch-spec-approval" /> require spec approval
               </label>
             </div>
             <div class="exec-limits">
-              <label>attempts/task <input v-model="orchAttempts" class="f-input exec-num" data-testid="orch-attempts" /></label>
-              <label>integrator attempts <input v-model="orchIntegratorAttempts" class="f-input exec-num" data-testid="orch-integrator-attempts" /></label>
-              <label>max subtasks <input v-model="orchMaxSubtasks" class="f-input exec-num" data-testid="orch-max-subtasks" /></label>
+              <label>attempts/task <input v-model="orchAttempts" class="f-input ui-input exec-num" data-testid="orch-attempts" /></label>
+              <label>integrator attempts <input v-model="orchIntegratorAttempts" class="f-input ui-input exec-num" data-testid="orch-integrator-attempts" /></label>
+              <label>max subtasks <input v-model="orchMaxSubtasks" class="f-input ui-input exec-num" data-testid="orch-max-subtasks" /></label>
             </div>
             <p v-if="orchProblems.length" class="exec-warn" data-testid="orch-problems">
               {{ orchProblems.join(' · ') }}
             </p>
             <div class="exec-btnrow">
-              <button
+              <UiButton variant="primary"
                 class="btn primary"
                 data-testid="orch-start"
                 :disabled="gated(orchStartGate).disabled"
                 :title="gated(orchStartGate).title || 'Start an orchestrator run with this composition'"
                 @click="onStartOrchestrator"
-              >{{ st.busy === 'start' ? 'Starting…' : 'Start orchestrator run' }}</button>
-              <button class="btn" data-testid="orch-cancel" @click="orchEditorOpen = false">Close</button>
+              >{{ st.busy === 'start' ? 'Starting…' : 'Start orchestrator run' }}</UiButton>
+              <UiButton class="btn" data-testid="orch-cancel" @click="orchEditorOpen = false">Close</UiButton>
             </div>
           </div>
         </template>
-        <button
+        <UiButton
           v-else
           class="link-add"
           data-testid="orch-configure"
           @click="openOrchEditor"
-        >+ New orchestrator run</button>
+        >+ New orchestrator run</UiButton>
       </div>
 
       <!-- swarm (backend-ui-contract §§3,6–7): compose a swarm run.
@@ -1640,55 +1642,55 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
           <div class="exec-editor" data-testid="swarm-editor">
             <div class="exec-members" data-testid="swarm-participants-edit">
               <div v-for="(p, i) in swarmParts" :key="i" class="exec-member exec-member-swarm">
-                <input v-model="p.callsign" class="f-input mono exec-cs" :aria-label="`participant ${i} callsign`" :data-testid="`swarm-callsign-${i}`" placeholder="A" />
-                <input v-model="p.participantId" class="f-input mono" :aria-label="`participant ${i} id`" :data-testid="`swarm-pid-${i}`" placeholder="p1" />
-                <select v-model="p.profileId" class="f-input mono" :aria-label="`participant ${i} profile`" :data-testid="`swarm-profile-${i}`">
+                <input v-model="p.callsign" class="f-input ui-input mono exec-cs" :aria-label="`participant ${i} callsign`" :data-testid="`swarm-callsign-${i}`" placeholder="A" />
+                <input v-model="p.participantId" class="f-input ui-input mono" :aria-label="`participant ${i} id`" :data-testid="`swarm-pid-${i}`" placeholder="p1" />
+                <select v-model="p.profileId" class="f-input ui-input mono" :aria-label="`participant ${i} profile`" :data-testid="`swarm-profile-${i}`">
                   <option value="">profile…</option>
                   <option v-for="m in orchProfiles" :key="m" :value="m">{{ m }}</option>
                 </select>
-                <input v-model="p.ownedPaths" class="f-input mono exec-grow" :aria-label="`participant ${i} owned paths`" :data-testid="`swarm-paths-${i}`" placeholder="src/a/**, docs/**" />
-                <button
+                <input v-model="p.ownedPaths" class="f-input ui-input mono exec-grow" :aria-label="`participant ${i} owned paths`" :data-testid="`swarm-paths-${i}`" placeholder="src/a/**, docs/**" />
+                <UiButton
                   v-if="swarmParts.length > 2"
                   class="link-del"
                   :aria-label="`remove participant ${i}`"
                   @click="swarmParts.splice(i, 1)"
-                >×</button>
+                >×</UiButton>
                 <span v-else />
               </div>
-              <button v-if="swarmParts.length < 3" class="link-add" data-testid="swarm-add-participant" @click="addSwarmParticipant">+ participant</button>
+              <UiButton v-if="swarmParts.length < 3" class="link-add" data-testid="swarm-add-participant" @click="addSwarmParticipant">+ participant</UiButton>
             </div>
             <div class="exec-btnrow">
-              <input v-model="swarmBaseRef" class="f-input mono exec-grow" placeholder="base ref (default HEAD)" data-testid="swarm-baseref" />
+              <input v-model="swarmBaseRef" class="f-input ui-input mono exec-grow" placeholder="base ref (default HEAD)" data-testid="swarm-baseref" />
               <label class="check-setup">
                 <input v-model="swarmVerify" type="checkbox" data-testid="swarm-verify" /> verify required
               </label>
             </div>
             <div class="exec-limits">
-              <label>turns/participant <input v-model="swarmTurns" class="f-input exec-num" data-testid="swarm-turns" /></label>
-              <label>max rounds <input v-model="swarmRounds" class="f-input exec-num" data-testid="swarm-rounds" /></label>
-              <label>max messages <input v-model="swarmMaxMessages" class="f-input exec-num" data-testid="swarm-max-messages" /></label>
+              <label>turns/participant <input v-model="swarmTurns" class="f-input ui-input exec-num" data-testid="swarm-turns" /></label>
+              <label>max rounds <input v-model="swarmRounds" class="f-input ui-input exec-num" data-testid="swarm-rounds" /></label>
+              <label>max messages <input v-model="swarmMaxMessages" class="f-input ui-input exec-num" data-testid="swarm-max-messages" /></label>
             </div>
             <p v-if="swarmProblems.length" class="exec-warn" data-testid="swarm-problems">
               {{ swarmProblems.join(' · ') }}
             </p>
             <div class="exec-btnrow">
-              <button
+              <UiButton variant="primary"
                 class="btn primary"
                 data-testid="swarm-start"
                 :disabled="gated(swarmStartGate).disabled"
                 :title="gated(swarmStartGate).title || 'Start a swarm run with this composition'"
                 @click="onStartSwarm"
-              >{{ st.busy === 'start' ? 'Starting…' : 'Start swarm run' }}</button>
-              <button class="btn" data-testid="swarm-cancel" @click="swarmEditorOpen = false">Close</button>
+              >{{ st.busy === 'start' ? 'Starting…' : 'Start swarm run' }}</UiButton>
+              <UiButton class="btn" data-testid="swarm-cancel" @click="swarmEditorOpen = false">Close</UiButton>
             </div>
           </div>
         </template>
-        <button
+        <UiButton
           v-else
           class="link-add"
           data-testid="swarm-configure"
           @click="openSwarmEditor"
-        >+ New swarm run</button>
+        >+ New swarm run</UiButton>
       </div>
 
       <!-- run control -->
@@ -1701,55 +1703,55 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
         </div>
 
         <div class="exec-btnrow" data-testid="run-actions">
-          <button
+          <UiButton variant="primary"
             class="btn primary"
             data-testid="exec-start"
             :disabled="gated(startGate).disabled"
             :title="gated(startGate).title || 'Start a new run from the approved inputs'"
             @click="onStart"
-          >Start</button>
-          <button
+          >Start</UiButton>
+          <UiButton
             class="btn"
             data-testid="exec-stop"
             :disabled="gated(stopGate).disabled"
             :title="gated(stopGate).title || 'Record a durable stop — live attempts are cancelled'"
             @click="onStop"
-          >Stop</button>
-          <button
+          >Stop</UiButton>
+          <UiButton
             class="btn"
             data-testid="exec-continue"
             :disabled="gated(continueGate).disabled"
             :title="gated(continueGate).title || 'Continue with the approved inputs in a new run'"
             @click="onContinue"
-          >Continue</button>
-          <button
+          >Continue</UiButton>
+          <UiButton
             class="btn"
             data-testid="exec-changereq"
             :disabled="offline || busy"
             title="Revoke the requirements+plan approvals and stop live work"
             @click="onChangeRequirements"
-          >Change requirements</button>
-          <button
+          >Change requirements</UiButton>
+          <UiButton variant="primary"
             class="btn primary"
             data-testid="exec-accept"
             :disabled="gated(acceptGate).disabled"
             :title="gated(acceptGate).title || 'Accept the reviewed workspace result'"
             @click="onAccept"
-          >Accept result</button>
+          >Accept result</UiButton>
         </div>
-        <p v-if="!startGate.ok || !continueGate.ok || !acceptGate.ok" class="art-note" data-testid="gate-hints">
+        <p v-if="!startGate.ok || !continueGate.ok || !acceptGate.ok" class="art-note ui-note" data-testid="gate-hints">
           {{ [startGate, continueGate, acceptGate].map((g) => g.reason).filter(Boolean).join(' · ') }}
         </p>
 
         <div class="exec-startrow">
-          <input v-model="startBaseRef" class="f-input mono" placeholder="base ref (default HEAD)" data-testid="start-baseref" />
+          <input v-model="startBaseRef" class="f-input ui-input mono" placeholder="base ref (default HEAD)" data-testid="start-baseref" />
           <label class="check-setup">
             <input v-model="startFreshWorkspace" type="checkbox" /> fresh workspace
           </label>
         </div>
         <input
           v-model="continueNote"
-          class="f-input"
+          class="f-input ui-input"
           placeholder="note for the continuation run (optional)"
           data-testid="continue-note"
         />
@@ -1786,29 +1788,29 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
               <div v-for="a in fzPending" :key="a.type + ':' + ((a as Record<string,unknown>).participantId ?? (a as Record<string,unknown>).versionId)" class="exec-actionrow">
                 <p class="exec-warn" :data-testid="`fusion-pending-${a.type}`">{{ pendingActionText(a, run) }}</p>
                 <template v-if="a.type === 'participant_decision'">
-                  <button
+                  <UiButton
                     class="btn exec-actionbtn"
                     :data-testid="`fusion-retry-${a.participantId}`"
                     :disabled="gated(retryGateFor(a.participantId)).disabled"
                     :title="gated(retryGateFor(a.participantId)).title || 'Grant this participant one more attempt'"
                     @click="onRetryParticipant(a.participantId)"
-                  >Retry</button>
-                  <button
+                  >Retry</UiButton>
+                  <UiButton variant="danger"
                     class="btn danger exec-actionbtn"
                     :data-testid="`fusion-exclude-${a.participantId}`"
                     :disabled="gated(excludeGateFor(a.participantId)).disabled"
                     :title="gated(excludeGateFor(a.participantId)).title || 'Remove this participant from the panel'"
                     @click="onExcludePanelist(a.participantId)"
-                  >Exclude</button>
+                  >Exclude</UiButton>
                 </template>
-                <button
+                <UiButton variant="primary"
                   v-else-if="a.type === 'work_order_approval'"
                   class="btn primary exec-actionbtn"
                   :data-testid="`fusion-approve-${a.versionId}`"
                   :disabled="gated(woApproveGateFor(a.versionId)).disabled"
                   :title="gated(woApproveGateFor(a.versionId)).title || 'Approve this work-order version'"
                   @click="onApproveWorkOrder(fzWorkOrders.find((w) => w.versionId === a.versionId)!)"
-                >Approve work order</button>
+                >Approve work order</UiButton>
               </div>
             </div>
 
@@ -1840,25 +1842,25 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
                 <span class="exec-pmeta">
                   attempts {{ p.attemptsUsed }}<template v-if="p.extraAttempts"> +{{ p.extraAttempts }}</template>
                 </span>
-                <button
+                <UiButton variant="ghost"
                   v-if="p.answer?.artifactId"
                   class="exec-artlink"
                   :title="`answer ${fmtSha(p.answer.sha256, 8)}${p.answer.reusedFrom ? ' · reused' : ''}`"
                   @click="onOpenArtifact(p.answer!.artifactId)"
-                >answer</button>
+                >answer</UiButton>
                 <template v-if="p.status === 'awaiting_decision'">
-                  <button
+                  <UiButton variant="ghost"
                     class="exec-artlink"
                     :data-testid="`fusion-retry-alt-${p.id}`"
                     :disabled="gated(retryGateFor(p.id)).disabled"
                     @click="onRetryParticipant(p.id)"
-                  >retry</button>
-                  <button
+                  >retry</UiButton>
+                  <UiButton variant="ghost"
                     class="exec-artlink"
                     :data-testid="`fusion-exclude-alt-${p.id}`"
                     :disabled="gated(excludeGateFor(p.id)).disabled"
                     @click="onExcludePanelist(p.id)"
-                  >exclude</button>
+                  >exclude</UiButton>
                 </template>
                 <p v-if="p.lastError?.reason" class="exec-line exec-warn">{{ p.lastError.reason }}</p>
                 <p v-if="p.exclusion" class="exec-line">excluded by {{ p.exclusion.by }}<template v-if="p.exclusion.reason"> — {{ p.exclusion.reason }}</template></p>
@@ -1898,17 +1900,17 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
                   <template v-if="w.approved">approved by {{ w.approved.by }} · {{ fmtTs(w.approved.at) }}</template>
                   <template v-else-if="fzPending.some((a) => a.type === 'work_order_approval' && a.versionId === w.versionId)"><span class="exec-warn">awaits your approval</span></template>
                   <template v-else>not approved</template>
-                  <button class="exec-artlink" :title="`work order ${w.versionId} · ${fmtSha(w.sha256)}`" @click="onOpenArtifact(w.artifactId)">view</button>
+                  <UiButton variant="ghost" class="exec-artlink" :title="`work order ${w.versionId} · ${fmtSha(w.sha256)}`" @click="onOpenArtifact(w.artifactId)">view</UiButton>
                 </p>
                 <p v-if="w.steps?.length" class="exec-line">steps: {{ w.steps.length }} · affected: {{ (w.affectedParts ?? []).join(', ') }}</p>
-                <button
+                <UiButton
                   v-if="fzPending.some((a) => a.type === 'work_order_approval' && a.versionId === w.versionId)"
                   class="btn primary exec-actionbtn"
                   :data-testid="`fusion-approve-wo`"
                   :disabled="gated(woApproveGateFor(w.versionId)).disabled"
                   :title="gated(woApproveGateFor(w.versionId)).title"
                   @click="onApproveWorkOrder(w)"
-                >Approve this work order</button>
+                >Approve this work order</UiButton>
               </div>
             </div>
             <p v-if="fz.workOrder" class="exec-line mono" data-testid="fusion-wo-accepted">
@@ -1929,7 +1931,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
                 integrator report {{ fmtSha(fz.integratorReport.sha256, 8) }}
                 · behavior change: {{ fz.integratorReport.behaviorChange ? 'yes' : 'no' }}
                 <template v-if="fz.integratorReport.mismatches?.length"> · mismatches: {{ fz.integratorReport.mismatches.length }}</template>
-                <button v-if="fz.integratorReport.artifactId" class="exec-artlink" @click="onOpenArtifact(fz.integratorReport!.artifactId)">view</button>
+                <UiButton variant="ghost" v-if="fz.integratorReport.artifactId" class="exec-artlink" @click="onOpenArtifact(fz.integratorReport!.artifactId)">view</UiButton>
               </p>
             </div>
 
@@ -1952,23 +1954,23 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
               <span class="exec-subtitle mono">action required</span>
               <div v-for="(a, i) in ozPending" :key="`${a.type}-${i}`" class="exec-actionrow">
                 <p class="exec-warn" :data-testid="`orch-pending-${a.type}`">{{ orchPendingActionText(a) }}</p>
-                <button
+                <UiButton variant="primary"
                   v-if="a.type === 'spec_approval'"
                   class="btn primary exec-actionbtn"
                   data-testid="orch-approve-spec"
                   :disabled="gated(orchApproveGate).disabled"
                   :title="gated(orchApproveGate).title || 'Approve this spec version'"
                   @click="onOrchApprove"
-                >Approve spec</button>
+                >Approve spec</UiButton>
                 <template v-if="a.type === 'decision'">
-                  <button class="btn primary exec-actionbtn" :data-testid="`orch-decide-approve-${a.proposalId}`"
+                  <UiButton variant="primary" class="btn primary exec-actionbtn" :data-testid="`orch-decide-approve-${a.proposalId}`"
                     :disabled="gated(canOrchDecide(run, a.proposalId)).disabled"
                     :title="gated(canOrchDecide(run, a.proposalId)).title"
-                    @click="onOrchDecide(a.proposalId, 'approve')">Approve input change</button>
-                  <button class="btn danger exec-actionbtn" :data-testid="`orch-decide-reject-${a.proposalId}`"
+                    @click="onOrchDecide(a.proposalId, 'approve')">Approve input change</UiButton>
+                  <UiButton variant="danger" class="btn danger exec-actionbtn" :data-testid="`orch-decide-reject-${a.proposalId}`"
                     :disabled="gated(canOrchDecide(run, a.proposalId)).disabled"
                     :title="gated(canOrchDecide(run, a.proposalId)).title"
-                    @click="onOrchDecide(a.proposalId, 'reject')">Reject input change</button>
+                    @click="onOrchDecide(a.proposalId, 'reject')">Reject input change</UiButton>
                 </template>
               </div>
             </div>
@@ -1978,7 +1980,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
               <span class="exec-subtitle mono">orchestrator · {{ orchPhaseLabel(run?.phase) }}</span>
               <p v-if="ozSpec" class="exec-line mono" data-testid="orch-spec">
                 spec v{{ ozSpec.version ?? '?' }} · {{ ozSpec.status ?? '?' }} · {{ fmtSha(ozSpec.sha256, 12) }}<template v-if="ozSpec.approvedAt"> · approved {{ ozSpec.approvedAt }}</template><template v-if="ozSpec.by"> by {{ ozSpec.by }}</template>
-                <button v-if="ozSpec.artifactId" class="exec-artlink" @click="onOpenArtifact(ozSpec.artifactId!)">view</button>
+                <UiButton variant="ghost" v-if="ozSpec.artifactId" class="exec-artlink" @click="onOpenArtifact(ozSpec.artifactId!)">view</UiButton>
               </p>
               <p v-if="run.acceptance" class="exec-line mono" data-testid="orch-acceptance">
                 acceptance hash {{ fmtSha(run.acceptance.resultSha256, 16) }}… · round {{ run.acceptance.round }}
@@ -2005,8 +2007,8 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
                 <p v-if="t.resultCommit" class="exec-line" :data-testid="`orch-result-${t.taskId}`">result {{ fmtSha(t.resultCommit, 8) }} · hash {{ fmtSha(t.resultSha256, 12) }}</p>
                 <p v-if="t.evidence" class="exec-line">
                   verdict {{ t.evidence.verdict ?? '—' }}
-                  <button v-if="t.evidence.verifyArtifactId" class="exec-artlink" @click="onOpenArtifact(t.evidence.verifyArtifactId!)">verify</button>
-                  <button v-if="t.evidence.findingsArtifactId" class="exec-artlink" @click="onOpenArtifact(t.evidence.findingsArtifactId!)">findings</button>
+                  <UiButton variant="ghost" v-if="t.evidence.verifyArtifactId" class="exec-artlink" @click="onOpenArtifact(t.evidence.verifyArtifactId!)">verify</UiButton>
+                  <UiButton variant="ghost" v-if="t.evidence.findingsArtifactId" class="exec-artlink" @click="onOpenArtifact(t.evidence.findingsArtifactId!)">findings</UiButton>
                 </p>
                 <p v-if="t.waiting" class="exec-line exec-warn" :data-testid="`orch-waiting-${t.taskId}`">
                   waiting: {{ t.waiting.reason ?? '?' }}<template v-if="t.waiting.question"> — {{ t.waiting.question }}</template>
@@ -2020,40 +2022,40 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
                   <div class="exec-actionrow">
                     <input
                       v-model="orchAnswerDrafts[t.taskId]"
-                      class="f-input exec-grow"
+                      class="f-input ui-input exec-grow"
                       :data-testid="`orch-answer-${t.taskId}`"
                       placeholder="answer the question…"
                       :disabled="gated(orchAnswerFor(t.taskId)).disabled"
                       @keydown.enter="onOrchAnswer(t.taskId)"
                     />
-                    <button
+                    <UiButton variant="ghost"
                       class="exec-artlink"
                       :data-testid="`orch-answer-send-${t.taskId}`"
                       :disabled="gated(orchAnswerFor(t.taskId)).disabled"
                       :title="gated(orchAnswerFor(t.taskId)).title"
                       @click="onOrchAnswer(t.taskId)"
-                    >answer</button>
+                    >answer</UiButton>
                   </div>
                 </template>
                 <template v-if="t.status === 'failed' || t.status === 'waiting' || t.status === 'blocked' || t.status === 'returned' || orchGrantFor(t.taskId).ok">
-                  <button
+                  <UiButton variant="ghost"
                     class="exec-artlink"
                     :data-testid="`orch-grant-${t.taskId}`"
                     :disabled="gated(orchGrantFor(t.taskId)).disabled"
                     :title="gated(orchGrantFor(t.taskId)).title || 'Grant extra attempts'"
                     @click="onOrchGrant(t.taskId)"
-                  >grant attempts</button>
+                  >grant attempts</UiButton>
                   <!-- retry only while budget remains — canOrchRetry reads
                        budget.used/budget.limit; an exhausted task shows
                        grant alone (the retry POST would be refused). -->
-                  <button
+                  <UiButton variant="ghost"
                     v-if="orchRetryFor(t.taskId).ok"
                     class="exec-artlink"
                     :data-testid="`orch-retry-${t.taskId}`"
                     :disabled="gated(orchRetryFor(t.taskId)).disabled"
                     :title="gated(orchRetryFor(t.taskId)).title || 'Re-queue the task within its remaining budget'"
                     @click="onOrchRetry(t.taskId)"
-                  >retry</button>
+                  >retry</UiButton>
                 </template>
               </div>
             </div>
@@ -2066,14 +2068,14 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
               <span class="exec-subtitle mono">action required</span>
               <div v-for="(a, i) in swPending" :key="`${a.type}-${i}`" class="exec-actionrow">
                 <p class="exec-warn" :data-testid="`swarm-pending-${a.type}`">{{ swarmPendingActionText(a, run) }}</p>
-                <button
+                <UiButton
                   v-if="a.type === 'extend'"
                   class="btn exec-actionbtn"
                   :data-testid="`swarm-extend-${a.participantId ?? 'all'}`"
                   :disabled="gated(canSwarmExtend(run, a.participantId)).disabled"
                   :title="gated(canSwarmExtend(run, a.participantId)).title || 'Grant extra turns'"
                   @click="onSwarmExtend(a.participantId ?? null)"
-                >Extend</button>
+                >Extend</UiButton>
               </div>
             </div>
 
@@ -2112,45 +2114,45 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
                 <div class="exec-actionrow">
                   <input
                     v-model="swarmInputDrafts[p.participantId]"
-                    class="f-input exec-grow"
+                    class="f-input ui-input exec-grow"
                     :data-testid="`swarm-input-${p.participantId}`"
                     placeholder="steer or answer…"
                     :disabled="gated(canSwarmInput(run, p.participantId)).disabled"
                     @keydown.enter="onSwarmInput(p.participantId)"
                   />
-                  <button
+                  <UiButton variant="ghost"
                     class="exec-artlink"
                     :data-testid="`swarm-send-${p.participantId}`"
                     :disabled="gated(canSwarmInput(run, p.participantId)).disabled"
                     :title="gated(canSwarmInput(run, p.participantId)).title"
                     @click="onSwarmInput(p.participantId)"
-                  >send</button>
-                  <button
+                  >send</UiButton>
+                  <UiButton variant="ghost"
                     v-if="p.status === 'exhausted'"
                     class="exec-artlink"
                     :data-testid="`swarm-extend-btn-${p.participantId}`"
                     :disabled="gated(canSwarmExtend(run, p.participantId)).disabled"
                     :title="gated(canSwarmExtend(run, p.participantId)).title"
                     @click="onSwarmExtend(p.participantId)"
-                  >extend</button>
+                  >extend</UiButton>
                 </div>
               </div>
               <div class="exec-actionrow">
                 <input
                   v-model="swarmBroadcast"
-                  class="f-input exec-grow"
+                  class="f-input ui-input exec-grow"
                   data-testid="swarm-broadcast"
                   placeholder="broadcast to all participants…"
                   :disabled="gated(canSwarmInput(run, 'all')).disabled"
                   @keydown.enter="onSwarmInput('all')"
                 />
-                <button
+                <UiButton variant="ghost"
                   class="exec-artlink"
                   data-testid="swarm-broadcast-send"
                   :disabled="gated(canSwarmInput(run, 'all')).disabled"
                   :title="gated(canSwarmInput(run, 'all')).title"
                   @click="onSwarmInput('all')"
-                >broadcast</button>
+                >broadcast</UiButton>
               </div>
             </div>
 
@@ -2175,24 +2177,24 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
                   <div class="exec-actionrow">
                     <input
                       v-model="swarmDecideNotes[d.id]"
-                      class="f-input exec-grow"
+                      class="f-input ui-input exec-grow"
                       :data-testid="`swarm-decide-note-${d.id}`"
                       placeholder="note (optional)…"
                     />
-                    <button
+                    <UiButton variant="primary"
                       class="btn primary exec-actionbtn"
                       :data-testid="`swarm-decide-approve-${d.id}`"
                       :disabled="gated(canSwarmDecide(run, d.id)).disabled"
                       :title="gated(canSwarmDecide(run, d.id)).title"
                       @click="onSwarmDecide(d.id, 'approve')"
-                    >Approve</button>
-                    <button
+                    >Approve</UiButton>
+                    <UiButton variant="danger"
                       class="btn danger exec-actionbtn"
                       :data-testid="`swarm-decide-reject-${d.id}`"
                       :disabled="gated(canSwarmDecide(run, d.id)).disabled"
                       :title="gated(canSwarmDecide(run, d.id)).title"
                       @click="onSwarmDecide(d.id, 'reject')"
-                    >Reject</button>
+                    >Reject</UiButton>
                   </div>
                 </template>
               </div>
@@ -2227,11 +2229,11 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
               {{ run.result.role }} {{ shortId(run.result.attemptId) }}
               <template v-if="run.result.status"> · {{ run.result.status }}</template>
               <template v-if="run.result.exitCode !== undefined && run.result.exitCode !== null"> · exit {{ run.result.exitCode }}</template>
-              <button
+              <UiButton variant="ghost"
                 v-if="run.result.finalArtifactId"
                 class="exec-artlink"
                 @click="onOpenArtifact(run.result.finalArtifactId!)"
-              >output</button>
+              >output</UiButton>
             </p>
             <p v-if="run.result.summary" class="exec-sumtext" data-testid="run-result-summary">{{ run.result.summary }}</p>
           </div>
@@ -2246,8 +2248,8 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
                 <span class="exec-checkrep" :data-status="reportForIndex(i)!.status">
                   → {{ reportForIndex(i)!.status }}<template v-if="reportForIndex(i)!.exitCode !== undefined && reportForIndex(i)!.exitCode !== null"> · exit {{ reportForIndex(i)!.exitCode }}</template>
                 </span>
-                <button v-if="reportForIndex(i)!.logOutArtifactId" class="exec-artlink" @click="onOpenArtifact(reportForIndex(i)!.logOutArtifactId!)">stdout</button>
-                <button v-if="reportForIndex(i)!.logErrArtifactId" class="exec-artlink" @click="onOpenArtifact(reportForIndex(i)!.logErrArtifactId!)">stderr</button>
+                <UiButton variant="ghost" v-if="reportForIndex(i)!.logOutArtifactId" class="exec-artlink" @click="onOpenArtifact(reportForIndex(i)!.logOutArtifactId!)">stdout</UiButton>
+                <UiButton variant="ghost" v-if="reportForIndex(i)!.logErrArtifactId" class="exec-artlink" @click="onOpenArtifact(reportForIndex(i)!.logErrArtifactId!)">stderr</UiButton>
               </template>
               <span v-else class="exec-checkrep" data-status="missing">→ not recorded</span>
             </div>
@@ -2278,8 +2280,8 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
               <p class="exec-line mono">
                 round {{ rd.round }} · {{ rd.decision }}<template v-if="rd.checksVerdict"> · checks {{ rd.checksVerdict }}</template>
                 <template v-if="rd.resultSha256"> · result {{ fmtSha(rd.resultSha256, 8) }}</template>
-                <button v-if="rd.findingsArtifactId" class="exec-artlink" @click="onOpenArtifact(rd.findingsArtifactId)">findings doc</button>
-                <button v-if="rd.verdictsArtifactId" class="exec-artlink" @click="onOpenArtifact(rd.verdictsArtifactId)">verdicts doc</button>
+                <UiButton variant="ghost" v-if="rd.findingsArtifactId" class="exec-artlink" @click="onOpenArtifact(rd.findingsArtifactId)">findings doc</UiButton>
+                <UiButton variant="ghost" v-if="rd.verdictsArtifactId" class="exec-artlink" @click="onOpenArtifact(rd.verdictsArtifactId)">verdicts doc</UiButton>
               </p>
               <p v-if="rd.reason" class="exec-line exec-warn">{{ rd.reason }}</p>
               <p v-for="id in rd.blocking ?? []" :key="`b-${rd.round}-${id}`" class="exec-line mono exec-blocking">
@@ -2313,7 +2315,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
           </div>
 
           <div v-if="runArtifacts.length" class="exec-artifacts" data-testid="run-artifacts">
-            <button
+            <UiButton
               v-for="a in runArtifacts"
               :key="a.id"
               class="art-row mono"
@@ -2321,14 +2323,14 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
               @click="onOpenArtifact(a.id)"
             >
               <span class="art-name">{{ artifactLabel(a) }}</span>
-            </button>
+            </UiButton>
             <pre v-if="openedArtifact" class="exec-docview mono" data-testid="artifact-content">{{ openedArtifact.content }}</pre>
           </div>
 
           <div class="exec-btnrow">
-            <button class="btn" data-testid="open-in-workflow" :disabled="!run" @click="onOpenInWorkflow">
+            <UiButton class="btn" data-testid="open-in-workflow" :disabled="!run" @click="onOpenInWorkflow">
               Show in Workflow panel
-            </button>
+            </UiButton>
           </div>
 
           <!-- full managed event history — every event the store drained,
@@ -2369,9 +2371,16 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
 
 <style scoped>
 .exec-panel {
+  font-size: 0.75rem;
+  line-height: 1.5;
   border-top: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
   padding-top: 0.625rem;
 }
+.art-head { display: flex; align-items: center; gap: 0.5rem; }
+.art-refresh { margin-left: auto; }
+.status-token { font-size: 0.625rem; padding: 0.0625rem 0.3rem; border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: var(--text-secondary); }
+.tok-blocked { color: var(--bg-danger); border-color: var(--bg-danger); }
+.art-error { margin: 0; font-size: 0.75rem; color: var(--bg-danger); }
 .exec-block {
   margin-top: 0.5rem;
   padding: 0.5rem;
@@ -2397,18 +2406,10 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
   display: flex;
   gap: 0.125rem;
 }
-.exec-doc-tabs .tab-btn {
-  padding: 0 0.375rem;
-  min-height: 22px;
-  font-size: 0.625rem;
-}
 .exec-line {
   font-size: 0.625rem;
   color: var(--text-secondary, #6b6259);
   margin: 0;
-}
-.exec-select {
-  font-size: 0.6875rem;
 }
 .exec-btnrow {
   display: flex;
@@ -2422,25 +2423,13 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
   color: var(--text-accent, #c2532f);
   font-size: 0.6875rem;
 }
-.exec-dismiss {
-  border: none;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font-size: 0.75rem;
-  padding: 0 0.25rem;
-}
 .exec-editor {
   display: flex;
   flex-direction: column;
   gap: 0.375rem;
 }
-.exec-area {
-  font-size: 0.6875rem;
-}
 .exec-importrow .f-input {
   width: 100%;
-  font-size: 0.6875rem;
 }
 .exec-docview {
   max-height: 14rem;
@@ -2583,16 +2572,6 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
 .exec-vline {
   padding-left: 0.5rem;
 }
-.exec-artlink {
-  border: none;
-  background: transparent;
-  color: var(--text-accent, #c2532f);
-  font-family: inherit;
-  font-size: 0.625rem;
-  cursor: pointer;
-  padding: 0 0.25rem;
-  text-decoration: underline;
-}
 .exec-round {
   font-size: 0.625rem;
   color: var(--text-secondary, #6b6259);
@@ -2709,10 +2688,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
   flex-direction: column;
   gap: 0.0625rem;
 }
-.exec-wo .exec-artlink {
-  margin-left: 0.25rem;
-}
-.exec-mode {
+.exec-wo .exec-mode {
   color: var(--text-accent, #c2532f);
   border: 1px solid var(--text-accent, #c2532f);
   border-radius: var(--radius-sm, 4px);

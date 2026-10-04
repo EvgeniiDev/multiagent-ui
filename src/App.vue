@@ -751,86 +751,10 @@ function clearError() {
   </div>
 </template>
 
+<style src="./styles/tokens.css"></style>
+<style src="./styles/controls.css"></style>
+
 <style>
-:root {
-  /* Calm paper palette: warm neutral background, terracotta accent,
-   * dark ink text. Flat colors only — no gradients, no glows. */
-  --bg-primary: #c2532f;
-  --bg-primary-hover: #a8431f;
-  --bg-sidebar: #f6f2ec;
-  --bg-main: #fbf8f3;
-  --bg-hover: #efe9e0;
-  --bg-user: #f3e3d3;
-  --bg-assistant: #f1ece4;
-  --bg-code: #2b2723;
-  --bg-success: #5a7d4f;
-  --bg-danger: #b3402e;
-  --bg-danger-hover: #9c3524;
-  --bg-warning: #f5e9cf;
-  --text-primary: #2b2723;
-  --text-secondary: #6b6259;
-  --text-muted: #786d62;
-  --text-on-accent: #ffffff;
-  --text-accent: #b04a28;
-  --text-code: #e8e0d5;
-  --border-color: #e3dbcf;
-  /* Design tokens: density + faint chrome. Flat colors, thin hairline
-   * borders, no shadows-as-decoration. */
-  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 10px;
-  --sidebar-w: 288px;
-  --border-faint: rgba(43, 39, 35, 0.09);
-  --tint-hover: rgba(43, 39, 35, 0.045);
-  --tint-active: rgba(194, 83, 47, 0.10);
-  --accent-soft: rgba(194, 83, 47, 0.14);
-  /* Scrollbars are painted, not left to the engine: its default is a cool
-   * white that clashes with warm paper. */
-  --scrollbar-thumb: rgba(43, 39, 35, 0.22);
-  --scrollbar-thumb-hover: rgba(43, 39, 35, 0.40);
-  color-scheme: light;
-
-  font-family: var(--font-ui);
-  font-size: 16px;
-  line-height: 1.5;
-  color: var(--text-primary);
-  background-color: var(--bg-main);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg-primary: #e07450;
-    --bg-primary-hover: #ea8a69;
-    --bg-sidebar: #211d1a;
-    --bg-main: #2a2521;
-    --bg-hover: #363029;
-    --bg-user: #3d3128;
-    --bg-assistant: #332d28;
-    /* Danger follows the accent's dark-scheme rule: the fill lightens so the
-     * dark --text-on-accent ink still reads >= 4.5:1 on it (deep #b3402e
-     * measured 2.94:1). As a text/border ink the lighter red also keeps its
-     * contrast on the dark surfaces. */
-    --bg-danger: #d9775f;
-    --bg-danger-hover: #e08a70;
-    --text-primary: #ece5da;
-    --text-secondary: #b0a496;
-    --text-muted: #b3a79b;
-    --text-on-accent: #211d1a;
-    --text-accent: #f0a184;
-    --border-color: #3d362f;
-    --border-faint: rgba(236, 229, 218, 0.13);
-    --tint-hover: rgba(236, 229, 218, 0.06);
-    --tint-active: rgba(224, 116, 80, 0.16);
-    --accent-soft: rgba(224, 116, 80, 0.20);
-    --scrollbar-thumb: rgba(236, 229, 218, 0.24);
-    --scrollbar-thumb-hover: rgba(236, 229, 218, 0.42);
-    color-scheme: dark;
-    background-color: var(--bg-main);
-  }
-}
-
 /* One painted scrollbar for the whole app. `scrollbar-color` is the standard
    property (Chromium 121+, Firefox); the ::-webkit-* rules below are the
    fallback for engines that still ignore it. */

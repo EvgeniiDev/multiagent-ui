@@ -7,6 +7,15 @@ or deploying. Select checks by the affected user flow; documentation-only
 changes require content/link/diff checks. Do not claim production readiness
 without verifying the actual deployed artifacts and affected user flow.
 
+## UI design system
+
+Read and follow [docs/design-system.md](docs/design-system.md) for UI changes.
+Use `src/components/ui/UiButton.vue` for new or modified action buttons and
+shared theme tokens/field primitives. Component appearance must not depend on
+parent scoped CSS. Keep page CSS for layout; extend shared primitives when a
+new variant is needed. Verify actual browser styles, theme, focus, disabled,
+and touch sizing as required by TESTING.md.
+
 ## Runtime: docker compose only
 
 The stack lives in `compose.yaml` (repo root). Control it with

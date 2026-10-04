@@ -1170,6 +1170,23 @@ describe('CardDrawer/ExecutionPanel setup+render (SSR)', () => {
     assert.ok(retry.includes('aria-busy="true"'));
   });
 
+  test('managed panel renders shared buttons without parent CSS', async () => {
+    const { createSSRApp } = await import('vue');
+    const { renderToString } = await import('@vue/server-renderer');
+    const ExecutionPanel = (await import('../src/features/board/ExecutionPanel.vue')).default;
+    const st = useExecutionStore().stateFor('design-card');
+    st.phase = 'ready';
+    st.view = cardView({ cardId: 'design-card', features: { fusion: true, orchestrator: true, swarm: true } });
+    const html = await renderToString(createSSRApp(ExecutionPanel, { cardId: 'design-card' }));
+    const buttons = [...html.matchAll(/<button\b[^>]*>/g)].map(m => m[0]);
+    assert.ok(buttons.length > 5);
+    for (const button of buttons) {
+      assert.match(button, /class="[^"]*ds-button/);
+      assert.match(button, /type="button"/, 'actions must not implicitly submit a containing form');
+    }
+    assert.ok(html.includes('aria-label="Reload managed state"'));
+  });
+
   test('enable button explains the command in flight and exposes busy state', async () => {
     const { createSSRApp } = await import('vue');
     const { renderToString } = await import('@vue/server-renderer');
