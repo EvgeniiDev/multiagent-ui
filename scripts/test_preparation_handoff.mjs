@@ -373,7 +373,7 @@ test('P4-S1 AE1: small task — requirements then plan, no design stage, ready',
   assert.equal(view.package.inputs.plan.checks.length, 1, 'the acp-checks block became the agreed checks');
   assert.deepEqual(
     view.handoffTargets.map((t) => [t.mode, t.implemented]),
-    [['solo', true], ['fusion', true], ['orchestrator', false], ['swarm', false]]);
+    [['solo', true], ['fusion', true], ['orchestrator', true], ['swarm', true]]);
 });
 
 // ============================================================================
@@ -853,7 +853,7 @@ test('P4-S7: handoff offers are durable and gate-checked — implementation neve
   assert.equal(view.ready, true, J(view.blockers));
 
   // Offer the accepted package to every named mode — each is recorded with
-  // the frozen inputs; orchestrator/Swarm record honestly as not implemented.
+  // the frozen inputs; all four native consumers now exist in this build.
   const offered = {};
   for (const mode of ['solo', 'fusion', 'orchestrator', 'swarm']) {
     const h = await ucmd(svc, 'card-a', 'handoff_preparation', { mode });
@@ -869,8 +869,8 @@ test('P4-S7: handoff offers are durable and gate-checked — implementation neve
   }
   assert.equal(offered.solo.implemented, true);
   assert.equal(offered.fusion.implemented, true);
-  assert.equal(offered.orchestrator.implemented, false);
-  assert.equal(offered.swarm.implemented, false);
+  assert.equal(offered.orchestrator.implemented, true);
+  assert.equal(offered.swarm.implemented, true);
 
   // Recording offers minted NO run and NO implementation attempt — the
   // mode is data on the session, not a dispatch.

@@ -101,10 +101,9 @@ const QUESTIONS_CAP = 200;
 const HANDOFFS_CAP = 50;
 // P4 (R11): the modes a prepared package may be OFFERED to. Recording the
 // offer is data — `implemented` marks which modes this build can actually
-// launch, so an orchestrator/Swarm handoff is never an unproven capability
-// claim: it is a package waiting for a consumer that does not exist yet.
+// launch. Deployment feature flags still gate starting any downstream run.
 export const HANDOFF_MODES = new Set(['solo', 'fusion', 'orchestrator', 'swarm']);
-export const HANDOFF_IMPLEMENTED = new Set(['solo', 'fusion']);
+export const HANDOFF_IMPLEMENTED = new Set(['solo', 'fusion', 'orchestrator', 'swarm']);
 
 // ---------------------------------------------------------------------------
 // Gate contract
