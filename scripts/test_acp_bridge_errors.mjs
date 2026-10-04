@@ -64,7 +64,7 @@ const runtimeJs = `export function scenario() {
   const agentName = ref(''), descriptor = ref(null), historyCacheNote = ref(null), session = ref(null);
   const availableModes = ref([]), currentModeId = ref(''), availableModels = ref([]), currentModelId = ref('');
   const messages = ref([]), toolCalls = ref(new Map());
-  let connectionAborted = false, cacheScope, replayMerge = null, acpClient = null;
+  let connectionAborted = false, cacheScope, replayMerge = null, acpClient = null, loadingHistory = false;
   let autoReconnectAttempts = 0, inFlightPrompts = 0;
   let finishLoad, failLoad, started;
   const loadStarted = new Promise(resolve => {started = resolve;});

@@ -124,6 +124,9 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   const toolCalls = ref<Map<string, ToolCallInfo>>(new Map());
   const isConnected = ref(false);
   const isLoading = ref(false);
+  // session/load replays historical frames even when no tail cache exists.
+  // Keep them in the transcript without recording them as new live work.
+  let loadingHistory = false;
   const isConnecting = ref(false);
   // True while a foreground reconnect attempt is in flight. Distinct from
   // `isConnecting` (which is the multi-phase initial spawn/connect path):
@@ -904,7 +907,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
           rawInput: callRawInput,
           rawOutput: callOutput,
         });
-        useActivityStore().recordEntry({
+        if (!loadingHistory) useActivityStore().recordEntry({
           kind: 'tool-call',
           agentName: agentName.value || session.value?.agentName || 'unknown',
           sessionId: notification.sessionId,
@@ -963,7 +966,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       // ---- ledger: everything below feeds Timeline / Events / Dashboard ----
       case 'session_info_update': {
         const info = update as { title?: string | null; updatedAt?: string | null };
-        useActivityStore().recordEntry({
+        if (!loadingHistory) useActivityStore().recordEntry({
           kind: 'sync',
           agentName: agentName.value || session.value?.agentName || 'unknown',
           sessionId: notification.sessionId,
@@ -1351,13 +1354,23 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       // Try to load existing session - may fail with auth_required.
       // The load result carries the session inventory (models / modes) —
       // same shape as session/new — captured for the parser below.
+      const loadHistory = async () => {
+        loadingHistory = true;
+        try {
+          return await acpClient!.loadSession({
+            sessionId: savedSession.sessionId,
+            cwd: savedSession.cwd,
+            mcpServers: [],
+          });
+        } finally {
+          // Failed loads and authentication retries must not suppress later
+          // live activity once the historical stream has finished.
+          loadingHistory = false;
+        }
+      };
       let loadResponse: Awaited<ReturnType<AcpClientBridge['loadSession']>> | undefined;
       try {
-        loadResponse = await acpClient.loadSession({
-          sessionId: savedSession.sessionId,
-          cwd: savedSession.cwd,
-          mcpServers: [],
-        });
+        loadResponse = await loadHistory();
       } catch (sessionError: unknown) {
         // Check if auth is required (error code -32000)
         const errorMessage = sessionError instanceof Error ? sessionError.message : String(sessionError);
@@ -1382,11 +1395,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
           console.log('Authentication successful:', authResponse);
 
           // Retry loading session after auth
-          loadResponse = await acpClient.loadSession({
-            sessionId: savedSession.sessionId,
-            cwd: savedSession.cwd,
-            mcpServers: [],
-          });
+          loadResponse = await loadHistory();
         } else {
           throw sessionError;
         }

@@ -105,15 +105,20 @@ const reviewInfo = computed(() => {
  * run is doing and for how long — all derived from claims.json and the
  * activity ledger, never stored on the card itself. `claimsStore.now`
  * ticks so the state and durations stay live. */
+const runEntries = computed(() => {
+  const claim = claimsStore.claimFor(props.card.id);
+  const sessionId = claim?.sessionId || props.card.session?.sessionId || '';
+  return activityStore.entriesForRun(sessionId, props.card.title);
+});
 const runInfo = computed(() =>
-  runInfoFor(props.card, claimsStore.claimFor(props.card.id), activityStore.entries, claimsStore.now)
+  runInfoFor(props.card, claimsStore.claimFor(props.card.id), runEntries.value, claimsStore.now)
 );
 
 /** Subagents the run delegated to — `delegate` ledger entries keyed to
  * the run's sessionId. No events, no rows. */
 const subagents = computed(() =>
   runInfo.value
-    ? subagentsFor(runInfo.value.sessionId, activityStore.entries, claimsStore.now)
+    ? subagentsFor(runInfo.value.sessionId, runEntries.value, claimsStore.now)
     : []
 );
 

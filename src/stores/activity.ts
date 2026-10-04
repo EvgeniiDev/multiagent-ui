@@ -16,7 +16,7 @@
 //   usageByDay(from, to)           [{ day: 'YYYY-MM-DD', tokens, cost, turns }]
 //   dayRange(days)                 helpers: { from, to } for common windows
 import { defineStore } from 'pinia';
-import { computed, ref } from 'vue';
+import { computed, ref, shallowRef } from 'vue';
 import { loadKvStore, type KVStore } from '../lib/host/storage';
 
 export type ActivityKind =
@@ -134,11 +134,38 @@ function nextId(): string {
 }
 
 export const useActivityStore = defineStore('activity', () => {
-  const entries = ref<ActivityEntry[]>([]);
+  // Ledger rows are immutable facts. Publish snapshots instead of tracking
+  // every field of 5000 rows through deep reactive proxies in every card.
+  const entries = shallowRef<ActivityEntry[]>([]);
   const usage = ref<UsageSample[]>([]);
   let store: KVStore | null = null;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let syncTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Shared index is rebuilt only when the ledger snapshot changes.
+  const runEntriesIndex = computed(() => {
+    const sessions = new Map<string, ActivityEntry[]>();
+    const titles = new Map<string, ActivityEntry[]>();
+    for (const entry of entries.value) {
+      const sessionId = entry.sessionId;
+      if (sessionId) {
+        const bucket = sessions.get(sessionId) ?? [];
+        bucket.push(entry);
+        sessions.set(sessionId, bucket);
+      }
+      if (entry.title) {
+        const bucket = titles.get(entry.title) ?? [];
+        bucket.push(entry);
+        titles.set(entry.title, bucket);
+      }
+    }
+    return { sessions, titles };
+  });
+  function entriesForRun(sessionId: string, title: string): ActivityEntry[] {
+    return (sessionId
+      ? runEntriesIndex.value.sessions.get(sessionId)
+      : runEntriesIndex.value.titles.get(title)) ?? [];
+  }
 
   const recent = (limit = 50): ActivityEntry[] => entries.value.slice(-limit).reverse();
 
@@ -394,10 +421,7 @@ export const useActivityStore = defineStore('activity', () => {
   }
 
   function recordEntry(entry: Omit<ActivityEntry, 'id' | 'at'> & { at?: number }): void {
-    entries.value.push({ id: nextId(), at: entry.at ?? Date.now(), ...entry });
-    if (entries.value.length > MAX_ENTRIES) {
-      entries.value = entries.value.slice(-MAX_ENTRIES);
-    }
+    entries.value = [...entries.value.slice(-(MAX_ENTRIES - 1)), { id: nextId(), at: entry.at ?? Date.now(), ...entry }];
     scheduleSave();
   }
 
@@ -517,6 +541,7 @@ export const useActivityStore = defineStore('activity', () => {
     usage,
     recent,
     entriesInRange,
+    entriesForRun,
     usageInRange,
     deltaRows,
     totalUsage,
