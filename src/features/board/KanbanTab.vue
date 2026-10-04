@@ -117,16 +117,16 @@ function onReorder(cardId: string, delta: -1 | 1) {
 
 <template>
   <div class="kanban-tab">
-    <BoardFilters />
+    <BoardFilters v-if="board.ready" />
 
-    <p v-if="board.isFiltering && !hasVisible" class="filter-empty">
+    <p v-if="board.ready && board.isFiltering && !hasVisible" class="filter-empty">
       No cards match the filter.
       <button class="filter-clear" @click="board.clearFilters()">Clear filter</button>
     </p>
 
     <div class="kanban-area">
       <!-- Phone: column switcher + one stacked column. -->
-      <template v-if="isPhone">
+      <template v-if="board.ready && isPhone">
         <div class="col-switcher" role="tablist" aria-label="Board stages">
           <button
             v-for="col in BOARD_STAGES"
@@ -156,7 +156,7 @@ function onReorder(cardId: string, delta: -1 | 1) {
 
       <!-- Tablet/desktop: all columns side by side, scrolls horizontally
            inside the pane (never a page-level scroll). -->
-      <div v-else class="cols-scroll">
+      <div v-else-if="board.ready" class="cols-scroll">
         <BoardColumn
           v-for="col in BOARD_STAGES"
           :key="col.id"
@@ -173,9 +173,16 @@ function onReorder(cardId: string, delta: -1 | 1) {
         />
       </div>
 
+      <div v-if="!board.ready" class="board-empty" role="status" data-testid="board-loading">
+        <div class="empty-card loading-card">
+          <span class="loading-spinner" aria-hidden="true"></span>
+          <span>Loading cards…</span>
+        </div>
+      </div>
+
       <!-- Empty state: the columns still render underneath (the board's
            shape stays visible); this overlay explains the first move. -->
-      <div v-if="!hasCards" class="board-empty" aria-live="polite">
+      <div v-if="board.ready && !hasCards" class="board-empty" aria-live="polite">
         <div class="empty-card">
           <p class="empty-title">No cards yet</p>
           <p class="empty-text">
@@ -261,6 +268,31 @@ function onReorder(cardId: string, delta: -1 | 1) {
   font-size: 0.875rem;
   font-weight: 600;
   color: var(--text-primary, #2b2723);
+}
+
+.loading-card {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.625rem;
+  color: var(--text-secondary, #6b6259);
+}
+
+.loading-spinner {
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid var(--border-color, #e3dbcf);
+  border-top-color: var(--text-accent, #c2532f);
+  border-radius: 50%;
+  animation: board-loading-spin 0.8s linear infinite;
+}
+
+@keyframes board-loading-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-spinner { animation: none; }
 }
 
 .empty-text {
