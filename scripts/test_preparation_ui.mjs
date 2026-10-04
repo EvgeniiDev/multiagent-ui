@@ -706,6 +706,24 @@ describe('PreparationPanel SSR — discussion, drafts, gates, handoff', () => {
     assert.ok(html.includes('solo, fusion'), 'solo+fusion startable on this deployment');
   });
 
+  test('thread footer distinguishes a working lead from a completed turn awaiting review', async () => {
+    const working = await renderPrepPanel('pc-footer-running', {}, {
+      attempts: [{ attemptId: 'pa-next', kind: 'turn', status: 'running' }],
+      checkpoint: { openQuestions: [], decisions: [], assumptions: [] },
+    });
+    assert.ok(working.includes('Your answer is saved. The lead is preparing the next turn'));
+    assert.ok(!working.includes('data-testid="prep-review-jump"'));
+    const finished = await renderPrepPanel('pc-footer-done', {}, {
+      attempts: [{ attemptId: 'pa-next', kind: 'turn', status: 'completed' }],
+      intent: { proposal: { text: 'Use browser extraction instead of RSS.' } },
+      checkpoint: { openQuestions: [], decisions: [], assumptions: [] },
+    });
+    assert.ok(finished.includes('The lead has finished this turn. Review the clarified idea below'));
+    assert.ok(finished.includes('data-testid="prep-review-jump"'));
+    const footer = finished.match(/data-testid="prep-thread-state"[\s\S]*?<\/div>/)?.[0];
+    assert.ok(footer && !footer.includes('prep-spinner'));
+  });
+
   test('structured no-progress blocker gives a recoverable message, not raw JSON', async () => {
     const html = await renderPrepPanel('pc-blocked', {}, {
       blocker: { code: 'no_progress', detail: '3 consecutive turns', retryable: true },

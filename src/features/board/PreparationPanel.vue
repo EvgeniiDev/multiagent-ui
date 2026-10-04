@@ -123,6 +123,25 @@ watch(() => session.value?.sessionId, (id) => {
 const openQuestionCount = computed(() => questions.value.filter(q => q.status === 'open').length);
 const leadWorking = computed(() => session.value?.status === 'active' && lastAttempt.value?.status === 'running');
 const firstTurn = computed(() => !questions.value.length && lastAttempt.value?.kind === 'kickoff');
+const reviewEl = ref<HTMLElement | null>(null);
+const needsIdeaReview = computed(() => !openQuestionCount.value && !!session.value?.intent.proposal);
+const threadStatus = computed(() => {
+  if (offline.value || st.value.prepError) return 'Connection interrupted. Your discussion is saved; reconnecting…';
+  if (busy.value) return 'Saving your message…';
+  if (leadWorking.value) return firstTurn.value
+    ? 'The lead is reading your card and preparing the first question…'
+    : 'Your answer is saved. The lead is preparing the next turn…';
+  if (openQuestionCount.value) return 'The lead is waiting for your answer.';
+  if (session.value?.ready) return 'Preparation is ready for handoff.';
+  if (needsIdeaReview.value) return 'The lead has finished this turn. Review the clarified idea below.';
+  if (lastAttempt.value?.status === 'failed') return 'The lead could not finish this turn. Send a message to continue.';
+  return 'The lead has finished this turn. Send a message to continue the discussion.';
+});
+async function showIdeaReview() {
+  await nextTick();
+  reviewEl.value?.scrollIntoView({ block: 'center', behavior: 'auto' });
+}
+
 async function showDiscussion() {
   await nextTick();
   discussionEl.value?.scrollIntoView({ block: 'start', behavior: 'auto' });
@@ -471,9 +490,6 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
             <UiButton size="xs" data-testid="prep-discussion-jump" @click="showDiscussion">Answer the lead</UiButton>
           </template>
         </div>
-        <p v-if="session.blocker" class="exec-line exec-warn" data-testid="prep-blocker">
-          {{ leadBlockerMessage }}
-        </p>
         <p v-if="typeof lastAttempt?.progress === 'string' && lastAttempt.progress" class="exec-line" data-testid="prep-progress">
           {{ lastAttempt.progress }}
         </p>
@@ -528,6 +544,14 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
               >Answer</UiButton>
             </div>
           </div>
+          <div class="prep-thread-state" role="status" aria-live="polite" :aria-busy="busy || leadWorking" data-testid="prep-thread-state">
+            <p v-if="session.blocker" class="exec-line exec-warn" data-testid="prep-blocker">{{ leadBlockerMessage }}</p>
+            <template v-else>
+              <span v-if="busy || leadWorking" class="prep-spinner" aria-hidden="true"></span>
+              <span data-testid="prep-thread-status">{{ threadStatus }}</span>
+              <UiButton v-if="needsIdeaReview && !busy && !leadWorking" size="xs" data-testid="prep-review-jump" @click="showIdeaReview">Review idea</UiButton>
+            </template>
+          </div>
           <div class="exec-startrow">
             <input
               v-model="continueDraft"
@@ -559,7 +583,7 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
             </p>
           </div>
 
-        <div v-if="!openQuestionCount && session.intent.proposal" class="exec-detail prep-section ui-surface ui-surface-accent" data-testid="prep-intent-review">
+        <div ref="reviewEl" v-if="!openQuestionCount && session.intent.proposal" class="exec-detail prep-section ui-surface ui-surface-accent" data-testid="prep-intent-review">
           <div class="exec-subtitle">Review the clarified idea</div>
           <p class="exec-sumtext">{{ session.intent.proposal.text }}</p>
           <UiButton v-for="g in gatesAll.filter(g => g.type === 'intent_confirm' && g.status === 'pending')"
@@ -811,6 +835,18 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
   color: var(--text-primary, #2b2723);
   white-space: pre-wrap;
 }
+.prep-thread-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+.prep-thread-state > [data-testid="prep-thread-status"] { flex: 1; min-width: 0; }
+.prep-thread-state + .exec-startrow { border-top: 0; padding-top: 0; }
 .prep-blocker-detail { white-space: pre-wrap; overflow-wrap: anywhere; }
 .prep-section {
   margin-top: 0.375rem;
