@@ -52,7 +52,7 @@ import { createStateService } from '../server/execution/state-service.mjs';
 import { loadAggregate } from '../server/execution/execution-store.mjs';
 import { loadRegistry, buildManifest, verifyManifest } from '../server/execution/preparation/skills/registry.mjs';
 import {
-  createPreparationLead, serviceFromService, prepRunDirs,
+  createPreparationLead, serviceFromService, prepRunDirs, composeLeadPrompt,
 } from '../server/execution/preparation/lead.mjs';
 import { createFakePiTransport, fakeTransportFactory } from './fixtures/fake-pi-rpc.mjs';
 
@@ -61,6 +61,19 @@ const git = (dir, ...args) =>
 const J = (o) => JSON.stringify(o);
 const sha = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test('clarification prompt starts focused grilling from the existing card idea', () => {
+  const prompt = composeLeadPrompt({
+    view: { phase: 'clarify', intent: { raw: 'Reddit adapters: reuse the authenticated browser' } },
+    attempt: { attemptId: 'kickoff', kind: 'kickoff' }, stage: 'intent', binding: null,
+  });
+  assert.match(prompt, /Reddit adapters: reuse the authenticated browser/);
+  assert.match(prompt, /Do not ask the user to repeat or re-enter/);
+  assert.match(prompt, /one focused question/);
+  assert.match(prompt, /Challenge weak assumptions/);
+  assert.match(prompt, /question-and-answer discussion, one question at a time/);
+  assert.match(prompt, /Never start implementation/);
+});
 
 // ---- fixtures ---------------------------------------------------------------
 

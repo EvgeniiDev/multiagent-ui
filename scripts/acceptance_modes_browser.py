@@ -72,7 +72,7 @@ plus backend-ui-contract.md §§1-11, the published planned interface):
 
 Flow per mode (all through the real panel UI; a silently-passing
 failed/stopped run is FORBIDDEN — terminal non-accepted states FAIL):
-  preparation : fill prep-intent -> prep-start (real grill discussion) ->
+  preparation : saved card idea -> prep-start (real grill discussion) ->
                 answer any open questions (zero-question adaptive flows
                 proceed immediately) -> prep-draft-requirements (real lead
                 generates) -> approve exact generated version via panel
@@ -145,7 +145,7 @@ DIAG_PAGES: list = []
 SELECTOR_CONTRACT = {
     "preparation": {
         "panel": "prep-panel",
-        "entry": ["prep-intent", "prep-restart-intent", "prep-meta"],
+        "entry": ["prep-card-source", "prep-restart", "prep-meta"],
         "question_row": "prep-q-<qid> (class prep-q-open while open)",
         "answer_input": "prep-answer-<qid> | prep-answer-select-<qid>",
         "answer_send": "prep-send-<qid>",
@@ -361,7 +361,8 @@ def merge_fixture_live(tag, kinds, fixture_root):
             fail_closed(f"fixture card collision {cid}")
         cards.append({
             "id": cid, "title": f"{cid} acceptance {m}",
-            "description": "production acceptance browser harness",
+            "description": (PREPARATION_IDEA if m == "preparation"
+                            else "production acceptance browser harness"),
             "project": project_name,
             "agent": "", "priority": "normal", "acceptance": "",
             "verification": "", "links": [], "session": None,
@@ -653,6 +654,11 @@ def wait_prep(card_id, predicate, timeout_s=240, poll=2.0):
     return None
 
 
+PREPARATION_IDEA = ("Acceptance clamp feature: " + README_TASK +
+                    ' The generated development plan must include an acp-checks fenced JSON block '
+                    'with {"checks":[{"run":"node --test","timeoutSec":60}]} and require actual tests.')
+
+
 def mode_preparation(pw, args, outdir, card_id, exec_ctx):
     browser = pw.chromium.launch(headless=True,
                                  executable_path=exec_ctx["chrome"],
@@ -670,7 +676,7 @@ def mode_preparation(pw, args, outdir, card_id, exec_ctx):
             shot(page, outdir, "preparation-no-panel")
             return False
         check("prep-panel-mounted-correct-card", True, card_id)
-        fresh = page.locator('[data-testid="prep-intent"]').count() > 0
+        fresh = page.locator('[data-testid="prep-card-source"]').count() > 0
         if not fresh:
             # A resumed session: adopt it only if it is THIS card's session.
             st, pv = prep_view(card_id)
@@ -682,10 +688,6 @@ def mode_preparation(pw, args, outdir, card_id, exec_ctx):
             if not (sid and sid in meta):
                 return False
         else:
-            page.locator('[data-testid="prep-intent"]').fill(
-                "Acceptance clamp feature: " + README_TASK +
-                ' The generated development plan must include an acp-checks fenced JSON block '
-                'with {"checks":[{"run":"node --test","timeoutSec":60}]} and require actual tests.')
             page.locator('[data-testid="prep-bindings-start"] summary').click()
             page.locator('[data-testid="prep-start-bind-intent"]').select_option("grill-me-intent")
             page.locator('[data-testid="prep-start"]').click()
@@ -1150,6 +1152,9 @@ def _offline_self_check():
                                                 "fusion", "orchestrator", "swarm", "runcontrol"))
            and SELECTOR_CONTRACT["fusion"]["start"] == "fusion-start"
            and "exec-start" not in SELECTOR_CONTRACT["fusion"]["start"])
+    _check("offline-preparation-card-source-contract",
+           SELECTOR_CONTRACT["preparation"]["entry"] == ["prep-card-source", "prep-restart", "prep-meta"]
+           and README_TASK in PREPARATION_IDEA and "acp-checks" in PREPARATION_IDEA)
     # 5. Constants sane.
     _check("offline-constants", STATE_URL.endswith(":25900") and MIN_TIMEOUT_S >= 600
            and EXPECTED_STATE_DIR == "/home/hermes/.hermes/acp-ui-state")

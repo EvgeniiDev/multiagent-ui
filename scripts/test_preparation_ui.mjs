@@ -315,6 +315,8 @@ describe('ui-model — preparation gates', () => {
     assert.deepEqual(ui.prepStartPayload('idea', { intent: 'b-1' }),
       { intent: 'idea', bindings: { intent: 'b-1' } });
     assert.deepEqual(ui.prepStartPayload('idea'), { intent: 'idea' });
+    assert.deepEqual(ui.prepStartPayload(undefined), {});
+    assert.deepEqual(ui.prepStartPayload(undefined, { intent: 'grill-me-intent' }), { bindings: { intent: 'grill-me-intent' } });
   });
 
   test('prepBindingsForStage sorts available first and keeps refused rows visible', () => {
@@ -618,10 +620,20 @@ describe('PreparationPanel SSR — discussion, drafts, gates, handoff', () => {
     const st = exec.stateFor(cardId);
     st.phase = 'ready';
     st.view = cardView({ cardId, ...viewOver });
-    st.preparation = prepView({ ...prepOver });
+    st.preparation = prepOver === null ? null : prepView({ ...prepOver });
     const html = await renderToString(createSSRApp(Panel, { cardId }));
     return html;
   }
+
+  test('existing card starts question discussion without a second idea input', async () => {
+    const html = await renderPrepPanel('pc-start', { preparation: null }, null);
+    assert.ok(!html.includes('data-testid="prep-intent"'));
+    assert.ok(html.includes('data-testid="prep-card-source"'));
+    assert.ok(html.includes('Start brainstorming'));
+    const button = html.match(/<button[^>]*data-testid="prep-start"[^>]*>/)?.[0];
+    assert.ok(button && !button.includes(' disabled'));
+    assert.ok(!html.includes('describe the idea first'));
+  });
 
   test('live discussion renders questions, answers, decisions, gates', async () => {
     const html = await renderPrepPanel('pc1', {}, {

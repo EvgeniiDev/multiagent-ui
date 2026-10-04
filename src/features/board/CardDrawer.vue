@@ -501,7 +501,7 @@ onBeforeUnmount(() => {
         </select>
       </label>
 
-      <PreparationPanel :card-id="card.id" />
+      <PreparationPanel :card-id="card.id" @before-start="flushNow" />
 
       <ExecutionPanel
         :card-id="card.id"

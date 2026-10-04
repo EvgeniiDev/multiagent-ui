@@ -387,6 +387,7 @@ export interface ExecPrepView {
   projectPath?: string | null;
   intent: {
     raw: string;
+    source?: 'card' | 'explicit';
     current?: { text: string; sha256?: string; at?: number; seq?: number } | null;
     proposal?: { text: string; [k: string]: unknown } | null;
     restatements: number;

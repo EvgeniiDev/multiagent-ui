@@ -363,7 +363,7 @@ export const useBoardStore = defineStore('board', () => {
   const newCardIds = new Set<string>();
   const deletedCardIds = new Set<string>();
   let mutGen = 0;
-  let managedSaveRunning = false;
+  let managedSavePromise: Promise<void> | null = null;
   let managedSaveAgain = false;
   let managedSyncSeq = 0;
 
@@ -418,20 +418,22 @@ export const useBoardStore = defineStore('board', () => {
    * still equals the current one — an edit that lands mid-PUT is never
    * lost. A protection refusal surfaces `saveError` + authoritative
    * reload; an unreachable server keeps the local mirror and dirty marks. */
-  async function persistManagedBoard(): Promise<void> {
-    if (managedSaveRunning) {
+  function persistManagedBoard(): Promise<void> {
+    if (managedSavePromise) {
       managedSaveAgain = true;
-      return;
+      return managedSavePromise;
     }
-    managedSaveRunning = true;
-    try {
+    const run = (async () => {
       do {
         managedSaveAgain = false;
         await runManagedSaveOnce();
       } while (managedSaveAgain);
-    } finally {
-      managedSaveRunning = false;
-    }
+    })();
+    const tracked = run.finally(() => {
+      if (managedSavePromise === tracked) managedSavePromise = null;
+    });
+    managedSavePromise = tracked;
+    return tracked;
   }
 
   async function runManagedSaveOnce(): Promise<void> {

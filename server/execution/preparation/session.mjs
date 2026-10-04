@@ -896,7 +896,26 @@ async function resolveBindingRef(D, ctx, stage, bindingId, now) {
 }
 
 async function cmdStartPreparation(D, ctx, aggregate, payload, now, cardId) {
-  const intent = text(payload?.intent, D, 'intent');
+  // Read inside the serialized command queue: edits saved after enable are
+  // the idea being discussed, not a stale managed-aggregate snapshot.
+  const fromCard = payload?.intent === undefined || payload?.intent === null;
+  let intent;
+  if (fromCard) {
+    const board = await ctx.getDoc('board.json');
+    const card = (board?.cards || []).find((c) => c && c.id === cardId);
+    if (!card) fail(D, 404, 'card_not_found', `unknown card ${cardId}`);
+    const value = (key) => typeof card[key] === 'string' ? card[key].trim() : '';
+    if (!value('title') && !value('description')) {
+      fail(D, 422, 'card_idea_missing', 'Add an idea to the card title or description before starting preparation');
+    }
+    intent = text([
+      ['Card title', 'title'], ['Idea', 'description'],
+      ['Acceptance criteria', 'acceptance'], ['Verification', 'verification'],
+    ].filter(([, key]) => value(key)).map(([label, key]) => `## ${label}\n${value(key)}`).join('\n\n'), D, 'intent');
+  } else {
+    // Preserve existing API clients that supply an explicit intent.
+    intent = text(payload.intent, D, 'intent');
+  }
   const selection = validateBindingSelection(D, payload?.bindings);
   const existing = sessionOf(aggregate);
   if (existing && existing.status === 'active') {
@@ -965,6 +984,7 @@ async function cmdStartPreparation(D, ctx, aggregate, payload, now, cardId) {
       ? payload.discussionRef.slice(0, 200) : (aggregate.session ?? null),
     intent: {
       raw: intent,
+      source: fromCard ? 'card' : 'explicit',
       current: restatement,
       proposal: null,
       history: [],
@@ -2180,6 +2200,7 @@ export async function preparationView(D, ctx, aggregate) {
     projectPath: aggregate.projectPath ?? null,
     intent: {
       raw: s.intent.raw,
+      source: s.intent.source ?? 'explicit',
       current: s.intent.current,
       proposal: s.intent.proposal ?? null,
       restatements: s.intent.history.length + 1,

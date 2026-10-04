@@ -295,6 +295,19 @@ export function composeLeadPrompt({
   lines.push('');
 
   pushSection(lines, 'Goal (raw intent)', s.intent?.raw);
+  if (stage === 'intent') {
+    pushSection(lines, 'Grilling and brainstorming conversation',
+      'The supplied card already contains the user\'s initial idea. Read it before asking anything. ' +
+      'Do not ask the user to repeat or re-enter what is already written. ' +
+      'Start with one focused question about the most consequential unresolved assumption, ' +
+      'goal, constraint, tradeoff, or alternative. Challenge weak assumptions and explore ' +
+      'useful alternatives in a question-and-answer discussion, one question at a time. ' +
+      'Use each recorded answer to choose the next question; preserve decisions and avoid ' +
+      're-asking answered questions. Do not replace the discussion with a questionnaire ' +
+      'or immediately draft requirements, a plan, or implementation. Once the idea is ' +
+      'sufficiently clarified, present the refined intent for explicit confirmation, then ' +
+      'proceed through the existing document approval stages. Never start implementation.');
+  }
   if (s.intent?.current && s.intent.current.text !== s.intent?.raw) {
     pushSection(lines, 'Current intent restatement', s.intent.current.text);
   }

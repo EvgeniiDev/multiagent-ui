@@ -1147,10 +1147,10 @@ export function canPrepHandoff(view: ExecCardView): GateResult {
 // -- preparation command payloads ----------------------------------------------
 
 export function prepStartPayload(
-  intent: string,
+  intent?: string,
   bindings?: Partial<Record<PrepStage, string | null>>,
 ): Record<string, unknown> {
-  const payload: Record<string, unknown> = { intent };
+  const payload: Record<string, unknown> = intent === undefined ? {} : { intent };
   if (bindings && Object.keys(bindings).length) payload.bindings = bindings;
   return payload;
 }

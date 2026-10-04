@@ -11,6 +11,7 @@
 // authoritative for every gate mirrored here.
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import UiButton from '../../components/ui/UiButton.vue';
+import { useBoardStore } from '../../stores/board';
 import { useExecutionStore } from '../../stores/execution';
 import {
   canChangePrepBinding,
@@ -55,6 +56,8 @@ import type {
 
 const props = defineProps<{ cardId: string }>();
 
+const emit = defineEmits<{ 'before-start': [] }>();
+const board = useBoardStore();
 const exec = useExecutionStore();
 
 // This panel owns exactly one watch on its card — mounted with the drawer,
@@ -62,7 +65,7 @@ const exec = useExecutionStore();
 watch(
   () => props.cardId,
   (id, prev) => {
-    if (prev && prev !== id) exec.unwatchCard(prev);
+    if (prev && prev !== id) { exec.unwatchCard(prev); uiSeq += 1; startError.value = null; }
     if (id) exec.watchCard(id);
   },
 );
@@ -118,6 +121,7 @@ const stillCurrent = (cardId: string, seq: number) => props.cardId === cardId &&
 
 function gated(gate: GateResult): { disabled: boolean; title: string } {
   if (offline.value) return { disabled: true, title: 'state server unreachable — actions are disabled' };
+  if (starting.value) return { disabled: true, title: 'Saving the card before starting discussion…' };
   if (busy.value) return { disabled: true, title: `a ${st.value.busy} command is still in flight` };
   return { disabled: !gate.ok, title: gate.ok ? '' : gate.reason };
 }
@@ -137,7 +141,9 @@ async function send(
 
 // ---- start form -------------------------------------------------------------
 
-const intentDraft = ref('');
+const starting = ref(false);
+const startError = ref<string | null>(null);
+const card = computed(() => board.cards.find(c => c.id === props.cardId));
 // '' = no binding for that stage at start (the lead runs unbound; the
 // server still validates every selection it is given).
 const startBindings = ref<Partial<Record<PrepStage, string>>>({});
@@ -147,21 +153,37 @@ const startGate = computed(() => {
   if (!view.value) return { ok: false, reason: 'loading…' };
   const g = canStartPrep(view.value);
   if (!g.ok) return g;
-  if (!intentDraft.value.trim()) return { ok: false, reason: 'describe the idea first' };
+  if (!card.value?.title?.trim() && !card.value?.description?.trim()) return { ok: false, reason: 'Add the idea to the card title or description first' };
   return g;
 });
 
 async function onStartPrep() {
-  const bindings: Partial<Record<PrepStage, string | null>> = {};
-  for (const stage of PREP_STAGES) {
-    const v = startBindings.value[stage];
-    if (v) bindings[stage] = v;
-  }
-  const ok = await send('start_preparation', prepStartPayload(intentDraft.value, bindings));
-  if (ok) {
-    intentDraft.value = '';
-    startBindings.value = {};
-    startBindingsOpen.value = false;
+  if (starting.value || busy.value || offline.value) return;
+  const cardId = props.cardId;
+  const seq = uiSeq;
+  starting.value = true;
+  startError.value = null;
+  try {
+    emit('before-start');
+    await board.persistManagedBoard();
+    if (!stillCurrent(cardId, seq)) return;
+    if (board.saveError) throw new Error(board.saveError.error);
+    await exec.loadPrepBindings();
+    if (!stillCurrent(cardId, seq)) return;
+    const selected: Partial<Record<PrepStage, string | null>> = {};
+    for (const stage of PREP_STAGES) {
+      const binding = effectiveStartBinding(stage);
+      if (binding) selected[stage] = binding;
+    }
+    const ok = await send('start_preparation', prepStartPayload(undefined, selected));
+    if (ok && stillCurrent(cardId, seq)) {
+      startBindings.value = {};
+      startBindingsOpen.value = false;
+    }
+  } catch (e) {
+    if (stillCurrent(cardId, seq)) startError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    starting.value = false;
   }
 }
 
@@ -274,6 +296,14 @@ const bindingsError = computed(() => exec.prepBindingsError);
 function stageChoices(stage: PrepStage): PrepBindingInfo[] {
   return prepBindingsForStage(bindings.value, stage);
 }
+const recommendedBindings: Partial<Record<PrepStage, string>> = {
+  intent: 'grill-me-intent', requirements: 'ce-brainstorm', plan: 'ce-plan', review: 'ce-doc-review',
+};
+function effectiveStartBinding(stage: PrepStage): string {
+  if (startBindings.value[stage] !== undefined) return startBindings.value[stage] ?? '';
+  const recommended = recommendedBindings[stage];
+  return stageChoices(stage).some(b => b.bindingId === recommended && b.status === 'available') ? recommended! : '';
+}
 const bindPicks = ref<Partial<Record<PrepStage, string>>>({});
 
 function stageProblem(stage: PrepStage): string | null {
@@ -335,35 +365,29 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
 
       <!-- ── no session: the start form ─────────────────────────────────── -->
       <template v-else-if="!session">
-        <p class="exec-line">
-          Turn this card's raw idea into accepted requirements and a plan —
-          one durable discussion with the lead, explicit document approvals,
-          then an explicit handoff. Implementation never auto-starts.
+        <p class="ui-note" data-testid="prep-card-source">
+          We'll use this card's title and description. The lead will challenge assumptions,
+          explore alternatives and ask focused questions, then turn your answers into requirements and a plan.
         </p>
-        <textarea
-          v-model="intentDraft"
-          class="f-input ui-input exec-area"
-          rows="3"
-          data-testid="prep-intent"
-          placeholder="Describe the idea for this card — the lead will interview you."
-        ></textarea>
+        <p v-if="startError" class="exec-line exec-warn" data-testid="prep-start-error">{{ startError }}</p>
         <details
           class="prep-bindings-detail"
           data-testid="prep-bindings-start"
           :open="startBindingsOpen"
           @toggle="startBindingsOpen = ($event.target as HTMLDetailsElement).open"
         >
-          <summary class="exec-line">Skill bindings for this session (optional)</summary>
+          <summary class="exec-line">Advanced: discussion skills</summary>
           <div v-for="stage in PREP_STAGES" :key="`start-${stage}`" class="prep-bindrow">
             <span class="exec-role">{{ prepStageLabel(stage) }}</span>
             <select
-              v-model="startBindings[stage]"
+              :value="effectiveStartBinding(stage)"
+              @change="startBindings[stage] = ($event.target as HTMLSelectElement).value"
               class="f-input ui-input exec-select exec-grow"
               :data-testid="`prep-start-bind-${stage}`"
             >
               <option value="">lead only (no skill)</option>
               <option
-                v-for="b in stageChoices(stage)"
+                v-for="b in stageChoices(stage).filter(b => b.status === 'available')"
                 :key="b.bindingId"
                 :value="b.bindingId"
                 :disabled="b.status !== 'available'"
@@ -382,7 +406,7 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
             :disabled="gated(startGate).disabled"
             :title="gated(startGate).title"
             @click="onStartPrep"
-          >Start preparation</UiButton>
+          >{{ starting ? 'Saving card…' : 'Start brainstorming' }}</UiButton>
         </div>
       </template>
 
@@ -394,13 +418,7 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
           again creates a new session.
         </p>
         <div class="exec-startrow">
-          <input
-            v-model="intentDraft"
-            class="f-input ui-input exec-grow"
-            data-testid="prep-restart-intent"
-            placeholder="intent for the new session…"
-            @keydown.enter="onStartPrep"
-          />
+          <p class="ui-note">A new discussion starts from the current card.</p>
           <UiButton
             class="exec-actionbtn"
             variant="primary"

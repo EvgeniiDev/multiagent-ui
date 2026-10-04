@@ -326,6 +326,37 @@ async function driveToReady(svc, cardId) {
 // Scenario 1 — concurrent/tab-equivalent start: one session, idempotent
 // ============================================================================
 
+test('card-led preparation reads the current saved card, not its enable snapshot', async () => {
+  const { svc, projectDir } = await mkEnv();
+  await seedBase(svc, projectDir, [cardFixture('card-a', { description: 'Old idea' })]);
+  await enable(svc);
+  const board = await readBoard(svc);
+  const card = board.data.cards.find((c) => c.id === 'card-a');
+  Object.assign(card, { title: 'Reddit adapters', description: 'Extract through the logged-in browser',
+    acceptance: 'Reuse the authenticated session', verification: 'Check an existing thread' });
+  assert.equal((await putDoc(svc, 'board.json', board.data, board.rev)).status, 200);
+  const started = await mustStartPrep(svc, 'card-a', {});
+  const prep = (await getPrep(svc, 'card-a')).json.preparation;
+  assert.match(prep.intent.raw, /Reddit adapters/);
+  assert.match(prep.intent.raw, /Extract through the logged-in browser/);
+  assert.match(prep.intent.raw, /Reuse the authenticated session/);
+  assert.match(prep.intent.raw, /Check an existing thread/);
+  assert.doesNotMatch(prep.intent.raw, /Old idea/);
+  assert.equal(prep.intent.source, 'card');
+  assert.equal(prep.attempts[0].kind, 'kickoff');
+  assert.equal((await mustStartPrep(svc, 'card-a', {})).sessionId, started.sessionId);
+});
+
+test('card-led preparation rejects a missing idea without creating a session', async () => {
+  const { svc, projectDir } = await mkEnv();
+  await seedBase(svc, projectDir, [cardFixture('card-a', { title: '', description: '' })]);
+  await enable(svc);
+  const r = await startPrep(svc, 'card-a', {});
+  assert.equal(r.status, 422);
+  assert.equal(r.json.code, 'card_idea_missing');
+  assert.equal((await getPrep(svc, 'card-a')).json.preparation, null);
+});
+
 test('S1: concurrent + repeated start_preparation produce one durable session', async () => {
   const { svc, projectDir } = await mkEnv();
   await seedBase(svc, projectDir);

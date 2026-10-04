@@ -20,7 +20,7 @@ Phases:
              gate; a binding change invalidates dependent gates and re-mints;
              handoff_preparation records a durable OFFER and never starts a
              run; Stop preserves the checkpoint.
-  D gates   — unsupported bindings are visible-but-disabled in the UI and
+  D gates   — unsupported bindings are omitted from start options and
              refused with a reason at the API; offline (transport-failed)
              controls go disabled with the stale-state banner, no
              optimistic success.
@@ -58,8 +58,8 @@ CARD_SMALL = "u7-p5-small"
 CARD_COMPLEX = "u7-p5-complex"
 CARD_LEGACY = "u7-p5-legacy"
 
-# One intent text for the small card — session reuse is keyed on the exact
-# raw string; every phase that (re)starts or joins card-small MUST use it.
+# The initial idea lives in the small card description. Session reuse uses
+# the exact durable raw snapshot returned by the preparation API.
 SMALL_INTENT = ("A 'snooze card' feature for the kanban board: park a card "
                 "until a date; it disappears and resurfaces in its column.")
 
@@ -213,7 +213,7 @@ def gates(view):
     return view.get("gates") or []
 
 
-def seed_card(card_id: str, title: str):
+def seed_card(card_id: str, title: str, description: str = "p5 preparation browser suite"):
     status, doc = H.get_doc("projects.json")
     data = doc.get("data") if status == 200 else {"version": 1,
                                                   "projects": []}
@@ -236,7 +236,7 @@ def seed_card(card_id: str, title: str):
     cards = [c for c in data.get("cards", []) if c.get("id") != card_id]
     cards.append({
         "id": card_id, "title": title,
-        "description": "p5 preparation browser suite", "project": PROJ_LABEL,
+        "description": description, "project": PROJ_LABEL,
         "agent": "", "priority": "normal", "acceptance": "",
         "verification": "", "links": [], "session": None,
         "blocked": False, "blockedReason": "", "cancelled": False,
@@ -381,9 +381,9 @@ def phase_small(pw):
         # the drawer — wait out the loading state before judging.
         fresh = restart = active = False
         for _ in range(24):
-            fresh = page.locator('[data-testid="prep-intent"]').count() > 0
+            fresh = page.locator('[data-testid="prep-card-source"]').count() > 0
             restart = page.locator(
-                '[data-testid="prep-restart-intent"]').count() > 0
+                '[data-testid="prep-restart"]').count() > 0
             active = page.locator('[data-testid="prep-meta"]').count() > 0
             if fresh or restart or active:
                 break
@@ -392,7 +392,7 @@ def phase_small(pw):
               fresh or restart or active)
 
         if fresh:
-            # Binding select lists real registry entries incl. disabled ones.
+            # Advanced selectors list only available real registry bindings.
             page.locator(
                 '[data-testid="prep-bindings-start"] summary').click()
             opts = page.locator(
@@ -403,13 +403,10 @@ def phase_small(pw):
             page.locator(
                 '[data-testid="prep-start-bind-intent"]').select_option(
                 "grill-me-intent")
-            page.locator('[data-testid="prep-intent"]').fill(SMALL_INTENT)
             page.locator('[data-testid="prep-start"]').click()
         elif restart:
             check("A3 restart path (stopped session) — start new session",
                   True)
-            page.locator('[data-testid="prep-restart-intent"]').fill(
-                SMALL_INTENT)
             page.locator('[data-testid="prep-restart"]').click()
         else:
             check("A3 active session resumed — no duplicate start offered",
@@ -523,7 +520,9 @@ def phase_stale():
     # session — a contender may legitimately 409 on revision_conflict (the
     # lead writes between read and post) or preparation_active; a retry on
     # the fresh revision must then join the same session, never fork.
-    intent = SMALL_INTENT
+    st, existing = prep_view(CARD_SMALL)
+    assert st == 200 and existing.get("preparation"), "small discussion must exist"
+    intent = existing["preparation"]["intent"]["raw"]
     with concurrent.futures.ThreadPoolExecutor(2) as ex:
         f1 = ex.submit(send_command, CARD_SMALL, "start_preparation",
                        {"intent": intent})
@@ -835,21 +834,25 @@ def phase_failclosed(pw):
         page = browser.new_page()
         track_page(page)
         open_card_drawer(page, CARD_SMALL)
-        # The stopped-small card's session persists; open a fresh complex-
-        # style card instead — CARD_COMPLEX is stopped, so use the small
-        # card's stopped session for the disabled-option check via the
-        # start form on a NEW card. Simpler: check the option is disabled.
+        # Existing discussions preserve their bindings. Check availability
+        # in the start form on a fresh fixture card.
         seed_card("u7-p5-offline", "U7 P5 offline u7-p5-offline")
         enable_card_api("u7-p5-offline")
         page2 = browser.new_page()
         track_page(page2)
         open_card_drawer(page2, "u7-p5-offline")
         page2.locator('[data-testid="prep-bindings-start"] summary').click()
-        dis = page2.locator(
-            '[data-testid="prep-start-bind-requirements"] option:disabled'
+        options = page2.locator(
+            '[data-testid="prep-start-bind-requirements"] option'
         ).all_inner_texts()
-        check("D3 unsupported options disabled + reasoned in the UI",
-              any("unavailable" in o for o in dis), str(dis)[:160])
+        values = page2.locator(
+            '[data-testid="prep-start-bind-requirements"] option'
+        ).evaluate_all('(options) => options.map(option => option.value)')
+        allowed = {x.get("bindingId") for x in b.get("bindings", [])
+                   if x.get("stage") == "requirements" and x.get("status") == "available"}
+        check("D3 unsupported routes omitted from start options",
+              bool(values) and all(not value or value in allowed for value in values)
+              and not any("unavailable" in option for option in options), str(options)[:160])
 
         # Offline: every execution request fails on a FRESH page load —
         # the exec view never loads, so the honest surface is no prep
@@ -895,7 +898,7 @@ def phase_legacy(pw):
         track_page(page)
         open_card_drawer(page, CARD_LEGACY)
         check("E2 prep panel offers a start form, not a forced flow",
-              page.locator('[data-testid="prep-intent"]').is_visible())
+              page.locator('[data-testid="prep-card-source"]').is_visible())
 
         # When preparation does start, the accepted doc is adopted as the
         # session's presented requirements — no re-interview for it.
@@ -954,7 +957,7 @@ def main() -> int:
     H.verify_isolation()
     H.require_stack()
     # Feature flags ride on the card view — seed one card first, then read.
-    seed_card(CARD_SMALL, "U7 P5 small " + CARD_SMALL)
+    seed_card(CARD_SMALL, "U7 P5 small " + CARD_SMALL, SMALL_INTENT)
     enable_card_api(CARD_SMALL)
     st, cv = card_view(CARD_SMALL)
     prep_on = st == 200 and (cv.get("features") or {}).get("preparation")

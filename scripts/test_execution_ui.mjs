@@ -906,8 +906,12 @@ describe('board store — managed persistence', () => {
     const p = board.persistManagedBoard(); // in-flight PUT #1
     await sleep(0);
     board.updateCard('c1', { description: 'second edit' }); // mid-flight edit
+    let joinedDone = false;
+    const joined = board.persistManagedBoard().then(() => { joinedDone = true; });
+    await sleep(0);
+    assert.equal(joinedDone, false, 'joining save must wait before commands use the saved card');
     gate.res();
-    await p;
+    await Promise.all([p, joined]);
     // the in-flight save shipped title only; the second edit stayed dirty →
     // the follow-up save must carry it
     await board.persistManagedBoard();
