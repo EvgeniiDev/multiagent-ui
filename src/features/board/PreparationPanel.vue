@@ -5,12 +5,14 @@
 // preparation view — one durable discussion, derived readiness, pinned
 // bindings — never from cached board state and never from a model's claim.
 //
-// Commands are deliberate user actions only: one click = one commandId =
-// one POST through execStore.sendCommand (busy-guarded, revision-checked).
+// Commands are deliberate user actions only, sent through the busy-guarded,
+// revision-checked store. Document approval also confirms the exact reviewed
+// artifact's SkillGate; it never authorizes a different version or a launch.
 // Offline, every control is disabled with its reason; the server remains
 // authoritative for every gate mirrored here.
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import UiButton from '../../components/ui/UiButton.vue';
+import PreparationDocumentReview from './PreparationDocumentReview.vue';
 import { useBoardStore } from '../../stores/board';
 import { useExecutionStore } from '../../stores/execution';
 import {
@@ -34,10 +36,8 @@ import {
   prepGatePayload,
   prepHandoffPayload,
   prepOpenQuestionCounts,
-  prepPhaseLabel,
   prepStageLabel,
   prepStartPayload,
-  prepStatusLabel,
   prepStopPayload,
   prepBindPayload,
   PREP_DOWNSTREAM_MODES,
@@ -48,6 +48,7 @@ import {
 } from '../../lib/execution/ui-model';
 import type {
   ExecDocKind,
+  ExecCheck,
   PrepBindingInfo,
   PrepGate,
   PrepQuestion,
@@ -144,6 +145,44 @@ const reviewEl = ref<HTMLElement | null>(null);
 const ideaConfirmed = computed(() => gatesAll.value.some(g => g.type === 'intent_confirm' && g.status === 'confirmed'));
 const needsIdeaReview = computed(() => !openQuestionCount.value && !!session.value?.intent.proposal && !ideaConfirmed.value);
 const missingDraft = computed(() => typeof session.value?.blocker === 'object' && session.value?.blocker?.code === 'draft_document_missing');
+const workflowSteps = ['Discussion', 'Requirements', 'Plan', 'Handoff'];
+function documentAccepted(kind: 'requirements' | 'plan'): boolean {
+  const pointer = session.value?.presented[kind];
+  if (!pointer || prepCompletenessState(session.value, kind) !== 'approved') return false;
+  return gatesAll.value.filter(g => g.stage === kind && g.type === 'artifact_confirm').every(g => g.status === 'confirmed');
+}
+const workflowStep = computed(() => !ideaConfirmed.value ? 0 : !documentAccepted('requirements') ? 1 : !documentAccepted('plan') ? 2 : 3);
+const activeDocumentKind = computed<'requirements' | 'plan' | null>(() => workflowStep.value === 1 ? 'requirements' : workflowStep.value === 2 ? 'plan' : null);
+const approvingDocument = ref(false);
+const documentApprovalError = ref<string | null>(null);
+async function approvePreparedDocument(kind: 'requirements' | 'plan', reviewed: { versionId: string; sha256: string; checks?: ExecCheck[] }) {
+  if (approvingDocument.value || busy.value || offline.value) return;
+  const cardId = props.cardId;
+  const seq = uiSeq;
+  const pointer = session.value?.presented[kind];
+  if (!pointer || pointer.versionId !== reviewed.versionId || pointer.sha256 !== reviewed.sha256) {
+    documentApprovalError.value = 'The document changed. Read the current version before approving.';
+    return;
+  }
+  const gates = gatesAll.value.filter(g => g.stage === kind && g.type === 'artifact_confirm' && g.status !== 'confirmed');
+  approvingDocument.value = true;
+  documentApprovalError.value = null;
+  try {
+    const approved = await send(kind === 'requirements' ? 'approve_requirements' : 'approve_plan', {
+      versionId: reviewed.versionId, sha256: reviewed.sha256,
+      ...(kind === 'plan' ? { checks: reviewed.checks ?? [] } : {}),
+    });
+    if (!approved || !stillCurrent(cardId, seq)) return;
+    for (const gate of gates) {
+      const ok = await send('confirm_gate', { gateId: gate.gateId, expectedSubject: {
+        kind: 'document', docKind: kind, versionId: reviewed.versionId, sha256: reviewed.sha256,
+      } });
+      if (!ok || !stillCurrent(cardId, seq)) return;
+    }
+  } catch (e) {
+    if (stillCurrent(cardId, seq)) documentApprovalError.value = e instanceof Error ? e.message : String(e);
+  } finally { approvingDocument.value = false; }
+}
 const nextDraftKind = computed<ExecDocKind | null>(() => {
   if (missingDraft.value && !draftWorkKind.value) {
     const kind = lastAttempt.value?.docKind;
@@ -151,7 +190,7 @@ const nextDraftKind = computed<ExecDocKind | null>(() => {
   }
   if (!ideaConfirmed.value || openQuestionCount.value || leadWorking.value || session.value?.blocker) return null;
   if (!session.value?.presented.requirements) return 'requirements';
-  if (prepCompletenessState(session.value, 'requirements') === 'approved' && !session.value?.presented.plan) return 'plan';
+  if (documentAccepted('requirements') && !session.value?.presented.plan) return 'plan';
   return null;
 });
 const preparationNextStep = computed(() => {
@@ -160,7 +199,7 @@ const preparationNextStep = computed(() => {
   if (session.value?.ready) return 'Requirements and plan are accepted. You can now explicitly hand off to development.';
   if (nextDraftKind.value === 'requirements') return 'Discussion complete. Your idea is confirmed. Next: create requirements from the recorded answers, then review and approve them.';
   if (nextDraftKind.value === 'plan') return 'Requirements are approved. Next: create the development plan, then review and approve it.';
-  return 'Review the generated document in the card’s Documents section and approve its current version. Preparation is complete only after requirements and plan are accepted.';
+  return workflowStep.value === 1 ? 'Read the requirements below. Approve them to move to the development plan, or send corrections to the lead.' : 'Read the plan and its verification commands below. Approve it to finish preparation.';
 });
 const threadStatus = computed(() => {
   if (offline.value || st.value.prepError) return 'Connection interrupted. Your discussion is saved; reconnecting…';
@@ -442,8 +481,13 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
           v-if="session"
           class="exec-line mono"
           data-testid="prep-status"
-        >{{ prepStatusLabel(session.status) }} · {{ prepPhaseLabel(session.phase) }}<template v-if="session.ready"> · ready</template></span>
+        >Step {{ workflowStep + 1 }} of 4 · {{ workflowSteps[workflowStep] }}<template v-if="session.ready"> · ready</template></span>
       </div>
+      <ol class="prep-stepper" aria-label="Preparation progress" data-testid="prep-stepper">
+        <li v-for="(step, index) in workflowSteps" :key="step" :class="{ current: index === workflowStep, complete: index < workflowStep }" :aria-current="index === workflowStep ? 'step' : undefined">
+          <span class="prep-step-number">{{ index < workflowStep ? '✓' : index + 1 }}</span><span>{{ step }}</span>
+        </li>
+      </ol>
       <p v-if="st.prepError" class="exec-line exec-warn" data-testid="prep-stale">
         last known state — the preparation view failed to refresh: {{ st.prepError }}
       </p>
@@ -539,14 +583,73 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
           {{ lastAttempt.progress }}
         </p>
 
+        <div v-if="draftWorkKind || (ideaConfirmed && !openQuestionCount && !leadWorking)" class="exec-detail prep-section ui-surface ui-surface-accent" data-testid="prep-next-step">
+          <div class="exec-subtitle">Next step</div>
+          <p class="ui-note" role="status" :aria-busy="!!pendingDraftKind || (!!activeDraft && !openQuestionCount)">{{ draftWorkKind ? draftWorkLabel : preparationNextStep }}</p>
+          <UiButton v-if="draftWorkKind" variant="primary" disabled data-testid="prep-draft-working">{{ pendingDraftKind ? 'Submitting…' : openQuestionCount ? 'Waiting for your answer' : 'Creating document…' }}</UiButton>
+          <UiButton v-else-if="nextDraftKind" variant="primary" data-testid="prep-next-draft"
+            :disabled="!!draftWorkKind || gated(draftGate).disabled" :title="gated(draftGate).title"
+            @click="onRequestDraft(nextDraftKind)">{{ missingDraft ? 'Retry generation' : nextDraftKind === 'requirements' ? 'Create requirements' : 'Create development plan' }}</UiButton>
+          <p class="ui-note">Implementation starts only after an explicit handoff and launch.</p>
+        </div>
+        <div ref="reviewEl" v-if="needsIdeaReview" class="exec-detail prep-section ui-surface ui-surface-accent" data-testid="prep-intent-review">
+          <div class="exec-subtitle">Review the clarified idea</div>
+          <p class="exec-sumtext">{{ session.intent.proposal?.text }}</p>
+          <UiButton v-for="g in gatesAll.filter(g => g.type === 'intent_confirm' && g.status === 'pending')"
+            :key="g.gateId" :disabled="gated(canConfirmGate(view!, g)).disabled"
+            @click="onConfirmGate(g)">Confirm idea</UiButton>
+        </div>
+        <div v-if="activeDocumentKind && session.presented[activeDocumentKind]" data-testid="prep-document-stage">
+          <PreparationDocumentReview :card-id="cardId" :kind="activeDocumentKind"
+            :version-id="session.presented[activeDocumentKind]!.versionId"
+            :approved="documentAccepted(activeDocumentKind)"
+            :disabled="offline || busy || approvingDocument || !!draftWorkKind"
+            @approve="approvePreparedDocument(activeDocumentKind!, $event)" />
+          <p v-if="approvingDocument" class="ui-note" role="status">Saving your approval…</p>
+          <p v-if="documentApprovalError" class="ui-note exec-warn" role="alert">{{ documentApprovalError }}</p>
+        </div>
+        <!-- handoff — records the offer; implementation start stays a
+             separate action in the run section below -->
+        <div v-if="session.ready" class="exec-detail" data-testid="prep-handoff">
+          <div class="exec-subtitle">Handoff</div>
+          <div class="exec-actionrow">
+            <select v-model="handoffMode" class="f-input ui-input exec-select" data-testid="prep-handoff-mode">
+              <option
+                v-for="t in handoffTargets"
+                :key="t.mode"
+                :value="t.mode"
+              >{{ t.mode }}{{ t.implemented ? '' : ' (not implemented)' }}</option>
+            </select>
+            <UiButton
+              class="exec-actionbtn"
+              data-testid="prep-handoff-btn"
+              :disabled="gated(handoffGate).disabled"
+              :title="gated(handoffGate).title"
+              @click="onHandoff"
+            >Record handoff offer</UiButton>
+          </div>
+          <p class="exec-line mono" data-testid="prep-modes-available">
+            startable on this deployment: {{ availableModes.join(', ') || '—' }}
+          </p>
+          <div v-for="h in session.handoffs" :key="h.handoffId" class="exec-line" :data-testid="`prep-handoff-${h.handoffId}`">
+            → {{ h.mode }} @ {{ fmtTs(h.at) }}{{ h.stale ? ' — stale (inputs changed)' : '' }}{{ h.implemented === false ? ' — mode not implemented' : '' }}
+          </div>
+          <p v-if="!handoffModeStartGate.ok" class="exec-line exec-warn" data-testid="prep-handoff-start-note">
+            {{ handoffModeStartGate.reason }}
+          </p>
+        </div>
+
+
         <!-- one durable discussion -->
+        <details class="prep-conversation" :open="workflowStep === 0 || openQuestionCount > 0" data-testid="prep-conversation">
+          <summary class="ui-label">{{ workflowStep === 0 ? 'Discuss the idea' : 'Ask the lead or request changes' }}</summary>
         <div ref="discussionEl" class="prep-discussion prep-section ui-surface" data-testid="prep-discussion">
           <div class="exec-subtitle">Discussion</div>
           <div v-if="!questions.length && !leadWorking" class="exec-line" data-testid="prep-no-questions">
             No questions recorded yet. Check the lead status above.
           </div>
           <div
-            v-for="q in questions"
+            v-for="q in questions.filter(q => q.status === 'open')"
             :key="q.questionId"
             class="prep-q"
             :class="{ 'prep-q-open': q.status === 'open' }"
@@ -589,6 +692,13 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
               >Answer</UiButton>
             </div>
           </div>
+          <details v-if="questions.some(q => q.status !== 'open')" class="prep-history" data-testid="prep-history">
+            <summary class="exec-line">Earlier discussion ({{ questions.filter(q => q.status !== 'open').length }})</summary>
+            <div v-for="q in questions.filter(q => q.status !== 'open')" :key="q.questionId" class="prep-q" :data-testid="`prep-q-${q.questionId}`">
+              <p class="exec-sumtext">{{ q.text }}</p>
+              <p class="exec-line prep-answer" :data-testid="`prep-a-${q.questionId}`">{{ q.answer || q.status }}</p>
+            </div>
+          </details>
           <div class="prep-thread-state" role="status" aria-live="polite" :aria-busy="busy || leadWorking || !!pendingDraftKind" data-testid="prep-thread-state">
             <p v-if="session.blocker" class="exec-line exec-warn" data-testid="prep-blocker">{{ leadBlockerMessage }}</p>
             <template v-else>
@@ -615,6 +725,9 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
           </div>
         </div>
 
+        </details>
+        <details v-if="session.checkpoint.decisions.length || session.checkpoint.assumptions.length" class="prep-agreements" data-testid="prep-agreements">
+          <summary class="ui-label">Agreed decisions and assumptions</summary>
           <div v-if="session.checkpoint.decisions.length" class="exec-detail prep-section ui-surface" data-testid="prep-decisions">
             <div class="exec-subtitle">Decisions</div>
             <p v-for="(d, i) in session.checkpoint.decisions" :key="`d-${i}`" class="exec-line">
@@ -628,61 +741,7 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
             </p>
           </div>
 
-        <div v-if="draftWorkKind || (ideaConfirmed && !openQuestionCount && !leadWorking)" class="exec-detail prep-section ui-surface ui-surface-accent" data-testid="prep-next-step">
-          <div class="exec-subtitle">Next step</div>
-          <p class="ui-note" role="status" :aria-busy="!!pendingDraftKind || (!!activeDraft && !openQuestionCount)">{{ draftWorkKind ? draftWorkLabel : preparationNextStep }}</p>
-          <UiButton v-if="draftWorkKind" variant="primary" disabled data-testid="prep-draft-working">{{ pendingDraftKind ? 'Submitting…' : openQuestionCount ? 'Waiting for your answer' : 'Creating document…' }}</UiButton>
-          <UiButton v-else-if="nextDraftKind" variant="primary" data-testid="prep-next-draft"
-            :disabled="!!draftWorkKind || gated(draftGate).disabled" :title="gated(draftGate).title"
-            @click="onRequestDraft(nextDraftKind)">{{ missingDraft ? 'Retry generation' : nextDraftKind === 'requirements' ? 'Create requirements' : 'Create development plan' }}</UiButton>
-          <p class="ui-note">Implementation starts only after an explicit handoff and launch.</p>
-        </div>
-        <div ref="reviewEl" v-if="needsIdeaReview" class="exec-detail prep-section ui-surface ui-surface-accent" data-testid="prep-intent-review">
-          <div class="exec-subtitle">Review the clarified idea</div>
-          <p class="exec-sumtext">{{ session.intent.proposal?.text }}</p>
-          <UiButton v-for="g in gatesAll.filter(g => g.type === 'intent_confirm' && g.status === 'pending')"
-            :key="g.gateId" :disabled="gated(canConfirmGate(view!, g)).disabled"
-            @click="onConfirmGate(g)">Confirm idea</UiButton>
-        </div>
-        <div v-if="DOC_KINDS.some(k => !!session?.presented[k])" class="exec-detail prep-section ui-surface" data-testid="prep-document-review">
-          <div class="exec-subtitle">Documents for review</div>
-          <p v-for="k in DOC_KINDS.filter(k => !!session?.presented[k])" :key="k" class="exec-line">
-            {{ docKindLabel(k) }} · {{ presentedLine(k) }}
-          </p>
-          <UiButton v-for="g in gatesAll.filter(g => g.type !== 'intent_confirm' && g.status === 'pending' && !!g.subject)"
-            :key="g.gateId" :disabled="gated(canConfirmGate(view!, g)).disabled"
-            @click="onConfirmGate(g)">{{ prepGateLabel(g) }}</UiButton>
-        </div>
-        <!-- handoff — records the offer; implementation start stays a
-             separate action in the run section below -->
-        <div v-if="session.ready" class="exec-detail" data-testid="prep-handoff">
-          <div class="exec-subtitle">Handoff</div>
-          <div class="exec-actionrow">
-            <select v-model="handoffMode" class="f-input ui-input exec-select" data-testid="prep-handoff-mode">
-              <option
-                v-for="t in handoffTargets"
-                :key="t.mode"
-                :value="t.mode"
-              >{{ t.mode }}{{ t.implemented ? '' : ' (not implemented)' }}</option>
-            </select>
-            <UiButton
-              class="exec-actionbtn"
-              data-testid="prep-handoff-btn"
-              :disabled="gated(handoffGate).disabled"
-              :title="gated(handoffGate).title"
-              @click="onHandoff"
-            >Record handoff offer</UiButton>
-          </div>
-          <p class="exec-line mono" data-testid="prep-modes-available">
-            startable on this deployment: {{ availableModes.join(', ') || '—' }}
-          </p>
-          <div v-for="h in session.handoffs" :key="h.handoffId" class="exec-line" :data-testid="`prep-handoff-${h.handoffId}`">
-            → {{ h.mode }} @ {{ fmtTs(h.at) }}{{ h.stale ? ' — stale (inputs changed)' : '' }}{{ h.implemented === false ? ' — mode not implemented' : '' }}
-          </div>
-          <p v-if="!handoffModeStartGate.ok" class="exec-line exec-warn" data-testid="prep-handoff-start-note">
-            {{ handoffModeStartGate.reason }}
-          </p>
-        </div>
+        </details>
 
         <details class="prep-bindings-detail" data-testid="prep-diagnostics">
           <summary class="exec-line">Diagnostics</summary>
@@ -799,6 +858,13 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
 </template>
 
 <style scoped>
+.prep-stepper { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.25rem; padding: 0; margin: 0.5rem 0; list-style: none; }
+.prep-stepper li { display: flex; flex-direction: column; align-items: center; gap: 0.25rem; color: var(--text-muted); font-size: 0.625rem; padding: 0.375rem 0.125rem; border-bottom: 2px solid var(--border-faint); }
+.prep-stepper li.current { color: var(--text-accent); border-bottom-color: var(--text-accent); font-weight: 600; }
+.prep-stepper li.complete { color: var(--text-primary); }
+.prep-step-number { border: 1px solid var(--border-color); border-radius: 50%; width: 1.375rem; height: 1.375rem; display: grid; place-items: center; }
+.prep-conversation, .prep-agreements { margin-top: 0.5rem; }
+.prep-conversation > summary, .prep-agreements > summary, .prep-history > summary { cursor: pointer; padding: 0.375rem 0; }
 .prep-panel {
   border-top: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
   padding-top: 0.625rem;

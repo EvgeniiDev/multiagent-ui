@@ -2,6 +2,7 @@
 import UiButton from '../../components/ui/UiButton.vue';
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { useBoardStore, type BoardCard } from '../../stores/board';
+import { useExecutionStore } from '../../stores/execution';
 import { useSessionStore } from '../../stores/session';
 import { useConfigStore } from '../../stores/config';
 import { useProjectsStore } from '../../stores/projects';
@@ -48,6 +49,8 @@ const card = computed(() => board.cards.find((c) => c.id === props.cardId) ?? nu
 /** Server-owned lifecycle: the managed card's stage/status/flags/project/
  * session come from the execution engine, not the draft. */
 const isManaged = computed(() => card.value?.execution?.managed === true);
+const executionStore = useExecutionStore();
+const preparingIdea = computed(() => executionStore.stateFor(props.cardId).preparation?.status === 'active');
 const managedReason =
   'managed by the execution engine — controlled in the Managed execution section below';
 
@@ -503,10 +506,13 @@ onBeforeUnmount(() => {
 
       <PreparationPanel :card-id="card.id" @before-start="flushNow" />
 
-      <ExecutionPanel
-        :card-id="card.id"
-        @open-workflow="(t) => emit('open-workflow', t)"
-      />
+      <details class="drawer-development" :open="!preparingIdea" data-testid="drawer-development">
+        <summary class="ui-label">Development controls</summary>
+        <ExecutionPanel
+          :card-id="card.id"
+          @open-workflow="(t) => emit('open-workflow', t)"
+        />
+      </details>
 
       <div
         v-if="reviewState && (reviewState.findings.length || reviewState.round !== null || reviewState.error)"
@@ -667,6 +673,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.drawer-development > summary { cursor: pointer; padding: 0.5rem 0; }
 .card-drawer {
   position: absolute;
   top: 0;

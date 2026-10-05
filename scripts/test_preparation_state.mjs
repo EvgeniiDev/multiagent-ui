@@ -1059,6 +1059,63 @@ test('S8: unsupported/candidate/unknown bindings and gate violations fail closed
   assert.ok(byCode('requirements_unapproved').length === 1, 'new version revoked the approval');
 });
 
+test('S8: exact gate subjects refuse races without mutating confirmations; legacy callers still work', async () => {
+  const { svc, projectDir } = await mkEnv();
+  await seedBase(svc, projectDir);
+  await enable(svc);
+  await mustStartPrep(svc, 'card-a', {
+    intent: 'original idea',
+    bindings: { intent: 'test-grill', requirements: 'test-brainstorm' },
+  });
+  let view = await prepView(svc, 'card-a');
+  const intentGate = view.gates.find((g) => g.type === 'intent_confirm');
+  const oldIntent = { kind: 'intent_restatement', sha256: view.intent.current.sha256 };
+  const updated = await ucmd(svc, 'card-a', 'continue_discussion', {
+    intent: { restate: 'revised idea' },
+  });
+  assert.equal(updated.status, 200, J(updated.json));
+  async function expectRefused(gateId, expectedSubject) {
+    const before = await loadAggregate(svc.stateDir, 'card-a');
+    const r = await ucmd(svc, 'card-a', 'confirm_gate', { gateId, expectedSubject });
+    assert.equal(r.status, 409, J(r.json));
+    assert.equal(r.json.code, 'gate_subject_changed');
+    const after = await loadAggregate(svc.stateDir, 'card-a');
+    assert.deepEqual(after.preparation, before.preparation,
+      'rejected exact-subject confirmation must leave the entire session unchanged');
+    assert.equal(after.controlRevision, before.controlRevision);
+  }
+  await expectRefused(intentGate.gateId, oldIntent);
+  view = await prepView(svc, 'card-a');
+  const exactIntent = { sha256: view.intent.current.sha256, kind: 'intent_restatement' };
+  const intentOk = await ucmd(svc, 'card-a', 'confirm_gate', {
+    gateId: intentGate.gateId, expectedSubject: exactIntent,
+  });
+  assert.equal(intentOk.status, 200, J(intentOk.json));
+  assert.deepEqual(intentOk.json.result.subject, exactIntent, 'key order is irrelevant');
+
+  const reqGate = view.gates.find((g) => g.stage === 'requirements');
+  const oldDoc = await attachDoc(svc, 'card-a', 'requirements', '# Original requirements\n');
+  const oldSubject = { kind: 'document', docKind: 'requirements',
+    versionId: oldDoc.versionId, sha256: oldDoc.sha256 };
+  const newDoc = await attachDoc(svc, 'card-a', 'requirements', '# New requirements\n');
+  await expectRefused(reqGate.gateId, oldSubject);
+  const subject = { kind: 'document', docKind: 'requirements',
+    versionId: newDoc.versionId, sha256: newDoc.sha256 };
+  for (const mismatch of [null, {}, { ...subject, kind: 'intent_restatement' },
+    { ...subject, docKind: 'plan' }, { ...subject, sha256: oldDoc.sha256 },
+    { ...subject, versionId: oldDoc.versionId }, { ...subject, extra: true }]) {
+    await expectRefused(reqGate.gateId, mismatch);
+  }
+  const exact = await ucmd(svc, 'card-a', 'confirm_gate', {
+    gateId: reqGate.gateId, expectedSubject: subject,
+  });
+  assert.equal(exact.status, 200, J(exact.json));
+  assert.deepEqual(exact.json.result.subject, subject);
+  await expectRefused(reqGate.gateId, oldSubject);
+  const legacy = await confirmGate(svc, 'card-a', reqGate.gateId);
+  assert.equal(legacy.alreadyConfirmed, true);
+});
+
 test('S8b: registry repin → stale digest; drifted resources fail at the start gate', async () => {
   const { svc, projectDir, root, registryPath } = await mkEnv();
   await seedBase(svc, projectDir);

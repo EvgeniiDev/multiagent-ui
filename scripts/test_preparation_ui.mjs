@@ -724,6 +724,28 @@ describe('PreparationPanel SSR — discussion, drafts, gates, handoff', () => {
     assert.ok(!waiting.includes('data-testid="prep-next-draft"'));
   });
 
+  test('wizard advances only after the current document and its gate are approved', async () => {
+    const req = { versionId: 'dv_req1', sha256: SHA };
+    const intentGate = { gateId: 'gi', type: 'intent_confirm', status: 'confirmed' };
+    const pending = await renderPrepPanel('pc-wizard-pending', {}, {
+      gates: [intentGate, { gateId: 'gr', type: 'artifact_confirm', stage: 'requirements', status: 'pending' }],
+      presented: { requirements: req, plan: null, design: null },
+      completeness: { requirements: 'approved', plan: 'absent' },
+      checkpoint: { openQuestions: [], decisions: [], assumptions: [] },
+    });
+    assert.ok(pending.includes('Step 2 of 4 · Requirements'));
+    assert.ok(!pending.includes('Create development plan'));
+    const approved = await renderPrepPanel('pc-wizard-approved', {}, {
+      gates: [intentGate, { gateId: 'gr', type: 'artifact_confirm', stage: 'requirements', status: 'confirmed' }],
+      presented: { requirements: req, plan: null, design: null },
+      completeness: { requirements: 'approved', plan: 'absent' },
+      checkpoint: { openQuestions: [], decisions: [], assumptions: [] },
+    });
+    assert.ok(approved.includes('Step 3 of 4 · Plan'));
+    assert.ok(approved.includes('Create development plan'));
+    assert.ok(approved.includes('data-testid="prep-history"') === false);
+  });
+
   test('confirmed idea shows requirements as the next action and stops asking for review', async () => {
     const html = await renderPrepPanel('pc-next-requirements', {}, {
       gates: [{ gateId: 'gi', type: 'intent_confirm', status: 'confirmed' }],

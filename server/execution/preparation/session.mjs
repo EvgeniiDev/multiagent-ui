@@ -1448,6 +1448,21 @@ async function cmdConfirmGate(D, ctx, aggregate, payload, now) {
       { gateId, bindingId: gate.bindingId });
   }
   const subject = gateSubjectFor(D, session, gate); // binds what is presented NOW
+  // A combined document approval + SkillGate confirmation must not approve a
+  // replacement presented between its two commands. Legacy callers may omit
+  // the pin; callers supplying it bind exactly the subject they reviewed.
+  if (payload && Object.hasOwn(payload, 'expectedSubject')) {
+    const expected = payload.expectedSubject;
+    const keys = Object.keys(subject);
+    const matches = expected !== null && typeof expected === 'object'
+      && !Array.isArray(expected) && Object.keys(expected).length === keys.length
+      && keys.every((key) => Object.hasOwn(expected, key) && expected[key] === subject[key]);
+    if (!matches) {
+      fail(D, 409, 'gate_subject_changed',
+        'the presented subject changed — review the current idea or document before confirming',
+        { gateId, subject });
+    }
+  }
   const alreadyConfirmed = gate.status === 'confirmed'
     && JSON.stringify(gate.subject) === JSON.stringify(subject);
   gate.subject = subject;
