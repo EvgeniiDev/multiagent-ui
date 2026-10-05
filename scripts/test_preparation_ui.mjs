@@ -706,6 +706,18 @@ describe('PreparationPanel SSR — discussion, drafts, gates, handoff', () => {
     assert.ok(html.includes('solo, fusion'), 'solo+fusion startable on this deployment');
   });
 
+  test('confirmed idea shows requirements as the next action and stops asking for review', async () => {
+    const html = await renderPrepPanel('pc-next-requirements', {}, {
+      gates: [{ gateId: 'gi', type: 'intent_confirm', status: 'confirmed' }],
+      intent: { proposal: { text: 'Extract Reddit data from the browser.' } },
+      checkpoint: { openQuestions: [], decisions: [], assumptions: [] },
+    });
+    assert.ok(html.includes('Create requirements'));
+    assert.ok(html.includes('Your idea is confirmed'));
+    assert.ok(!html.includes('data-testid="prep-review-jump"'));
+    assert.ok(!html.includes('data-testid="prep-intent-review"'));
+  });
+
   test('thread footer distinguishes a working lead from a completed turn awaiting review', async () => {
     const working = await renderPrepPanel('pc-footer-running', {}, {
       attempts: [{ attemptId: 'pa-next', kind: 'turn', status: 'running' }],
@@ -718,7 +730,7 @@ describe('PreparationPanel SSR — discussion, drafts, gates, handoff', () => {
       intent: { proposal: { text: 'Use browser extraction instead of RSS.' } },
       checkpoint: { openQuestions: [], decisions: [], assumptions: [] },
     });
-    assert.ok(finished.includes('The lead has finished this turn. Review the clarified idea below'));
+    assert.ok(finished.includes('Discussion complete. Confirm the clarified idea below to proceed to requirements'));
     assert.ok(finished.includes('data-testid="prep-review-jump"'));
     const footer = finished.match(/data-testid="prep-thread-state"[\s\S]*?<\/div>/)?.[0];
     assert.ok(footer && !footer.includes('prep-spinner'));

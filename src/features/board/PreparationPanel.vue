@@ -124,7 +124,21 @@ const openQuestionCount = computed(() => questions.value.filter(q => q.status ==
 const leadWorking = computed(() => session.value?.status === 'active' && lastAttempt.value?.status === 'running');
 const firstTurn = computed(() => !questions.value.length && lastAttempt.value?.kind === 'kickoff');
 const reviewEl = ref<HTMLElement | null>(null);
-const needsIdeaReview = computed(() => !openQuestionCount.value && !!session.value?.intent.proposal);
+const ideaConfirmed = computed(() => gatesAll.value.some(g => g.type === 'intent_confirm' && g.status === 'confirmed'));
+const needsIdeaReview = computed(() => !openQuestionCount.value && !!session.value?.intent.proposal && !ideaConfirmed.value);
+const nextDraftKind = computed<ExecDocKind | null>(() => {
+  if (!ideaConfirmed.value || openQuestionCount.value || leadWorking.value || session.value?.blocker) return null;
+  if (!session.value?.presented.requirements) return 'requirements';
+  if (prepCompletenessState(session.value, 'requirements') === 'approved' && !session.value?.presented.plan) return 'plan';
+  return null;
+});
+const preparationNextStep = computed(() => {
+  if (!ideaConfirmed.value || openQuestionCount.value) return '';
+  if (session.value?.ready) return 'Requirements and plan are accepted. You can now explicitly hand off to development.';
+  if (nextDraftKind.value === 'requirements') return 'Discussion complete. Your idea is confirmed. Next: create requirements from the recorded answers, then review and approve them.';
+  if (nextDraftKind.value === 'plan') return 'Requirements are approved. Next: create the development plan, then review and approve it.';
+  return 'Review the generated document in the card’s Documents section and approve its current version. Preparation is complete only after requirements and plan are accepted.';
+});
 const threadStatus = computed(() => {
   if (offline.value || st.value.prepError) return 'Connection interrupted. Your discussion is saved; reconnecting…';
   if (busy.value) return 'Saving your message…';
@@ -133,7 +147,8 @@ const threadStatus = computed(() => {
     : 'Your answer is saved. The lead is preparing the next turn…';
   if (openQuestionCount.value) return 'The lead is waiting for your answer.';
   if (session.value?.ready) return 'Preparation is ready for handoff.';
-  if (needsIdeaReview.value) return 'The lead has finished this turn. Review the clarified idea below.';
+  if (needsIdeaReview.value) return 'Discussion complete. Confirm the clarified idea below to proceed to requirements.';
+  if (ideaConfirmed.value) return preparationNextStep.value;
   if (lastAttempt.value?.status === 'failed') return 'The lead could not finish this turn. Send a message to continue.';
   return 'The lead has finished this turn. Send a message to continue the discussion.';
 });
@@ -583,9 +598,17 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
             </p>
           </div>
 
-        <div ref="reviewEl" v-if="!openQuestionCount && session.intent.proposal" class="exec-detail prep-section ui-surface ui-surface-accent" data-testid="prep-intent-review">
+        <div v-if="ideaConfirmed && !openQuestionCount && !leadWorking" class="exec-detail prep-section ui-surface ui-surface-accent" data-testid="prep-next-step">
+          <div class="exec-subtitle">Next step</div>
+          <p class="ui-note">{{ preparationNextStep }}</p>
+          <UiButton v-if="nextDraftKind" variant="primary" data-testid="prep-next-draft"
+            :disabled="gated(draftGate).disabled" :title="gated(draftGate).title"
+            @click="onRequestDraft(nextDraftKind)">{{ nextDraftKind === 'requirements' ? 'Create requirements' : 'Create development plan' }}</UiButton>
+          <p class="ui-note">Implementation starts only after an explicit handoff and launch.</p>
+        </div>
+        <div ref="reviewEl" v-if="needsIdeaReview" class="exec-detail prep-section ui-surface ui-surface-accent" data-testid="prep-intent-review">
           <div class="exec-subtitle">Review the clarified idea</div>
-          <p class="exec-sumtext">{{ session.intent.proposal.text }}</p>
+          <p class="exec-sumtext">{{ session.intent.proposal?.text }}</p>
           <UiButton v-for="g in gatesAll.filter(g => g.type === 'intent_confirm' && g.status === 'pending')"
             :key="g.gateId" :disabled="gated(canConfirmGate(view!, g)).disabled"
             @click="onConfirmGate(g)">Confirm idea</UiButton>
