@@ -706,6 +706,24 @@ describe('PreparationPanel SSR — discussion, drafts, gates, handoff', () => {
     assert.ok(html.includes('solo, fusion'), 'solo+fusion startable on this deployment');
   });
 
+  test('draft generation replaces the create action and distinguishes waiting from working', async () => {
+    const gates = [{ gateId: 'gi', type: 'intent_confirm', status: 'confirmed' }];
+    const creating = await renderPrepPanel('pc-draft-active', {}, {
+      gates, attempts: [{ attemptId: 'pd', kind: 'draft', docKind: 'requirements', status: 'running' }],
+      checkpoint: { openQuestions: [], decisions: [], assumptions: [] },
+    });
+    assert.ok(creating.includes('Creating requirements'));
+    assert.ok(creating.includes('no need to click again'));
+    assert.ok(creating.includes('data-testid="prep-draft-working"'));
+    assert.ok(!creating.includes('data-testid="prep-next-draft"'));
+    const waiting = await renderPrepPanel('pc-draft-wait', {}, {
+      gates, attempts: [{ attemptId: 'pd', kind: 'draft', docKind: 'requirements', status: 'running' }],
+    });
+    assert.ok(waiting.includes('The lead is waiting for your answer above'));
+    assert.ok(waiting.includes('Waiting for your answer'));
+    assert.ok(!waiting.includes('data-testid="prep-next-draft"'));
+  });
+
   test('confirmed idea shows requirements as the next action and stops asking for review', async () => {
     const html = await renderPrepPanel('pc-next-requirements', {}, {
       gates: [{ gateId: 'gi', type: 'intent_confirm', status: 'confirmed' }],

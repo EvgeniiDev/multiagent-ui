@@ -39,6 +39,7 @@
 
 import { promises as fs, existsSync } from 'node:fs';
 import path from 'node:path';
+import { isTerminalRoutingMenu } from './routing-menu.mjs';
 import { randomUUID } from 'node:crypto';
 import { RuntimeError } from '../common.mjs';
 import {
@@ -325,7 +326,15 @@ export function composeLeadPrompt({
   ].join('; ');
   pushSection(lines, 'Stage', stageLine);
   if (attempt.docKind) {
-    pushSection(lines, 'Requested draft', `The user asked for a ${attempt.docKind} document.`);
+    pushSection(lines, 'Requested draft', `The user asked for a ${attempt.docKind} document. ` +
+      ((s.gates ?? []).some((g) => g.type === 'intent_confirm' && g.status === 'confirmed')
+        ? 'The clarified idea is already explicitly accepted; this request authorizes drafting this document. '
+        : 'This explicit drafting request authorizes writing a reviewable document from the current idea; it does not approve the document. ') +
+      'Do not re-propose the same idea or request another scope confirmation. ' +
+      'Write the requested artifact now using the recorded decisions. Ask only if a NEW material ambiguity prevents drafting. ' +
+      'After writing it, end the turn so the host can present it for explicit approval. ' +
+      "Do not show the skill's final next-step/routing menu or offer shipping or implementation; " +
+      'the preparation panel owns document approval and the later explicit handoff.');
   }
   if (attempt.input) {
     pushSection(lines, 'User instruction for this turn', attempt.input);
@@ -690,6 +699,7 @@ export function createPreparationLead({
         }
         case 'extension_ui_request': {
           const r = await uiRequest(st, ctx, f);
+          if (r.artifact) return { kind: 'artifact_ready', artifact: r.artifact };
           if (r.park) return { kind: 'awaiting_user', questionId: r.questionId };
           if (r.superseded) return { kind: 'superseded', reason: r.reason };
           break;
@@ -738,6 +748,17 @@ export function createPreparationLead({
       ? frame.options.slice(0, 24).map((o) =>
         typeof o === 'string' ? o : String(o?.label ?? o?.value ?? '')).filter(Boolean)
       : undefined;
+    // A real document followed by the external skill's terminal routing menu
+    // is this stage's output, not a new interview or authority to launch work.
+    const contract = st.binding?.result;
+    const attempt = ctx.view.attempts?.find((a) => a.attemptId === st.attemptId);
+    if (attempt?.kind === 'draft' && contract?.mode === 'workspace_artifact'
+        && contract.importAs !== 'none' && isTerminalRoutingMenu(text, method, options)
+        && !(ctx.view.checkpoint?.openQuestions ?? []).some((q) => q.status === 'open'
+          && q.attemptId === st.attemptId && !isTerminalRoutingMenu(q.text, q.dialog?.method, q.dialog?.options))) {
+      const art = await findContractArtifact(st.dirs?.workspace, contract.artifacts, null, attempt.createdAt);
+      if (art) return { park: false, artifact: art };
+    }
     const res = await internal(ctx.cardId, 'prep_question', {
       attemptId: st.attemptId,
       question: {
@@ -779,7 +800,7 @@ export function createPreparationLead({
     return map;
   }
 
-  async function findContractArtifact(workspace, globs, baseline = null) {
+  async function findContractArtifact(workspace, globs, baseline = null, notBefore = null) {
     if (!workspace || !Array.isArray(globs) || !globs.length) return null;
     const files = await listFilesRec(workspace).catch(() => []);
     const matches = [];
@@ -792,6 +813,7 @@ export function createPreparationLead({
       const p = path.join(workspace, rel);
       const stt = await fs.stat(p).catch(() => null);
       if (!stt?.isFile()) continue;
+      if (notBefore != null && stt.mtimeMs < notBefore) continue;
       if (baseline && baseline.has(rel) && !(stt.mtimeMs > baseline.get(rel))) continue;
       if (!best || stt.mtimeMs > best.mtimeMs) best = { path: p, rel, mtimeMs: stt.mtimeMs };
     }
@@ -870,6 +892,14 @@ export function createPreparationLead({
     }
     st.mintedThisTurn.clear();
 
+    const attempt = ctx.view.attempts?.find((a) => a.attemptId === attemptId);
+    if (attempt?.kind === 'draft' && !result.document && !result.blocker
+        && !(result.questions ?? []).length && !st.pending.size) {
+      result = { blocker: { code: 'draft_document_missing', retryable: true,
+        detail: `The lead finished without the requested ${attempt.docKind} document. ` +
+          (result.note?.includes('dropped document claim') ? 'There was no declared artifact to import. ' : '') +
+          'Retry drafting; the requested document is not ready for review.' } };
+    }
     const outcome = result.blocker ? 'blocked' : 'completed';
     return deliverResult(cardId, attemptId, { outcome, result });
   }
@@ -1009,6 +1039,26 @@ export function createPreparationLead({
           return { status: 'blocked', reason: r.applied === false ? r.reason : e.code, attemptId: running.attemptId };
         }
 
+        const terminalQuestions = (view.checkpoint?.openQuestions ?? []).filter((q) =>
+          q.status === 'open' && q.attemptId === running.attemptId
+          && isTerminalRoutingMenu(q.text, q.dialog?.method, q.dialog?.options));
+        if (running.kind === 'draft' && planned.binding?.result?.mode === 'workspace_artifact'
+            && terminalQuestions.length
+            && !(view.checkpoint?.openQuestions ?? []).some((q) => q.status === 'open'
+              && q.attemptId === running.attemptId && !terminalQuestions.includes(q))) {
+          const art = await findContractArtifact(planned.dirs.workspace,
+            planned.binding.result.artifacts, null, running.createdAt);
+          if (art) {
+            await deliverResult(cardId, running.attemptId, {
+              outcome: 'completed', closeRoutingQuestionIds: terminalQuestions.map((q) => q.questionId),
+              result: { document: { kind: planned.binding.result.docKind, text: art.text },
+                note: `[imported artifact ${art.rel}; terminal routing owned by the host]` },
+            });
+            await teardown(st);
+            continue;
+          }
+        }
+
         // Reuse the live process only while it is bound to THIS attempt's
         // plan — a different binding is a new CLI session under the SAME
         // discussion identity, never a new interview.
@@ -1137,6 +1187,16 @@ export function createPreparationLead({
   async function settleOutcome(st, out, ctx) {
     const { cardId, view } = ctx;
     switch (out.kind) {
+      case 'artifact_ready': {
+        const r = await deliverResult(cardId, st.attemptId, {
+          outcome: 'completed', result: {
+            document: { kind: st.binding.result.docKind, text: out.artifact.text },
+            note: `[imported artifact ${out.artifact.rel}; terminal routing owned by the host]`,
+          },
+        });
+        await teardown(st);
+        return { continue: true, delivered: r };
+      }
       case 'settled': {
         const r = await deliverSettled(st, { cardId, view });
         if (r?.applied === false) {

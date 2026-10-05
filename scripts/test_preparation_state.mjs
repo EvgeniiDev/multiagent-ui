@@ -826,6 +826,8 @@ test('S7: cancelled attempts and late results are refused/ignored; replays idemp
   // kickoff — a newer instruction makes its result stale).
   const d1Req = await ucmd(svc, 'card-a', 'request_draft', { kind: 'requirements' });
   assert.equal(d1Req.status, 200, J(d1Req.json));
+  assert.equal((await prepView(svc, 'card-a')).noProgressEpoch, view0.noProgressEpoch + 1,
+    'explicit draft request resets the no-progress epoch');
   const d1 = d1Req.json.result.attemptId;
   const viewA = await prepView(svc, 'card-a');
   const kRec = viewA.attempts.find((a) => a.attemptId === kickoff.attemptId);

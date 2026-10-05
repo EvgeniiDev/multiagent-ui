@@ -49,6 +49,7 @@
 //     resource manifest).
 
 import { randomUUID } from 'node:crypto';
+import { isTerminalRoutingMenu } from './routing-menu.mjs';
 import { sha256 } from '../execution-store.mjs';
 import { bindingById, assertRouteAvailable, bindingConfigDigest } from './skills/registry.mjs';
 import { ADAPTERS, assertResultChannels } from './skills/adapters.mjs';
@@ -1175,6 +1176,9 @@ async function cmdRequestDraft(D, ctx, aggregate, payload, now) {
     }
   }
   const note = payload?.note !== undefined ? text(payload.note, D, 'note') : null;
+  // A new explicit drafting request starts a fresh progress epoch; prior
+  // stalled turns must not prevent a user-directed retry.
+  session.noProgressEpoch = (session.noProgressEpoch ?? 0) + 1;
   supersedeLiveAttempts(session, now);
   const attempt = mintAttempt(session, 'draft', now, { docKind: kind, input: note });
   logEvent(session, now, 'draft_requested', { attemptId: attempt.attemptId, kind, note });
@@ -1893,6 +1897,27 @@ async function cmdPrepResult(D, ctx, aggregate, payload, now) {
     logEvent(session, now, 'document_presented', {
       kind, versionId: version.versionId, sha256: version.sha256,
       draft, via: 'prep_result', attemptId });
+  }
+
+  // Host-only recovery of a skill's terminal routing menu after an actual
+  // document import. Never fabricate an answer or retire product questions.
+  if (payload.closeRoutingQuestionIds !== undefined) {
+    const ids = payload.closeRoutingQuestionIds;
+    const contract = session.bindings?.[attempt.docKind]?.result;
+    if (!Array.isArray(ids) || !applied.document || attempt.kind !== 'draft'
+        || contract?.mode !== 'workspace_artifact') {
+      fail(D, 422, 'result_off_contract', 'routing closure requires an imported draft artifact');
+    }
+    for (const id of ids) {
+      const q = session.checkpoint.openQuestions.find((q) => q.questionId === id);
+      if (!q || q.attemptId !== attemptId || q.status !== 'open'
+          || !isTerminalRoutingMenu(q.text, q.dialog?.method, q.dialog?.options)) {
+        fail(D, 422, 'result_off_contract', "only this draft's terminal routing menu may be closed");
+      }
+      q.status = 'deferred';
+      logEvent(session, now, 'routing_menu_closed', { questionId: id, attemptId,
+        reason: 'document_imported_host_owns_handoff' });
+    }
   }
 
   // P2 (KTD5): a declared route handoff is RECORDED evidence — the menu

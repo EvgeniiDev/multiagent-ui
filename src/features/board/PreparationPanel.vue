@@ -65,7 +65,7 @@ const exec = useExecutionStore();
 watch(
   () => props.cardId,
   (id, prev) => {
-    if (prev && prev !== id) { exec.unwatchCard(prev); uiSeq += 1; startError.value = null; }
+    if (prev && prev !== id) { exec.unwatchCard(prev); uiSeq += 1; startError.value = null; pendingDraftKind.value = null; }
     if (id) exec.watchCard(id);
   },
 );
@@ -121,18 +121,41 @@ watch(() => session.value?.sessionId, (id) => {
   }
 }, { flush: 'post' });
 const openQuestionCount = computed(() => questions.value.filter(q => q.status === 'open').length);
-const leadWorking = computed(() => session.value?.status === 'active' && lastAttempt.value?.status === 'running');
+const leadWorking = computed(() => session.value?.status === 'active' && lastAttempt.value?.status === 'running' && !openQuestionCount.value);
 const firstTurn = computed(() => !questions.value.length && lastAttempt.value?.kind === 'kickoff');
+const pendingDraftKind = ref<ExecDocKind | null>(null);
+let pendingDraftSeen = new Set<string>();
+const activeDraft = computed(() => [...(session.value?.attempts ?? [])].reverse()
+  .find(a => a.kind === 'draft' && (a.status === 'running' || a.status === 'awaiting_answer')));
+const draftWorkKind = computed(() => pendingDraftKind.value || activeDraft.value?.docKind || null);
+const draftWorkLabel = computed(() => {
+  const kind = draftWorkKind.value;
+  if (!kind) return '';
+  const name = kind === 'requirements' ? 'requirements' : kind === 'plan' ? 'development plan' : 'design';
+  if (pendingDraftKind.value) return `Submitting the ${name} request…`;
+  if (openQuestionCount.value) return `The ${name} request was accepted. The lead is waiting for your answer above.`;
+  return `Creating ${name}… The request was accepted; no need to click again.`;
+});
+watch(() => session.value?.attempts, (attempts) => {
+  if (pendingDraftKind.value && attempts?.some(a => !pendingDraftSeen.has(a.attemptId) && a.kind === 'draft' && a.docKind === pendingDraftKind.value)) pendingDraftKind.value = null;
+}, { deep: true });
+
 const reviewEl = ref<HTMLElement | null>(null);
 const ideaConfirmed = computed(() => gatesAll.value.some(g => g.type === 'intent_confirm' && g.status === 'confirmed'));
 const needsIdeaReview = computed(() => !openQuestionCount.value && !!session.value?.intent.proposal && !ideaConfirmed.value);
+const missingDraft = computed(() => typeof session.value?.blocker === 'object' && session.value?.blocker?.code === 'draft_document_missing');
 const nextDraftKind = computed<ExecDocKind | null>(() => {
+  if (missingDraft.value && !draftWorkKind.value) {
+    const kind = lastAttempt.value?.docKind;
+    if (kind === 'requirements' || kind === 'plan' || kind === 'design') return kind;
+  }
   if (!ideaConfirmed.value || openQuestionCount.value || leadWorking.value || session.value?.blocker) return null;
   if (!session.value?.presented.requirements) return 'requirements';
   if (prepCompletenessState(session.value, 'requirements') === 'approved' && !session.value?.presented.plan) return 'plan';
   return null;
 });
 const preparationNextStep = computed(() => {
+  if (missingDraft.value) return 'The request finished without a document. Your answers are saved. Retry generation; the error details are in Diagnostics.';
   if (!ideaConfirmed.value || openQuestionCount.value) return '';
   if (session.value?.ready) return 'Requirements and plan are accepted. You can now explicitly hand off to development.';
   if (nextDraftKind.value === 'requirements') return 'Discussion complete. Your idea is confirmed. Next: create requirements from the recorded answers, then review and approve them.';
@@ -141,6 +164,7 @@ const preparationNextStep = computed(() => {
 });
 const threadStatus = computed(() => {
   if (offline.value || st.value.prepError) return 'Connection interrupted. Your discussion is saved; reconnecting…';
+  if (draftWorkKind.value) return draftWorkLabel.value;
   if (busy.value) return 'Saving your message…';
   if (leadWorking.value) return firstTurn.value
     ? 'The lead is reading your card and preparing the first question…'
@@ -343,7 +367,13 @@ const handoffModeStartGate = computed(() =>
 );
 
 async function onRequestDraft(kind: ExecDocKind) {
-  await send('request_draft', prepDraftPayload(kind));
+  if (pendingDraftKind.value || activeDraft.value || busy.value || offline.value) return;
+  const cardId = props.cardId;
+  const seq = uiSeq;
+  pendingDraftSeen = new Set(session.value?.attempts.map(a => a.attemptId) ?? []);
+  pendingDraftKind.value = kind;
+  const ok = await send('request_draft', prepDraftPayload(kind));
+  if (!stillCurrent(cardId, seq) || !ok) pendingDraftKind.value = null;
 }
 
 // ---- gates ---------------------------------------------------------------------
@@ -559,10 +589,10 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
               >Answer</UiButton>
             </div>
           </div>
-          <div class="prep-thread-state" role="status" aria-live="polite" :aria-busy="busy || leadWorking" data-testid="prep-thread-state">
+          <div class="prep-thread-state" role="status" aria-live="polite" :aria-busy="busy || leadWorking || !!pendingDraftKind" data-testid="prep-thread-state">
             <p v-if="session.blocker" class="exec-line exec-warn" data-testid="prep-blocker">{{ leadBlockerMessage }}</p>
             <template v-else>
-              <span v-if="busy || leadWorking" class="prep-spinner" aria-hidden="true"></span>
+              <span v-if="busy || leadWorking || pendingDraftKind" class="prep-spinner" aria-hidden="true"></span>
               <span data-testid="prep-thread-status">{{ threadStatus }}</span>
               <UiButton v-if="needsIdeaReview && !busy && !leadWorking" size="xs" data-testid="prep-review-jump" @click="showIdeaReview">Review idea</UiButton>
             </template>
@@ -598,12 +628,13 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
             </p>
           </div>
 
-        <div v-if="ideaConfirmed && !openQuestionCount && !leadWorking" class="exec-detail prep-section ui-surface ui-surface-accent" data-testid="prep-next-step">
+        <div v-if="draftWorkKind || (ideaConfirmed && !openQuestionCount && !leadWorking)" class="exec-detail prep-section ui-surface ui-surface-accent" data-testid="prep-next-step">
           <div class="exec-subtitle">Next step</div>
-          <p class="ui-note">{{ preparationNextStep }}</p>
-          <UiButton v-if="nextDraftKind" variant="primary" data-testid="prep-next-draft"
-            :disabled="gated(draftGate).disabled" :title="gated(draftGate).title"
-            @click="onRequestDraft(nextDraftKind)">{{ nextDraftKind === 'requirements' ? 'Create requirements' : 'Create development plan' }}</UiButton>
+          <p class="ui-note" role="status" :aria-busy="!!pendingDraftKind || (!!activeDraft && !openQuestionCount)">{{ draftWorkKind ? draftWorkLabel : preparationNextStep }}</p>
+          <UiButton v-if="draftWorkKind" variant="primary" disabled data-testid="prep-draft-working">{{ pendingDraftKind ? 'Submitting…' : openQuestionCount ? 'Waiting for your answer' : 'Creating document…' }}</UiButton>
+          <UiButton v-else-if="nextDraftKind" variant="primary" data-testid="prep-next-draft"
+            :disabled="!!draftWorkKind || gated(draftGate).disabled" :title="gated(draftGate).title"
+            @click="onRequestDraft(nextDraftKind)">{{ missingDraft ? 'Retry generation' : nextDraftKind === 'requirements' ? 'Create requirements' : 'Create development plan' }}</UiButton>
           <p class="ui-note">Implementation starts only after an explicit handoff and launch.</p>
         </div>
         <div ref="reviewEl" v-if="needsIdeaReview" class="exec-detail prep-section ui-surface ui-surface-accent" data-testid="prep-intent-review">
@@ -668,7 +699,7 @@ const gateStatusClass = (g: PrepGate) => `prep-gate-${g.status}`;
             <UiButton
               class="exec-actionbtn"
               :data-testid="`prep-draft-${k}`"
-              :disabled="gated(draftGate).disabled"
+              :disabled="!!draftWorkKind || gated(draftGate).disabled"
               :title="gated(draftGate).title"
               @click="onRequestDraft(k)"
             >Draft {{ k }}</UiButton>

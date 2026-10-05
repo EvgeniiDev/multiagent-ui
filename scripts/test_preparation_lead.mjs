@@ -1099,6 +1099,17 @@ test('S15c: workspace_artifact imports the REAL file; a bare claim is dropped', 
         // second turn, same process: a document CLAIM with no artifact —
         // the claim is dropped, never imported
         { type: 'settle', text: PREP({ note: 'imaginary plan', document: { kind: 'plan', text: '# FAKE\n' } }) } ],
+      [ (ctx) => {
+          writeFileSync(join(ctx.spawnCtx.dirs.workspace, 'plan.md'), '# Final plan\n', 'utf-8');
+          return { type: 'dialog', dialog: { method: 'select',
+            title: 'Brainstorm complete. Plan artifact: docs/plan.md. What would you like to do next?',
+            options: ['Create the implementation plan', 'Ship it autonomously with lfg', 'More clarifying questions'] }, after: null };
+        } ],
+      [ (ctx) => {
+          writeFileSync(join(ctx.spawnCtx.dirs.workspace, 'plan.md'), '# Needs a storage decision\n', 'utf-8');
+          return { type: 'dialog', dialog: { method: 'select',
+            title: 'Which store should retain the records?', options: ['redis', 'sqlite'] }, after: null };
+        } ],
     ], spawns),
     limits: { idleTimeoutMs: 80, turnTimeoutMs: 1500, rpcTimeoutMs: 80 },
   });
@@ -1136,12 +1147,83 @@ test('S15c: workspace_artifact imports the REAL file; a bare claim is dropped', 
   assert.equal(out.status, 'idle', J(out));
   const agg = await readAgg(join(root, 'state'), 'card-a');
   const att2 = agg.preparation.attempts.find((a) => a.attemptId === d2.json.result.attemptId);
-  assert.equal(att2.status, 'completed');
-  assert.equal(att2.result.document, null, 'the claim was dropped — no artifact existed');
-  assert.match(att2.result.note, /dropped document claim/);
+  assert.equal(att2.status, 'blocked');
+  assert.equal(att2.result.blocker.code, 'draft_document_missing');
+  assert.match(att2.result.blocker.detail, /no declared artifact/);
   // presented.plan still the first import — the fake claim changed nothing
   view = await prepView(svc, 'card-a');
   assert.equal(view.presented.plan.versionId, got.json.versionId);
+  const d3 = await ucmd(svc, 'card-a', 'request_draft', { kind: 'plan' });
+  assert.equal(d3.status, 200, J(d3.json));
+  out = await lead.drive('card-a');
+  assert.equal(out.status, 'idle', J(out));
+  view = await prepView(svc, 'card-a');
+  assert.ok(view.presented.plan);
+  assert.notEqual(view.presented.plan.versionId, got.json.versionId);
+  assert.equal((await getDoc(svc, 'card-a', view.presented.plan.versionId)).json.content, '# Final plan\n');
+  assert.equal(openQ(view).length, 0, 'terminal skill routing is not a product question');
+  assert.equal(spawns[1].responses.length, 0, 'no handoff option or fabricated answer was selected');
+  assert.equal(spawns[1].aborted(), true, 'process is closed before skill routing can launch work');
+  const d4 = await ucmd(svc, 'card-a', 'request_draft', { kind: 'plan' });
+  assert.equal(d4.status, 200, J(d4.json));
+  out = await lead.drive('card-a');
+  assert.equal(out.status, 'awaiting_user', J(out));
+  view = await prepView(svc, 'card-a');
+  assert.equal(openQ(view)[0].text, 'Which store should retain the records?', 'real product questions stay visible despite an artifact');
+  await lead.dispose();
+});
+
+test('S15c2: restart imports the parked terminal artifact without spawning or answering a routing choice', async () => {
+  const { svc, projectDir, root, registryPath } = await mkEnv();
+  await seedBase(svc, projectDir);
+  await enable(svc);
+  const start = await startPrep(svc, 'card-a', { intent: 'Draft the approved plan.', bindings: { plan: 'test-plan-ws' } });
+  const req = await ucmd(svc, 'card-a', 'attach_document', {
+    kind: 'requirements', source: { type: 'text', text: '# Requirements\nApproved scope.\n' },
+  });
+  await ucmd(svc, 'card-a', 'approve_requirements', {
+    versionId: req.json.result.versionId, sha256: req.json.result.sha256,
+  });
+  const draft = await ucmd(svc, 'card-a', 'request_draft', { kind: 'plan' });
+  const attemptId = draft.json.result.attemptId;
+  const question = { text: 'Brainstorm complete. Plan artifact: plan.md. What would you like to do next?',
+    blocking: true, channel: 'dialog', dialog: { requestId: 'old-routing-rpc', method: 'select',
+      options: ['Create the implementation plan', 'Ship it autonomously with lfg', 'More clarifying questions'] } };
+  const card = (await getCard(svc, 'card-a')).json;
+  const q = await svc.internalCommand('card-a', { commandId: 'park-terminal-menu', type: 'prep_question',
+    expectedInternalRevision: card.internalRevision, payload: { attemptId, question } });
+  assert.equal(q.status, 200, J(q.json));
+  const dirs = prepRunDirs(join(root, 'lead-runs'), start.sessionId);
+  await fs.mkdir(dirs.workspace, { recursive: true });
+  await fs.writeFile(join(dirs.workspace, 'plan.md'), '# Persisted draft\n', 'utf-8');
+  const { lead, spawns } = mkLead(svc, { root, registryPath, spawnScripts: [] });
+  const out = await lead.drive('card-a');
+  assert.equal(out.status, 'idle', J(out));
+  const view = await prepView(svc, 'card-a');
+  assert.equal(spawns.length, 0, 'restart recovery does not spend another provider turn');
+  assert.ok(view.presented.plan);
+  assert.equal((await getDoc(svc, 'card-a', view.presented.plan.versionId)).json.content, '# Persisted draft\n');
+  const closed = view.checkpoint.openQuestions.find((x) => x.dialog?.requestId === 'old-routing-rpc');
+  assert.equal(closed.status, 'deferred');
+  assert.equal(closed.answer, null, 'no user answer is fabricated');
+  assert.equal(view.attempts.find((a) => a.attemptId === attemptId).status, 'completed');
+  assert.equal((await getCard(svc, 'card-a')).json.currentRunId, null);
+  const next = await ucmd(svc, 'card-a', 'request_draft', { kind: 'plan' });
+  const nextId = next.json.result.attemptId;
+  const before = (await getCard(svc, 'card-a')).json;
+  const productQ = await svc.internalCommand('card-a', { commandId: 'product-question', type: 'prep_question',
+    expectedInternalRevision: before.internalRevision, payload: { attemptId: nextId,
+      question: { text: 'Which store should retain the records?', blocking: true, channel: 'dialog',
+        dialog: { requestId: 'real-product-rpc', method: 'select', options: ['redis', 'sqlite'] } } } });
+  assert.equal(productQ.status, 200, J(productQ.json));
+  const refused = await prepResult(svc, 'card-a', nextId, { outcome: 'completed',
+    closeRoutingQuestionIds: [productQ.body.result.questionId],
+    result: { document: { kind: 'plan', text: '# New plan\n' } } });
+  assert.equal(refused.status, 422, J(refused.json));
+  assert.equal(refused.body.code, 'result_off_contract');
+  const unchanged = await prepView(svc, 'card-a');
+  assert.equal(openQ(unchanged)[0].text, 'Which store should retain the records?');
+  assert.equal(unchanged.presented.plan.versionId, view.presented.plan.versionId);
   await lead.dispose();
 });
 
