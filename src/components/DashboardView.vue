@@ -2,7 +2,8 @@
 // Dashboard (F5): usage stats + quotas from the activity ledger, agent state (F6).
 // All numbers come from useActivityStore; every figure names its range.
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import { useActivityStore, projectName, type UsageSample } from '../stores/activity';
+import UiButton from './ui/UiButton.vue';
+import { useActivityStore, projectName } from '../stores/activity';
 import { useSessionStore } from '../stores/session';
 import { useConfigStore } from '../stores/config';
 import { useLimitsStore, periodStart, periodLabel, type UsageLimit } from '../stores/limits';
@@ -43,14 +44,22 @@ const range = ref<RangeId>('7d');
 const rangeLoading = ref(false);
 let prefs: KVStore | null = null;
 
-const bounds = computed(() => rangeBounds(range.value, now.value));
+const bounds = computed(() => {
+  const window = rangeBounds(range.value, now.value);
+  if (range.value === 'all') {
+    const rows = activity.usageInRange(0, now.value);
+    if (rows.length) window.from = rows.reduce((at, r) => Math.min(at, r.at), now.value);
+  }
+  return window;
+});
 const windowLabel = computed(() => rangeLabel(range.value, bounds.value.from, bounds.value.to));
+const spendingRows = computed(() => activity.deltaRows(bounds.value.from, bounds.value.to));
 
 const summary = computed(() => {
   const { from, to } = bounds.value;
   const u = activity.totalUsage(from, to);
-  const rows = activity.usageInRange(from, to);
-  const sessions = new Set(rows.map((r) => r.sessionId)).size;
+  const rows = spendingRows.value;
+  const sessions = new Set(rows.map((r) => `${r.agentName}::${r.sessionId}`)).size;
   const toolCalls = activity
     .entriesInRange(from, to)
     .filter((e) => e.kind === 'tool-call').length;
@@ -73,7 +82,6 @@ const agentRows = computed<AgentRow[]>(() => {
   const { from, to } = bounds.value;
   const rows = activity.usageByAgent(from, to);
   const total = rows.reduce((s, r) => s + r.tokens, 0);
-  const samples = activity.usageInRange(from, to);
   const entries = activity.entriesInRange(from, to);
   return rows.map((r) => {
     const last = [...entries].reverse().find((e) => e.agentName === r.agentName);
@@ -87,7 +95,7 @@ const agentRows = computed<AgentRow[]>(() => {
       lastAt: last?.at ?? 0,
       lastText: last?.title ?? last?.detail ?? last?.kind ?? '—',
       costs: fmtCostGroups(
-        groupCost(samples.filter((s) => s.agentName === r.agentName))
+        groupCost(spendingRows.value.filter((s) => s.agentName === r.agentName))
       ),
     };
   });
@@ -126,7 +134,7 @@ const projectRows = computed<ProjectRow[]>(() => {
       turns: r.turns,
       share: total > 0 ? (r.tokens / total) * 100 : 0,
       lastAt,
-      costs: fmtCostGroups(groupCost(samples.filter((s) => projectName(s.cwd) === r.project))),
+      costs: fmtCostGroups(groupCost(spendingRows.value.filter((s) => projectName(s.cwd) === r.project))),
     };
   });
 });
@@ -147,9 +155,8 @@ const modelRows = computed<ModelRow[]>(() => {
   const { from, to } = bounds.value;
   const rows = activity.usageByModel(from, to);
   const total = rows.reduce((s, r) => s + r.tokens, 0);
-  const samples = activity.usageInRange(from, to);
   return rows.map((r) => {
-    const mine = samples.filter((s) => (s.model ?? 'unknown') === r.model);
+    const mine = spendingRows.value.filter((s) => s.model === r.model && s.provider === r.provider);
     return {
       model: r.model,
       provider: r.provider,
@@ -188,13 +195,17 @@ function labelFor(key: string, startMs: number, step: number): string {
 const dayPoints = computed<DayPoint[]>(() => {
   const { from, to } = bounds.value;
   const rows = activity.usageByDay(from, to);
-  const samples = activity.usageInRange(from, to);
+  const costsByDay = new Map<string, typeof spendingRows.value>();
+  for (const row of spendingRows.value) {
+    const key = new Date(row.at).toISOString().slice(0, 10);
+    const list = costsByDay.get(key) ?? []; list.push(row); costsByDay.set(key, list);
+  }
   // Fill gaps so the chart axis holds with sparse data; week buckets for long ranges.
   const filled = new Map(rows.map((r) => [r.day, r]));
   const start = new Date(from);
-  start.setHours(0, 0, 0, 0);
+  start.setUTCHours(0, 0, 0, 0);
   const end = new Date(to);
-  end.setHours(0, 0, 0, 0);
+  end.setUTCHours(0, 0, 0, 0);
   const spanDays = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86400000) + 1);
   const iso = (d: Date) => d.toISOString().slice(0, 10);
   const step = spanDays > 120 ? 7 : 1;
@@ -226,16 +237,10 @@ const dayPoints = computed<DayPoint[]>(() => {
         }
       }
     }
-    out.push({ day: key, label: labelFor(key, t, step), tokens, estTokens, cost, turns, costs: fmtCostGroups(
-        groupCost(
-          samples.filter((s) => {
-            const sd = new Date(s.at).toISOString().slice(0, 10);
-            if (step === 1) return sd === key;
-            return sd >= key && sd <= iso(new Date(t + 6 * 86400000));
-          })
-        )
-      ),
-    });
+    const costSamples = Array.from({ length: step }, (_, k) =>
+      costsByDay.get(iso(new Date(t + k * 86400000))) ?? []).flat();
+    out.push({ day: key, label: labelFor(key, t, step), tokens, estTokens, cost, turns,
+      costs: fmtCostGroups(groupCost(costSamples)) });
   }
   return out;
 });
@@ -317,60 +322,34 @@ interface SessionRow {
   lastAt: number;
   sessionId: string;
   costs: string;
+  canResume: boolean;
 }
 
 const sessionRows = computed<SessionRow[]>(() => {
   const { from, to } = bounds.value;
-  // deltaRows: what each session consumed in the window (last minus baseline),
-  // not the sum of its running totals — summing `used` across samples
-  // multiplied a session by its sample count, the same xN bug the summary had.
-  const deltas = activity.deltaRows(from, to);
-  const samples = activity.usageInRange(from, to);
-  const lastSampleAt = new Map<string, number>();
-  const samplesBySession = new Map<string, UsageSample[]>();
-  for (const s of samples) {
-    lastSampleAt.set(s.sessionId, Math.max(lastSampleAt.get(s.sessionId) ?? 0, s.at));
-    const list = samplesBySession.get(s.sessionId) ?? [];
-    list.push(s);
-    samplesBySession.set(s.sessionId, list);
+  const groups = new Map<string, typeof spendingRows.value>();
+  for (const row of spendingRows.value) {
+    const key = `${row.agentName}::${row.sessionId}`;
+    const list = groups.get(key) ?? []; list.push(row); groups.set(key, list);
   }
-  const meta = new Map<string, { title: string; agentName: string; cwd?: string; at: number }>();
+  const titles = new Map<string, string>();
   for (const e of activity.entriesInRange(from, to)) {
-    if (!e.sessionId) continue;
-    const m = meta.get(e.sessionId);
-    if (!m || e.at > m.at) {
-      meta.set(e.sessionId, {
-        title: e.title ?? m?.title ?? e.sessionId.slice(0, 8),
-        agentName: e.agentName,
-        cwd: e.cwd ?? m?.cwd,
-        at: e.at,
-      });
-    }
+    if (e.sessionId && e.title) titles.set(`${e.agentName}::${e.sessionId}`, e.title);
   }
-  return deltas
-    .map((row) => {
-      const sessionId = row.sessionId ?? '';
-      const m = meta.get(sessionId);
-      const sessionSamples = samplesBySession.get(sessionId) ?? [];
-      return {
-        key: sessionId,
-        title: m?.title ?? sessionId.slice(0, 8),
-        agentName: m?.agentName ?? row.agentName,
-        project: projectName(m?.cwd ?? row.cwd),
-        tokens: row.tokens,
-        estTokens: row.source === 'estimate' ? row.tokens : 0,
-        cost: row.cost,
-        lastAt: Math.max(m?.at ?? 0, lastSampleAt.get(sessionId) ?? 0),
-        sessionId,
-        costs: fmtCostGroups(groupCost(sessionSamples)),
-      };
-    })
-    .sort((a, b) => b.tokens - a.tokens)
-    .slice(0, 10);
+  return [...groups].map(([key, rows]) => {
+    const last = rows[rows.length - 1];
+    return { key, title: titles.get(key) ?? last.sessionId.slice(0, 8),
+      agentName: last.agentName, project: projectName(last.cwd),
+      tokens: rows.reduce((n, r) => n + r.tokens, 0),
+      estTokens: rows.reduce((n, r) => n + (r.source === 'estimate' ? r.tokens : 0), 0),
+      cost: rows.reduce((n, r) => n + (r.cost ?? 0), 0), lastAt: last.at,
+      sessionId: last.sessionId, costs: fmtCostGroups(groupCost(rows)),
+      canResume: sessionStore.savedSessions.some(s => s.sessionId === last.sessionId && s.agentName === last.agentName) };
+  }).sort((a, b) => b.tokens - a.tokens).slice(0, 20);
 });
 
 async function openSession(row: SessionRow): Promise<void> {
-  const saved = sessionStore.savedSessions.find((s) => s.sessionId === row.sessionId);
+  const saved = sessionStore.savedSessions.find((s) => s.sessionId === row.sessionId && s.agentName === row.agentName);
   if (!saved) return;
   try {
     await sessionStore.resumeSession(saved);
@@ -540,8 +519,10 @@ onMounted(async () => {
   const saved = await prefs.get<RangeId>('dashboardRange');
   if (saved && RANGES.some((r) => r.id === saved)) range.value = saved;
   await limitsStore.initLimitsStore();
+  void activity.refreshNativeUsage();
   tickTimer = setInterval(() => {
     now.value = Date.now();
+    void activity.refreshNativeUsage();
   }, 60000);
 });
 
@@ -582,12 +563,21 @@ watch(
     </div>
 
     <div class="pane-body">
+      <p v-if="activity.usageLoading" class="ui-note" role="status" data-testid="usage-loading">Reading agent usage…</p>
+      <p v-if="activity.usageError" class="ui-note" role="alert" data-testid="usage-error">{{ activity.usageError }}. Showing available ledger data.</p>
+      <p v-if="activity.usageSources.length" class="ui-note" data-testid="usage-sources">
+        All server sessions, including CLI and background agents. Sources:
+        <span v-for="(source, i) in activity.usageSources" :key="source.agentName">{{ i ? ' · ' : '' }}{{ source.agentName }}: {{ source.status === 'ready' ? 'available' : source.status }}</span>.
+        Token counts include cached input; costs appear only when reported.
+        <span v-if="spendingRows.some(r => r.cost === undefined)">Costs are unavailable for some sessions; the amount shown is a partial total.</span>
+        Hermes historical totals are dated by the session’s last activity, so daily figures are approximate.
+      </p>
       <!-- Summary strip: one dense line per metric -->
       <section class="panel" aria-label="Summary" data-testid="summary-strip">
         <div class="panel-title">Summary <span class="muted">· {{ windowLabel }}</span></div>
         <dl class="summary">
           <div class="sum-row"><dt>Tokens used</dt><dd data-testid="sum-tokens" :data-est="summary.estTokens > 0">{{ fmtTokensWithEst(summary.tokens, summary.estTokens) }}</dd></div>
-          <div class="sum-row"><dt>Cost</dt><dd data-testid="sum-cost">{{ fmtCostGroups(summary.costs) }}</dd></div>
+          <div class="sum-row"><dt>Recorded cost</dt><dd data-testid="sum-cost">{{ fmtCostGroups(summary.costs) }}</dd></div>
           <div class="sum-row"><dt>Turns</dt><dd data-testid="sum-turns">{{ fmtInt(summary.turns) }}</dd></div>
           <div class="sum-row"><dt>Sessions touched</dt><dd data-testid="sum-sessions">{{ fmtInt(summary.sessions) }}</dd></div>
           <div class="sum-row"><dt>Tool calls</dt><dd data-testid="sum-tools">{{ fmtInt(summary.toolCalls) }}</dd></div>
@@ -683,7 +673,7 @@ watch(
               <tr><th scope="col">Model</th><th scope="col">Provider</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th><th scope="col">Share</th><th scope="col">Last activity</th></tr>
             </thead>
             <tbody>
-              <tr v-for="r in modelRows" :key="r.model" data-testid="by-model-row" :data-model="r.model" :data-est="r.estTokens > 0">
+              <tr v-for="r in modelRows" :key="`${r.provider}::${r.model}`" data-testid="by-model-row" :data-model="r.model" :data-est="r.estTokens > 0">
                 <td data-label="Model"><span class="mono">{{ r.model }}</span></td>
                 <td class="muted" data-label="Provider">{{ r.provider }}</td>
                 <td class="num mono" data-label="Tokens" :title="r.estTokens > 0 ? `${fmtInt(r.estTokens)} of these are a bridge estimate` : ''">{{ fmtTokensWithEst(r.tokens, r.estTokens) }}</td>
@@ -785,7 +775,8 @@ watch(
           <tbody>
             <tr v-for="s in sessionRows" :key="s.key" :data-est="s.estTokens > 0">
               <td data-label="Session">
-                <button class="link" :title="`Open ${s.title} in chat`" @click="openSession(s)">{{ s.title }}</button>
+                <UiButton v-if="s.canResume" variant="ghost" size="xs" :title="`Open ${s.title} in chat`" @click="openSession(s)">{{ s.title }}</UiButton>
+                <span v-else>{{ s.title }}</span>
               </td>
               <td data-label="Agent">{{ s.agentName }}</td>
               <td class="mono" data-label="Project">{{ s.project }}</td>

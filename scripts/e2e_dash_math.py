@@ -59,12 +59,12 @@ def fixture() -> dict:
     day2 = (now - timedelta(days=2)).replace(hour=12, minute=0, second=0)
     ms = lambda d: int(d.timestamp() * 1000)
     samples = [
-        {"at": ms(day2), "agentName": "Hermes Agent", "sessionId": "S1", "cwd": "/home/hermes/projects/acp-ui", "used": 10000, "size": 200000, "cost": 0.10, "currency": "USD"},
-        {"at": ms(day2 + timedelta(hours=1)), "agentName": "Hermes Agent", "sessionId": "S1", "cwd": "/home/hermes/projects/acp-ui", "used": 12000, "size": 200000, "cost": 0.12, "currency": "USD"},
-        {"at": ms(day2 + timedelta(minutes=30)), "agentName": "Devin", "sessionId": "S2", "cwd": "/home/hermes/projects/acp-ui", "used": 5000, "size": 200000, "cost": 0.05, "currency": "USD"},
-        {"at": ms(day1), "agentName": "Devin", "sessionId": "S3", "cwd": "/home/hermes/projects/acp-ui", "used": 3000, "size": 200000, "cost": 0.03, "currency": "USD"},
-        {"at": ms(day1 + timedelta(hours=1)), "agentName": "Devin", "sessionId": "S3", "cwd": "/home/hermes/projects/acp-ui", "used": 9000, "size": 200000, "cost": 0.09, "currency": "USD"},
-        {"at": ms(day1 + timedelta(hours=2)), "agentName": "Devin", "sessionId": "S3", "cwd": "/home/hermes/projects/acp-ui", "used": 15000, "size": 200000, "cost": 0.15, "currency": "USD"},
+        {"at": ms(day2), "agentName": "Hermes Agent", "sessionId": "S1", "cwd": "/home/hermes/projects/acp-ui", "accounting": "cumulative", "used": 10000, "size": 200000, "cost": 0.10, "currency": "USD"},
+        {"at": ms(day2 + timedelta(hours=1)), "agentName": "Hermes Agent", "sessionId": "S1", "cwd": "/home/hermes/projects/acp-ui", "accounting": "cumulative", "used": 12000, "size": 200000, "cost": 0.12, "currency": "USD"},
+        {"at": ms(day2 + timedelta(minutes=30)), "agentName": "Devin", "sessionId": "S2", "cwd": "/home/hermes/projects/acp-ui", "accounting": "cumulative", "used": 5000, "size": 200000, "cost": 0.05, "currency": "USD"},
+        {"at": ms(day1), "agentName": "Devin", "sessionId": "S3", "cwd": "/home/hermes/projects/acp-ui", "accounting": "cumulative", "used": 3000, "size": 200000, "cost": 0.03, "currency": "USD"},
+        {"at": ms(day1 + timedelta(hours=1)), "agentName": "Devin", "sessionId": "S3", "cwd": "/home/hermes/projects/acp-ui", "accounting": "cumulative", "used": 9000, "size": 200000, "cost": 0.09, "currency": "USD"},
+        {"at": ms(day1 + timedelta(hours=2)), "agentName": "Devin", "sessionId": "S3", "cwd": "/home/hermes/projects/acp-ui", "accounting": "cumulative", "used": 15000, "size": 200000, "cost": 0.15, "currency": "USD"},
     ]
     entries = [{"id": f"t{i}", "at": s["at"], "kind": "turn-end", "agentName": s["agentName"],
                 "sessionId": s["sessionId"], "cwd": s["cwd"], "title": "turn"} for i, s in enumerate(samples)]

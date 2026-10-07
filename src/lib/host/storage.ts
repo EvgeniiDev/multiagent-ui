@@ -90,7 +90,7 @@ const POLL_INTERVAL_MS = 5000;
 
 // `VITE_STATE_URL` overrides the whole base URL at build time (tests,
 // non-standard deployments); default is the host that served this bundle.
-function stateServerBase(): string {
+export function stateServerBase(): string {
   const env = import.meta.env?.VITE_STATE_URL as string | undefined;
   if (env) return env.replace(/\/+$/, '');
   const hostname =

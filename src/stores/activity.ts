@@ -17,7 +17,7 @@
 //   dayRange(days)                 helpers: { from, to } for common windows
 import { defineStore } from 'pinia';
 import { computed, ref, shallowRef } from 'vue';
-import { loadKvStore, type KVStore } from '../lib/host/storage';
+import { stateServerBase, loadKvStore, type KVStore } from '../lib/host/storage';
 
 export type ActivityKind =
   | 'session-open'
@@ -66,11 +66,10 @@ export interface ActivityEntry {
   endedAt?: number;
 }
 
-/** Who measured a usage sample: the agent's own `usage_update` (`agent`,
- * exact) or the ws-bridge's chars/4 guess (`estimate`, approximate — the
- * dashboard marks it `~`). Samples written before this field existed carry
- * no source and are all agent-reported, so `undefined` reads as `agent`. */
+/** Provider-reported usage or an approximate bridge estimate. ACP context
+ * occupancy is stored separately via accounting:'context' and is not spend. */
 export type UsageSource = 'agent' | 'estimate';
+export interface UsageSourceStatus { agentName: string; status: 'ready' | 'partial' | 'unavailable'; samples: number; }
 
 export interface UsageSample {
   at: number;
@@ -79,6 +78,8 @@ export interface UsageSample {
   cwd?: string;
   used: number;
   size: number;
+  accounting?: 'cumulative' | 'delta' | 'context';
+  timeBasis?: 'session-last-active';
   cost?: number;
   currency?: string;
   source?: UsageSource;
@@ -100,12 +101,17 @@ export function projectName(cwd?: string): string {
   return cwd.split(/[\\/]/).filter(Boolean).pop() || cwd;
 }
 
+function agentLabel(name: string): string {
+  const cmd = name.split(/[\\/]/).pop() ?? name;
+  return ({ 'pi-acp': 'Pi', pi: 'Pi', 'codex-acp': 'Codex', codex: 'Codex', hermes: 'Hermes Agent', opencode: 'OpenCode', devin: 'Devin' } as Record<string, string>)[cmd] ?? name;
+}
+
 const sampleSource = (row: UsageSample): UsageSource => row.source ?? 'agent';
 const sampleModel = (row: UsageSample): string => row.model ?? 'unknown';
 const sampleProvider = (row: UsageSample): string => row.provider ?? 'unknown';
 
-function sessionKey(row: UsageSample): string {
-  return row.sessionId ?? `${row.agentName}:${row.cwd ?? ''}`;
+function sessionKey(row: { agentName: string; sessionId?: string; cwd?: string }): string {
+  return `${row.agentName}::${row.sessionId ?? row.cwd ?? ''}`;
 }
 
 /**
@@ -117,10 +123,14 @@ function sessionKey(row: UsageSample): string {
  */
 function countableRows(all: UsageSample[]): UsageSample[] {
   const factual = new Set<string>();
-  for (const row of all) {
+  // Older ACP context notifications were incorrectly recorded as spend.
+  // OpenCode's plugin is the exception: it records cumulative message usage.
+  const spend = all.filter(r => r.accounting !== 'context' && !r.agentName.startsWith('/') &&
+    (r.accounting || sampleSource(r) === 'estimate' || !['Hermes Agent', 'Pi', 'Codex'].includes(r.agentName)));
+  for (const row of spend) {
     if (sampleSource(row) === 'agent') factual.add(sessionKey(row));
   }
-  return all.filter((r) => sampleSource(r) === 'agent' || !factual.has(sessionKey(r)));
+  return spend.filter((r) => sampleSource(r) === 'agent' || !factual.has(sessionKey(r)));
 }
 
 const STORE_PATH = 'activity.json';
@@ -138,6 +148,34 @@ export const useActivityStore = defineStore('activity', () => {
   // every field of 5000 rows through deep reactive proxies in every card.
   const entries = shallowRef<ActivityEntry[]>([]);
   const usage = ref<UsageSample[]>([]);
+  const nativeRows = shallowRef<UsageSample[]>([]);
+  const usageSources = ref<UsageSourceStatus[]>([]);
+  const usageLoading = ref(false);
+  const usageError = ref('');
+  const allUsage = computed(() => {
+    const covered = new Set(usageSources.value.filter(s => s.status !== 'unavailable').map(s => s.agentName));
+    const legacy = usage.value.map(r => ({ ...r, agentName: agentLabel(r.agentName) }));
+    return [...legacy.filter(r => !covered.has(r.agentName)), ...nativeRows.value];
+  });
+  let nativeRequest: Promise<void> | null = null;
+  async function refreshNativeUsage(): Promise<void> {
+    if (nativeRequest) return nativeRequest;
+    usageLoading.value = true;
+    nativeRequest = (async () => {
+      try {
+        const response = await fetch(`${stateServerBase()}/api/usage`, { signal: AbortSignal.timeout(65000) });
+        if (!response.ok) throw new Error(`Usage data unavailable (HTTP ${response.status})`);
+        const data = await response.json();
+        if (!Array.isArray(data.usage) || !Array.isArray(data.sources)) throw new Error('Invalid usage data');
+        nativeRows.value = data.usage;
+        usageSources.value = data.sources;
+        usageError.value = '';
+      } catch (e) {
+        usageError.value = e instanceof Error ? e.message : 'Usage data unavailable';
+      } finally { usageLoading.value = false; nativeRequest = null; }
+    })();
+    return nativeRequest;
+  }
   let store: KVStore | null = null;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let syncTimer: ReturnType<typeof setInterval> | null = null;
@@ -174,143 +212,53 @@ export const useActivityStore = defineStore('activity', () => {
   }
 
   function usageInRange(from: number, to: number): UsageSample[] {
-    return usage.value.filter((u) => u.at >= from && u.at <= to);
+    return allUsage.value.filter((u) => u.at >= from && u.at <= to);
   }
 
-  /**
-   * Consumed tokens/cost inside [from, to], attributed as per-session DELTAS.
-   *
-   * `used`/`cost` are a session's RUNNING totals (that is what `usage_update`
-   * carries), so summing every sample multiplies a session by its sample count —
-   * measured on live data: a session that spent nothing in a day still added its
-   * entire running total to that day, and a day with four samples inflated ~4x.
-   *
-   * For each session: the last cumulative value at or before `to`, minus the last
-   * value before `from`. A session first seen inside the window is baselined at its
-   * first in-window sample, so nothing is attributed for the time before we knew it.
-   */
-  function consumedInRange(
-    from: number,
-    to: number
-  ): { tokens: number; estTokens: number; cost: number; sessions: number } {
-    const bySession = new Map<string, { before: UsageSample | null; inside: UsageSample[] }>();
-    for (const row of countableRows(usage.value)) {
-      const key = sessionKey(row);
-      const acc = bySession.get(key) ?? { before: null, inside: [] };
-      if (row.at < from) {
-        if (!acc.before || row.at > acc.before.at) acc.before = row;
-      } else if (row.at <= to) {
-        acc.inside.push(row);
-      }
-      bySession.set(key, acc);
-    }
-    let tokens = 0;
-    let estTokens = 0;
-    let cost = 0;
-    let sessions = 0;
-    for (const { before, inside } of bySession.values()) {
-      if (!inside.length) continue;
-      sessions += 1;
-      inside.sort((a, b) => a.at - b.at);
-      // Baseline: what the session had already spent when the window opened. With
-      // no earlier sample the session is new to us, so its total counts once —
-      // never once per sample, which is what made a day read x4.
-      const baseTokens = before ? Math.max(0, before.used) : 0;
-      const baseCost = before ? before.cost ?? 0 : 0;
-      const endTokens = Math.max(0, inside[inside.length - 1].used);
-      const endCost = inside[inside.length - 1].cost ?? 0;
-      const delta = Math.max(0, endTokens - baseTokens);
-      tokens += delta;
-      if (sampleSource(inside[inside.length - 1]) === 'estimate') estTokens += delta;
-      cost += Math.max(0, endCost - baseCost);
-    }
-    return { tokens, estTokens, cost, sessions };
-  }
-
-  /**
-   * Per-session delta rows: one row per session with what it actually consumed in
-   * the window, tagged with the agent and cwd of its LAST in-window sample (the
-   * row that defines the end of the measured interval).
-   */
-  function deltaRows(
-    from: number,
-    to: number
-  ): { agentName: string; cwd?: string; sessionId?: string; model: string; provider: string; tokens: number; cost: number; source: UsageSource }[] {
-    const bySession = new Map<string, UsageSample[]>();
-    for (const row of countableRows(usage.value)) {
+  /** One delta per recorded call, retaining its model and currency. Native
+   * records are already deltas; legacy running counters are differenced. */
+  function deltaRows(from: number, to: number) {
+    const previous = new Map<string, UsageSample>();
+    const out: Array<{ at: number; agentName: string; cwd?: string; sessionId: string;
+      model: string; provider: string; tokens: number; cost?: number; currency?: string; source: UsageSource }> = [];
+    for (const row of [...countableRows(allUsage.value)].sort((a, b) => a.at - b.at)) {
       if (row.at > to) continue;
       const key = sessionKey(row);
-      const list = bySession.get(key) ?? [];
-      list.push(row);
-      bySession.set(key, list);
-    }
-    const out: { agentName: string; cwd?: string; sessionId?: string; model: string; provider: string; tokens: number; cost: number; source: UsageSource }[] = [];
-    for (const list of bySession.values()) {
-      list.sort((a, b) => a.at - b.at);
-      const inside = list.filter((r) => r.at >= from);
-      if (!inside.length) continue;
-      const before = [...list].reverse().find((r) => r.at < from) ?? null;
-      const last = inside[inside.length - 1];
-      const baseTokens = before ? Math.max(0, before.used) : 0;
-      const baseCost = before ? before.cost ?? 0 : 0;
-      out.push({
-        agentName: last.agentName,
-        cwd: last.cwd,
-        sessionId: last.sessionId,
-        // A session that switched model mid-window attributes its whole
-        // delta to the latest sample's model — same last-row semantics as
-        // agentName/cwd above.
-        model: sampleModel(last),
-        provider: sampleProvider(last),
-        tokens: Math.max(0, Math.max(0, last.used) - baseTokens),
-        cost: Math.max(0, (last.cost ?? 0) - baseCost),
-        source: sampleSource(last),
-      });
+      const before = previous.get(key);
+      const value = Math.max(0, Number.isFinite(row.used) ? row.used : 0);
+      const delta = row.accounting === 'delta' ? value
+        : value >= (before?.used ?? 0) ? value - (before?.used ?? 0) : value;
+      let cost: number | undefined;
+      if (typeof row.cost === 'number' && Number.isFinite(row.cost)) {
+        const base = before?.currency === row.currency ? before?.cost ?? 0 : 0;
+        cost = row.accounting === 'delta' ? row.cost : row.cost >= base ? row.cost - base : row.cost;
+      }
+      if (row.accounting !== 'delta') previous.set(key, { ...row, cost: row.cost ?? before?.cost });
+      if (row.at < from) continue;
+      out.push({ at: row.at, agentName: row.agentName, cwd: row.cwd, sessionId: row.sessionId,
+        model: sampleModel(row), provider: sampleProvider(row), tokens: delta, cost,
+        currency: row.currency, source: sampleSource(row) });
     }
     return out;
   }
 
-  /**
-   * The same delta accounting, bucketed per calendar day — the basis for the
-   * dashboard's chart and its table (a day can only gain what grew that day).
-   */
-  function consumedByDay(
-    from: number,
-    to: number
-  ): Map<string, { tokens: number; estTokens: number; cost: number }> {
-    const dayKey = (ms: number) => new Date(ms).toISOString().slice(0, 10);
-    const bySession = new Map<string, UsageSample[]>();
-    for (const row of countableRows(usage.value)) {
-      if (row.at > to) continue;
-      const key = sessionKey(row);
-      const list = bySession.get(key) ?? [];
-      list.push(row);
-      bySession.set(key, list);
-    }
+  function consumedInRange(from: number, to: number) {
+    const rows = deltaRows(from, to);
+    return { tokens: rows.reduce((n, r) => n + r.tokens, 0),
+      estTokens: rows.reduce((n, r) => n + (r.source === 'estimate' ? r.tokens : 0), 0),
+      cost: rows.reduce((n, r) => n + (r.cost ?? 0), 0),
+      sessions: new Set(rows.map(sessionKey)).size };
+  }
+
+  function consumedByDay(from: number, to: number) {
     const out = new Map<string, { tokens: number; estTokens: number; cost: number }>();
-    for (const list of bySession.values()) {
-      list.sort((a, b) => a.at - b.at);
-      // last cumulative value per day for this session
-      const perDay = new Map<string, UsageSample>();
-      for (const row of list) perDay.set(dayKey(row.at), row);
-      // Baseline: exact when the session was already spending before the window;
-      // otherwise zero, so a session new to us contributes its total exactly once.
-      const prior = [...list].reverse().find((r) => r.at < from);
-      let seenTokens = prior ? Math.max(0, prior.used) : 0;
-      let seenCost = prior ? prior.cost ?? 0 : 0;
-      for (const day of [...perDay.keys()].sort()) {
-        const row = perDay.get(day)!;
-        const tokens = Math.max(0, Math.max(0, row.used) - seenTokens);
-        const cost = Math.max(0, (row.cost ?? 0) - seenCost);
-        seenTokens = Math.max(seenTokens, Math.max(0, row.used));
-        seenCost = Math.max(seenCost, row.cost ?? 0);
-        if (day < dayKey(from)) continue;
-        const acc = out.get(day) ?? { tokens: 0, estTokens: 0, cost: 0 };
-        acc.tokens += tokens;
-        if (sampleSource(row) === 'estimate') acc.estTokens += tokens;
-        acc.cost += cost;
-        out.set(day, acc);
-      }
+    for (const row of deltaRows(from, to)) {
+      const day = new Date(row.at).toISOString().slice(0, 10);
+      const acc = out.get(day) ?? { tokens: 0, estTokens: 0, cost: 0 };
+      acc.tokens += row.tokens;
+      if (row.source === 'estimate') acc.estTokens += row.tokens;
+      acc.cost += row.cost ?? 0;
+      out.set(day, acc);
     }
     return out;
   }
@@ -324,11 +272,15 @@ export const useActivityStore = defineStore('activity', () => {
   /** Cost is reported in the agent's own currency; mixed currencies stay separate. */
   function usageByAgent(from: number, to: number) {
     const map = new Map<string, { agentName: string; tokens: number; estTokens: number; cost: number; turns: number }>();
+    for (const source of usageSources.value) {
+      if (source.status !== 'unavailable') map.set(source.agentName,
+        { agentName: source.agentName, tokens: 0, estTokens: 0, cost: 0, turns: 0 });
+    }
     for (const row of deltaRows(from, to)) {
       const acc = map.get(row.agentName) ?? { agentName: row.agentName, tokens: 0, estTokens: 0, cost: 0, turns: 0 };
       acc.tokens += row.tokens;
       if (row.source === 'estimate') acc.estTokens += row.tokens;
-      acc.cost += row.cost;
+      acc.cost += row.cost ?? 0;
       map.set(row.agentName, acc);
     }
     const turns = turnsBy(from, to, (e) => e.agentName);
@@ -350,15 +302,16 @@ export const useActivityStore = defineStore('activity', () => {
     const map = new Map<string, { model: string; provider: string; tokens: number; estTokens: number; cost: number; turns: number }>();
     const sessionModel = new Map<string, string>();
     for (const row of deltaRows(from, to)) {
-      const acc = map.get(row.model) ?? { model: row.model, provider: row.provider, tokens: 0, estTokens: 0, cost: 0, turns: 0 };
+      const key = `${row.provider}::${row.model}`;
+      const acc = map.get(key) ?? { model: row.model, provider: row.provider, tokens: 0, estTokens: 0, cost: 0, turns: 0 };
       acc.tokens += row.tokens;
       if (row.source === 'estimate') acc.estTokens += row.tokens;
-      acc.cost += row.cost;
+      acc.cost += row.cost ?? 0;
       if (acc.provider === 'unknown' && row.provider !== 'unknown') acc.provider = row.provider;
-      map.set(row.model, acc);
-      if (row.sessionId) sessionModel.set(row.sessionId, row.model);
+      map.set(key, acc);
+      if (row.sessionId) sessionModel.set(sessionKey(row), key);
     }
-    const turns = turnsBy(from, to, (e) => (e.sessionId ? sessionModel.get(e.sessionId) ?? 'unknown' : 'unknown'));
+    const turns = turnsBy(from, to, (e) => (e.sessionId ? sessionModel.get(`${e.agentName}::${e.sessionId}`) ?? 'unknown' : 'unknown'));
     for (const [key, value] of turns) {
       const acc = map.get(key) ?? { model: key, provider: 'unknown', tokens: 0, estTokens: 0, cost: 0, turns: 0 };
       acc.turns = value;
@@ -374,7 +327,7 @@ export const useActivityStore = defineStore('activity', () => {
       const acc = map.get(project) ?? { project, cwd: row.cwd, tokens: 0, estTokens: 0, cost: 0, turns: 0 };
       acc.tokens += row.tokens;
       if (row.source === 'estimate') acc.estTokens += row.tokens;
-      acc.cost += row.cost;
+      acc.cost += row.cost ?? 0;
       map.set(project, acc);
     }
     const turns = turnsBy(from, to, (e) => projectName(e.cwd));
@@ -429,7 +382,7 @@ export const useActivityStore = defineStore('activity', () => {
     // `usage_update` arrives per turn; keeping the last one per session window
     // avoids summing the same running total over and over.
     const at = sample.at ?? Date.now();
-    const last = [...usage.value].reverse().find((u) => u.sessionId === sample.sessionId);
+    const last = [...usage.value].reverse().find((u) => u.sessionId === sample.sessionId && u.agentName === sample.agentName);
     // Skip a sample that repeats the previous one for this session: the agents
     // report a running total, so an unchanged used/size/cost adds nothing. The
     // source matters too — an estimate may legitimately match an agent row.
@@ -491,7 +444,7 @@ export const useActivityStore = defineStore('activity', () => {
 
     const remoteUsage = (await store.get<UsageSample[]>('usage')) ?? [];
     const usageKey = (u: UsageSample) =>
-      `${u.sessionId}|${u.at}|${u.used}|${u.size}|${u.cost ?? ''}|${u.source ?? ''}|${u.model ?? ''}|${u.provider ?? ''}`;
+      `${u.agentName}|${u.sessionId}|${u.at}|${u.used}|${u.size}|${u.cost ?? ''}|${u.source ?? ''}|${u.model ?? ''}|${u.provider ?? ''}`;
     const byKey = new Map(usage.value.map((u) => [usageKey(u), u]));
     let usageChanged = false;
     for (const u of remoteUsage) {
@@ -539,6 +492,10 @@ export const useActivityStore = defineStore('activity', () => {
   return {
     entries,
     usage,
+    usageSources,
+    usageLoading,
+    usageError,
+    refreshNativeUsage,
     recent,
     entriesInRange,
     entriesForRun,

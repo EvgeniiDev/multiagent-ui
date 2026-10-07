@@ -40,11 +40,11 @@ def ts(days_ago: int, hour: int = 12) -> int:  # noqa: ARG001
 # series. Tokens actually consumed: alpha 2000, beta 500.
 USAGE = [
     {"at": ts(1), "agentName": "alpha", "sessionId": "sess-a1", "cwd": "/home/u/proj-one",
-     "used": 1200, "size": 8000, "cost": 0.02, "currency": "USD"},
+     "accounting": "cumulative", "used": 1200, "size": 8000, "cost": 0.02, "currency": "USD"},
     {"at": ts(0), "agentName": "alpha", "sessionId": "sess-a1", "cwd": "/home/u/proj-one",
-     "used": 2000, "size": 8000, "cost": 0.03, "currency": "USD"},
+     "accounting": "cumulative", "used": 2000, "size": 8000, "cost": 0.03, "currency": "USD"},
     {"at": ts(0), "agentName": "beta", "sessionId": "sess-b1", "cwd": "/home/u/proj-two",
-     "used": 500, "size": 4000},
+     "accounting": "cumulative", "used": 500, "size": 4000},
 ]
 ENTRIES = [
     {"id": "e1", "at": ts(1), "kind": "turn-end", "agentName": "alpha",

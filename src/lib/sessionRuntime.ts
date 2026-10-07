@@ -768,6 +768,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         agentName: agentName.value || session.value?.agentName || 'unknown',
         sessionId: notification.sessionId || session.value?.sessionId || 'unknown',
         cwd: foreign ? undefined : session.value?.cwd,
+        accounting: 'context',
         used: Number(untyped.used ?? 0),
         size: Number(untyped.size ?? 0),
         cost: typeof untyped.cost?.amount === 'number' ? untyped.cost.amount : undefined,
