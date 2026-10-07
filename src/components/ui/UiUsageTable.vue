@@ -3,7 +3,7 @@ import UiButton from './UiButton.vue';
 import { fmtInt, fmtTokensWithEst } from '../../features/dashboard/format';
 export interface UsageTableRow {
   key: string; name: string; detail: string; tokens: number; estTokens: number;
-  costs: string; share: number; title?: string; canResume?: boolean;
+  costs: string; share: number; title?: string; canResume?: boolean; actionLabel?: string;
   agentName?: string; model?: string; day?: string;
 }
 defineProps<{ rows: UsageTableRow[]; id: string; testId: string; rowTestId?: string;
@@ -18,7 +18,7 @@ defineEmits<{ open: [key: string] }>();
     <tbody>
       <tr v-for="row in rows" :key="row.key" :data-testid="rowTestId" :data-agent="row.agentName" :data-model="row.model" :data-day="row.day" :data-tokens="row.tokens" :data-est="row.estTokens > 0">
         <td class="name-cell" :data-label="nameLabel" :title="row.title || row.name">
-          <UiButton v-if="row.canResume" variant="ghost" size="xs" :aria-label="`Open ${row.name} in chat`" @click="$emit('open', row.key)"><span class="name-text">{{ row.name }}</span></UiButton>
+          <UiButton v-if="row.actionLabel || row.canResume" variant="ghost" size="xs" :aria-label="row.actionLabel || `Open ${row.name} in chat`" @click="$emit('open', row.key)"><span class="name-text">{{ row.name }}</span></UiButton>
           <span v-else class="name-text mono">{{ row.name }}</span>
         </td>
         <td class="detail-cell" :data-label="detailLabel"><span class="detail-tag" :title="row.detail">{{ row.detail }}</span></td>

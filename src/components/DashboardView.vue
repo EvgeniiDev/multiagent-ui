@@ -5,7 +5,6 @@ import UiExpandableRows from './ui/UiExpandableRows.vue';
 import UiUsageTable, { type UsageTableRow } from './ui/UiUsageTable.vue';
 import { useActivityStore, projectName } from '../stores/activity';
 import { useSessionStore } from '../stores/session';
-import { useConfigStore } from '../stores/config';
 import { useLimitsStore, periodStart, periodLabel, type UsageLimit } from '../stores/limits';
 import { useUiStore } from '../stores/ui';
 import { loadKvStore, type KVStore } from '../lib/host/storage';
@@ -16,7 +15,6 @@ import { exportFileName, toJson, toCsv, downloadFile, type ExportPayload } from 
 
 const activity = useActivityStore();
 const sessionStore = useSessionStore();
-const configStore = useConfigStore();
 const limitsStore = useLimitsStore();
 const uiStore = useUiStore();
 const now = ref(Date.now());
@@ -102,31 +100,76 @@ const inspectorDates = computed(() => selectedPoint.value
   ? `${localDayKey(selectionBounds.value.from)}${selectedPoint.value.step === 7 ? ` — ${localDayKey(selectionBounds.value.to)}` : ''}`
   : `${new Date(bounds.value.from).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} — ${new Date(bounds.value.to).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`);
 
-const savedSessionKeys = computed(() => new Set(sessionStore.savedSessions.map(s => `${s.agentName}::${s.sessionId}`)));
+const sessionScope = ref<{ model: string; provider: string } | { agentName: string } | null>(null);
+const sessionDetailKey = ref<string | null>(null);
+const sessionStats = computed(() => {
+  const scope = sessionScope.value;
+  if (!scope) return selectionStats.value;
+  const rows = selectedSpendRows.value.filter(r => 'model' in scope
+    ? r.model === scope.model && r.provider === scope.provider : r.agentName === scope.agentName);
+  // A model's contribution is filtered before grouping: mixed-model sessions
+  // must not contribute their other models' tokens to this drilldown.
+  return aggregateUsage(rows, [], []);
+});
+const scopeLabel = computed(() => !sessionScope.value ? '' : 'model' in sessionScope.value
+  ? `${sessionScope.value.model} · ${sessionScope.value.provider}` : sessionScope.value.agentName);
+const sessionDetail = computed(() => sessionStats.value.sessions.find(r => r.key === sessionDetailKey.value));
+const detailSaved = computed(() => sessionDetail.value && sessionStore.savedSessions.find(s =>
+  s.agentName === sessionDetail.value?.agentName && s.sessionId === sessionDetail.value?.sessionId));
+const detailModels = computed(() => sessionDetail.value ? aggregateUsage(selectedSpendRows.value.filter(r =>
+  r.agentName === sessionDetail.value?.agentName && r.sessionId === sessionDetail.value?.sessionId &&
+  (!sessionScope.value || !('model' in sessionScope.value) ||
+    (r.model === sessionScope.value.model && r.provider === sessionScope.value.provider))), [], []).models : []);
+watch([selectedBucket, range], () => { sessionDetailKey.value = null; });
+const savedSessionsByKey = computed(() => new Map(sessionStore.savedSessions.map(s => [`${s.agentName}::${s.sessionId}`, s])));
 const tabs = computed(() => [
   { id: 'models' as const, label: 'Models', title: 'Models & providers', nameLabel: 'Model', detailLabel: 'Provider', tableId: 'by-model-table', rowId: 'by-model-row', count: selectionStats.value.models.length },
   { id: 'projects' as const, label: 'Projects', title: 'Projects', nameLabel: 'Project', detailLabel: 'Type', tableId: 'by-project-table', rowId: 'by-project-row', count: selectionStats.value.projects.length },
   { id: 'agents' as const, label: 'Agents', title: 'By agent', nameLabel: 'Agent', detailLabel: 'Coverage', tableId: 'by-agent-table', rowId: 'by-agent-row', count: selectionStats.value.agents.length },
-  { id: 'sessions' as const, label: 'Sessions', title: 'Sessions', nameLabel: 'Session', detailLabel: 'Agent / project', tableId: 'top-sessions-table', rowId: 'top-session-row', count: selectionStats.value.sessions.length },
+  { id: 'sessions' as const, label: 'Sessions', title: 'Sessions', nameLabel: 'Session', detailLabel: 'Agent / project', tableId: 'top-sessions-table', rowId: 'top-session-row', count: sessionStats.value.sessions.length },
   { id: 'days' as const, label: 'Days', title: 'Days, newest first', nameLabel: 'Day / week', detailLabel: 'Date', tableId: 'by-day-table', rowId: 'by-day-row', count: selectedPoint.value ? 1 : tableRows.value.length },
 ]);
 const activeTab = computed(() => tabs.value.find(t => t.id === activeBreakdown.value)!);
 const activeRows = computed<UsageTableRow[]>(() => {
-  const total = summary.value.tokens;
+  const total = activeBreakdown.value === 'sessions' ? sessionStats.value.total.tokens : summary.value.tokens;
   if (activeBreakdown.value === 'days') {
     return (selectedPoint.value ? [selectedPoint.value] : tableRows.value).map(d => ({ key: d.day, day: d.day,
       name: d.label, detail: d.day, tokens: d.tokens, estTokens: d.estTokens, costs: d.costs,
       share: total > 0 ? d.tokens / total * 100 : 0 }));
   }
-  return selectionStats.value[activeBreakdown.value].map(r => ({ ...r, title: r.cwd || r.name,
+  const groups = activeBreakdown.value === 'sessions' ? sessionStats.value.sessions : selectionStats.value[activeBreakdown.value];
+  return groups.map(r => ({ ...r,
+    name: activeBreakdown.value === 'sessions' ? savedSessionsByKey.value.get(r.key)?.title || r.name : r.name,
+    title: activeBreakdown.value === 'sessions' ? `${r.sessionId} · ${r.cwd || ''}` : r.cwd || r.name,
+    actionLabel: activeBreakdown.value === 'models' ? `View sessions for ${r.name}, ${r.detail}`
+      : activeBreakdown.value === 'sessions' ? `Inspect session ${r.sessionId}` : undefined,
     costs: fmtCostGroups(r.costs), share: total > 0 ? r.tokens / total * 100 : 0,
-    canResume: activeBreakdown.value === 'sessions' && savedSessionKeys.value.has(r.key) }));
+    canResume: activeBreakdown.value === 'sessions' && savedSessionsByKey.value.has(r.key) }));
 });
 const filteredRows = computed(() => {
   const search = query.value.trim().toLowerCase();
   return search ? activeRows.value.filter(r => `${r.name} ${r.detail} ${r.title ?? ''}`.toLowerCase().includes(search)) : activeRows.value;
 });
-function selectTab(id: BreakdownId): void { activeBreakdown.value = id; query.value = ''; }
+function selectTab(id: BreakdownId): void {
+  activeBreakdown.value = id; query.value = ''; sessionScope.value = null; sessionDetailKey.value = null;
+}
+async function inspectRow(key: string): Promise<void> {
+  if (activeBreakdown.value === 'models') {
+    const model = selectionStats.value.models.find(r => r.key === key);
+    if (!model || model.model === undefined || model.provider === undefined) return;
+    sessionScope.value = { model: model.model, provider: model.provider };
+    activeBreakdown.value = 'sessions'; query.value = ''; sessionDetailKey.value = null;
+    await nextTick(); document.getElementById('session-scope')?.focus();
+  } else if (activeBreakdown.value === 'sessions') {
+    sessionDetailKey.value = key;
+    await nextTick(); document.getElementById('session-detail')?.focus();
+  }
+}
+async function inspectAgent(name: string): Promise<void> {
+  sessionScope.value = { agentName: name }; activeBreakdown.value = 'sessions';
+  query.value = ''; sessionDetailKey.value = null;
+  await nextTick(); document.getElementById('session-scope')?.focus();
+}
 async function onTabsKeydown(event: KeyboardEvent): Promise<void> {
   if (!['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(event.key)) return;
   event.preventDefault();
@@ -283,35 +326,15 @@ function exportCsv(): void {
   downloadFile(exportFileName(range.value, bounds.value.to, 'csv'), toCsv(p.byDay), 'text/csv');
 }
 
-// --- Agent state strip (F6) ---
-interface AgentState {
-  name: string;
-  transport: string;
-  reachable: boolean;
-  currentSession: string;
-  inFlight: boolean;
-  lastAt: number;
-  lastText: string;
-}
-
-const agentStates = computed<AgentState[]>(() => {
-  const names = configStore.allAgentNames;
-  const entries = activity.entries;
-  return names.map((name) => {
-    const cfg = configStore.getAgent(name);
-    const transport = cfg?.transport ?? 'stdio';
-    const last = [...entries].reverse().find((e) => e.agentName === name);
-    const isCurrent = sessionStore.currentSession?.agentName === name;
-    return {
-      name,
-      transport,
-      reachable: transport !== 'stdio',
-      currentSession: isCurrent ? (sessionStore.currentSession?.title ?? '—') : '—',
-      inFlight: isCurrent && sessionStore.isLoading,
-      lastAt: last?.at ?? 0,
-      lastText: last ? `${last.kind}${last.title ? ` · ${last.title}` : ''}` : 'no events yet',
-    };
-  });
+// Historical activity uses the same native deltas and date selection as usage.
+const agentStates = computed(() => {
+  const counts = new Map<string, number>();
+  for (const session of selectionStats.value.sessions) {
+    const name = session.agentName!; counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return selectionStats.value.agents.map(a => ({ name: a.name, tokens: a.tokens,
+    sessions: counts.get(a.name) ?? 0, lastAt: a.lastAt,
+    inFlight: sessionStore.currentSession?.agentName === a.name && sessionStore.isLoading }));
 });
 
 async function setRange(id: RangeId): Promise<void> {
@@ -428,25 +451,36 @@ watch(
 
             <section :id="`breakdown-${activeBreakdown}`" role="tabpanel" :aria-labelledby="`tab-${activeBreakdown}`" tabindex="0" class="panel explore-panel">
               <div class="panel-heading"><div><h3>{{ activeTab.title }}</h3><p>{{ activeBreakdown === 'days' ? 'Newest periods first' : 'Largest usage first' }} · {{ selectedPoint ? inspectorTitle : 'full selected period' }}</p></div></div>
+              <div v-if="activeBreakdown === 'sessions' && sessionScope" id="session-scope" tabindex="-1" class="session-scope" data-testid="session-scope">
+                <div><strong>{{ scopeLabel }}</strong><p>{{ fmtInt(sessionStats.total.tokens) }} tokens · {{ sessionStats.sessions.length }} sessions · {{ inspectorDates }}</p><p>Only this {{ 'model' in sessionScope ? 'model’s' : 'agent’s' }} usage in the selected period. Shares are of this subtotal.</p></div>
+                <UiButton size="xs" @click="selectTab('models')">← All models</UiButton>
+              </div>
+              <section v-if="activeBreakdown === 'sessions' && sessionDetail" id="session-detail" tabindex="-1" class="session-detail" data-testid="session-detail" aria-label="Session usage details">
+                <div class="panel-heading"><h3>{{ detailSaved?.title || sessionDetail.name }}</h3><UiButton size="xs" @click="sessionDetailKey = null">Close details</UiButton></div>
+                <dl><dt>Session ID</dt><dd class="mono">{{ sessionDetail.sessionId }}</dd><dt>Agent</dt><dd>{{ sessionDetail.agentName }}</dd><dt>Project / folder</dt><dd>{{ sessionDetail.cwd || 'Unknown' }}</dd><dt>Selected period</dt><dd>{{ inspectorDates }}</dd><dt>Tokens in this selection</dt><dd>{{ fmtTokensWithEst(sessionDetail.tokens, sessionDetail.estTokens) }}</dd><dt>Last usage in this selection</dt><dd>{{ fmtStamp(sessionDetail.lastAt) }}</dd></dl>
+                <ul><li v-for="model in detailModels" :key="model.key">{{ model.name }} · {{ model.provider }}: <strong>{{ fmtInt(model.tokens) }}</strong> tokens</li></ul>
+                <UiButton v-if="detailSaved" data-testid="open-saved-chat" @click="openSession(sessionDetail.key)">Open saved chat</UiButton>
+                <p v-else class="muted">Historical session from agent logs. This chat is not saved in this browser.</p>
+              </section>
               <label class="search-field"><span class="sr-only">Search {{ activeTab.label.toLowerCase() }}</span><input v-model="query" type="search" class="ui-input" :placeholder="`Find ${activeTab.label.toLowerCase()}…`" :aria-label="`Search ${activeTab.label.toLowerCase()}`" data-testid="usage-search" /></label>
-              <UiExpandableRows v-if="filteredRows.length" :key="`${activeBreakdown}-${range}-${selectedBucket ?? 'full'}`" :rows="filteredRows" :controls-id="`dashboard-${activeBreakdown}`" :toggle-test-id="`toggle-${activeBreakdown}`" :ordered-by-rank="activeBreakdown !== 'days'" :collapsed-label="activeBreakdown === 'days' ? 'Show latest 20' : undefined" show-count v-slot="{ rows: visibleRows }">
-                <UiUsageTable :id="`dashboard-${activeBreakdown}`" :rows="visibleRows" :test-id="activeTab.tableId" :row-test-id="activeTab.rowId" :caption="`${activeTab.title}, ${inspectorTitle}`" :name-label="activeTab.nameLabel" :detail-label="activeTab.detailLabel" @open="openSession" />
+              <UiExpandableRows v-if="filteredRows.length" :key="`${activeBreakdown}-${range}-${selectedBucket ?? 'full'}-${scopeLabel}`" :rows="filteredRows" :controls-id="`dashboard-${activeBreakdown}`" :toggle-test-id="`toggle-${activeBreakdown}`" :ordered-by-rank="activeBreakdown !== 'days'" :collapsed-label="activeBreakdown === 'days' ? 'Show latest 20' : undefined" show-count v-slot="{ rows: visibleRows }">
+                <UiUsageTable :id="`dashboard-${activeBreakdown}`" :rows="visibleRows" :test-id="activeTab.tableId" :row-test-id="activeTab.rowId" :caption="`${activeTab.title}, ${inspectorTitle}`" :name-label="activeTab.nameLabel" :detail-label="activeTab.detailLabel" @open="inspectRow" />
               </UiExpandableRows>
               <p v-else class="empty" :data-testid="`${activeBreakdown}-empty`">{{ query.trim() ? 'No matching results. Try another search.' : initialLoading ? 'Loading your usage history…' : 'No recorded usage in this period.' }}</p>
             </section>
 
             <div class="secondary-grid">
-<details class="secondary-panel" data-testid="agent-state"><summary>Agent activity <span>{{ agentStates.length }} configured</span></summary><div class="secondary-body">
+<details class="secondary-panel" data-testid="agent-state"><summary>Agent activity <span>{{ summary.sessions }} sessions · {{ inspectorTitle }}</span></summary><div class="secondary-body">
 
-        <p v-if="agentStates.length === 0" class="empty">No agents configured.</p>
+        <p v-if="agentStates.length === 0" class="empty">No agent history in this period.</p>
         <UiExpandableRows v-else :rows="agentStates" controls-id="dashboard-agent-state" toggle-test-id="toggle-agent-state" :ordered-by-rank="false" v-slot="{ rows: visibleRows }">
           <ul id="dashboard-agent-state" class="state-list">
-            <li v-for="a in visibleRows" :key="a.name" class="state-row">
+            <li v-for="a in visibleRows" :key="a.name" class="state-row" data-testid="agent-history-row">
                 <span class="state-name">{{ a.name }}</span>
-              <span class="state-cur" :title="a.currentSession">session: {{ a.currentSession }}</span>
-              <span v-if="a.inFlight" class="pill">turn in flight</span>
+              <UiButton size="xs" variant="ghost" :disabled="!a.sessions" @click="inspectAgent(a.name)">{{ a.sessions }} {{ a.sessions === 1 ? 'session' : 'sessions' }} · {{ fmtInt(a.tokens) }} tokens</UiButton>
+              <span v-if="a.inFlight" class="pill">current browser turn in flight</span>
               <span class="state-last muted" :title="a.lastAt ? fmtStamp(a.lastAt) : ''">
-                {{ a.lastAt ? `${fmtAgo(a.lastAt, now)} · ${a.lastText}` : a.lastText }}
+                {{ a.lastAt ? `Last usage ${fmtAgo(a.lastAt, now)}` : 'No recorded usage in this period' }}
               </span>
             </li>
           </ul>
@@ -528,6 +562,14 @@ watch(
 </template>
 
 <style scoped>
+.session-scope, .session-detail { padding: 1rem; margin-bottom: 1rem; border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-assistant); overflow-wrap: anywhere; }
+.session-scope { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .75rem; }
+.session-scope p, .session-detail p, .session-detail li { font-size: .75rem; margin: .5rem 0; }
+.session-detail dl { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(0, 3fr); gap: .5rem 1rem; font-size: .75rem; }
+.session-detail dt { color: var(--text-muted); }
+.session-detail dd { margin: 0; }
+.session-scope:focus-visible, .session-detail:focus-visible { outline: 2px solid var(--text-accent); }
+
 .view-pane { display: flex; flex-direction: column; height: 100%; min-width: 0; }
 .pane-body { flex: 1; min-height: 0; overflow: auto; padding: 2rem 2.125rem 3rem; }
 .dashboard-content { max-width: 1480px; margin: 0 auto; }

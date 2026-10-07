@@ -19,6 +19,7 @@ def usage(agent, used, offset=0, **extra):
 
 ROWS = [usage('Hermes Agent', 600, -3 * 86400000, cost=0, currency='USD'), usage('Pi', 300, cost=0.3, currency='USD'),
         usage('Pi', 500, 1000, cost=0.5, currency='USD'), usage('Codex', 200), usage('Devin', 400)]
+ROWS[2]['model'] = 'another-model-in-the-same-chat'
 for at, used, cost in [(NOW, 1000, 1), (NOW + 1000, 1400, 1.4)]:
     ROWS.append(dict(agentName='OpenCode', sessionId='OpenCode', at=at, used=used,
                      size=0, accounting='cumulative', source='agent',
@@ -105,6 +106,13 @@ def run_case(browser, fail=False, large=False, mixed=False):
             page.locator('[data-testid=usage-search]').fill('missing-model')
             expect(page.locator('[data-testid=models-empty]')).to_contain_text('No matching')
             page.locator('[data-testid=usage-search]').fill('')
+            page.locator('[data-testid=by-model-row][data-tokens="1500"] button').click()
+            expect(page.locator('[data-testid=session-scope]')).to_contain_text('1,500')
+            session_rows = page.locator('[data-testid=top-session-row]')
+            assert sum(int(n) for n in session_rows.evaluate_all('rs=>rs.map(r=>r.dataset.tokens)')) == 1500
+            expect(session_rows.filter(has_text='Pi')).to_have_attribute('data-tokens', '300')
+            expect(page.locator('[data-testid=sum-tokens]')).to_have_text(total)
+            page.locator('[data-testid=tab-models]').click()
             # The prior day has 600 tokens. Selecting it changes the inspector and all breakdowns.
             oldest = page.locator('[data-testid=day-bar][data-tokens="600"]').get_attribute('data-day')
             page.locator('[data-testid=inspect-period]').select_option(oldest)
@@ -113,6 +121,21 @@ def run_case(browser, fail=False, large=False, mixed=False):
             expect(page.locator('.inspector dt').filter(has_text='Reported cost')).to_have_text('Reported cost')
             expect(page.locator('[data-testid=sum-cost]')).to_have_text('0 USD')
             expect(page.locator('[data-testid=by-model-row]')).to_have_count(1)
+            # Native history must be inspectable without a browser chat or activity log.
+            page.locator('[data-testid=by-model-row] button').click()
+            expect(page.locator('[data-testid=session-scope]')).to_contain_text('600')
+            expect(page.locator('[data-testid=top-session-row]')).to_have_count(1)
+            page.locator('[data-testid=top-session-row] button').click()
+            expect(page.locator('[data-testid=session-detail]')).to_contain_text('Hermes Agent')
+            expect(page.locator('[data-testid=session-detail]')).to_contain_text('/project')
+            expect(page.locator('[data-testid=session-detail]')).to_contain_text('600')
+            expect(page.locator('[data-testid=open-saved-chat]')).to_have_count(0)
+            page.locator('[data-testid=agent-state] summary').click()
+            historical = page.locator('[data-testid=agent-history-row]').filter(has_text='Hermes Agent')
+            expect(historical).to_contain_text('1 session')
+            expect(historical).to_contain_text('600')
+            page.locator('[data-testid=agent-state] summary').click()
+            page.locator('[data-testid=tab-models]').click()
             # JSON export covers the full toolbar range even with a selected bar and search.
             page.locator('[data-testid=usage-search]').fill('missing')
             page.locator('.export-menu summary').click()
