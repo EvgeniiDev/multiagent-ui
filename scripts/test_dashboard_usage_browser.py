@@ -29,6 +29,10 @@ for at, used, cost in [(NOW, 1000, 1), (NOW + 1000, 1400, 1.4)]:
                      size=0, accounting='cumulative', source='agent', model='model',
                      provider='OpenCode', cost=cost, currency='USD'))
 
+for row in ROWS:
+    row['model'] = 'deepseek/deepseek-v4-flash-0731'
+    row['provider'] = 'opencode-go' if row['agentName'] == 'OpenCode' else 'openai-codex'
+
 
 def run_case(browser, fail=False):
     context = browser.new_context(viewport=dict(width=1440, height=1000), timezone_id='Asia/Karachi')
@@ -62,8 +66,19 @@ def run_case(browser, fail=False):
         assert page.locator('[data-testid="top-sessions-table"] tbody tr').count() == 5
         page.click('[data-testid="range-all"]')
         assert page.locator('[data-testid="sum-tokens"]').inner_text().strip() == '3,400'
+        page.set_viewport_size(dict(width=961, height=1000))
+        page.locator('.share-cell').first.wait_for()
+        cells = page.locator('.share-cell').evaluate_all("""cells => cells.map(cell => ({
+            display: getComputedStyle(cell).display,
+            bottom: cell.getBoundingClientRect().bottom,
+            rowBottom: cell.parentElement.getBoundingClientRect().bottom,
+        }))""")
+        assert all(c['display'] == 'table-cell' for c in cells), cells
+        assert all(abs(c['bottom'] - c['rowBottom']) < 1 for c in cells), cells
         page.set_viewport_size(dict(width=390, height=844))
         assert page.locator('[data-testid="usage-sources"]').is_visible()
+        assert page.locator('.share-cell').first.evaluate("e => getComputedStyle(e).display") == 'flex'
+        assert page.locator('.share-content').first.bounding_box()['width'] > 80
     assert not errors, errors
     context.close()
 

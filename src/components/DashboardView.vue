@@ -627,10 +627,12 @@ watch(
                 <td class="num mono" data-label="Cost">{{ r.costs }}</td>
                 <td class="num mono" data-label="Turns">{{ fmtInt(r.turns) }}</td>
                 <td class="share-cell" data-label="Share">
-                  <span class="bar" aria-hidden="true"><span class="fill" :style="{ width: r.share.toFixed(1) + '%' }"></span></span>
-                  <span class="mono muted">{{ r.share.toFixed(0) }}%</span>
+                  <span class="share-content">
+                    <span class="bar" aria-hidden="true"><span class="fill" :style="{ width: r.share.toFixed(1) + '%' }"></span></span>
+                    <span class="mono muted">{{ r.share.toFixed(0) }}%</span>
+                  </span>
                 </td>
-                <td class="muted" data-label="Last activity" :title="r.lastAt ? fmtStamp(r.lastAt) : ''">{{ r.lastAt ? fmtAgo(r.lastAt, now) : '—' }}</td>
+                <td class="muted nowrap" data-label="Last activity" :title="r.lastAt ? fmtStamp(r.lastAt) : ''">{{ r.lastAt ? fmtAgo(r.lastAt, now) : '—' }}</td>
               </tr>
             </tbody>
           </table>
@@ -654,10 +656,12 @@ watch(
                 <td class="num mono" data-label="Cost">{{ r.costs }}</td>
                 <td class="num mono" data-label="Turns">{{ fmtInt(r.turns) }}</td>
                 <td class="share-cell" data-label="Share">
-                  <span class="bar" aria-hidden="true"><span class="fill" :style="{ width: r.share.toFixed(1) + '%' }"></span></span>
-                  <span class="mono muted">{{ r.share.toFixed(0) }}%</span>
+                  <span class="share-content">
+                    <span class="bar" aria-hidden="true"><span class="fill" :style="{ width: r.share.toFixed(1) + '%' }"></span></span>
+                    <span class="mono muted">{{ r.share.toFixed(0) }}%</span>
+                  </span>
                 </td>
-                <td class="muted" data-label="Last activity" :title="r.lastAt ? fmtStamp(r.lastAt) : ''">{{ r.lastAt ? fmtAgo(r.lastAt, now) : '—' }}</td>
+                <td class="muted nowrap" data-label="Last activity" :title="r.lastAt ? fmtStamp(r.lastAt) : ''">{{ r.lastAt ? fmtAgo(r.lastAt, now) : '—' }}</td>
               </tr>
             </tbody>
           </table>
@@ -677,15 +681,17 @@ watch(
             <tbody>
               <tr v-for="r in modelRows" :key="`${r.provider}::${r.model}`" data-testid="by-model-row" :data-model="r.model" :data-est="r.estTokens > 0">
                 <td data-label="Model"><span class="mono">{{ r.model }}</span></td>
-                <td class="muted" data-label="Provider">{{ r.provider }}</td>
+                <td class="muted nowrap" data-label="Provider">{{ r.provider }}</td>
                 <td class="num mono" data-label="Tokens" :title="r.estTokens > 0 ? `${fmtInt(r.estTokens)} of these are a bridge estimate` : ''">{{ fmtTokensWithEst(r.tokens, r.estTokens) }}</td>
                 <td class="num mono" data-label="Cost">{{ r.costs }}</td>
                 <td class="num mono" data-label="Turns">{{ fmtInt(r.turns) }}</td>
                 <td class="share-cell" data-label="Share">
-                  <span class="bar" aria-hidden="true"><span class="fill" :style="{ width: r.share.toFixed(1) + '%' }"></span></span>
-                  <span class="mono muted">{{ r.share.toFixed(0) }}%</span>
+                  <span class="share-content">
+                    <span class="bar" aria-hidden="true"><span class="fill" :style="{ width: r.share.toFixed(1) + '%' }"></span></span>
+                    <span class="mono muted">{{ r.share.toFixed(0) }}%</span>
+                  </span>
                 </td>
-                <td class="muted" data-label="Last activity" :title="r.lastAt ? fmtStamp(r.lastAt) : ''">{{ r.lastAt ? fmtAgo(r.lastAt, now) : '—' }}</td>
+                <td class="muted nowrap" data-label="Last activity" :title="r.lastAt ? fmtStamp(r.lastAt) : ''">{{ r.lastAt ? fmtAgo(r.lastAt, now) : '—' }}</td>
               </tr>
             </tbody>
           </table>
@@ -1080,7 +1086,11 @@ table.dense th.num {
   text-align: right;
 }
 
-.share-cell {
+.nowrap {
+  white-space: nowrap;
+}
+
+.share-content {
   display: flex;
   align-items: center;
   gap: 0.375rem;
@@ -1467,7 +1477,8 @@ table.dense th.num {
     text-align: left;
   }
 
-  .share-cell {
+  .share-content {
+    flex: 1;
     min-width: 0;
   }
 
