@@ -569,6 +569,8 @@ watch(
         All server sessions, including CLI and background agents. Sources:
         <span v-for="(source, i) in activity.usageSources" :key="source.agentName">{{ i ? ' · ' : '' }}{{ source.agentName }}: {{ source.status === 'ready' ? 'available' : source.status }}</span>.
         Token counts include cached input; costs appear only when reported.
+        <span v-if="activity.porchUsage?.status === 'ready'">Porch journals: {{ activity.porchUsage.rawFiles }} files, including ephemeral runs.</span>
+        <span v-else-if="activity.porchUsage">Porch journals {{ activity.porchUsage.status }}: some ephemeral runs may be missing.</span>
         <span v-if="spendingRows.some(r => r.cost === undefined)">Costs are unavailable for some sessions; the amount shown is a partial total.</span>
         Hermes historical totals are dated by the session’s last activity, so daily figures are approximate.
       </p>

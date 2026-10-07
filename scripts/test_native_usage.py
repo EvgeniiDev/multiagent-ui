@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import sqlite3
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('native_usage', Path(__file__).parents[1] / 'server/usage/read_native.py')
 native = importlib.util.module_from_spec(spec)
@@ -42,7 +43,7 @@ class NativeUsageTest(unittest.TestCase):
 
     def test_missing_sources_are_reported_without_fake_zero_costs(self):
         with tempfile.TemporaryDirectory() as tmp:
-            result = native.collect(Path(tmp))
+            result = native.collect(Path(tmp), porch_output=Path(tmp) / 'porch')
             self.assertEqual(len(result['sources']), 5)
             self.assertTrue(all(s['status'] == 'unavailable' for s in result['sources']))
             self.assertEqual(result['usage'], [])
@@ -69,7 +70,7 @@ class NativeUsageTest(unittest.TestCase):
             record = dict(type='message', id='unique', timestamp='2026-10-07T10:00:00Z', message=dict(role='assistant', usage=dict(totalTokens=42)))
             (managed / 'a.jsonl').write_text(json.dumps(record))
             (standard / 'copy.jsonl').write_text(json.dumps(record))
-            rows = native.collect(home)['usage']
+            rows = native.collect(home, porch_output=home / 'porch')['usage']
             self.assertEqual(sum(r['used'] for r in rows), 42)
 
     def test_codex_keeps_old_usage_when_a_session_upgrades(self):
@@ -78,6 +79,63 @@ class NativeUsageTest(unittest.TestCase):
             records = [dict(type='event_msg', timestamp='2026-10-06T10:00:00Z', payload=dict(type='token_count', info=dict(total_token_usage=dict(total_tokens=100)))), dict(type='event_msg', timestamp='2026-10-07T10:00:00Z', payload=dict(type='token_count', info=dict(total_token_usage=dict(total_tokens=150)))), dict(type='token_usage_record', timestamp='2026-10-07T10:00:00Z', payload=dict(response_id='r', usage=dict(total_tokens=50), thread_token_usage=dict(total_tokens=150)))]
             p.write_text('\n'.join(map(json.dumps, records)))
             self.assertEqual(sum(r['used'] for r in native.read_codex_file(p)), 150)
+
+    def test_ephemeral_porch_codex_counters_and_persisted_session_dedup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'raw').mkdir()
+            (root / 'meta.json').write_text(json.dumps(dict(cwd='/project', started_at='2026-10-07T10:00:00Z')))
+            records = [dict(method='thread/tokenUsage/updated', emittedAtMs=1791367200000 + n,
+                            params=dict(threadId='thread', tokenUsage=dict(total=dict(totalTokens=used))))
+                       for n, used in enumerate([100, 100, 250])]
+            (root / 'raw/codex.jsonl').write_text('\n'.join(map(json.dumps, records)))
+            rows = native.read_porch_usage([root], set())
+            self.assertEqual(sum(r['used'] for r in rows), 250)
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(native.read_porch_usage([root], {'thread'}), [])
+
+    def test_porch_pi_repeated_notifications_count_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'raw').mkdir()
+            (root / 'meta.json').write_text(json.dumps(dict(cwd='/project', started_at='2026-10-07T10:00:00Z')))
+            msg = dict(role='assistant', timestamp=1791367200000, responseId='r', provider='p', model='m', usage=dict(totalTokens=42))
+            records = [dict(type=kind, message=msg) for kind in ['message_end', 'turn_end']]
+            (root / 'raw/pi.jsonl').write_text('\n'.join(map(json.dumps, records)))
+            rows = native.read_porch_usage([root], set())
+            self.assertEqual(sum(r['used'] for r in rows), 42)
+
+    def test_porch_codex_cli_reports_cumulative_thread_usage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / 'raw').mkdir()
+            (root / 'meta.json').write_text(json.dumps(dict(started_at='2026-10-07T10:00:00Z')))
+            events = [dict(type='thread.started', thread_id='t'),
+                      dict(type='turn.completed', usage=dict(input_tokens=100, output_tokens=20)),
+                      dict(type='turn.completed', usage=dict(input_tokens=200, output_tokens=40))]
+            (root / 'raw/codex.jsonl').write_text('\n'.join(map(json.dumps, events)))
+            self.assertEqual(sum(r['used'] for r in native.read_porch_usage([root], set())), 240)
+
+    def test_private_porch_artifacts_are_discovered_via_registry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp); root = home / 'private-artifacts'; (root / 'raw').mkdir(parents=True)
+            registry = home / '.cache/pragmatic-orchestration/steer/runs/run-1'; registry.mkdir(parents=True)
+            (registry / 'meta.json').write_text(json.dumps(dict(artifacts_dir=str(root), cwd='/project', model='M', started_at='2026-10-07T10:00:00Z')))
+            event = dict(method='thread/tokenUsage/updated', emittedAtMs=1791367200000,
+                         params=dict(threadId='t', tokenUsage=dict(total=dict(totalTokens=42))))
+            (root / 'raw/codex.jsonl').write_text(json.dumps(event))
+            result = native.collect(home, porch_output=home / 'default-output')
+            self.assertEqual(sum(r['used'] for r in result['usage']), 42)
+            self.assertEqual(result['usage'][0]['model'], 'M')
+
+    def test_one_unreadable_porch_journal_does_not_discard_other_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / 'raw').mkdir()
+            (root / 'raw/codex.jsonl').touch()
+            errors = []
+            with patch.object(native, 'json_lines', side_effect=PermissionError()):
+                rows = native.read_porch_usage([root], set(), errors=errors)
+            self.assertEqual(rows, [])
+            self.assertEqual(errors, ['unreadable-journal'])
 
     def test_pi_cache_and_reasoning_are_not_counted_twice(self):
         with tempfile.TemporaryDirectory() as tmp:

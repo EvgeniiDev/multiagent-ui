@@ -152,6 +152,7 @@ export const useActivityStore = defineStore('activity', () => {
   const usageSources = ref<UsageSourceStatus[]>([]);
   const usageLoading = ref(false);
   const usageError = ref('');
+  const porchUsage = ref<{ status: string; rawFiles: number } | null>(null);
   const allUsage = computed(() => {
     const covered = new Set(usageSources.value.filter(s => s.status !== 'unavailable').map(s => s.agentName));
     const legacy = usage.value.map(r => ({ ...r, agentName: agentLabel(r.agentName) }));
@@ -169,6 +170,7 @@ export const useActivityStore = defineStore('activity', () => {
         if (!Array.isArray(data.usage) || !Array.isArray(data.sources)) throw new Error('Invalid usage data');
         nativeRows.value = data.usage;
         usageSources.value = data.sources;
+        porchUsage.value = data.porch ?? null;
         usageError.value = '';
       } catch (e) {
         usageError.value = e instanceof Error ? e.message : 'Usage data unavailable';
@@ -495,6 +497,7 @@ export const useActivityStore = defineStore('activity', () => {
     usageSources,
     usageLoading,
     usageError,
+    porchUsage,
     refreshNativeUsage,
     recent,
     entriesInRange,

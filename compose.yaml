@@ -111,12 +111,16 @@ services:
       - /home/hermes/.local:/home/hermes/.local:rw
       - /home/hermes/.pi:/home/hermes/.pi:rw
       - /home/hermes/.hermes:/home/hermes/.hermes:rw
+      - /home/hermes/.codex:/home/hermes/.codex:ro
       - /home/hermes/.local/share/devin:/home/hermes/.local/share/devin:rw
       - /home/hermes/.acp-ops:/run/acp-ops:ro
       # External porch registry — READ-ONLY, state only. Lets the workflow
       # panel show real external runs next to managed ones (the live spec
       # lacks this mount, so the reader returns an empty list today).
       - /home/hermes/.cache/pragmatic-orchestration/steer:/home/hermes/.cache/pragmatic-orchestration/steer:ro
+      # Ephemeral Porch calls keep provider counters only in these journals.
+      - /tmp/pragmatic-orchestration-outputs:/tmp/pragmatic-orchestration-outputs:ro
+      - /home/hermes/.cache/codex-run:/home/hermes/.cache/codex-run:ro
 
   runner:
     <<: *node

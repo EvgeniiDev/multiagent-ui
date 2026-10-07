@@ -46,6 +46,16 @@ def json_lines(path):
                 continue  # An in-flight JSONL append can have an incomplete tail.
 
 
+def pi_event_id(msg, fallback):
+    response = msg.get('responseId')
+    if response:
+        return f"pi:{msg.get('provider')}:{response}"
+    if msg.get('timestamp'):
+        identity = {k: msg.get(k) for k in ('timestamp', 'provider', 'model', 'usage')}
+        return 'pi:' + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return f'pi:{fallback}'
+
+
 def read_pi_file(path):
     sid, cwd = path.stem, None
     rows, seen = [], set()
@@ -63,7 +73,7 @@ def read_pi_file(path):
             total = sum(number(usage.get(k)) for k in ('input', 'output', 'cacheRead', 'cacheWrite'))
         rows.append(sample('Pi', sid, data.get('timestamp'), total, cwd,
                            msg.get('model'), msg.get('provider'), (usage.get('cost') or {}).get('total'),
-                           eventId=mid or f"{sid}:{data.get('timestamp')}"))
+                           eventId=pi_event_id(msg, mid or f"{sid}:{data.get('timestamp')}")))
     return rows
 
 
@@ -207,7 +217,91 @@ def read_devin(path):
     finally: conn.close()
 
 
-def collect(home):
+def read_porch_usage(roots, native_codex_sessions, *, metadata=None, errors=None):
+    """Porch's ephemeral calls may exist only in its raw event journals.
+
+    Persistent Codex threads are already covered by their native history.
+    Pi events use provider response IDs shared with the native JSONL file.
+    """
+    rows, snapshots, seen = [], [], set()
+    metadata = metadata or {}
+    def records(path):
+        try: yield from json_lines(path)
+        except (OSError, ValueError, TypeError):
+            if errors is not None: errors.append('unreadable-journal')
+    for root in roots:
+        try: meta = json.loads((root / 'meta.json').read_text())
+        except (OSError, ValueError): meta = {}
+        meta = {**metadata.get(root, {}), **meta}
+        cwd, model, sid = meta.get('cwd'), meta.get('model'), root.name
+        at = meta.get('finished_at') or meta.get('started_at')
+        for path in sorted((root / 'raw').glob('*.jsonl')):
+            for data in records(path):
+                method, kind = data.get('method'), data.get('type')
+                params = data.get('params') or {}
+                if method == 'thread/started':
+                    thread = params.get('thread') or {}
+                    sid, model = thread.get('id', sid), thread.get('model', model)
+                if kind == 'thread.started': sid = data.get('thread_id', sid)
+                if method == 'thread/tokenUsage/updated':
+                    thread = params.get('threadId') or sid
+                    if thread in native_codex_sessions: continue
+                    usage = (params.get('tokenUsage') or {}).get('total') or {}
+                    total = usage.get('totalTokens')
+                    if total is None: total = number(usage.get('inputTokens')) + number(usage.get('outputTokens'))
+                    snapshots.append(sample('Codex', thread, data.get('emittedAtMs') or at, total, cwd, model))
+                if kind == 'turn.completed' and data.get('usage') and sid not in native_codex_sessions:
+                    usage = data['usage']
+                    total = usage.get('total_tokens')
+                    if total is None: total = number(usage.get('input_tokens')) + number(usage.get('output_tokens'))
+                    snapshots.append(sample('Codex', sid, data.get('timestamp') or data.get('emittedAtMs') or at,
+                                            total, cwd, model))
+                if kind == 'message_end':
+                    msg = data.get('message') or {}; usage = msg.get('usage') or {}
+                    if msg.get('role') != 'assistant' or not usage: continue
+                    total = usage.get('totalTokens')
+                    if total is None: total = sum(number(usage.get(k)) for k in ('input', 'output', 'cacheRead', 'cacheWrite'))
+                    event = pi_event_id(msg, f'{root.name}:{len(rows)}')
+                    if event in seen: continue
+                    seen.add(event)
+                    rows.append(sample('Pi', root.name, msg.get('timestamp') or data.get('emittedAtMs') or at,
+                                       total, cwd, msg.get('model'), msg.get('provider'),
+                                       (usage.get('cost') or {}).get('total'), eventId=event))
+    previous = {}
+    for row in sorted(snapshots, key=lambda r: r['at']):
+        total = row['used']; base = previous.get(row['sessionId'], 0)
+        if total <= base: continue
+        previous[row['sessionId']] = total
+        row['used'] = total - base
+        row['eventId'] = f"porch-codex:{row['sessionId']}:{total}"
+        rows.append(row)
+    return rows
+
+
+def porch_roots(home, state, output):
+    roots = {p.parent for p in output.glob('*/meta.json')}
+    metadata = {}
+    registries = [Path(os.environ.get('PORCH_STEER_DIR') or home / '.cache/pragmatic-orchestration/steer'),
+                  state / 'execution/steer']
+    for registry in registries:
+        for path in (registry / 'runs').glob('*/meta.json'):
+            try:
+                meta = json.loads(path.read_text())
+                location = meta.get('artifacts_dir')
+                if location:
+                    root = Path(location)
+                    roots.add(root); metadata[root] = meta
+            except (OSError, ValueError, TypeError): continue
+    for path in (state / 'execution/attempts').glob('*/launch.json'):
+        try:
+            meta = json.loads(path.read_text())
+            root = Path(meta.get('artifactsDir') or path.parent / 'artifacts')
+            roots.add(root); metadata[root] = meta
+        except (OSError, ValueError, TypeError): continue
+    return sorted(roots), metadata
+
+
+def collect(home, *, porch_output=None):
     home = Path(home)
     rows, sources = [], []
     readers = [('Hermes Agent', home / '.hermes/state.db', read_hermes),
@@ -242,6 +336,18 @@ def collect(home):
             except (OSError, ValueError, TypeError): errors += 1
         rows.extend(found)
         sources.append(dict(agentName=agent, status='partial' if errors else 'ready' if directory.is_dir() or files else 'unavailable', samples=len(found)))
+    output = Path(porch_output or os.environ.get('ACP_PORCH_OUTPUT_DIR') or '/tmp/pragmatic-orchestration-outputs')
+    state = Path(os.environ.get('STATE_DIR') or home / '.hermes/acp-ui-state')
+    roots, metadata = porch_roots(home, state, output)
+    native_codex_sessions = {r['sessionId'] for r in rows if r['agentName'] == 'Codex'}
+    porch_errors = []
+    porch_rows = read_porch_usage(roots, native_codex_sessions, metadata=metadata, errors=porch_errors)
+    rows.extend(porch_rows)
+    for source in sources:
+        if source['status'] == 'unavailable' and any(r['agentName'] == source['agentName'] for r in porch_rows):
+            source['status'] = 'partial'
+    porch = dict(status='partial' if porch_errors else 'ready' if output.is_dir() or any(p.is_dir() for p in roots) else 'unavailable',
+                 rawFiles=sum(len(list((root / 'raw').glob('*.jsonl'))) for root in roots))
     unique, seen = [], set()
     for r in rows:
         if r['at'] <= 0 or (r['used'] <= 0 and r.get('cost', 0) <= 0): continue
@@ -251,7 +357,7 @@ def collect(home):
         if event: seen.add(key)
         unique.append(r)
     rows = unique
-    return dict(usage=rows, sources=sources, updatedAt=int(dt.datetime.now().timestamp() * 1000))
+    return dict(usage=rows, sources=sources, porch=porch, updatedAt=int(dt.datetime.now().timestamp() * 1000))
 
 
 if __name__ == '__main__':
