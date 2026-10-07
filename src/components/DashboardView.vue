@@ -119,12 +119,27 @@ const projectRows = computed<ProjectRow[]>(() => {
   const total = rows.reduce((s, r) => s + r.tokens, 0);
   const samples = activity.usageInRange(from, to);
   const entries = activity.entriesInRange(from, to);
+  // Index each history once. Scanning/reversing 50k samples for every project
+  // blocks the main thread for seconds on the all-time range.
+  const sampleDetails = new Map<string, { at: number; cwd?: string }>();
+  for (const sample of samples) {
+    const key = projectName(sample.cwd);
+    const first = sampleDetails.get(key);
+    sampleDetails.set(key, { at: sample.at, cwd: first ? first.cwd : sample.cwd });
+  }
+  const lastEntryAt = new Map<string, number>();
+  for (const entry of entries) lastEntryAt.set(projectName(entry.cwd), entry.at);
+  const costSamples = new Map<string, typeof spendingRows.value>();
+  for (const sample of spendingRows.value) {
+    const key = projectName(sample.cwd);
+    const bucket = costSamples.get(key) ?? [];
+    bucket.push(sample);
+    costSamples.set(key, bucket);
+  }
   return rows.map((r) => {
-    const lastAt =
-      [...samples].reverse().find((s) => projectName(s.cwd) === r.project)?.at ??
-      [...entries].reverse().find((e) => projectName(e.cwd) === r.project)?.at ??
-      0;
-    const cur = samples.find((s) => projectName(s.cwd) === r.project)?.cwd ?? r.cwd ?? '';
+    const detail = sampleDetails.get(r.project);
+    const lastAt = detail?.at ?? lastEntryAt.get(r.project) ?? 0;
+    const cur = detail?.cwd ?? r.cwd ?? '';
     return {
       project: r.project,
       cwd: cur || r.cwd || '',
@@ -134,7 +149,7 @@ const projectRows = computed<ProjectRow[]>(() => {
       turns: r.turns,
       share: total > 0 ? (r.tokens / total) * 100 : 0,
       lastAt,
-      costs: fmtCostGroups(groupCost(spendingRows.value.filter((s) => projectName(s.cwd) === r.project))),
+      costs: fmtCostGroups(groupCost(costSamples.get(r.project) ?? [])),
     };
   });
 });
