@@ -38,8 +38,10 @@ def run_case(browser, fail=False, large=False):
     context = browser.new_context(viewport=dict(width=1440, height=1000), timezone_id='Asia/Karachi')
     errors = []
     rows = [dict(ROWS[0], used=100, at=NOW - i * 60000,
-                 sessionId=f'session-{i % 2000}', cwd=f'/projects/project-{i % 200}')
+                 sessionId=f'session-{i % 2000}', cwd=f'/projects/project-{i % 200}',
+                 agentName=f'Agent-{i % 30}', model=f'Model-{i % 60}')
             for i in range(52000)] if large else ROWS
+    agents = [f'Agent-{i}' for i in range(30)] if large else AGENTS
     def route(request):
         url = urlparse(request.request.url)
         if url.port == 25808:
@@ -48,7 +50,7 @@ def run_case(browser, fail=False, large=False):
             request.fulfill(body=path.read_bytes(), content_type=mimetypes.guess_type(str(path))[0] or 'application/octet-stream')
         elif url.path == '/health': request.fulfill(json=dict(ok=True))
         elif url.path == '/api/usage':
-            request.fulfill(status=503 if fail else 200, json=dict(usage=rows, sources=[dict(agentName=a, status='ready', samples=1) for a in AGENTS]))
+            request.fulfill(status=503 if fail else 200, json=dict(usage=rows, sources=[dict(agentName=a, status='ready', samples=1) for a in agents]))
         elif url.path.startswith('/api/state/'):
             data = dict(entries=[], usage=[]) if url.path.endswith('activity.json') else {}
             request.fulfill(json=dict(rev=1, updatedAt=1, data=data))
@@ -83,6 +85,19 @@ def run_case(browser, fail=False, large=False):
         assert toggle.get_attribute('aria-expanded') == 'true'
         toggle.click()
         assert projects.count() == 20
+        for table, control, total in [('by-agent-table', 'toggle-agents', 30),
+                                      ('by-model-table', 'toggle-models', 60),
+                                      ('top-sessions-table', 'toggle-sessions', 6000),
+                                      ('by-day-table', 'toggle-days', None)]:
+            visible = page.locator(f'[data-testid="{table}"] tbody tr')
+            button = page.locator(f'[data-testid="{control}"]')
+            assert visible.count() == 20, (table, visible.count())
+            assert button.get_attribute('aria-controls') == page.locator(f'[data-testid="{table}"]').get_attribute('id')
+            button.click()
+            assert visible.count() == total if total else visible.count() > 20
+            assert projects.count() == 20, 'Expanding another table expanded projects'
+            button.click()
+            assert visible.count() == 20
         assert page.locator('[data-testid="sum-tokens"]').inner_text().strip() == '5,200,000'
     else:
         page.wait_for_selector('[data-testid="usage-sources"]')

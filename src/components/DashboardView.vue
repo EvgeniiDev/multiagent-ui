@@ -3,6 +3,7 @@
 // All numbers come from useActivityStore; every figure names its range.
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import UiButton from './ui/UiButton.vue';
+import UiExpandableRows from './ui/UiExpandableRows.vue';
 import { useActivityStore, projectName } from '../stores/activity';
 import { useSessionStore } from '../stores/session';
 import { useConfigStore } from '../stores/config';
@@ -153,9 +154,6 @@ const projectRows = computed<ProjectRow[]>(() => {
     };
   });
 });
-
-const showAllProjects = ref(false);
-const visibleProjectRows = computed(() => showAllProjects.value ? projectRows.value : projectRows.value.slice(0, 20));
 
 interface ModelRow {
   model: string;
@@ -363,7 +361,7 @@ const sessionRows = computed<SessionRow[]>(() => {
       cost: rows.reduce((n, r) => n + (r.cost ?? 0), 0), lastAt: last.at,
       sessionId: last.sessionId, costs: fmtCostGroups(groupCost(rows)),
       canResume: sessionStore.savedSessions.some(s => s.sessionId === last.sessionId && s.agentName === last.agentName) };
-  }).sort((a, b) => b.tokens - a.tokens).slice(0, 20);
+  }).sort((a, b) => b.tokens - a.tokens);
 });
 
 async function openSession(row: SessionRow): Promise<void> {
@@ -612,18 +610,20 @@ watch(
       <section class="panel" aria-label="Agent state" data-testid="agent-state">
         <div class="panel-title">Agents <span class="muted">· live state</span></div>
         <p v-if="agentStates.length === 0" class="empty">No agents configured.</p>
-        <ul v-else class="state-list">
-          <li v-for="a in agentStates" :key="a.name" class="state-row">
-            <span class="dot" :class="{ ok: a.reachable, bad: !a.reachable }" aria-hidden="true"></span>
-            <span class="state-name">{{ a.name }}</span>
-            <span class="mono muted">{{ a.transport }}</span>
-            <span class="state-cur" :title="a.currentSession">session: {{ a.currentSession }}</span>
-            <span v-if="a.inFlight" class="pill">turn in flight</span>
-            <span class="state-last muted" :title="a.lastAt ? fmtStamp(a.lastAt) : ''">
-              {{ a.lastAt ? `${fmtAgo(a.lastAt, now)} · ${a.lastText}` : a.lastText }}
-            </span>
-          </li>
-        </ul>
+        <UiExpandableRows v-else :rows="agentStates" controls-id="dashboard-agent-state" toggle-test-id="toggle-agent-state" :ordered-by-rank="false" v-slot="{ rows: visibleRows }">
+          <ul id="dashboard-agent-state" class="state-list">
+            <li v-for="a in visibleRows" :key="a.name" class="state-row">
+              <span class="dot" :class="{ ok: a.reachable, bad: !a.reachable }" aria-hidden="true"></span>
+              <span class="state-name">{{ a.name }}</span>
+              <span class="mono muted">{{ a.transport }}</span>
+              <span class="state-cur" :title="a.currentSession">session: {{ a.currentSession }}</span>
+              <span v-if="a.inFlight" class="pill">turn in flight</span>
+              <span class="state-last muted" :title="a.lastAt ? fmtStamp(a.lastAt) : ''">
+                {{ a.lastAt ? `${fmtAgo(a.lastAt, now)} · ${a.lastText}` : a.lastText }}
+              </span>
+            </li>
+          </ul>
+        </UiExpandableRows>
       </section>
 
       <div class="cols">
@@ -634,26 +634,28 @@ watch(
             no usage recorded yet<br />
             <span class="muted">Numbers come from the agents' usage_update notifications and the bridges' estimates.</span>
           </p>
-          <table v-else class="dense" data-testid="by-agent-table">
-            <thead>
-              <tr><th scope="col">Agent</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th><th scope="col">Share</th><th scope="col">Last activity</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="r in agentRows" :key="r.name" data-testid="by-agent-row" :data-agent="r.name" :data-tokens="r.tokens" :data-est="r.estTokens > 0">
-                <td data-label="Agent">{{ r.name }}</td>
-                <td class="num mono" data-label="Tokens" :title="r.estTokens > 0 ? `${fmtInt(r.estTokens)} of these are a bridge estimate` : ''">{{ fmtTokensWithEst(r.tokens, r.estTokens) }}</td>
-                <td class="num mono" data-label="Cost">{{ r.costs }}</td>
-                <td class="num mono" data-label="Turns">{{ fmtInt(r.turns) }}</td>
-                <td class="share-cell" data-label="Share">
-                  <span class="share-content">
-                    <span class="bar" aria-hidden="true"><span class="fill" :style="{ width: r.share.toFixed(1) + '%' }"></span></span>
-                    <span class="mono muted">{{ r.share.toFixed(0) }}%</span>
-                  </span>
-                </td>
-                <td class="muted nowrap" data-label="Last activity" :title="r.lastAt ? fmtStamp(r.lastAt) : ''">{{ r.lastAt ? fmtAgo(r.lastAt, now) : '—' }}</td>
-              </tr>
-            </tbody>
-          </table>
+          <UiExpandableRows v-else :rows="agentRows" controls-id="dashboard-agents" toggle-test-id="toggle-agents" v-slot="{ rows: visibleRows }">
+            <table id="dashboard-agents" class="dense" data-testid="by-agent-table">
+              <thead>
+                <tr><th scope="col">Agent</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th><th scope="col">Share</th><th scope="col">Last activity</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in visibleRows" :key="r.name" data-testid="by-agent-row" :data-agent="r.name" :data-tokens="r.tokens" :data-est="r.estTokens > 0">
+                  <td data-label="Agent">{{ r.name }}</td>
+                  <td class="num mono" data-label="Tokens" :title="r.estTokens > 0 ? `${fmtInt(r.estTokens)} of these are a bridge estimate` : ''">{{ fmtTokensWithEst(r.tokens, r.estTokens) }}</td>
+                  <td class="num mono" data-label="Cost">{{ r.costs }}</td>
+                  <td class="num mono" data-label="Turns">{{ fmtInt(r.turns) }}</td>
+                  <td class="share-cell" data-label="Share">
+                    <span class="share-content">
+                      <span class="bar" aria-hidden="true"><span class="fill" :style="{ width: r.share.toFixed(1) + '%' }"></span></span>
+                      <span class="mono muted">{{ r.share.toFixed(0) }}%</span>
+                    </span>
+                  </td>
+                  <td class="muted nowrap" data-label="Last activity" :title="r.lastAt ? fmtStamp(r.lastAt) : ''">{{ r.lastAt ? fmtAgo(r.lastAt, now) : '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </UiExpandableRows>
         </section>
 
         <!-- By project -->
@@ -663,33 +665,29 @@ watch(
             no usage recorded yet<br />
             <span class="muted">Numbers come from the agents' usage_update notifications and the bridges' estimates.</span>
           </p>
-          <table v-else id="dashboard-projects" class="dense" data-testid="by-project-table">
-            <thead>
-              <tr><th scope="col">Project</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th><th scope="col">Share</th><th scope="col">Last activity</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="r in visibleProjectRows" :key="r.project" :title="r.cwd" :data-est="r.estTokens > 0">
-                <td data-label="Project"><span :title="r.cwd" class="mono">{{ r.project }}</span></td>
-                <td class="num mono" data-label="Tokens" :title="r.estTokens > 0 ? `${fmtInt(r.estTokens)} of these are a bridge estimate` : ''">{{ fmtTokensWithEst(r.tokens, r.estTokens) }}</td>
-                <td class="num mono" data-label="Cost">{{ r.costs }}</td>
-                <td class="num mono" data-label="Turns">{{ fmtInt(r.turns) }}</td>
-                <td class="share-cell" data-label="Share">
-                  <span class="share-content">
-                    <span class="bar" aria-hidden="true"><span class="fill" :style="{ width: r.share.toFixed(1) + '%' }"></span></span>
-                    <span class="mono muted">{{ r.share.toFixed(0) }}%</span>
-                  </span>
-                </td>
-                <td class="muted nowrap" data-label="Last activity" :title="r.lastAt ? fmtStamp(r.lastAt) : ''">{{ r.lastAt ? fmtAgo(r.lastAt, now) : '—' }}</td>
-              </tr>
-            </tbody>
-          </table>
-          <UiButton
-            v-if="projectRows.length > 20"
-            data-testid="toggle-projects"
-            aria-controls="dashboard-projects"
-            :aria-expanded="showAllProjects"
-            @click="showAllProjects = !showAllProjects"
-          >{{ showAllProjects ? 'Show top 20' : `Show all (${projectRows.length - 20} more)` }}</UiButton>
+          <UiExpandableRows v-else :rows="projectRows" controls-id="dashboard-projects" toggle-test-id="toggle-projects" v-slot="{ rows: visibleRows }">
+            <table id="dashboard-projects" class="dense" data-testid="by-project-table">
+              <thead>
+                <tr><th scope="col">Project</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th><th scope="col">Share</th><th scope="col">Last activity</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in visibleRows" :key="r.project" :title="r.cwd" :data-est="r.estTokens > 0">
+                  <td data-label="Project"><span :title="r.cwd" class="mono">{{ r.project }}</span></td>
+                  <td class="num mono" data-label="Tokens" :title="r.estTokens > 0 ? `${fmtInt(r.estTokens)} of these are a bridge estimate` : ''">{{ fmtTokensWithEst(r.tokens, r.estTokens) }}</td>
+                  <td class="num mono" data-label="Cost">{{ r.costs }}</td>
+                  <td class="num mono" data-label="Turns">{{ fmtInt(r.turns) }}</td>
+                  <td class="share-cell" data-label="Share">
+                    <span class="share-content">
+                      <span class="bar" aria-hidden="true"><span class="fill" :style="{ width: r.share.toFixed(1) + '%' }"></span></span>
+                      <span class="mono muted">{{ r.share.toFixed(0) }}%</span>
+                    </span>
+                  </td>
+                  <td class="muted nowrap" data-label="Last activity" :title="r.lastAt ? fmtStamp(r.lastAt) : ''">{{ r.lastAt ? fmtAgo(r.lastAt, now) : '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </UiExpandableRows>
+
         </section>
 
         <!-- By model -->
@@ -699,27 +697,29 @@ watch(
             no usage recorded yet<br />
             <span class="muted">The model comes from the session's announced model id; rows written before that field existed read as unknown.</span>
           </p>
-          <table v-else class="dense" data-testid="by-model-table">
-            <thead>
-              <tr><th scope="col">Model</th><th scope="col">Provider</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th><th scope="col">Share</th><th scope="col">Last activity</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="r in modelRows" :key="`${r.provider}::${r.model}`" data-testid="by-model-row" :data-model="r.model" :data-est="r.estTokens > 0">
-                <td data-label="Model"><span class="mono">{{ r.model }}</span></td>
-                <td class="muted nowrap" data-label="Provider">{{ r.provider }}</td>
-                <td class="num mono" data-label="Tokens" :title="r.estTokens > 0 ? `${fmtInt(r.estTokens)} of these are a bridge estimate` : ''">{{ fmtTokensWithEst(r.tokens, r.estTokens) }}</td>
-                <td class="num mono" data-label="Cost">{{ r.costs }}</td>
-                <td class="num mono" data-label="Turns">{{ fmtInt(r.turns) }}</td>
-                <td class="share-cell" data-label="Share">
-                  <span class="share-content">
-                    <span class="bar" aria-hidden="true"><span class="fill" :style="{ width: r.share.toFixed(1) + '%' }"></span></span>
-                    <span class="mono muted">{{ r.share.toFixed(0) }}%</span>
-                  </span>
-                </td>
-                <td class="muted nowrap" data-label="Last activity" :title="r.lastAt ? fmtStamp(r.lastAt) : ''">{{ r.lastAt ? fmtAgo(r.lastAt, now) : '—' }}</td>
-              </tr>
-            </tbody>
-          </table>
+          <UiExpandableRows v-else :rows="modelRows" controls-id="dashboard-models" toggle-test-id="toggle-models" v-slot="{ rows: visibleRows }">
+            <table id="dashboard-models" class="dense" data-testid="by-model-table">
+              <thead>
+                <tr><th scope="col">Model</th><th scope="col">Provider</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th><th scope="col">Share</th><th scope="col">Last activity</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in visibleRows" :key="`${r.provider}::${r.model}`" data-testid="by-model-row" :data-model="r.model" :data-est="r.estTokens > 0">
+                  <td data-label="Model"><span class="mono">{{ r.model }}</span></td>
+                  <td class="muted nowrap" data-label="Provider">{{ r.provider }}</td>
+                  <td class="num mono" data-label="Tokens" :title="r.estTokens > 0 ? `${fmtInt(r.estTokens)} of these are a bridge estimate` : ''">{{ fmtTokensWithEst(r.tokens, r.estTokens) }}</td>
+                  <td class="num mono" data-label="Cost">{{ r.costs }}</td>
+                  <td class="num mono" data-label="Turns">{{ fmtInt(r.turns) }}</td>
+                  <td class="share-cell" data-label="Share">
+                    <span class="share-content">
+                      <span class="bar" aria-hidden="true"><span class="fill" :style="{ width: r.share.toFixed(1) + '%' }"></span></span>
+                      <span class="mono muted">{{ r.share.toFixed(0) }}%</span>
+                    </span>
+                  </td>
+                  <td class="muted nowrap" data-label="Last activity" :title="r.lastAt ? fmtStamp(r.lastAt) : ''">{{ r.lastAt ? fmtAgo(r.lastAt, now) : '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </UiExpandableRows>
         </section>
       </div>
 
@@ -782,43 +782,47 @@ watch(
             </g>
           </svg>
         </div>
-        <table v-if="tableRows.length > 0" class="dense" data-testid="by-day-table">
-          <thead>
-            <tr><th scope="col">Day / week</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th></tr>
-          </thead>
-          <tbody>
-            <tr v-for="d in tableRows" :key="d.day" data-testid="by-day-row" :data-day="d.day" :data-est="d.estTokens > 0">
-              <td data-label="Day">{{ d.label }}</td>
-              <td class="num mono" data-label="Tokens">{{ fmtTokensWithEst(d.tokens, d.estTokens) }}</td>
-              <td class="num mono" data-label="Cost">{{ d.costs }}</td>
-              <td class="num mono" data-label="Turns">{{ fmtInt(d.turns) }}</td>
-            </tr>
-          </tbody>
-        </table>
+        <UiExpandableRows v-if="tableRows.length > 0" :rows="tableRows" controls-id="dashboard-days" toggle-test-id="toggle-days" :ordered-by-rank="false" v-slot="{ rows: visibleRows }">
+          <table id="dashboard-days" class="dense" data-testid="by-day-table">
+            <thead>
+              <tr><th scope="col">Day / week</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="d in visibleRows" :key="d.day" data-testid="by-day-row" :data-day="d.day" :data-est="d.estTokens > 0">
+                <td data-label="Day">{{ d.label }}</td>
+                <td class="num mono" data-label="Tokens">{{ fmtTokensWithEst(d.tokens, d.estTokens) }}</td>
+                <td class="num mono" data-label="Cost">{{ d.costs }}</td>
+                <td class="num mono" data-label="Turns">{{ fmtInt(d.turns) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </UiExpandableRows>
       </section>
 
       <!-- Sessions top-N -->
       <section class="panel" aria-label="Top sessions">
         <div class="panel-title">Top sessions <span class="muted">· by tokens, {{ windowLabel }}</span></div>
         <p v-if="sessionRows.length === 0" class="empty">No sessions with usage in this range.</p>
-        <table v-else class="dense" data-testid="top-sessions-table">
-          <thead>
-            <tr><th scope="col">Session</th><th scope="col">Agent</th><th scope="col">Project</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col">Last turn</th></tr>
-          </thead>
-          <tbody>
-            <tr v-for="s in sessionRows" :key="s.key" :data-est="s.estTokens > 0">
-              <td data-label="Session">
-                <UiButton v-if="s.canResume" variant="ghost" size="xs" :title="`Open ${s.title} in chat`" @click="openSession(s)">{{ s.title }}</UiButton>
-                <span v-else>{{ s.title }}</span>
-              </td>
-              <td data-label="Agent">{{ s.agentName }}</td>
-              <td class="mono" data-label="Project">{{ s.project }}</td>
-              <td class="num mono" data-label="Tokens" :title="s.estTokens > 0 ? 'bridge estimate' : ''">{{ fmtTokensWithEst(s.tokens, s.estTokens) }}</td>
-              <td class="num mono" data-label="Cost">{{ s.costs }}</td>
-              <td class="muted mono" data-label="Last turn" :title="fmtStamp(s.lastAt)">{{ fmtAgo(s.lastAt, now) }}</td>
-            </tr>
-          </tbody>
-        </table>
+        <UiExpandableRows v-else :rows="sessionRows" controls-id="dashboard-sessions" toggle-test-id="toggle-sessions" v-slot="{ rows: visibleRows }">
+          <table id="dashboard-sessions" class="dense" data-testid="top-sessions-table">
+            <thead>
+              <tr><th scope="col">Session</th><th scope="col">Agent</th><th scope="col">Project</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col">Last turn</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="s in visibleRows" :key="s.key" :data-est="s.estTokens > 0">
+                <td data-label="Session">
+                  <UiButton v-if="s.canResume" variant="ghost" size="xs" :title="`Open ${s.title} in chat`" @click="openSession(s)">{{ s.title }}</UiButton>
+                  <span v-else>{{ s.title }}</span>
+                </td>
+                <td data-label="Agent">{{ s.agentName }}</td>
+                <td class="mono" data-label="Project">{{ s.project }}</td>
+                <td class="num mono" data-label="Tokens" :title="s.estTokens > 0 ? 'bridge estimate' : ''">{{ fmtTokensWithEst(s.tokens, s.estTokens) }}</td>
+                <td class="num mono" data-label="Cost">{{ s.costs }}</td>
+                <td class="muted mono" data-label="Last turn" :title="fmtStamp(s.lastAt)">{{ fmtAgo(s.lastAt, now) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </UiExpandableRows>
       </section>
 
       <!-- Limits -->
@@ -830,36 +834,38 @@ watch(
         <p v-if="limitRows.length === 0 && !showLimitForm" class="empty">
           No quotas yet. Add one to track spend against a target.
         </p>
-        <ul v-else class="limit-list">
-          <li
-            v-for="row in limitRows"
-            :key="row.limit.id"
-            class="limit-row"
-            :class="{ warn: row.warn }"
-            :data-testid="`limit-row-${row.limit.id}`"
-            :data-warn="row.warn ? 'true' : 'false'"
-          >
-            <div class="limit-head">
-              <span class="limit-label">{{ row.limit.label }}</span>
-              <span class="mono muted">{{ row.limit.scope }}{{ row.limit.scope !== 'global' ? `:${row.limit.target}` : '' }} · {{ periodLabel(row.limit.period) }}</span>
-              <span class="mono" :class="{ 'warn-text': row.warn }" :data-testid="`limit-pct-${row.limit.id}`">
-                {{ fmtInt(row.used) }} / {{ fmtInt(row.limit.targetTokens) }} · {{ row.pct.toFixed(0) }}%
-              </span>
-              <button class="mini-btn" :aria-label="`Edit ${row.limit.label}`" @click="startEditLimit(row.limit)">Edit</button>
-              <button class="mini-btn danger" :aria-label="`Delete ${row.limit.label}`" @click="deleteLimit(row.limit.id)">Del</button>
-            </div>
-            <div
-              class="bar limit-bar"
-              role="progressbar"
-              :aria-valuenow="Math.min(100, Math.round(row.pct))"
-              aria-valuemin="0"
-              aria-valuemax="100"
-              :aria-label="`${row.limit.label}: ${row.pct.toFixed(0)} percent of quota`"
+        <UiExpandableRows v-else :rows="limitRows" controls-id="dashboard-limits" toggle-test-id="toggle-limits" :ordered-by-rank="false" v-slot="{ rows: visibleRows }">
+          <ul id="dashboard-limits" class="limit-list">
+            <li
+              v-for="row in visibleRows"
+              :key="row.limit.id"
+              class="limit-row"
+              :class="{ warn: row.warn }"
+              :data-testid="`limit-row-${row.limit.id}`"
+              :data-warn="row.warn ? 'true' : 'false'"
             >
-              <span class="fill" :class="{ over: row.warn }" :style="{ width: Math.min(100, row.pct).toFixed(1) + '%' }"></span>
-            </div>
-          </li>
-        </ul>
+              <div class="limit-head">
+                <span class="limit-label">{{ row.limit.label }}</span>
+                <span class="mono muted">{{ row.limit.scope }}{{ row.limit.scope !== 'global' ? `:${row.limit.target}` : '' }} · {{ periodLabel(row.limit.period) }}</span>
+                <span class="mono" :class="{ 'warn-text': row.warn }" :data-testid="`limit-pct-${row.limit.id}`">
+                  {{ fmtInt(row.used) }} / {{ fmtInt(row.limit.targetTokens) }} · {{ row.pct.toFixed(0) }}%
+                </span>
+                <button class="mini-btn" :aria-label="`Edit ${row.limit.label}`" @click="startEditLimit(row.limit)">Edit</button>
+                <button class="mini-btn danger" :aria-label="`Delete ${row.limit.label}`" @click="deleteLimit(row.limit.id)">Del</button>
+              </div>
+              <div
+                class="bar limit-bar"
+                role="progressbar"
+                :aria-valuenow="Math.min(100, Math.round(row.pct))"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                :aria-label="`${row.limit.label}: ${row.pct.toFixed(0)} percent of quota`"
+              >
+                <span class="fill" :class="{ over: row.warn }" :style="{ width: Math.min(100, row.pct).toFixed(1) + '%' }"></span>
+              </div>
+            </li>
+          </ul>
+        </UiExpandableRows>
         <form v-if="showLimitForm" class="limit-form" data-testid="limit-form" @submit.prevent="saveLimit">
           <label>Label <input v-model="limitForm.label" required maxlength="60" placeholder="e.g. Weekly budget" /></label>
           <label>Scope
