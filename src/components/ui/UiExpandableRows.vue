@@ -8,6 +8,8 @@ const props = withDefaults(defineProps<{
   limit?: number;
   toggleTestId?: string;
   orderedByRank?: boolean;
+  showCount?: boolean;
+  collapsedLabel?: string;
 }>(), { limit: 20, orderedByRank: true });
 
 const expanded = ref(false);
@@ -15,20 +17,18 @@ const visibleRows = computed(() => expanded.value ? props.rows : props.rows.slic
 </script>
 
 <template>
+  <div v-if="showCount || rows.length > limit" class="row-controls">
+    <span v-if="showCount" class="row-count" role="status">Showing {{ visibleRows.length }} of {{ rows.length.toLocaleString('en-US') }}</span>
+    <UiButton v-if="rows.length > limit" variant="ghost" size="xs"
+      :data-testid="toggleTestId" :aria-controls="controlsId" :aria-expanded="expanded"
+      @click="expanded = !expanded"
+    >{{ expanded ? (collapsedLabel || `Show ${orderedByRank ? 'top' : 'first'} ${limit}`) : `Show all (${rows.length - limit} more)` }}</UiButton>
+  </div>
   <slot :rows="visibleRows" />
-  <UiButton
-    v-if="rows.length > limit"
-    class="expandable-toggle"
-    :data-testid="toggleTestId"
-    :aria-controls="controlsId"
-    :aria-expanded="expanded"
-    @click="expanded = !expanded"
-  >{{ expanded ? `Show ${orderedByRank ? 'top' : 'first'} ${limit}` : `Show all (${rows.length - limit} more)` }}</UiButton>
 </template>
 
 <style scoped>
-.expandable-toggle {
-  margin-top: 0.5rem;
-  align-self: flex-start;
-}
+.row-controls { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin: .5rem 0; flex-wrap: wrap; }
+.row-count { font-size: .6875rem; color: var(--text-muted); }
+.row-controls > :last-child { margin-left: auto; }
 </style>

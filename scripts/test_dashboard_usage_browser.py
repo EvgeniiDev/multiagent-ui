@@ -1,14 +1,10 @@
-"""Browser regression on the built dashboard, with isolated known counters.
-
-Serve the build through Playwright routes; no test servers or real state writes.
-"""
+"""Dashboard flows on built assets with known history; no test server or real writes."""
 import json
 import mimetypes
 from pathlib import Path
-import re
 import time
 from urllib.parse import urlparse
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, expect
 
 DIST = Path(__file__).parents[1] / 'dist-web'
 NOW = int(time.time() * 1000) - 60000
@@ -17,30 +13,26 @@ AGENTS = ['Hermes Agent', 'Pi', 'Codex', 'OpenCode', 'Devin']
 
 def usage(agent, used, offset=0, **extra):
     return dict(agentName=agent, sessionId=agent, at=NOW + offset, used=used,
-                size=0, accounting='delta', source='agent', model='model', provider=agent,
-                cwd='/project', **extra)
+                size=0, accounting='delta', source='agent',
+                model='deepseek/deepseek-v4-flash-0731', provider='openai-codex', cwd='/project', **extra)
 
 
-ROWS = [usage('Hermes Agent', 600), usage('Pi', 300, cost=0.3, currency='USD'),
-        usage('Pi', 500, 1000, cost=0.5, currency='USD'), usage('Codex', 200),
-        usage('Devin', 400)]
+ROWS = [usage('Hermes Agent', 600, -3 * 86400000, cost=0, currency='USD'), usage('Pi', 300, cost=0.3, currency='USD'),
+        usage('Pi', 500, 1000, cost=0.5, currency='USD'), usage('Codex', 200), usage('Devin', 400)]
 for at, used, cost in [(NOW, 1000, 1), (NOW + 1000, 1400, 1.4)]:
     ROWS.append(dict(agentName='OpenCode', sessionId='OpenCode', at=at, used=used,
-                     size=0, accounting='cumulative', source='agent', model='model',
-                     provider='OpenCode', cost=cost, currency='USD'))
-
-for row in ROWS:
-    row['model'] = 'deepseek/deepseek-v4-flash-0731'
-    row['provider'] = 'opencode-go' if row['agentName'] == 'OpenCode' else 'openai-codex'
+                     size=0, accounting='cumulative', source='agent',
+                     model='deepseek/deepseek-v4-flash-0731', provider='opencode-go',
+                     cwd='/project', cost=cost, currency='USD'))
 
 
-def run_case(browser, fail=False, large=False):
+def run_case(browser, fail=False, large=False, mixed=False):
     context = browser.new_context(viewport=dict(width=1440, height=1000), timezone_id='Asia/Karachi')
     errors = []
-    rows = [dict(ROWS[0], used=100, at=NOW - i * 60000,
-                 sessionId=f'session-{i % 2000}', cwd=f'/projects/project-{i % 200}',
-                 agentName=f'Agent-{i % 30}', model=f'Model-{i % 60}')
-            for i in range(52000)] if large else ROWS
+    rows = [dict(ROWS[0], used=100, at=NOW - i * 60000, sessionId=f'session-{i % 2000}',
+                 cwd=f'/projects/project-{i % 200}', agentName=f'Agent-{i % 30}', model=f'Model-{i % 60}')
+            for i in range(52000)] if large else [dict(row) for row in ROWS]
+    if mixed: rows[2]['currency'] = 'EUR'
     agents = [f'Agent-{i}' for i in range(30)] if large else AGENTS
     def route(request):
         url = urlparse(request.request.url)
@@ -62,82 +54,114 @@ def run_case(browser, fail=False, large=False):
             .map(e => ({at: e.startTime, duration: e.duration})))).observe({entryTypes: ['longtask']});""")
     page.on('pageerror', lambda e: errors.append(str(e)))
     page.goto('http://127.0.0.1:25808/dashboard')
-    page.wait_for_selector('[data-testid="dashboard"]')
     if fail:
-        page.wait_for_selector('[data-testid="usage-error"]')
-        assert '503' in page.locator('[data-testid="usage-error"]').inner_text()
-    elif large:
-        page.wait_for_selector('[data-testid="usage-sources"]')
-        before = page.evaluate('performance.now()')
-        page.click('[data-testid="range-all"]')
-        page.wait_for_function("document.querySelector('[data-testid=sum-tokens]').textContent.trim() === '5,200,000'")
-        page.wait_for_timeout(100)
-        tasks = page.evaluate('dashboardLongTasks').copy()
-        blocking = [t['duration'] for t in tasks if t['at'] >= before]
-        assert max(blocking, default=0) < 1000, f'Range switch blocks the browser: {blocking}'
-        projects = page.locator('[data-testid="by-project-table"] tbody tr')
-        toggle = page.locator('[data-testid="toggle-projects"]')
-        assert projects.count() == 20
-        assert toggle.get_attribute('aria-expanded') == 'false'
-        assert '180 more' in toggle.inner_text()
-        toggle.click()
-        assert projects.count() == 200
-        assert toggle.get_attribute('aria-expanded') == 'true'
-        toggle.click()
-        assert projects.count() == 20
-        for table, control, total in [('by-agent-table', 'toggle-agents', 30),
-                                      ('by-model-table', 'toggle-models', 60),
-                                      ('top-sessions-table', 'toggle-sessions', 6000),
-                                      ('by-day-table', 'toggle-days', None)]:
-            visible = page.locator(f'[data-testid="{table}"] tbody tr')
-            button = page.locator(f'[data-testid="{control}"]')
-            assert visible.count() == 20, (table, visible.count())
-            assert button.get_attribute('aria-controls') == page.locator(f'[data-testid="{table}"]').get_attribute('id')
-            button.click()
-            assert visible.count() == total if total else visible.count() > 20
-            if table == 'by-day-table':
-                days = visible.evaluate_all("rows => rows.map(r => r.dataset.day)")
-                assert days == sorted(days, reverse=True), days
-            assert projects.count() == 20, 'Expanding another table expanded projects'
-            button.click()
-            assert visible.count() == 20
-        assert page.locator('[data-testid="sum-tokens"]').inner_text().strip() == '5,200,000'
-        for period in ['today', '7d', '30d', 'all']:
-            page.click(f'[data-testid="range-{period}"]')
-            page.wait_for_timeout(100)
-            days = page.locator('[data-testid="by-day-row"]').evaluate_all("rows => rows.map(r => r.dataset.day)")
-            assert days and days == sorted(days, reverse=True), (period, days)
+        expect(page.locator('[data-testid="usage-error"]')).to_contain_text('503')
+        expect(page.get_by_role('button', name='Try again')).to_be_visible()
     else:
         page.wait_for_selector('[data-testid="usage-sources"]')
-        page.wait_for_function("document.querySelector('[data-testid=sum-tokens]').textContent.trim() === '3,400'")
-        assert page.locator('[data-testid="by-agent-row"]').count() == 5
-        assert page.locator('[data-testid="sum-cost"]').inner_text() == '2.2 USD'
-        assert page.locator('[data-testid="toggle-projects"]').count() == 0
-        assert page.locator('[data-testid="top-sessions-table"] tbody tr').count() == 5
-        page.click('[data-testid="range-all"]')
-        assert page.locator('[data-testid="sum-tokens"]').inner_text().strip() == '3,400'
-        page.set_viewport_size(dict(width=961, height=1000))
-        page.locator('.share-cell').first.wait_for()
-        cells = page.locator('.share-cell').evaluate_all("""cells => cells.map(cell => ({
-            display: getComputedStyle(cell).display,
-            bottom: cell.getBoundingClientRect().bottom,
-            rowBottom: cell.parentElement.getBoundingClientRect().bottom,
-        }))""")
-        assert all(c['display'] == 'table-cell' for c in cells), cells
-        assert all(abs(c['bottom'] - c['rowBottom']) < 1 for c in cells), cells
-        page.set_viewport_size(dict(width=390, height=844))
-        assert page.locator('[data-testid="usage-sources"]').is_visible()
-        assert page.locator('.share-cell').first.evaluate("e => getComputedStyle(e).display") == 'flex'
-        assert page.locator('.share-content').first.bounding_box()['width'] > 80
+        total = '5,200,000' if large else '3,400'
+        if large:
+            before = page.evaluate('performance.now()')
+            page.click('[data-testid="range-all"]')
+            expect(page.locator('[data-testid=sum-tokens]')).to_have_text(total)
+            page.wait_for_timeout(100)
+            blocking = [t['duration'] for t in page.evaluate('dashboardLongTasks') if t['at'] >= before]
+            assert max(blocking, default=0) < 1000, blocking
+            for tab, table, control, count in [('models','by-model-table','toggle-models',60),
+                                              ('projects','by-project-table','toggle-projects',200),
+                                              ('agents','by-agent-table','toggle-agents',30),
+                                              ('sessions','top-sessions-table','toggle-sessions',6000),
+                                              ('days','by-day-table','toggle-days',None)]:
+                page.click(f'[data-testid=tab-{tab}]')
+                visible = page.locator(f'[data-testid={table}] tbody tr')
+                expect(visible).to_have_count(20)
+                toggle = page.locator(f'[data-testid={control}]')
+                assert toggle.get_attribute('aria-controls') == page.locator(f'[data-testid={table}]').get_attribute('id')
+                toggle.click()
+                expect(toggle).to_have_attribute('aria-expanded','true')
+                assert visible.count() == count if count else visible.count() > 20
+                if tab == 'days':
+                    days = visible.evaluate_all('rows=>rows.map(r=>r.dataset.day)')
+                    assert days == sorted(days, reverse=True)
+                toggle.click(); expect(visible).to_have_count(20)
+                expect(page.locator('[data-testid=sum-tokens]')).to_have_text(total)
+            for period in ['today','7d','30d','all']:
+                page.click(f'[data-testid=range-{period}]')
+                page.wait_for_timeout(100)
+                days = page.locator('[data-testid=by-day-row]').evaluate_all('rows=>rows.map(r=>r.dataset.day)')
+                assert days and days == sorted(days, reverse=True), (period, days)
+        else:
+            expect(page.locator('[data-testid=sum-tokens]')).to_have_text(total)
+            expected_cost = '1.7 USD · 0.5 EUR' if mixed else '2.2 USD'
+            expect(page.locator('[data-testid=sum-cost]')).to_have_text(expected_cost)
+            page.click('[data-testid=tab-agents]')
+            expect(page.locator('[data-testid=by-agent-row]')).to_have_count(5)
+            page.click('[data-testid=tab-sessions]')
+            expect(page.locator('[data-testid=top-sessions-table] tbody tr')).to_have_count(5)
+            page.click('[data-testid=tab-models]')
+            page.locator('[data-testid=usage-search]').fill('opencode-go')
+            expect(page.locator('[data-testid=by-model-row]')).to_have_count(1)
+            expect(page.locator('[data-testid=sum-tokens]')).to_have_text(total)
+            page.locator('[data-testid=usage-search]').fill('missing-model')
+            expect(page.locator('[data-testid=models-empty]')).to_contain_text('No matching')
+            page.locator('[data-testid=usage-search]').fill('')
+            # The prior day has 600 tokens. Selecting it changes the inspector and all breakdowns.
+            oldest = page.locator('[data-testid=day-bar][data-tokens="600"]').get_attribute('data-day')
+            page.locator('[data-testid=inspect-period]').select_option(oldest)
+            expect(page.locator('[data-testid=sum-tokens]')).to_have_text('600')
+            expect(page.locator('[data-testid=sum-sessions]')).to_have_text('1')
+            expect(page.locator('.inspector dt').filter(has_text='Reported cost')).to_have_text('Reported cost')
+            expect(page.locator('[data-testid=sum-cost]')).to_have_text('0 USD')
+            expect(page.locator('[data-testid=by-model-row]')).to_have_count(1)
+            # JSON export covers the full toolbar range even with a selected bar and search.
+            page.locator('[data-testid=usage-search]').fill('missing')
+            page.locator('.export-menu summary').click()
+            with page.expect_download() as download:
+                page.locator('[data-testid=export-json]').click()
+            payload = json.loads(Path(download.value.path()).read_text())
+            assert payload['summary']['tokens'] == 3400
+            assert len(payload['summary']['costs']) == (2 if mixed else 1)
+            assert sum(d['tokens'] for d in payload['byDay']) == 3400
+            page.locator('.export-menu summary').click()
+            page.click('[data-testid=clear-selection]')
+            page.locator('[data-testid=usage-search]').fill('')
+            expect(page.locator('[data-testid=sum-tokens]')).to_have_text(total)
+            # Keyboard selection on the real SVG bar.
+            bars = page.locator('.chart-bucket')
+            page.locator(f'#bar-{oldest}').focus(); page.keyboard.press('Enter')
+            expect(page.locator('[data-testid=sum-tokens]')).to_have_text('600')
+            page.keyboard.press('Enter')
+            expect(page.locator('[data-testid=sum-tokens]')).to_have_text(total)
+            page.locator('.chart-bucket').last.focus();page.keyboard.press('ArrowLeft')
+            page.click('[data-testid=range-today]')
+            expect(page.locator('.chart-bucket[tabindex="0"]')).to_have_count(1)
+            page.click('[data-testid=range-7d]')
+            expect(page.locator('[data-testid=sum-tokens]')).to_have_text(total)
+            page.locator('[data-testid=tab-models]').focus();page.keyboard.press('ArrowRight')
+            expect(page.locator('[data-testid=tab-projects]')).to_have_attribute('aria-selected','true')
+            page.locator('[data-testid=tab-models]').click()
+            page.set_viewport_size(dict(width=961, height=1000))
+            assert page.locator('.share-cell').first.evaluate('e=>getComputedStyle(e).display') == 'table-cell'
+            for width in [320,360,390,430]:
+                page.set_viewport_size(dict(width=width,height=844))
+                close = page.get_by_role('button', name='Collapse sidebar', exact=True)
+                if close.is_visible(): close.click()
+                assert page.evaluate('document.documentElement.scrollWidth') <= width
+                assert page.locator('[data-testid=by-model-row]').first.bounding_box()['height'] < 140
+                cells = page.locator('[data-testid=by-model-row] td').evaluate_all('cells=>cells.map(e=>({right:e.getBoundingClientRect().right,overflow:e.scrollWidth-e.clientWidth}))')
+                assert all(c['right'] <= width and c['overflow'] <= 2 for c in cells), (width,cells)
+            page.locator('[data-testid=limits-block] summary').click()
+            page.locator('[data-testid=limit-add]').click()
+            expect(page.locator('[data-testid=limit-form]')).to_be_visible()
+            page.get_by_role('button', name='Cancel',exact=True).click()
+            page.locator('[data-testid=agent-state] summary').click()
+            expect(page.locator('[data-testid=agent-state] .secondary-body')).to_be_visible()
     assert not errors, errors
     context.close()
-
 
 if __name__ == '__main__':
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        run_case(browser)
-        run_case(browser, fail=True)
-        run_case(browser, large=True)
+        run_case(browser); run_case(browser, fail=True); run_case(browser, large=True); run_case(browser,mixed=True)
         browser.close()
-    print('PASS dashboard: accounting, mobile, error state and responsive range switch with 52,000 records / 200 projects')
+    print('PASS dashboard B: accounting, chart selection, search, tabs, exports, mobile density, quotas, keyboard, errors and 52k history')
