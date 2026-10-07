@@ -7,10 +7,13 @@ Modes:
            TEST spec as "actual" and corrupt restore), generate the restore
            compose file + digest manifest, render both overlay configs with
            assertions, seed the on-disk test marker and the git sandbox.
-  apply    capture -> render-check -> marker/sandbox -> preflight ->
-           build -> RE-preflight -> stop cron -> up -d --no-deps scoped
-           services (OFF) -> verify isolation. --self-run-id is required;
-           any failure or signal runs restore() first, then exits.
+  apply    preflight -> staged capture -> render-check -> marker/sandbox
+           -> build -> RE-preflight -> pin images -> publish captures ->
+           stop cron -> up -d --no-deps scoped services (OFF) -> verify
+           isolation. --self-run-id is required; any failure or signal
+           runs restore() first, then exits. Captures stay in a private
+           per-window staging dir until the mutation boundary, so every
+           refusal leaves the shared restore baseline byte-identical.
   on       stack compose.u7-on.yaml; recreate state+runner (managed ON).
   fusion   stack compose.u7-fusion.yaml on top of ON; recreate state+runner
            (managed ON + ACP_EXEC_FUSION=1 + runner F1 container runtime).
@@ -33,12 +36,17 @@ Guards (AGENTS.md): single acp-ui project, fixed ports, --no-deps only, no
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
+import re
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -96,11 +104,228 @@ def compose_json(files, *args, timeout=120.0):
 
 
 def write_private(path: Path, text: str) -> None:
-    PRIV.mkdir(parents=True, exist_ok=True)
-    os.chmod(PRIV, 0o700)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(text)
+
+
+def _safe_name(raw: str) -> str:
+    """Path-segment guard — window ids are hex nonces but the argv value
+    is operator-supplied; never let it escape the private dir."""
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", raw)
+
+
+def _new_stage_dir(window: str | None) -> Path:
+    """Fresh private staging dir for one apply attempt (0700, files 0600
+    via write_private). mkdtemp invents the name O_EXCL-fresh, so the
+    returned dir is provably owned by THIS window's attempt — _cleanup_
+    stage may remove it and nothing else."""
+    PRIV.mkdir(parents=True, exist_ok=True)
+    os.chmod(PRIV, 0o700)
+    label = _safe_name(window) if window else "adhoc"
+    return Path(tempfile.mkdtemp(prefix=f"stage-{label}-", dir=PRIV))
+
+
+def _cleanup_stage(stage: Path) -> None:
+    """Remove ONLY a staging dir this run created. Guards: inside PRIV,
+    name still carries our stage- prefix, not a symlink — so a swapped
+    path can never rmtree a foreign or shared location."""
+    try:
+        if stage.parent == PRIV and stage.name.startswith("stage-") \
+                and stage.is_dir() and not stage.is_symlink():
+            shutil.rmtree(stage)
+    except OSError as e:
+        print(f"WARN  could not remove own staging dir {stage}: {e}")
+
+
+def _baseline_lock_path() -> Path:
+    """Cross-process lock serializing the shared restore baseline —
+    kept OUTSIDE PRIV so it never appears among the published files."""
+    return PRIV.with_name(PRIV.name + ".lock")
+
+
+_baseline_lock_depth = 0
+
+
+@contextlib.contextmanager
+def _baseline_locked(exclusive: bool):
+    """flock-serialized access to the shared private baseline.
+
+    Publishers (plan, the apply publish transaction, restore's possible
+    regeneration) hold LOCK_EX; readers (verify, and every path that
+    only inspects the baseline) hold LOCK_SH — so no reader can ever
+    observe a half-published mixed generation and two publishers can
+    never interleave backup/install moves. Re-entrant: a nested call
+    (e.g. _on_signal -> _restore_impl while a restore already runs in
+    this process) rides the lock already held instead of deadlocking
+    on its own fd."""
+    global _baseline_lock_depth
+    if _baseline_lock_depth:
+        _baseline_lock_depth += 1
+        try:
+            yield
+        finally:
+            _baseline_lock_depth -= 1
+        return
+    fd = os.open(_baseline_lock_path(), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        _baseline_lock_depth += 1
+        try:
+            yield
+        finally:
+            _baseline_lock_depth -= 1
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def _signals_deferred():
+    """Block SIGINT/SIGTERM for the span of a critical transaction.
+
+    A signal arriving inside is left PENDING and is delivered by the
+    kernel the moment the mask is restored — so the transaction always
+    reaches either its commit or a completed rollback before any signal
+    handler runs, and the signal itself is never swallowed."""
+    if not hasattr(signal, "pthread_sigmask"):
+        yield
+        return
+    prev = signal.pthread_sigmask(
+        signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, prev)
+
+
+def _restore_prior(src: Path, dst: Path) -> None:
+    """Rollback copy fallback for when os.replace cannot put a prior
+    back. Writes the prior bytes to a private temp sibling (O_NOFOLLOW,
+    O_EXCL — it can never be a pre-planted link) and commits with one
+    atomic os.replace, which substitutes the DESTINATION NAME ITSELF:
+    a hostile symlink swapped in at dst is unlinked, never followed,
+    so captured bytes can never be redirected outside PRIV. A failed
+    copy leaves dst untouched (no truncated half-restore) and the temp
+    is cleaned up."""
+    tmp = dst.with_name(f".{dst.name}.rb-{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                 | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            with open(src, "rb") as inp:
+                shutil.copyfileobj(inp, out)
+        shutil.copystat(src, tmp, follow_symlinks=False)
+        os.replace(tmp, dst)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _publish_stage(stage: Path) -> None:
+    """Install the staged captures as the shared private baseline —
+    called ONLY at the mutation boundary, after every pre-mutation
+    refusal point has passed. Publication is all-or-nothing with
+    respect to the prior baseline:
+
+      1. every staged REQUIRED name must exist before anything moves;
+      2. every pre-existing shared file is moved aside into a private
+         rollback dir (same filesystem — a rename, never a copy), so a
+         failure in this phase cannot have published a single staged
+         byte yet;
+      3. the staged files are installed one by one via os.replace
+         (atomic per-file, keeps the staged 0600 mode).
+
+    A mid-publish failure of ANY kind — OSError, or a signal handler's
+    exception raised synchronously inside a move — restores every prior
+    file byte-for-byte and withdraws any already-installed file that
+    did not previously exist, so a refused publish never leaves a
+    half-new baseline behind. Rollback state is derived from the
+    rollback dir's CONTENTS, never from bookkeeping appended after a
+    move, so an interruption inside a move's own bookkeeping window
+    cannot strand a prior. If the rollback itself cannot complete,
+    each deviation is reported explicitly and the surviving prior
+    copies are KEPT in the rollback dir — the last copy of the baseline
+    is never deleted silently. A non-OSError abort is re-raised after
+    rollback, never converted into a refusal."""
+    required = [f"inspect-{svc}.json" for svc in SCOPED + [CRON]]
+    required += ["restore-acp-ui.yaml", "restore-acp-ui-check.json"]
+    missing = [n for n in required if not (stage / n).exists()]
+    if missing:
+        raise StepError(f"staged baseline incomplete {missing} — refusing "
+                        "to publish a partial capture")
+    names = required + [n for n in ("render-off.json", "render-on.json",
+                                    "render-fusion.json")
+                        if (stage / n).exists()]
+    try:
+        backup = Path(tempfile.mkdtemp(prefix=f"rollback-{stage.name}-",
+                                       dir=PRIV))
+    except OSError as e:
+        raise StepError(f"cannot create a rollback dir for publish: {e} "
+                        "— refusing to publish unsafely") from e
+    phase = "backup"
+    try:
+        for name in names:
+            dst = PRIV / name
+            if os.path.lexists(dst):
+                os.replace(dst, backup / name)
+        phase = "install"
+        for name in names:
+            os.replace(stage / name, PRIV / name)
+    except BaseException as e:
+        # Rollback truth comes from what the rollback dir ACTUALLY
+        # contains — a failure between a completed move and any
+        # bookkeeping of it (the window an abrupt signal opens) still
+        # sees the moved prior and restores it.
+        backed = {p.name for p in backup.iterdir()} \
+            if backup.is_dir() else set()
+        problems = []
+        for name in reversed(names):
+            if name not in backed:
+                continue
+            try:
+                os.replace(backup / name, PRIV / name)
+            except OSError as e2:
+                try:
+                    _restore_prior(backup / name, PRIV / name)
+                except OSError as e3:
+                    problems.append(f"prior {name} unrestored "
+                                    f"({e2}; copy fallback: {e3})")
+        if phase == "install":
+            # Every name with a prior is in `backed` already; a staged
+            # name with NO prior that exists in PRIV can only be one of
+            # this transaction's own installs — withdraw it.
+            for name in reversed(names):
+                if name in backed or not os.path.lexists(PRIV / name):
+                    continue
+                try:
+                    os.remove(PRIV / name)
+                except OSError as e2:
+                    problems.append(f"new file {name} not withdrawn "
+                                    f"({e2})")
+        tail = (f"; surviving prior copies kept under {backup} — "
+                "inspect before removing") \
+            if backup.is_dir() and any(backup.iterdir()) else ""
+        if isinstance(e, OSError):
+            if problems:
+                raise StepError(
+                    f"publish failed at {name!r}: {e} — rollback "
+                    f"INCOMPLETE ({'; '.join(problems)}){tail}") from e
+            shutil.rmtree(backup, ignore_errors=True)
+            raise StepError(
+                f"publish failed at {name!r}: {e} — prior shared "
+                "baseline restored intact") from e
+        # A signal (or any non-OSError abort): the rollback already ran
+        # above — report it loudly, then re-raise untouched so the
+        # signal is never swallowed as a refusal.
+        if problems:
+            print(f"WARN  publish aborted by {type(e).__name__} during "
+                  f"{phase} of {name!r}: rollback INCOMPLETE "
+                  f"({'; '.join(problems)}){tail}")
+        else:
+            shutil.rmtree(backup, ignore_errors=True)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
 
 
 def inspect_svc(service: str) -> dict:
@@ -121,11 +346,14 @@ def on_test_stack() -> bool:
         or env.get("STATE_DIR") == str(TEST_STATE_DIR)
 
 
-def capture_all() -> dict:
+def capture_all(priv: Path | None = None) -> dict:
     """Actual spec of scoped services + cron status, saved privately.
 
     Refuses while the test stack owns the ports: recapturing then would
-    overwrite the pretest baseline with test specs and break restore."""
+    overwrite the pretest baseline with test specs and break restore.
+    apply() passes a per-window staging dir; plan writes the shared
+    baseline directly (that mode exists to regenerate it)."""
+    priv = priv or PRIV
     if on_test_stack():
         raise StepError(
             "state container already runs the U7 spec — refusing to "
@@ -133,7 +361,7 @@ def capture_all() -> dict:
     got = {}
     for svc in SCOPED + [CRON]:
         d = inspect_svc(svc)
-        write_private(PRIV / f"inspect-{svc}.json", json.dumps([d]))
+        write_private(priv / f"inspect-{svc}.json", json.dumps([d]))
         got[svc] = d
     return got
 
@@ -151,8 +379,10 @@ def _image_id_of(ref: str) -> str | None:
     return res.stdout.strip() if res.returncode == 0 else None
 
 
-def pin_restore_images() -> None:
-    """Stable local refs for every captured image. Root cause of window
+def pin_restore_images(priv: Path | None = None) -> dict:
+    """Stable local refs for every captured image. Returns
+    {svc: prior tag target | None} — the tag generation this call
+    replaced, for _restore_pins rollback. Root cause of window
     67099d73 was image ABSENCE, not ref syntax: the untagged runner image
     was orphaned when its container was recreated and then GC'd; the bare
     `sha256:<id>` ref resolves fine while the image exists (state/web/
@@ -163,30 +393,104 @@ def pin_restore_images() -> None:
     resolve back to the captured image id — aborts before mutation. An
     image that merely exists NOW does not prevent GC later; only a
     verified pinned tag holds the reference."""
-    for svc in SCOPED + [CRON]:
-        p = PRIV / f"inspect-{svc}.json"
-        if not p.exists():
-            raise StepError(f"missing capture for pin: {p}")
-        d = json.loads(p.read_text())[0]
+    priv = priv or PRIV
+    # Snapshot the CURRENT target of every fixed tag BEFORE moving any
+    # of them: the published restore file references the tags BY NAME,
+    # so a tag left pointing at an unpublished capture silently
+    # re-targets the surviving prior baseline. saved feeds
+    # _restore_pins on ANY abort — pin failures here, publish failures,
+    # or a signal — so the prior tag generation is restored exactly
+    # (re-pointed, or withdrawn where no tag existed).
+    saved = {svc: _image_id_of(f"acp-ui-u7-restore-{svc}:u7baseline")
+             for svc in SCOPED + [CRON]}
+    try:
+        for svc in SCOPED + [CRON]:
+            p = priv / f"inspect-{svc}.json"
+            if not p.exists():
+                raise StepError(f"missing capture for pin: {p}")
+            d = json.loads(p.read_text())[0]
+            tag = f"acp-ui-u7-restore-{svc}:u7baseline"
+            res = subprocess.run(["docker", "tag", d["Image"], tag],
+                                 capture_output=True, text=True)
+            if res.returncode != 0:
+                raise StepError(
+                    f"cannot pin {svc} image {d['Image'][:19]}: "
+                    f"{res.stderr.strip() or 'image absent'} — refusing "
+                    "to mutate services on an unpinned restore image")
+            got = _image_id_of(tag)
+            if got != d["Image"]:
+                raise StepError(
+                    f"pinned {tag} resolves to {got!r}, expected "
+                    f"{d['Image']!r} — refusing to mutate services on "
+                    "an unverified pin")
+    except BaseException:
+        problems = _restore_pins(saved)
+        if problems:
+            print(f"WARN  pin rollback incomplete: {'; '.join(problems)}")
+        raise
+    return saved
+
+
+def _restore_pins(saved: dict) -> list[str]:
+    """Undo a pin generation: re-point each fixed tag at its recorded
+    pre-transaction image id, or withdraw the tag where none existed.
+    Tags already at their saved target are skipped. Returns deviation
+    strings for anything that could not be restored — reported, never
+    silent."""
+    problems = []
+    for svc, want in saved.items():
         tag = f"acp-ui-u7-restore-{svc}:u7baseline"
-        res = subprocess.run(["docker", "tag", d["Image"], tag],
-                             capture_output=True, text=True)
-        if res.returncode != 0:
-            raise StepError(
-                f"cannot pin {svc} image {d['Image'][:19]}: "
-                f"{res.stderr.strip() or 'image absent'} — refusing to "
-                "mutate services on an unpinned restore image")
-        got = _image_id_of(tag)
-        if got != d["Image"]:
-            raise StepError(
-                f"pinned {tag} resolves to {got!r}, expected "
-                f"{d['Image']!r} — refusing to mutate services on an "
-                "unverified pin")
+        if _image_id_of(tag) == want:
+            continue
+        try:
+            if want is None:
+                run(["docker", "rmi", tag], timeout=60)
+            else:
+                run(["docker", "tag", want, tag], timeout=60)
+        except StepError as e:
+            problems.append(f"{tag} not restored to "
+                            f"{want or 'absent'} ({e})")
+    return problems
 
 
-def missing_captured_images() -> list[str]:
+def _publish_staged_baseline(stage: Path, gen_args: list[str]) -> None:
+    """The whole shared-baseline mutation as ONE serialized
+    transaction — the only call path that moves both the fixed
+    restore-image tags and the staged capture files.
+
+    An exclusive cross-process flock serializes against concurrent
+    publishers AND against restore/verify readers (readers share-lock,
+    so no reader can observe a mid-publish mixed generation). Inside
+    the lock, SIGINT/SIGTERM stay signal-masked until the transaction
+    has committed or rolled fully back; a pending signal is delivered
+    on unmask, never swallowed and never mid-move.
+
+    Ordering: pins move first (prior targets recorded), the staged
+    restore file is regenerated against the fresh verified pins, then
+    the staged files install. ANY failure — pin, regeneration, file
+    publish, or a signal — rolls the files AND the tags back to the
+    prior generation so the surviving baseline is never a mix of
+    generations."""
+    with _baseline_locked(exclusive=True):
+        with _signals_deferred():
+            saved_pins = pin_restore_images(stage)
+            try:
+                if restore_gen.main(gen_args) != 0:
+                    raise StepError(
+                        "staged restore file regeneration failed — "
+                        "refusing to publish")
+                _publish_stage(stage)
+            except BaseException:
+                problems = _restore_pins(saved_pins)
+                if problems:
+                    print(f"WARN  publish pin rollback incomplete: "
+                          f"{'; '.join(problems)}")
+                raise
+
+
+def missing_captured_images(priv: Path | None = None) -> list[str]:
     """Scoped+cron services whose captured image is absent from the store."""
-    manifest = _manifest()
+    manifest = _manifest(priv)
     return [svc for svc in SCOPED + [CRON]
             if manifest.get(svc)
             and not _image_present(manifest[svc]["image"])]
@@ -376,13 +680,14 @@ def seed_sandbox() -> None:
           f"(top-level aliases proj-a/proj-b -> {SANDBOX.name}/*)")
 
 
-def render_check() -> list[str]:
+def render_check(priv: Path | None = None) -> list[str]:
     """`docker compose config` renders + asserts; returns findings list."""
+    priv = priv or PRIV
     notes = []
     off = compose_json(FILES_OFF, "config", "--format", "json")
     on = compose_json(FILES_ON, "config", "--format", "json")
-    write_private(PRIV / "render-off.json", json.dumps(off, indent=2))
-    write_private(PRIV / "render-on.json", json.dumps(on, indent=2))
+    write_private(priv / "render-off.json", json.dumps(off, indent=2))
+    write_private(priv / "render-on.json", json.dumps(on, indent=2))
 
     def svc(cfg, name):
         return cfg["services"][name]
@@ -416,7 +721,7 @@ def render_check() -> list[str]:
         assert env.get("ACP_EXEC_VALIDATION") == "1"
     notes.append("ACP_EXEC_START/VALIDATION render '0' OFF, '1' ON on both")
     fuz = compose_json(FILES_FUSION, "config", "--format", "json")
-    write_private(PRIV / "render-fusion.json", json.dumps(fuz, indent=2))
+    write_private(priv / "render-fusion.json", json.dumps(fuz, indent=2))
     st_f, rn_f = svc(fuz, "state"), svc(fuz, "runner")
     for env, who in ((st_f["environment"], "state"),
                      (rn_f["environment"], "runner")):
@@ -513,8 +818,8 @@ def provision_test_ops() -> None:
     print("test ops dir ready (token 0600, dir 0700) — value never printed")
 
 
-def _manifest() -> dict:
-    ck = PRIV / "restore-acp-ui-check.json"
+def _manifest(priv: Path | None = None) -> dict:
+    ck = (priv or PRIV) / "restore-acp-ui-check.json"
     return json.loads(ck.read_text()) if ck.exists() else {}
 
 
@@ -557,6 +862,14 @@ def diff_against_manifest() -> list:
 
 
 def _restore_impl() -> int:
+    # Exclusive: the manifest, the generated yaml and a possible
+    # regeneration are read/written as ONE generation — never mid-
+    # publish — and concurrent restores/publishes serialize outright.
+    with _baseline_locked(exclusive=True):
+        return _restore_txn()
+
+
+def _restore_txn() -> int:
     rf = PRIV / "restore-acp-ui.yaml"
     if not rf.exists():
         print("restore: no generated file — regenerating from last capture")
@@ -643,15 +956,16 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _on_signal)
 
     if args.mode == "plan":
-        if on_test_stack():
-            print("already on test stack — baseline captures preserved, "
-                  "skipping capture")
-        else:
-            capture_all()
-            print(f"captured actual specs → {PRIV}/inspect-*.json")
-        if restore_gen.main([]) != 0:
-            return 1
-        render_check()
+        with _baseline_locked(exclusive=True):
+            if on_test_stack():
+                print("already on test stack — baseline captures "
+                      "preserved, skipping capture")
+            else:
+                capture_all()
+                print(f"captured actual specs → {PRIV}/inspect-*.json")
+            if restore_gen.main([]) != 0:
+                return 1
+            render_check()
         seed_marker()
         seed_sandbox()
         seed_cli_compat()
@@ -662,7 +976,8 @@ def main() -> int:
         return restore()
 
     if args.mode == "verify":
-        bad = diff_against_manifest()
+        with _baseline_locked(exclusive=False):
+            bad = diff_against_manifest()
         if bad:
             print("FAIL  drift vs captured actual:", bad)
             return 1
@@ -705,41 +1020,66 @@ def main() -> int:
     if args.mode == "apply":
         if not args.self_run_id:
             ap.error("--self-run-id is required for apply")
+        # Gate 1 — the live-activity check precedes EVERY capture, file
+        # write, image tag, seed, build and compose call: a refusal here
+        # must leave the shared private baseline byte-identical.
+        try:
+            preflight_idle(args.self_run_id)
+        except (StepError, H.HarnessError) as e:
+            print(f"REFUSE  {e}")
+            return 1
         if on_test_stack():
             print("REFUSE  already on the test stack — apply would mutate "
                   "services under possibly-active U7 roles/tests; "
                   "restore first or use on/off/seed")
             return 1
-        capture_all()
-        print("captured fresh actual specs")
+        stage = _new_stage_dir(args.window)
         try:
-            pin_restore_images()
-        except StepError as e:
+            # Everything until the boundary writes into the private stage,
+            # never the shared baseline — any refusal below leaves the
+            # pre-existing inspect-*.json / restore-acp-ui.* untouched.
+            capture_all(stage)
+            print(f"captured fresh actual specs (staged: {stage.name})")
+            gen_args = ["--inspect-dir", str(stage),
+                        "--out", str(stage / "restore-acp-ui.yaml"),
+                        "--check-out",
+                        str(stage / "restore-acp-ui-check.json")]
+            if restore_gen.main(gen_args) != 0:
+                return 1
+            missing = missing_captured_images(stage)
+            if missing:
+                print("REFUSE  captured image missing from local store for "
+                      f"{missing} — restore would not be exact; aborting "
+                      "before any service mutation")
+                return 1
+            render_check(stage)
+            seed_marker()
+            seed_sandbox()
+            seed_cli_compat()
+            seed_scheduler_limits()
+            provision_test_ops()
+            build_image()
+            # Gate 2 — rechecked right before the mutation boundary; the
+            # staged baseline is still unpublished, so a refusal here
+            # rewrites nothing shared and touches no service.
+            preflight_idle(args.self_run_id)
+            # Fail-closed pins of the EXACT staged capture images, the
+            # restore-file regeneration and the file installs commit —
+            # or roll back — as ONE serialized, signal-deferred
+            # transaction (fixed tags + shared files are a single
+            # generation; a failure never leaves one half new).
+            _publish_staged_baseline(stage, gen_args)
+        except (StepError, H.HarnessError) as e:
             print(f"REFUSE  {e}")
             return 1
-        if restore_gen.main([]) != 0:
-            return 1
-        missing = missing_captured_images()
-        if missing:
-            print("REFUSE  captured image missing from local store for "
-                  f"{missing} — restore would not be exact; aborting "
-                  "before any service mutation")
-            return 1
-        render_check()
-        seed_marker()
-        seed_sandbox()
-        seed_cli_compat()
-        seed_scheduler_limits()
-        preflight_idle(args.self_run_id)        # before the (long) build
-        provision_test_ops()
-        build_image()
-        preflight_idle(args.self_run_id)        # recheck right before mutation
+        finally:
+            _cleanup_stage(stage)
         _transition_began = True
         try:
             if args.window:
                 # Ownership receipt BEFORE the first scoped mutation — the
                 # orchestrator restores only windows that reached this point.
-                write_private(PRIV / f"window-{args.window}.json",
+                write_private(PRIV / f"window-{_safe_name(args.window)}.json",
                               json.dumps({"window": args.window,
                                           "selfRunId": args.self_run_id,
                                           "state": "mutation-begun",
@@ -757,7 +1097,7 @@ def main() -> int:
                 "stateDir": str(TEST_STATE_DIR),
             }, indent=2))
             if args.window:
-                write_private(PRIV / f"window-{args.window}.json",
+                write_private(PRIV / f"window-{_safe_name(args.window)}.json",
                               json.dumps({"window": args.window,
                                           "state": "applied",
                                           "at": time.time()}, indent=2))
