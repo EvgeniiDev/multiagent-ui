@@ -95,10 +95,18 @@ def run_case(browser, fail=False, large=False):
             assert button.get_attribute('aria-controls') == page.locator(f'[data-testid="{table}"]').get_attribute('id')
             button.click()
             assert visible.count() == total if total else visible.count() > 20
+            if table == 'by-day-table':
+                days = visible.evaluate_all("rows => rows.map(r => r.dataset.day)")
+                assert days == sorted(days, reverse=True), days
             assert projects.count() == 20, 'Expanding another table expanded projects'
             button.click()
             assert visible.count() == 20
         assert page.locator('[data-testid="sum-tokens"]').inner_text().strip() == '5,200,000'
+        for period in ['today', '7d', '30d', 'all']:
+            page.click(f'[data-testid="range-{period}"]')
+            page.wait_for_timeout(100)
+            days = page.locator('[data-testid="by-day-row"]').evaluate_all("rows => rows.map(r => r.dataset.day)")
+            assert days and days == sorted(days, reverse=True), (period, days)
     else:
         page.wait_for_selector('[data-testid="usage-sources"]')
         page.wait_for_function("document.querySelector('[data-testid=sum-tokens]').textContent.trim() === '3,400'")

@@ -267,7 +267,7 @@ const dayPoints = computed<DayPoint[]>(() => {
  * range fills every bucket) is noise, not information.
  */
 const tableRows = computed(() =>
-  dayPoints.value.filter((d) => d.tokens > 0 || d.cost > 0 || d.turns > 0)
+  dayPoints.value.filter((d) => d.tokens > 0 || d.cost > 0 || d.turns > 0).reverse()
 );
 
 const maxDayTokens = computed(() =>
