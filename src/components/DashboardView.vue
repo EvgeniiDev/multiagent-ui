@@ -3,9 +3,8 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import UiButton from './ui/UiButton.vue';
 import UiExpandableRows from './ui/UiExpandableRows.vue';
 import UiUsageTable, { type UsageTableRow } from './ui/UiUsageTable.vue';
-import { useActivityStore, projectName } from '../stores/activity';
+import { useActivityStore } from '../stores/activity';
 import { useSessionStore } from '../stores/session';
-import { useLimitsStore, periodStart, periodLabel, type UsageLimit } from '../stores/limits';
 import { useUiStore } from '../stores/ui';
 import { loadKvStore, type KVStore } from '../lib/host/storage';
 import { RANGES, rangeBounds, rangeLabel, type RangeId } from '../features/dashboard/range';
@@ -15,7 +14,6 @@ import { exportFileName, toJson, toCsv, downloadFile, type ExportPayload } from 
 
 const activity = useActivityStore();
 const sessionStore = useSessionStore();
-const limitsStore = useLimitsStore();
 const uiStore = useUiStore();
 const now = ref(Date.now());
 const range = ref<RangeId>('7d');
@@ -231,76 +229,6 @@ async function onBarKeydown(event: KeyboardEvent, index: number): Promise<void> 
   chartFocus.value = event.key === 'Home' ? 0 : event.key === 'End' ? last : Math.max(0, Math.min(last, index + (event.key === 'ArrowRight' ? 1 : -1)));
   await nextTick(); document.getElementById(`bar-${dayPoints.value[chartFocus.value].day}`)?.focus();
 }
-// --- Limits ---
-const showLimitForm = ref(false);
-const editingId = ref<string | null>(null);
-const limitForm = ref({ label: '', scope: 'global' as 'agent' | 'project' | 'global', target: '', period: 'day' as 'day' | 'week' | 'month', targetTokens: 100000 });
-
-function limitUsage(l: UsageLimit, nowMs: number): number {
-  const from = periodStart(l.period, nowMs);
-  // Quotas compare against what was actually consumed in the period — the
-  // per-session delta, not the sum of every running-total sample.
-  return activity
-    .deltaRows(from, nowMs)
-    .filter((r) =>
-      l.scope === 'global'
-        ? true
-        : l.scope === 'agent'
-          ? r.agentName === l.target
-          : projectName(r.cwd) === l.target
-    )
-    .reduce((s, r) => s + r.tokens, 0);
-}
-
-const limitRows = computed(() =>
-  limitsStore.limits.map((l) => {
-    const used = limitUsage(l, now.value);
-    const pct = l.targetTokens > 0 ? (used / l.targetTokens) * 100 : 0;
-    return { limit: l, used, pct, warn: pct > 90 };
-  })
-);
-
-function startAddLimit(): void {
-  editingId.value = null;
-  limitForm.value = { label: '', scope: 'global', target: '', period: 'day', targetTokens: 100000 };
-  showLimitForm.value = true;
-}
-
-function startEditLimit(l: UsageLimit): void {
-  editingId.value = l.id;
-  limitForm.value = { label: l.label, scope: l.scope, target: l.target, period: l.period, targetTokens: l.targetTokens };
-  showLimitForm.value = true;
-}
-
-async function saveLimit(): Promise<void> {
-  const f = limitForm.value;
-  if (!f.label.trim() || !(f.targetTokens > 0)) return;
-  if (f.scope !== 'global' && !f.target.trim()) return;
-  if (editingId.value) {
-    await limitsStore.updateLimit(editingId.value, {
-      label: f.label.trim(),
-      scope: f.scope,
-      target: f.target.trim(),
-      period: f.period,
-      targetTokens: Math.round(f.targetTokens),
-    });
-  } else {
-    await limitsStore.addLimit({
-      label: f.label.trim(),
-      scope: f.scope,
-      target: f.target.trim(),
-      period: f.period,
-      targetTokens: Math.round(f.targetTokens),
-    });
-  }
-  showLimitForm.value = false;
-  editingId.value = null;
-}
-
-async function deleteLimit(id: string): Promise<void> {
-  if (confirm('Delete this quota?')) await limitsStore.removeLimit(id);
-}
-
 // --- Export ---
 function payload(): ExportPayload {
   const { from, to } = bounds.value;
@@ -363,7 +291,6 @@ onMounted(async () => {
   prefs = await loadKvStore('preferences.json');
   const saved = await prefs.get<RangeId>('dashboardRange');
   if (saved && RANGES.some((r) => r.id === saved)) range.value = saved;
-  await limitsStore.initLimitsStore();
   void activity.refreshNativeUsage();
   tickTimer = setInterval(() => {
     now.value = Date.now();
@@ -486,72 +413,7 @@ watch(
           </ul>
         </UiExpandableRows>
       </div></details>
-<details class="secondary-panel" data-testid="limits-block"><summary>Usage budgets <span>{{ limitRows.length }} quotas</span></summary><div class="secondary-body">
-        <div class="panel-title">
-          <span class="muted">Track token usage against your budgets</span>
-          <UiButton data-testid="limit-add" @click="startAddLimit">Add quota</UiButton>
-        </div>
-        <p v-if="limitRows.length === 0 && !showLimitForm" class="empty">
-          No quotas yet. Add one to track spend against a target.
-        </p>
-        <UiExpandableRows v-else :rows="limitRows" controls-id="dashboard-limits" toggle-test-id="toggle-limits" :ordered-by-rank="false" v-slot="{ rows: visibleRows }">
-          <ul id="dashboard-limits" class="limit-list">
-            <li
-              v-for="row in visibleRows"
-              :key="row.limit.id"
-              class="limit-row"
-              :class="{ warn: row.warn }"
-              :data-testid="`limit-row-${row.limit.id}`"
-              :data-warn="row.warn ? 'true' : 'false'"
-            >
-              <div class="limit-head">
-                <span class="limit-label">{{ row.limit.label }}</span>
-                <span class="mono muted">{{ row.limit.scope }}{{ row.limit.scope !== 'global' ? `:${row.limit.target}` : '' }} · {{ periodLabel(row.limit.period) }}</span>
-                <span class="mono" :class="{ 'warn-text': row.warn }" :data-testid="`limit-pct-${row.limit.id}`">
-                  {{ fmtInt(row.used) }} / {{ fmtInt(row.limit.targetTokens) }} · {{ row.pct.toFixed(0) }}%
-                </span>
-                <UiButton size="xs" :aria-label="`Edit ${row.limit.label}`" @click="startEditLimit(row.limit)">Edit</UiButton>
-                <UiButton size="xs" variant="danger" :aria-label="`Delete ${row.limit.label}`" @click="deleteLimit(row.limit.id)">Delete</UiButton>
-              </div>
-              <div
-                class="bar limit-bar"
-                role="progressbar"
-                :aria-valuenow="Math.min(100, Math.round(row.pct))"
-                aria-valuemin="0"
-                aria-valuemax="100"
-                :aria-label="`${row.limit.label}: ${row.pct.toFixed(0)} percent of quota`"
-              >
-                <span class="fill" :class="{ over: row.warn }" :style="{ width: Math.min(100, row.pct).toFixed(1) + '%' }"></span>
-              </div>
-            </li>
-          </ul>
-        </UiExpandableRows>
-        <form v-if="showLimitForm" class="limit-form" data-testid="limit-form" @submit.prevent="saveLimit">
-          <label>Label <input class="ui-input" v-model="limitForm.label" required maxlength="60" placeholder="e.g. Weekly budget" /></label>
-          <label>Scope
-            <select class="ui-input" v-model="limitForm.scope">
-              <option value="global">global</option>
-              <option value="agent">agent</option>
-              <option value="project">project</option>
-            </select>
-          </label>
-          <label v-if="limitForm.scope !== 'global'">Target
-            <input class="ui-input" v-model="limitForm.target" maxlength="80" placeholder="agent or project name" />
-          </label>
-          <label>Period
-            <select class="ui-input" v-model="limitForm.period">
-              <option value="day">day</option>
-              <option value="week">week</option>
-              <option value="month">month</option>
-            </select>
-          </label>
-          <label>Target tokens <input class="ui-input" v-model.number="limitForm.targetTokens" type="number" min="1" step="1" required /></label>
-          <div class="form-actions">
-            <UiButton type="submit" variant="primary" data-testid="limit-save">Save budget</UiButton>
-            <UiButton @click="showLimitForm = false">Cancel</UiButton>
-          </div>
-        </form>
-      </div></details>
+
             </div>
             <footer class="dashboard-footer">Exports use the full time range, regardless of search or chart selection.</footer>
           </div>
@@ -636,32 +498,20 @@ watch(
 .search-field { display: block; width: 260px; max-width: 100%; margin-bottom: .5rem; }
 .search-field input { width: 100%; font-size: .75rem; }
 .empty { margin: 1.5rem 0; padding: 1.5rem 0; font-size: .8125rem; color: var(--text-secondary); text-align: center; }
-.secondary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.125rem; margin-top: 1.5rem; }
+.secondary-grid { display: grid; grid-template-columns: 1fr; gap: 1.125rem; margin-top: 1.5rem; }
 .secondary-panel { border: 1px solid var(--border-color); background: var(--bg-assistant); border-radius: var(--radius-md); min-width: 0; }
 .secondary-panel > summary { padding: 1rem 1.25rem; cursor: pointer; font-size: .8125rem; font-weight: 500; }
 .secondary-panel > summary span { float: right; color: var(--text-muted); font-weight: 400; font-size: .6875rem; }
 .secondary-body { padding: 0 1.25rem 1rem; }
-.panel-title { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; font-size: .75rem; margin-bottom: .75rem; }
-.panel-title > :last-child { margin-left: auto; }
-.state-list, .limit-list { list-style: none; padding: 0; margin: 0; }
+.state-list { list-style: none; padding: 0; margin: 0; }
 .state-row { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; padding: .5rem 0; border-bottom: 1px solid var(--border-faint); font-size: .6875rem; }
-.state-row:last-child, .limit-row:last-child { border: 0; }
+.state-row:last-child { border: 0; }
 .state-name { font-weight: 600; }
 .state-cur, .state-last { min-width: 0; overflow-wrap: anywhere; }
 .state-last { flex-basis: 100%; }
 .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); }
 .dot.ok { background: var(--bg-success); }
 .pill { color: var(--text-accent); font-size: .625rem; }
-.limit-row { padding: .75rem 0; border-bottom: 1px solid var(--border-faint); }
-.limit-head { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; margin-bottom: .5rem; font-size: .6875rem; }
-.limit-label { font-weight: 600; }
-.warn-text, .limit-row.warn .limit-label { color: var(--bg-danger); }
-.limit-bar { height: 6px; background: var(--border-faint); border-radius: 3px; overflow: hidden; }
-.limit-bar .fill { display: block; height: 100%; background: var(--text-accent); }
-.limit-bar .fill.over { background: var(--bg-danger); }
-.limit-form { display: flex; flex-direction: column; gap: .75rem; margin-top: 1rem; }
-.limit-form label { display: flex; flex-direction: column; gap: .25rem; font-size: .6875rem; color: var(--text-secondary); }
-.form-actions { display: flex; gap: .5rem; }
 .muted { color: var(--text-muted); }
 .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .dashboard-footer { margin-top: 1.5rem; font-size: .6875rem; color: var(--text-muted); }

@@ -173,10 +173,7 @@ def run_case(browser, fail=False, large=False, mixed=False):
                 assert page.locator('[data-testid=by-model-row]').first.bounding_box()['height'] < 140
                 cells = page.locator('[data-testid=by-model-row] td').evaluate_all('cells=>cells.map(e=>({right:e.getBoundingClientRect().right,overflow:e.scrollWidth-e.clientWidth}))')
                 assert all(c['right'] <= width and c['overflow'] <= 2 for c in cells), (width,cells)
-            page.locator('[data-testid=limits-block] summary').click()
-            page.locator('[data-testid=limit-add]').click()
-            expect(page.locator('[data-testid=limit-form]')).to_be_visible()
-            page.get_by_role('button', name='Cancel',exact=True).click()
+            expect(page.locator('[data-testid=limits-block]')).to_have_count(0)
             page.locator('[data-testid=agent-state] summary').click()
             expect(page.locator('[data-testid=agent-state] .secondary-body')).to_be_visible()
     assert not errors, errors
@@ -187,4 +184,4 @@ if __name__ == '__main__':
         browser = p.chromium.launch(headless=True)
         run_case(browser); run_case(browser, fail=True); run_case(browser, large=True); run_case(browser,mixed=True)
         browser.close()
-    print('PASS dashboard B: accounting, chart selection, search, tabs, exports, mobile density, quotas, keyboard, errors and 52k history')
+    print('PASS dashboard B: accounting, chart selection, search, tabs, exports, mobile density, keyboard, errors and 52k history')
