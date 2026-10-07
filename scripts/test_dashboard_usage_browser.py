@@ -73,12 +73,23 @@ def run_case(browser, fail=False, large=False):
         tasks = page.evaluate('dashboardLongTasks').copy()
         blocking = [t['duration'] for t in tasks if t['at'] >= before]
         assert max(blocking, default=0) < 1000, f'Range switch blocks the browser: {blocking}'
-        assert page.locator('[data-testid="by-project-table"] tbody tr').count() == 200
+        projects = page.locator('[data-testid="by-project-table"] tbody tr')
+        toggle = page.locator('[data-testid="toggle-projects"]')
+        assert projects.count() == 20
+        assert toggle.get_attribute('aria-expanded') == 'false'
+        assert '180 more' in toggle.inner_text()
+        toggle.click()
+        assert projects.count() == 200
+        assert toggle.get_attribute('aria-expanded') == 'true'
+        toggle.click()
+        assert projects.count() == 20
+        assert page.locator('[data-testid="sum-tokens"]').inner_text().strip() == '5,200,000'
     else:
         page.wait_for_selector('[data-testid="usage-sources"]')
         page.wait_for_function("document.querySelector('[data-testid=sum-tokens]').textContent.trim() === '3,400'")
         assert page.locator('[data-testid="by-agent-row"]').count() == 5
         assert page.locator('[data-testid="sum-cost"]').inner_text() == '2.2 USD'
+        assert page.locator('[data-testid="toggle-projects"]').count() == 0
         assert page.locator('[data-testid="top-sessions-table"] tbody tr').count() == 5
         page.click('[data-testid="range-all"]')
         assert page.locator('[data-testid="sum-tokens"]').inner_text().strip() == '3,400'

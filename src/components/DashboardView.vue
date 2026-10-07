@@ -154,6 +154,9 @@ const projectRows = computed<ProjectRow[]>(() => {
   });
 });
 
+const showAllProjects = ref(false);
+const visibleProjectRows = computed(() => showAllProjects.value ? projectRows.value : projectRows.value.slice(0, 20));
+
 interface ModelRow {
   model: string;
   provider: string;
@@ -660,12 +663,12 @@ watch(
             no usage recorded yet<br />
             <span class="muted">Numbers come from the agents' usage_update notifications and the bridges' estimates.</span>
           </p>
-          <table v-else class="dense" data-testid="by-project-table">
+          <table v-else id="dashboard-projects" class="dense" data-testid="by-project-table">
             <thead>
               <tr><th scope="col">Project</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Turns</th><th scope="col">Share</th><th scope="col">Last activity</th></tr>
             </thead>
             <tbody>
-              <tr v-for="r in projectRows" :key="r.project" :title="r.cwd" :data-est="r.estTokens > 0">
+              <tr v-for="r in visibleProjectRows" :key="r.project" :title="r.cwd" :data-est="r.estTokens > 0">
                 <td data-label="Project"><span :title="r.cwd" class="mono">{{ r.project }}</span></td>
                 <td class="num mono" data-label="Tokens" :title="r.estTokens > 0 ? `${fmtInt(r.estTokens)} of these are a bridge estimate` : ''">{{ fmtTokensWithEst(r.tokens, r.estTokens) }}</td>
                 <td class="num mono" data-label="Cost">{{ r.costs }}</td>
@@ -680,6 +683,13 @@ watch(
               </tr>
             </tbody>
           </table>
+          <UiButton
+            v-if="projectRows.length > 20"
+            data-testid="toggle-projects"
+            aria-controls="dashboard-projects"
+            :aria-expanded="showAllProjects"
+            @click="showAllProjects = !showAllProjects"
+          >{{ showAllProjects ? 'Show top 20' : `Show all (${projectRows.length - 20} more)` }}</UiButton>
         </section>
 
         <!-- By model -->
