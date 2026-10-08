@@ -56,6 +56,21 @@ older hashed assets for open tabs, and replace `index.html` last.
 The Docker socket allows agents inside ACP UI to inspect and manage the
 existing stack; service lifecycle still follows the Compose rules above.
 
+## UI-only changes: leave agent bridges running
+
+When changing only the frontend, do not stop, restart, recreate, or rebuild
+any agent bridge, and do not kill its agent CLI child processes. Bridges are
+independent services; frontend builds, browser tests, and publishing
+`dist-web/` do not require bridge lifecycle changes.
+
+Do not run stack-wide `docker compose down`, `restart`, or `up` for a UI-only
+release. Publish the frontend assets to the verified web mount as described
+above. If a web service operation is actually needed, target `web` only and
+use `--no-deps` where supported.
+
+Bridge lifecycle changes belong to a bridge/backend change or recovery from
+a separately diagnosed bridge failure, never to routine UI deployment.
+
 ## Tauri: hands off
 
 All `@tauri-apps/*` usage sits behind the `isTauriHost()` runtime
