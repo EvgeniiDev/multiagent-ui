@@ -45,6 +45,9 @@ services:
       PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       NODE_PATH: /home/hermes/.local/lib/node_modules
       ACP_STATE_URL: http://127.0.0.1:25900
+      # Devin spawns through `devin acp`; bypass auto-approves every tool call
+      # instead of routing a permission prompt into the UI.
+      DEVIN_PERMISSION_MODE: bypass
   bridge-pi:
     <<: *node
     command: ["node", "/repo/server/acp-ws-bridge.mjs", "--port", "25904", "--cmd", "/usr/local/bin/pi-acp"]
