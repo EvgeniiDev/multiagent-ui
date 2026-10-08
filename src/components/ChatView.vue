@@ -54,7 +54,7 @@ const voiceOverlayEl = ref<HTMLElement | null>(null);
 const rt = props.runtime;
 const supportsImages = computed(() => rt.supportsImages);
 const imageHint = computed(
-  () => `Images and text files (max ${formatBytes(MAX_IMAGE_ATTACHMENT_BYTES)} / ${formatBytes(MAX_TEXT_ATTACHMENT_BYTES)})`
+  () => `Images and text files (max ${formatBytes(MAX_IMAGE_ATTACHMENT_BYTES)} / ${formatBytes(MAX_TEXT_ATTACHMENT_BYTES)}) — Ctrl+V pastes a copied image`
 );
 
 // On mobile (iOS/Android) the soft-keyboard's Return key should insert a
@@ -677,13 +677,7 @@ function openFilePicker() {
   fileInput.value?.click();
 }
 
-async function handleFilesPicked(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const picked = Array.from(input.files ?? []);
-  // Reset so picking the same file twice still fires a change event.
-  input.value = '';
-  if (picked.length === 0) return;
-
+async function stageFiles(picked: File[]) {
   const { attachments: staged, errors } = await readAttachments(picked);
   // The agent advertises image support; attaching one it can't read would just
   // be ignored on its side, so refuse it here with an explanation.
@@ -697,6 +691,44 @@ async function handleFilesPicked(event: Event) {
       : []),
   ];
   attachError.value = notes.length ? notes.join(' · ') : null;
+}
+
+async function handleFilesPicked(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const picked = Array.from(input.files ?? []);
+  // Reset so picking the same file twice still fires a change event.
+  input.value = '';
+  if (picked.length === 0) return;
+  await stageFiles(picked);
+}
+
+// Clipboard screenshots arrive with a generic "image.png" name (or none at
+// all); a timestamp keeps the staged chip and the transcript readable. A real
+// name — a file copied in the file manager — is left alone.
+function namePastedFile(file: File): File {
+  if (file.name && file.name !== 'blob' && !/^image\.[a-z0-9]+$/i.test(file.name)) {
+    return file;
+  }
+  const sub = (file.type.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  const d = new Date();
+  const stamp = [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map(n => String(n).padStart(2, '0'))
+    .join('');
+  return new File([file], `pasted-${stamp}.${sub === 'jpeg' ? 'jpg' : sub || 'png'}`, {
+    type: file.type,
+  });
+}
+
+// Ctrl+V with a copied image or file stages it as an attachment — same as the
+// attach button. A text-only clipboard falls through to the textarea's own
+// paste; a mixed one (image + a URL) prefers the file.
+function handlePaste(event: ClipboardEvent) {
+  const files = Array.from(event.clipboardData?.files ?? []);
+  if (files.length === 0) return;
+  // Same gate as the attach button: no staging mid-turn or while offline.
+  if (isLoading.value || isReconnecting.value || !isConnected.value) return;
+  event.preventDefault();
+  void stageFiles(files.map(namePastedFile));
 }
 
 function removeAttachment(id?: string) {
@@ -1040,7 +1072,7 @@ function getToolKind(kind: string): string {
         <!-- One framed card, Claude-Code style: the field on top, the bottom
              menu row under it — attach + mic, model and thinking pickers,
              then the context meter and send on the right. -->
-        <div ref="composerBox" class="composer-box">
+        <div ref="composerBox" class="composer-box" @paste="handlePaste">
           <div class="composer-field">
             <textarea
               ref="composerEl"
