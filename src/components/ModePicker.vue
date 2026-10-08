@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onBeforeUnmount } from 'vue';
+import UiButton from './ui/UiButton.vue';
 import type { SessionMode } from '../lib/types';
 
 const props = defineProps<{
@@ -53,11 +54,14 @@ function handleClickOutside(event: MouseEvent) {
 if (typeof window !== 'undefined') {
   window.addEventListener('click', handleClickOutside);
 }
+onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
 </script>
 
 <template>
   <div class="mode-picker" :class="{ disabled, compact }">
-    <button 
+    <UiButton
+      :variant="compact ? 'ghost' : 'secondary'"
+      :aria-expanded="isOpen"
       class="mode-button"
       :disabled="disabled"
       @click.stop="toggleDropdown"
@@ -65,7 +69,7 @@ if (typeof window !== 'undefined') {
       <svg v-if="compact" class="effort-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 20v-6M12 20V10M19 20V4"/></svg>
       <span class="mode-name">{{ compact ? compactLabel : (currentMode?.name || currentModeId) }}</span>
       <span class="dropdown-arrow">{{ isOpen ? '▲' : '▼' }}</span>
-    </button>
+    </UiButton>
     
     <Transition name="dropdown">
       <div v-if="isOpen" class="dropdown-menu" @click.stop>
@@ -100,18 +104,6 @@ if (typeof window !== 'undefined') {
 }
 
 /* Composer chip: text-like dropdown, no frame until hovered. */
-.mode-picker.compact .mode-button {
-  border: none;
-  background: transparent;
-  padding: 0.25rem 0.375rem;
-  color: var(--text-secondary, #6b6259);
-  font-size: 0.78rem;
-}
-
-.mode-picker.compact .mode-button:hover:not(:disabled) {
-  background: var(--bg-hover);
-  border: none;
-}
 
 .effort-icon {
   flex-shrink: 0;
@@ -127,29 +119,6 @@ if (typeof window !== 'undefined') {
 .mode-picker.compact .mode-name {
   font-weight: 500;
   text-transform: capitalize;
-}
-
-.mode-button {
-  display: flex;
-  align-items: center;
-  gap: 0.375rem;
-  padding: 0.375rem 0.625rem;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: var(--bg-main);
-  color: var(--text-primary);
-  font-size: 0.8rem;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.mode-button:hover:not(:disabled) {
-  background: var(--bg-hover);
-  border-color: var(--text-accent);
-}
-
-.mode-button:disabled {
-  cursor: not-allowed;
 }
 
 .mode-icon {
@@ -187,6 +156,7 @@ if (typeof window !== 'undefined') {
    the viewport when the button sits near a screen edge. Re-anchor to the
    viewport itself so the menu becomes a full-width sheet that always fits. */
 @media (max-width: 800px) {
+  .mode-picker.compact .dropdown-menu,
   .dropdown-menu {
     position: fixed;
     top: calc(env(safe-area-inset-top, 0px) + 4rem);
@@ -195,8 +165,10 @@ if (typeof window !== 'undefined') {
     bottom: auto;
     min-width: 0;
     max-width: none;
-    max-height: calc(100vh - 6rem);
+    max-height: calc(100dvh - 6rem);
+    overflow-y: auto;
   }
+  .dropdown-item { min-height: 44px; }
 }
 
 .dropdown-item {

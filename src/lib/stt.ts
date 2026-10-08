@@ -1,6 +1,6 @@
 // Streaming speech-to-text client for the composer mic button.
 //
-// The service (server/stt-server.py, systemd unit acp-stt.service) lives on
+// The service (server/stt-server.py, Compose stt service) lives on
 // the same host as the panel and talks raw PCM16 mono @16 kHz:
 //   GET  http://<hostname>:25905/health   -> {ok, model, loaded, sample_rate}
 //   WS   ws://<hostname>:25905/ws/stream  <- binary PCM16 frames (~100 ms)
@@ -131,6 +131,7 @@ export class StreamingStt {
   private ws: WebSocket | null = null;
   private gotFinal = false;
   private closedEmitted = false;
+  private disposed = false;
 
   constructor(
     private readonly handlers: SttHandlers,
@@ -138,7 +139,7 @@ export class StreamingStt {
   ) {}
 
   get isOpen(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN;
+    return !this.disposed && !this.gotFinal && !this.closedEmitted && this.ws?.readyState === WebSocket.OPEN;
   }
 
   /** Resolves once the socket is OPEN; rejects on timeout/refusal. */
@@ -183,7 +184,7 @@ export class StreamingStt {
   push(pcm: Int16Array): void {
     if (!this.isOpen) return;
     try {
-      this.ws!.send(pcm.buffer);
+      this.ws!.send(pcm);
     } catch {
       /* socket died between check and send; close event reports it */
     }
@@ -211,6 +212,7 @@ export class StreamingStt {
 
   /** Idempotent teardown — safe to call from any state. */
   close(): void {
+    this.disposed = true;
     const ws = this.ws;
     this.ws = null;
     if (!ws) {
@@ -228,6 +230,7 @@ export class StreamingStt {
   }
 
   private handleMessage(ev: MessageEvent): void {
+    if (this.disposed || this.gotFinal || this.closedEmitted) return;
     if (typeof ev.data !== 'string') return; // server sends JSON text only
     let msg: { type?: string; committed?: string; volatile?: string; text?: string; error?: string };
     try {

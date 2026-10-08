@@ -8,6 +8,7 @@ import { loadKvStore, type KVStore } from '../lib/host';
 import { readAttachments, formatBytes, extractReplayedAttachments, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from '../lib/attachments';
 import ModePicker from './ModePicker.vue';
 import ModelPicker from './ModelPicker.vue';
+import UiComposerSettings from './ui/UiComposerSettings.vue';
 import WorkflowPanel from './WorkflowPanel.vue';
 import { useWorkflowStore } from '../stores/workflow';
 import CommandPalette from './CommandPalette.vue';
@@ -15,6 +16,7 @@ import VoiceInput from './VoiceInput.vue';
 import type { Attachment, AttachmentMeta, SlashCommand } from '../lib/types';
 import type { SessionTab } from '../lib/sessionRuntime';
 import type { SttPartial } from '../lib/stt';
+import { transcriptSeparator, insertDictation, moveDictationAnchor } from '../lib/dictationText';
 
 const props = defineProps<{
   /** Working directory shown in the chat sidebar — the New session dialog
@@ -37,6 +39,7 @@ const RUN_MODES: { id: 'chat' | 'workflow'; name: string }[] = [
   { id: 'workflow', name: 'Workflow' },
 ];
 const inputText = ref('');
+const preparingSend = ref(false);
 const messagesContainer = ref<HTMLElement | null>(null);
 const commandPaletteRef = ref<InstanceType<typeof CommandPalette> | null>(null);
 
@@ -487,11 +490,7 @@ watch(inputText, async (newVal, oldVal) => {
   // Edits typed while dictating move the insertion mark when they land in
   // front of it, so the voice text stays where the user last saw it.
   if (voicePhase.value !== 'idle') {
-    const delta = newVal.length - (oldVal?.length ?? 0);
-    const caret = composerEl.value?.selectionStart ?? newVal.length;
-    if (delta !== 0 && caret <= voiceAt.value) {
-      voiceAt.value = Math.max(0, Math.min(voiceAt.value + delta, newVal.length));
-    }
+    voiceAt.value = moveDictationAnchor(oldVal ?? '', newVal, voiceAt.value);
   }
   await nextTick();
   autosizeComposer();
@@ -517,13 +516,10 @@ const voicePre = computed(() => inputText.value.slice(0, voiceAt.value));
 const voicePost = computed(() => inputText.value.slice(voiceAt.value));
 // The overlay shows the same separator the final insert will add, so the
 // spacing doesn't jump when the take commits.
-const voiceSep = computed(() =>
-  (voiceCommitted.value || voiceVolatile.value) &&
-  voicePre.value.length > 0 &&
-  !/\s$/.test(voicePre.value)
-    ? ' '
-    : '',
-);
+const voiceText = computed(() => voiceCommitted.value + transcriptSeparator(voiceCommitted.value, voiceVolatile.value) + voiceVolatile.value);
+const voiceSep = computed(() => transcriptSeparator(voicePre.value, voiceText.value));
+const voiceTailSep = computed(() => transcriptSeparator(voiceCommitted.value, voiceVolatile.value));
+const voicePostSep = computed(() => transcriptSeparator(voiceText.value, voicePost.value));
 
 const voiceStatusText = computed(() => {
   switch (voicePhase.value) {
@@ -566,11 +562,9 @@ function onVoicePartial(p: SttPartial) {
 
 function onVoiceFinal(text: string) {
   if (text) {
-    const pre = inputText.value.slice(0, voiceAt.value);
-    const post = inputText.value.slice(voiceAt.value);
-    const insert = (pre.length > 0 && !/\s$/.test(pre) ? ' ' : '') + text;
-    inputText.value = pre + insert + post;
-    const caret = pre.length + insert.length;
+    const inserted = insertDictation(inputText.value, voiceAt.value, text);
+    inputText.value = inserted.value;
+    const caret = inserted.caret;
     void nextTick(() => {
       composerEl.value?.focus();
       composerEl.value?.setSelectionRange(caret, caret);
@@ -642,34 +636,39 @@ onBeforeUnmount(() => {
 });
 
 async function handleSend() {
-  const text = inputText.value.trim();
-  if (!text && attachments.value.length === 0) return;
+  if (preparingSend.value) return;
+  if (!inputText.value.trim() && attachments.value.length === 0 && !voiceActive.value) return;
 
-  // A take in flight would land its final text into the cleared field —
-  // stop it first so the send and the dictation don't interleave.
-  voiceInputRef.value?.stop();
-
-  // Sending is an explicit "show me the newest" — re-arm the follow even
-  // while the user has the feed scrolled up.
-  followBottom.value = true;
-
-  const files = attachments.value;
-  inputText.value = '';
-  attachments.value = [];
-  attachError.value = null;
+  preparingSend.value = true;
+  let text: string;
+  let files: Attachment[];
   try {
-    // A send while a turn is running is a steer: cancel it, then this text
-    // goes out as the next turn. Stop remains the pure-cancel path.
+    // Stop requests a final transcript asynchronously. Snapshot only after
+    // it has been committed, so a late voice final cannot refill the field.
+    if (voiceActive.value) await voiceInputRef.value?.finish();
+    text = inputText.value.trim();
+    files = attachments.value;
+    if (!text && files.length === 0) return;
+    followBottom.value = true;
+    inputText.value = '';
+    attachments.value = [];
+    attachError.value = null;
+  } finally {
+    preparingSend.value = false;
+  }
+  try {
+    // A send while a turn is running is a steer; further drafts stay editable.
     if (isLoading.value) await rt.steer(text, files);
     else await rt.sendPrompt(text, files);
   } catch (e) {
-    // A rejected prompt used to die in the console: the composer cleared, the
-    // turn produced nothing, and the user saw no reason. Surface it.
     console.error('Failed to send prompt:', e);
     rt.error = `Send failed: ${e instanceof Error ? e.message : String(e)}`;
-    // Hand the files back so the turn can be retried without re-picking them.
-    attachments.value = files;
-    inputText.value = text;
+    // A turn can fail much later. Restore only an untouched composer;
+    // never overwrite the next draft or its attachments.
+    if (!inputText.value && attachments.value.length === 0) {
+      attachments.value = files;
+      inputText.value = text;
+    }
   }
 }
 
@@ -984,6 +983,7 @@ function getToolKind(kind: string): string {
     </div>
     
     <div class="input-container">
+      <div class="input-content">
       <!-- Update nag: the agent's own npm update notice from stderr. Desktop
            only; the × persists the offered version, so this exact nag stays
            dismissed while a newer one re-arms the strip. -->
@@ -1060,7 +1060,7 @@ function getToolKind(kind: string): string {
               ref="voiceOverlayEl"
               class="voice-overlay"
               aria-hidden="true"
-            ><span>{{ voicePre }}</span><span>{{ voiceSep }}</span><span class="voice-commit">{{ voiceCommitted }}</span><span class="voice-volatile">{{ voiceVolatile }}</span><span>{{ voicePost }}</span></div>
+            ><span>{{ voicePre }}</span><span>{{ voiceSep }}</span><span class="voice-commit">{{ voiceCommitted }}</span><span>{{ voiceTailSep }}</span><span class="voice-volatile">{{ voiceVolatile }}</span><span>{{ voicePostSep }}</span><span>{{ voicePost }}</span></div>
           </div>
           <div class="composer-menu">
             <button
@@ -1101,37 +1101,39 @@ function getToolKind(kind: string): string {
               @final="onVoiceFinal"
               @error="onVoiceError"
             />
-            <ModelPicker
-              v-if="availableModels.length > 0"
-              :models="availableModels"
-              :current-model-id="currentModelId"
-              :disabled="isLoading"
-              compact
-              @change="handleModelChange"
-            />
-            <ModePicker
-              v-if="availableModes.length > 0"
-              :modes="availableModes"
-              :current-mode-id="currentModeId"
-              :disabled="isLoading"
-              compact
-              @change="handleModeChange"
-            />
-            <ModePicker
-              :modes="RUN_MODES"
-              :current-mode-id="wfStore.chatMode"
-              compact
-              @change="(id) => wfStore.setChatMode(id as 'chat' | 'workflow')"
-            />
+            <UiComposerSettings>
+              <ModelPicker
+                v-if="availableModels.length > 0"
+                :models="availableModels"
+                :current-model-id="currentModelId"
+                :disabled="isLoading"
+                compact
+                @change="handleModelChange"
+              />
+              <ModePicker
+                v-if="availableModes.length > 0"
+                :modes="availableModes"
+                :current-mode-id="currentModeId"
+                :disabled="isLoading"
+                compact
+                @change="handleModeChange"
+              />
+              <ModePicker
+                :modes="RUN_MODES"
+                :current-mode-id="wfStore.chatMode"
+                compact
+                @change="(id) => wfStore.setChatMode(id as 'chat' | 'workflow')"
+              />
+              <span
+                v-if="contextLabel"
+                class="context-meter"
+                :title="contextTitle"
+              >{{ contextLabel }}</span>
+            </UiComposerSettings>
             <span class="composer-spacer" aria-hidden="true"></span>
-            <span
-              v-if="contextLabel"
-              class="context-meter"
-              :title="contextTitle"
-            >{{ contextLabel }}</span>
             <button
               class="icon-btn send-btn"
-              :disabled="(!inputText.trim() && attachments.length === 0) || isReconnecting || !isConnected"
+              :disabled="preparingSend || (!inputText.trim() && attachments.length === 0 && !voiceCommitted && !voiceVolatile) || isReconnecting || !isConnected"
               @click="handleSend"
               title="Send"
               aria-label="Send"
@@ -1154,6 +1156,7 @@ function getToolKind(kind: string): string {
           </div>
         </div>
       </div>
+      </div><!-- input-content -->
     </div>
     </div><!-- chat-column -->
 
@@ -1177,6 +1180,8 @@ function getToolKind(kind: string): string {
 /* The chat feed itself (header + messages + composer) stays a column; the
  * workflow side panel is a row sibling docked right of it. */
 .chat-column {
+  --chat-content-width: 780px;
+  --chat-content-gutter: 1.5rem;
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -1241,12 +1246,12 @@ function getToolKind(kind: string): string {
 .messages-container {
   flex: 1;
   overflow-y: auto;
-  padding: 1.25rem 1.5rem 0.75rem;
+  padding: 1.25rem var(--chat-content-gutter) 0.75rem;
 }
 
 /* Reading column: capped measure so long agent answers stay scannable. */
 .messages {
-  max-width: 780px;
+  max-width: var(--chat-content-width);
   margin: 0 auto;
   display: flex;
   flex-direction: column;
@@ -1562,12 +1567,19 @@ function getToolKind(kind: string): string {
 }
 
 .input-container {
+  padding: 0.625rem var(--chat-content-gutter);
+  border-top: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+}
+
+/* Match the reading column, including notices and staged attachments. */
+.input-content {
   position: relative;
+  width: 100%;
+  max-width: var(--chat-content-width);
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 0.375rem;
-  padding: 0.625rem 0.75rem;
-  border-top: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
 }
 
 .input-row {
@@ -2002,40 +2014,36 @@ function getToolKind(kind: string): string {
 /* ---------- Mobile / narrow-viewport tweaks ---------- */
 
 @media (max-width: 800px) {
+  .chat-column {
+    --chat-content-gutter: 0.75rem;
+  }
+
   /* Narrow screens: the stepper column would eat the feed — hide it; the
    * composer switch still works, the panel just isn't shown here. */
   .workflow-side {
     display: none;
   }
 
-  /* The mobile hamburger lives in the scope bar (in flow, right edge) —
-     the header needs no reserved gutter. Push the header below the camera
-     notch / status bar so picker buttons aren't clipped on phones with a
-     hole-punch or notch. */
+  /* Identity/title live in the drawer on phones. Keep only the OS safe
+     area here, without an empty header row above the transcript. */
   .chat-header {
-    display: flex;
-    flex-wrap: wrap;
-    padding-top: calc(0.625rem + env(safe-area-inset-top, 0px));
+    padding: env(safe-area-inset-top, 0px) 0 0;
+    border-bottom: 0;
   }
 
-  /* Mode/model pickers share one wrapping row — never crushed under
-     each other or the header edge on 390px viewports. */
+  /* The hidden identity row has no intrinsic height on phones. */
   .header-right {
     display: flex;
     flex-wrap: wrap;
     min-width: 0;
   }
 
-  /* Agent identity is already shown in the sidebar drawer; on a phone the
-     chat header should belong to mode/model/actions. Hiding the long name
-     also avoids awkward 4-line wraps for names like "Copilot CLI dev tunnel". */
+  /* Agent identity and the session title are available in the drawer. */
   .agent-name {
     display: none;
   }
 
-  /* Session title is also redundant on mobile (visible in the sidebar
-     SessionList) and otherwise gets crushed to a single character by the
-     mode/model pickers. Reclaim the horizontal space. */
+
   .chat-header h2 {
     display: none;
   }
@@ -2043,6 +2051,9 @@ function getToolKind(kind: string): string {
   .input-container {
     /* iOS home-indicator: keep Send button reachable above the gesture area. */
     padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .input-content {
     gap: 0.5rem;
   }
 
@@ -2068,7 +2079,10 @@ function getToolKind(kind: string): string {
      wrap, and nothing may overflow the 390px viewport. */
   .input-row {
     flex-wrap: nowrap;
-    overflow: hidden;
+  }
+
+  .composer-menu {
+    flex-wrap: nowrap;
   }
 
   .composer-box {
@@ -2086,9 +2100,21 @@ function getToolKind(kind: string): string {
     flex: 0 0 auto;
   }
 
+  /* The edge is part of the native feed scroller: a vertical swipe here
+     scrolls history; a horizontal one reaches the shell drawer handler. */
+  .messages-container::before {
+    content: '';
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 24px;
+    z-index: 80;
+    touch-action: pan-y pinch-zoom;
+  }
+
   /* Narrow screens: give the reading column the full width back. */
   .messages-container {
-    padding: 0.875rem 0.75rem 0.5rem;
+    touch-action: pan-y pinch-zoom;
+    padding: 0.875rem var(--chat-content-gutter) 0.5rem;
   }
 
   .message-user {

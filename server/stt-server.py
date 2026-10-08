@@ -5,14 +5,14 @@ Why a service and not a CLI: loading the checkpoint costs ~4.2 s (measured), whi
 transcribing costs 0.25 s for 2 s of audio and 0.34 s for 4 s (RTF 0.085–0.124 on
 CPU) — so one resident model serves thousands of windows.
 
-GigaAM v3_e2e_rnnt is not a streaming model, so the stream endpoint is a sliding
-window decoder with a stable-prefix commit:
+GigaAM v3_e2e_rnnt is not a streaming model. The stream endpoint decodes
+bounded phrases and commits them at pauses:
 
   * the client pushes raw PCM16 mono @16 kHz over the websocket;
-  * every HOP_S of new audio the server re-decodes the last WINDOW_S window and
-    returns the hypothesis split into `committed` (the word prefix that has stopped
-    changing between passes) and `volatile` (the tail that may still change);
-  * on stop, one final pass over the whole utterance (longform above 24 s).
+  * every HOP_S the current phrase is decoded as a volatile hypothesis;
+  * after 0.8 s of silence the phrase is finalised and appended to committed text;
+  * phrases are bounded to 20 s; on stop only the outstanding phrase is decoded.
+    Previously committed phrases are never replaced by a later window or final.
 
 Endpoints
   GET  /health                     -> {ok, model, device, window_s, hop_s}
@@ -38,6 +38,8 @@ import wave
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from stt_stream import PcmUtterances
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("stt")
 
@@ -46,7 +48,6 @@ PORT = int(os.environ.get("PORT", "25905"))
 HOST = os.environ.get("HOST", "0.0.0.0")
 
 SAMPLE_RATE = 16000          # GigaAM is trained at 16 kHz mono
-WINDOW_S = float(os.environ.get("STT_WINDOW_S", "6"))     # re-decoded window
 HOP_S = float(os.environ.get("STT_HOP_S", "1"))           # how often a partial is produced
 MIN_PARTIAL_S = 1.0          # don't decode before this much audio arrived
 LONGFORM_THRESHOLD_S = 24.0  # above this, transcribe_longform (VAD-segmented)
@@ -118,7 +119,7 @@ def transcribe_wav(path: str) -> str:
         if seconds > LONGFORM_THRESHOLD_S:
             try:
                 return _text_of(model.transcribe_longform(path))
-            except RuntimeError:
+            except (RuntimeError, OSError, ImportError):
                 # Offline host: no local pyannote segmentation model and no
                 # HF_TOKEN to fetch it — decode in plain <=20 s pieces instead
                 # of failing the whole take with {"type": "error"}.
@@ -150,34 +151,6 @@ def wav_seconds(path: str) -> float:
     with wave.open(path, "rb") as fh:
         frames, rate = fh.getnframes(), fh.getframerate()
     return frames / float(rate or 1)
-
-
-def stable_prefix(prev_committed: str, prev_hyp: str, cur: str) -> "tuple[str, str]":
-    """Split `cur` into (committed, volatile), never shrinking what was committed.
-
-    Two rules, and the second one exists because of a measured defect:
-      1. the word prefix that stopped changing between hypotheses is settled text;
-      2. committed text NEVER gets shorter. As the sliding window advances its start
-         can land inside a word ("|Познавания речи..."), the hypothesis then loses
-         its head and a plain common-prefix rule would return '' — the UI would
-         erase text the user already read. In that case keep the previous committed
-         text and treat the rest of the hypothesis as volatile.
-    """
-    a, b = prev_hyp.split(), cur.split()
-    n = 0
-    while n < len(a) and n < len(b) and a[n] == b[n]:
-        n += 1
-    candidate = " ".join(b[:n])
-
-    if len(candidate.split()) >= len(prev_committed.split()):
-        return candidate, " ".join(b[n:])
-
-    idx = cur.find(prev_committed)
-    if idx < 0:
-        # The window starts inside a word: the tail is a broken decode, not a guess
-        # worth showing. Keep what the user has read and offer nothing volatile.
-        return prev_committed, ""
-    return prev_committed, cur[idx + len(prev_committed):].strip()
 
 
 # --------------------------------------------------------------------------
@@ -213,7 +186,9 @@ async def health() -> dict:
         "loaded": _MODEL is not None,
         "loaded_at": _LOADED_AT,
         "sample_rate": SAMPLE_RATE,
-        "window_s": WINDOW_S,
+        "window_s": 20.0,  # legacy health field: maximum phrase length
+        "segmentation": "pause",
+        "pause_s": 0.8,
         "hop_s": HOP_S,
     }
 
@@ -242,56 +217,43 @@ async def transcribe(request: Request) -> JSONResponse:
 async def ws_stream(ws: WebSocket) -> None:
     await ws.accept()
     loop = asyncio.get_running_loop()
-    buf = bytearray()            # all PCM of this utterance
-    window = bytearray()         # last WINDOW_S of it
-    last_partial_at = 0.0        # bytes consumed at the last partial
-    prev_hyp = ""
-    committed = ""
+    audio = PcmUtterances()
+    committed_parts: list[str] = []
+    volatile = ""
+    last_partial_bytes = 0
     started = time.time()
+    disconnected = False
     log.info("stream client connected")
 
-    def push(chunk: bytes) -> None:
-        buf.extend(chunk)
-        window.extend(chunk)
-        max_bytes = int(WINDOW_S * SAMPLE_RATE * 2)
-        if len(window) > max_bytes:
-            del window[: len(window) - max_bytes]
+    async def decode(pcm: bytes) -> str:
+        def run() -> str:
+            with tempfile.TemporaryDirectory(prefix="stt-phrase-") as tmp:
+                path = pcm16_to_wav(pcm, os.path.join(tmp, "p.wav"))
+                return transcribe_wav(path)
+        return await loop.run_in_executor(_POOL, run)
 
     async def emit_partial() -> None:
-        nonlocal prev_hyp, committed, last_partial_at
-        pcm = bytes(window)
-        last_partial_at = len(buf)
-
-        def run() -> str:
-            with tempfile.TemporaryDirectory(prefix="stt-win-") as tmp:
-                path = pcm16_to_wav(pcm, os.path.join(tmp, "w.wav"))
-                return transcribe_wav(path)
-
-        hypo = await loop.run_in_executor(_POOL, run)
-        settled, volatile = stable_prefix(committed, prev_hyp, hypo)
-        prev_hyp = hypo
-        committed = settled
+        settled = " ".join(committed_parts)
         await ws.send_text(json.dumps({
-            "type": "partial",
-            "committed": settled,
-            "volatile": volatile,
-            "text": (settled + " " + volatile).strip(),
-            "audio_s": round(len(buf) / (SAMPLE_RATE * 2), 2),
-            "took_s": None,
-            "since_start_s": round(time.time() - started, 2),
+            "type": "partial", "committed": settled, "volatile": volatile,
+            "text": " ".join(p for p in (settled, volatile) if p),
+            "audio_s": round(audio.received_bytes / (SAMPLE_RATE * 2), 2),
+            "took_s": None, "since_start_s": round(time.time() - started, 2),
         }, ensure_ascii=False))
 
-    try:
+    wake = asyncio.Event()
+    stopping = False
+
+    async def receive_audio() -> None:
+        nonlocal audio, stopping, disconnected, volatile, started
         while True:
             message = await ws.receive()
             if message.get("type") == "websocket.disconnect":
-                break
+                disconnected = True
+                return
             if (data := message.get("bytes")) is not None:
-                push(data)
-                pending = len(buf) - last_partial_at
-                if (len(buf) >= MIN_PARTIAL_S * SAMPLE_RATE * 2
-                        and pending >= HOP_S * SAMPLE_RATE * 2):
-                    await emit_partial()
+                audio.push(data)
+                wake.set()
                 continue
             if (text := message.get("text")) is not None:
                 try:
@@ -299,37 +261,92 @@ async def ws_stream(ws: WebSocket) -> None:
                 except ValueError:
                     continue
                 if control.get("type") == "stop":
-                    break
+                    audio.finish()
+                    stopping = True
+                    wake.set()
+                    return
                 if control.get("type") == "reset":
-                    buf.clear(); window.clear(); prev_hyp = ""; committed = ""
-                    last_partial_at = 0; started = time.time()
-    except WebSocketDisconnect:
-        pass
+                    audio = PcmUtterances()
+                    committed_parts.clear()
+                    volatile = ""
+                    started = time.time()
+                    wake.set()
 
-    # Final pass over the whole utterance: one decode, best quality.
-    if buf:
-        pcm = bytes(buf)
+    async def recognise() -> None:
+        nonlocal volatile, last_partial_bytes
+        previous_audio = None
+        while True:
+            await wake.wait()
+            wake.clear()
+            current = audio
+            if current is not previous_audio:
+                last_partial_bytes = 0
+                previous_audio = current
+            changed = False
+            while current.completed:
+                text = await decode(current.completed.popleft())
+                if current is not audio:
+                    break  # reset occurred while the worker was decoding
+                if text:
+                    committed_parts.append(text)
+                volatile = ""
+                last_partial_bytes = 0
+                changed = True
+            if current is not audio:
+                continue
+            if stopping:
+                text = " ".join(committed_parts)
+                await ws.send_text(json.dumps({
+                    "type": "final", "text": text, "committed": text, "volatile": "",
+                    "audio_s": round(current.received_bytes / (SAMPLE_RATE * 2), 2),
+                    "total_s": round(time.time() - started, 2),
+                }, ensure_ascii=False))
+                return
+            size = len(current.active)
+            if (size >= MIN_PARTIAL_S * SAMPLE_RATE * 2
+                    and size - last_partial_bytes >= HOP_S * SAMPLE_RATE * 2):
+                sequence = current.sequence
+                last_partial_bytes = size
+                hypothesis = await decode(bytes(current.active))
+                # The audio reader keeps running during inference. A hypothesis
+                # from before a pause/reset must not replace the next phrase.
+                if current is audio and sequence == current.sequence and not stopping:
+                    volatile = hypothesis
+                    changed = True
+            if changed and current is audio and not stopping:
+                await emit_partial()
+            # Incoming packets set wake while inference runs. One event means
+            # one latest snapshot: never queue all the obsolete partial passes.
 
-        def run_final() -> str:
-            with tempfile.TemporaryDirectory(prefix="stt-final-") as tmp:
-                path = pcm16_to_wav(pcm, os.path.join(tmp, "f.wav"))
-                return transcribe_wav(path)
-
-        try:
-            text = await loop.run_in_executor(_POOL, run_final)
-            await ws.send_text(json.dumps({
-                "type": "final", "text": text, "committed": text, "volatile": "",
-                "audio_s": round(len(buf) / (SAMPLE_RATE * 2), 2),
-                "total_s": round(time.time() - started, 2),
-            }, ensure_ascii=False))
-        except Exception as exc:  # noqa: BLE001
-            log.exception("final pass failed")
-            await ws.send_text(json.dumps({"type": "error", "error": str(exc)}))
+    reader = asyncio.create_task(receive_audio())
+    worker = asyncio.create_task(recognise())
     try:
-        await ws.close()
-    except Exception:  # noqa: BLE001 — the client may be gone already
-        pass
-    log.info("stream client done (%.1fs of audio)", len(buf) / (SAMPLE_RATE * 2))
+        await asyncio.wait({reader, worker}, return_when=asyncio.FIRST_COMPLETED)
+        if worker.done():
+            await worker  # surface a decoding error instead of waiting for input
+        else:
+            await reader
+            if not disconnected:
+                await worker
+    except WebSocketDisconnect:
+        disconnected = True
+    except Exception as exc:
+        log.exception("stream decode failed")
+        try:
+            await ws.send_text(json.dumps({"type": "error", "error": str(exc)}))
+        except Exception:
+            disconnected = True
+    finally:
+        for task in (reader, worker):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(reader, worker, return_exceptions=True)
+        if not disconnected:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+        log.info("stream client done (%.1fs of audio)", audio.received_bytes / (SAMPLE_RATE * 2))
 
 
 def main() -> int:

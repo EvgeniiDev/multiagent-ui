@@ -47,10 +47,14 @@ source. Sacred invariants: per-session routing (a `session/load`
 replay must reach only its own tab) and per-socket request-id
 namespacing on the shared child. Do not break either.
 
-## Frontend builds on the host
+## Frontend builds and deployment
 
-`npm run build:web` → `dist-web/` is bind-mounted into the `web`
-container. Never build the frontend inside docker.
+`npm run build:web` may run on the host or inside the agent container.
+The live `dist-web/` is bind-mounted into the `web` container; verify its
+actual mount before publishing. Publish built assets to that mount, keep
+older hashed assets for open tabs, and replace `index.html` last.
+The Docker socket allows agents inside ACP UI to inspect and manage the
+existing stack; service lifecycle still follows the Compose rules above.
 
 ## Tauri: hands off
 

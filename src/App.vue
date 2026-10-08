@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
+import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { canPickFolder, pickFolder, loadKvStore, type KVStore } from './lib/host';
 import { useConfigStore } from './stores/config';
 import { useSessionStore } from './stores/session';
@@ -8,6 +8,8 @@ import AgentSelector from './components/AgentSelector.vue';
 import SessionList from './components/SessionList.vue';
 import SessionTabs from './components/SessionTabs.vue';
 import ChatView from './components/ChatView.vue';
+import UiButton from './components/ui/UiButton.vue';
+import { createDrawerSwipe } from './lib/drawerSwipe';
 import PermissionDialog from './components/PermissionDialog.vue';
 import SettingsView from './components/SettingsView.vue';
 import AuthMethodDialog from './components/AuthMethodDialog.vue';
@@ -362,6 +364,22 @@ async function handleAuthNewSession() {
   sessionStore.clearError();
 }
 
+const drawerSwipe = createDrawerSwipe({
+  isEnabled: () => isNarrowLayout.value,
+  isOpen: () => showSidebar.value,
+  setOpen: (open) => { showSidebar.value = open; },
+});
+
+async function openDrawer() {
+  showSidebar.value = true;
+  await nextTick();
+  document.getElementById('app-sidebar')?.querySelector<HTMLButtonElement>('[aria-label="Collapse sidebar"]')?.focus();
+}
+
+function handleDrawerEscape() {
+  if (isNarrowLayout.value) showSidebar.value = false;
+}
+
 function toggleSidebar() {
   showSidebar.value = !showSidebar.value;
 }
@@ -409,7 +427,15 @@ function clearError() {
 </script>
 
 <template>
-  <div class="app-container" :class="{ 'narrow-layout': isNarrowLayout }">
+  <div
+    class="app-container"
+    :class="{ 'narrow-layout': isNarrowLayout }"
+    @pointerdown="drawerSwipe.start"
+    @pointermove="drawerSwipe.move"
+    @pointerup="drawerSwipe.end"
+    @pointercancel="drawerSwipe.cancel"
+    @keydown.esc="handleDrawerEscape"
+  >
     <!-- View rail: the shell's top-level navigation (Chat · Projects · Board · Dashboard) -->
     <nav class="view-rail" aria-label="Main views">
       <button
@@ -452,10 +478,11 @@ function clearError() {
 
     <!-- Sidebar (slides in as a drawer on narrow viewports). Global on
          narrow: the drawer is reachable from every view there, not just
-         chat — the hamburger in the scope-bar is the opener on all of them.
+         chat — an edge swipe opens it on all of them.
          On desktop unchanged: only the chat view shows the sidebar. -->
     <aside
       v-show="uiStore.ready && showSidebar && (isNarrowLayout || uiStore.activeView === 'chat')"
+      id="app-sidebar"
       class="sidebar"
       :class="{ 'is-drawer': isNarrowLayout }"
     >
@@ -477,7 +504,7 @@ function clearError() {
             aria-label="Settings"
             @click="showSettings = true"
           ><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1a1.7 1.7 0 0 0 1.9.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1a1.7 1.7 0 0 0-.3 1.9v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.4 1z"/></svg></button>
-          <button class="toggle-btn" aria-label="Collapse sidebar" @click="toggleSidebar"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 6l-6 6 6 6"/></svg></button>
+          <UiButton variant="ghost" icon aria-label="Collapse sidebar" aria-controls="app-sidebar" @click="toggleSidebar"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 6l-6 6 6 6"/></svg></UiButton>
         </div>
       </div>
       
@@ -619,18 +646,23 @@ function clearError() {
     
     <!-- Main Content Area -->
     <div class="main-area">
-      <!-- Narrow-only hamburger bar: the drawer opener. The old scope-bar
-           (project selector + traffic + settings) is gone from the desktop —
-           the selector filters sessions from the sidebar, the two actions
-           moved into the sidebar header. -->
-      <header v-if="isNarrowLayout" class="scope-bar">
-        <button
-          v-show="!showSidebar"
-          class="mobile-hamburger"
-          @click="showSidebar = true"
-          aria-label="Open menu"
-        ><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
-      </header>
+      <!-- No in-flow menu bar: touch opens the drawer from the left edge.
+           Keep a keyboard/screen-reader opener that appears when focused. -->
+      <UiButton
+        v-if="isNarrowLayout && !showSidebar"
+        class="drawer-menu-access"
+        variant="ghost"
+        icon
+        aria-label="Open menu"
+        aria-controls="app-sidebar"
+        :aria-expanded="showSidebar"
+        @click="openDrawer"
+      >☰</UiButton>
+      <div
+        v-if="isNarrowLayout && !showSidebar"
+        class="drawer-swipe-edge"
+        aria-hidden="true"
+      />
       <main class="main-content">
         <!-- Reconnect banner takes priority over the error banner: while a
              reconnect is in progress we don't want a contradictory red
@@ -835,19 +867,6 @@ html, body, #app {
   gap: 0.25rem;
 }
 
-.toggle-btn {
-  padding: 0.25rem 0.5rem;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  font-size: 0.875rem;
-  color: var(--text-muted);
-}
-
-.toggle-btn:hover {
-  color: var(--text-primary);
-}
-
 .sidebar-content {
   flex: 1;
   overflow-y: auto;
@@ -976,23 +995,6 @@ html, body, #app {
   overflow: hidden;
 }
 
-/* Global scope strip: the project selector from §B. Slim chrome row pinned
- * above every view (chat, projects, board, dashboard). Positioned + z-indexed
- * above the mobile drawer backdrop (z 90) so the global Settings/Traffic
- * buttons stay clickable while the drawer is open on narrow viewports. */
-.scope-bar {
-  position: relative;
-  z-index: 95;
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  min-width: 0;
-  padding: 0.375rem 0.75rem;
-  border-bottom: 1px solid var(--border-faint);
-  background: var(--bg-main);
-}
-
 /* Sidebar-header icon buttons (Traffic + Settings). Same geometry as the
  * view rail (34×34, radius-md, hairline/ghost) so the header reads as one
  * chrome row. */
@@ -1025,22 +1027,27 @@ html, body, #app {
   outline-offset: 2px;
 }
 
-/* The drawer hamburger is a scope-bar item — static flow, right edge. It is
- * display:none on desktop via the base rule below and only re-enabled inside
- * the narrow-viewport media query (same pattern as before the move). */
-.mobile-hamburger {
-  display: none;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 44px;
-  height: 44px;
-  padding: 0;
-  background: var(--bg-sidebar);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  cursor: pointer;
-  color: var(--text-primary);
+/* Accessible menu opener is out of flow; keyboard focus reveals it. */
+.drawer-menu-access {
+  position: fixed;
+  top: calc(0.5rem + env(safe-area-inset-top, 0px));
+  left: 0.5rem;
+  z-index: 110;
+  clip-path: inset(50%);
+}
+
+.drawer-menu-access:focus-visible {
+  clip-path: none;
+}
+
+.drawer-swipe-edge {
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: 24px;
+  z-index: 80;
+  /* A fallback for views without a chat feed; the chat edge belongs to
+     its scroll container so vertical edge swipes scroll the transcript. */
+  touch-action: pan-y pinch-zoom;
 }
 
 .main-content {
@@ -1287,8 +1294,13 @@ html, body, #app {
     max-width: 360px;
     z-index: 100;
     box-shadow: 2px 0 16px rgba(0, 0, 0, 0.3);
+    touch-action: pan-y pinch-zoom;
     /* Honour iOS notch / Android status bar. */
     padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  .sidebar.is-drawer .sidebar-content {
+    touch-action: pan-y pinch-zoom;
   }
 
   .drawer-backdrop {
@@ -1299,13 +1311,9 @@ html, body, #app {
     z-index: 90;
   }
 
-  /* Hide the desktop chevron when the mobile hamburger is in play. */
+  /* Mobile navigation uses the edge gesture instead of the desktop handle. */
   .sidebar-toggle-collapsed {
     display: none;
-  }
-
-  .mobile-hamburger {
-    display: flex;
   }
 
   /* Drawer's first row: the view switcher that replaced the hidden rail.
@@ -1334,34 +1342,6 @@ html, body, #app {
     letter-spacing: -0.01em;
     color: var(--text-secondary, #6b6259);
     white-space: nowrap;
-  }
-
-  /* Tap-target sizing for the icon buttons inside the sidebar header. */
-  .toggle-btn {
-    min-width: 40px;
-    min-height: 40px;
-    font-size: 1rem;
-  }
-
-  /* Hamburger bar on phones — the drawer opener, nothing else. Single flex
-   * row, ~56px: children are flex items, never overlapping (regression:
-   * absolutely-positioned descendants). */
-  .scope-bar {
-    position: relative;
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    flex-wrap: nowrap;
-    overflow: hidden;
-    padding: 0.375rem 0.5rem;
-    min-height: 56px;
-    justify-content: flex-end;
-  }
-
-  .scope-bar > * {
-    position: static;
-    flex: 0 0 auto;
-    min-width: 0;
   }
 
   .scope-icon-btn {

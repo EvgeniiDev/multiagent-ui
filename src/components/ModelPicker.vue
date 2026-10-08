@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onBeforeUnmount } from 'vue';
+import UiButton from './ui/UiButton.vue';
 import type { ModelInfo } from '../lib/types';
 
 const props = defineProps<{
@@ -73,7 +74,9 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
 
 <template>
   <div class="model-picker" :class="{ disabled, compact }">
-    <button 
+    <UiButton
+      :variant="compact ? 'ghost' : 'secondary'"
+      :aria-expanded="isOpen"
       class="model-button"
       :disabled="disabled"
       @click.stop="toggleDropdown"
@@ -82,7 +85,7 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
       <svg v-if="compact" class="model-spark" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M18 6l-2.5 2.5M8.5 15.5 6 18"/></svg>
       <span class="model-name">{{ currentModel?.name || currentModelId }}</span>
       <span class="dropdown-arrow">{{ isOpen ? '▲' : '▼' }}</span>
-    </button>
+    </UiButton>
     
     <Transition name="dropdown">
       <div v-if="isOpen" class="dropdown-menu" @click.stop>
@@ -91,7 +94,7 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
             ref="searchInput"
             v-model="search"
             type="search"
-            class="search-input"
+            class="ui-input search-input"
             placeholder="Filter models…"
             aria-label="Filter models"
             @keydown.esc.stop="isOpen = false"
@@ -132,19 +135,7 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
 }
 
 /* Composer chip: text-like dropdown, no frame until hovered. */
-.model-picker.compact .model-button {
-  border: none;
-  background: transparent;
-  padding: 0.25rem 0.375rem;
-  color: var(--text-secondary, #6b6259);
-  font-size: 0.78rem;
-  max-width: 220px;
-}
-
-.model-picker.compact .model-button:hover:not(:disabled) {
-  background: var(--bg-hover);
-  border: none;
-}
+.model-picker.compact .model-button { max-width: 220px; }
 
 .model-spark {
   flex-shrink: 0;
@@ -157,29 +148,7 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
   bottom: calc(100% + 6px);
 }
 
-.model-button {
-  display: flex;
-  align-items: center;
-  gap: 0.375rem;
-  padding: 0.375rem 0.625rem;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: var(--bg-main);
-  color: var(--text-primary);
-  font-size: 0.8rem;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  max-width: 200px;
-}
-
-.model-button:hover:not(:disabled) {
-  background: var(--bg-hover);
-  border-color: var(--text-accent);
-}
-
-.model-button:disabled {
-  cursor: not-allowed;
-}
+.model-button { max-width: 200px; }
 
 .model-icon {
   font-size: 0.9rem;
@@ -221,22 +190,7 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
   flex-shrink: 0;
 }
 
-.search-input {
-  width: 100%;
-  height: 28px;
-  padding: 0 0.5rem;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: var(--bg-main);
-  color: var(--text-primary);
-  font-family: inherit;
-  font-size: 0.8rem;
-}
-
-.search-input:focus {
-  outline: none;
-  border-color: var(--text-accent);
-}
+.search-input { width: 100%; }
 
 .dropdown-list {
   overflow-y: auto;
@@ -258,6 +212,7 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
    viewport. Re-anchor to the viewport itself, leaving a small margin on
    each side, so the menu becomes a full-width sheet that always fits. */
 @media (max-width: 800px) {
+  .model-picker.compact .dropdown-menu,
   .dropdown-menu {
     position: fixed;
     top: calc(env(safe-area-inset-top, 0px) + 4rem);
@@ -266,8 +221,10 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
     bottom: auto;
     min-width: 0;
     max-width: none;
-    max-height: calc(100vh - 6rem);
+    max-height: calc(100dvh - 6rem);
+    overflow-y: auto;
   }
+  .dropdown-item { min-height: 44px; }
 }
 
 .dropdown-item {
