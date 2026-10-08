@@ -61,6 +61,10 @@ services:
       PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       NODE_PATH: /home/hermes/.local/lib/node_modules
       ACP_STATE_URL: http://127.0.0.1:25900
+      # Default Codex session mode: full access — approval_policy=never,
+      # dangerFullAccess sandbox (no approval prompts, no Guardian auto-review).
+      # Per-session downgrade still available via the UI mode picker.
+      INITIAL_AGENT_MODE: "agent-full-access"
 
   state:
     <<: *node
