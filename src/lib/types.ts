@@ -1,5 +1,7 @@
 // Types for ACP UI application
 
+import type { PlanEntry } from '@agentclientprotocol/sdk';
+
 /**
  * Transport kinds supported by the frontend.
  *
@@ -87,6 +89,19 @@ export interface SavedSession {
 
 export type SessionOrigin = 'local' | 'agent';
 
+/**
+ * One ordered renderable piece of a message. The flat `content`/`toolCalls`
+ * fields keep accumulation working for history/merge code, while `segments`
+ * preserve the arrival order those fields flatten away — a text block sent
+ * between two tool calls renders between them instead of gluing onto the
+ * previous paragraph, and a chip sits where the call actually ran.
+ */
+export type MessageSegment =
+  | { kind: 'text'; text: string }
+  | { kind: 'tool'; toolCallId: string }
+  | { kind: 'attachment'; index: number }
+  | { kind: 'plan' };
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system';
@@ -94,6 +109,14 @@ export interface ChatMessage {
   thought?: string;
   timestamp: number;
   toolCalls?: ToolCallInfo[];
+  /**
+   * Ordered parts as they arrived from the agent. Absent on messages hydrated
+   * from pre-segments cache entries — the view falls back to the legacy order
+   * (attachments → tools → content) for those.
+   */
+  segments?: MessageSegment[];
+  /** Latest plan snapshot the agent published on this turn (ACP `plan` update). */
+  plan?: PlanEntry[];
   /** Files that travelled with this user turn (metadata only, for display). */
   attachments?: AttachmentMeta[];
 }

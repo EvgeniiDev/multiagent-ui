@@ -135,3 +135,63 @@ test('both initial and authenticated retry loads suppress historical activity', 
     live();
   } finally { await rt.close(); }
 });
+
+test('tool calls split narration into ordered parts instead of gluing text', async () => {
+  const rt = createSessionRuntime(deps);
+  try {
+    await rt.resume({ ...saved });
+    emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'go' } });
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'first.' } });
+    emit({ sessionUpdate: 'tool_call', toolCallId: 't1', title: 'run ls', kind: 'execute', status: 'pending' });
+    emit({ sessionUpdate: 'tool_call_update', toolCallId: 't1', status: 'completed' });
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Second.' } });
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' continues' } });
+    const m = rt.messages.value.at(-1);
+    // The flat field keeps the raw concat (merge/cache compat)…
+    assert.equal(m.content, 'first.Second. continues');
+    // …while segments keep the arrival order the renderer needs.
+    assert.deepEqual(m.segments.map(s => s.kind), ['text', 'tool', 'text']);
+    assert.equal(m.segments[0].text, 'first.');
+    assert.equal(m.segments[1].toolCallId, 't1');
+    assert.equal(m.segments[2].text, 'Second. continues');
+    assert.equal(m.toolCalls[0].status, 'completed');
+  } finally { await rt.close(); }
+});
+
+test('a tool_call_update for an unannounced call materializes the chip', async () => {
+  const rt = createSessionRuntime(deps);
+  try {
+    await rt.resume({ ...saved });
+    emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'go' } });
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'intro' } });
+    emit({ sessionUpdate: 'tool_call_update', toolCallId: 'orphan', status: 'completed', rawOutput: 'result text' });
+    const m = rt.messages.value.at(-1);
+    assert.equal(m.toolCalls[0].toolCallId, 'orphan');
+    assert.equal(m.toolCalls[0].status, 'completed');
+    assert.equal(m.toolCalls[0].rawOutput, 'result text');
+    assert.equal(rt.toolCallList.value.at(-1).toolCallId, 'orphan');
+    assert.deepEqual(m.segments.map(s => s.kind), ['text', 'tool']);
+    // and later updates still merge into the materialized call
+    // (rawOutput frames are snapshots — they replace, terminal_output appends)
+    emit({ sessionUpdate: 'tool_call_update', toolCallId: 'orphan', rawOutput: 'more' });
+    assert.equal(m.toolCalls[0].rawOutput, 'more');
+  } finally { await rt.close(); }
+});
+
+test('plan updates land as a card pinned where the agent published it', async () => {
+  const rt = createSessionRuntime(deps);
+  try {
+    await rt.resume({ ...saved });
+    emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'go' } });
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'planning' } });
+    emit({ sessionUpdate: 'plan', entries: [{ content: 'step one', priority: 'high', status: 'in_progress' }] });
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'working' } });
+    const m = rt.messages.value.at(-1);
+    assert.equal(m.plan[0].content, 'step one');
+    assert.deepEqual(m.segments.map(s => s.kind), ['text', 'plan', 'text']);
+    // a later snapshot refreshes the card in place, it does not add a second one
+    emit({ sessionUpdate: 'plan', entries: [{ content: 'step one', priority: 'high', status: 'completed' }] });
+    assert.deepEqual(m.segments.map(s => s.kind), ['text', 'plan', 'text']);
+    assert.equal(m.plan[0].status, 'completed');
+  } finally { await rt.close(); }
+});

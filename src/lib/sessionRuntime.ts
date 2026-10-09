@@ -8,7 +8,7 @@ import { ref, computed, watch } from 'vue';
 import { getAppVersion } from './host';
 import { trackEvent, trackError } from './telemetry';
 import { uuid } from './uuid';
-import type { SavedSession, ChatMessage, ToolCallInfo, PermissionRequest, SessionMode, SlashCommand, ModelInfo, AgentConfig, Attachment, AttachmentMeta } from './types';
+import type { SavedSession, ChatMessage, ToolCallInfo, PermissionRequest, SessionMode, SlashCommand, ModelInfo, AgentConfig, Attachment, AttachmentMeta, MessageSegment } from './types';
 import { getTransportKind } from './types';
 import { attachmentFromContentBlock } from './attachments';
 import { recordTurnAttachments, turnAttachments, resolveCachedBytes } from './attachmentHistory';
@@ -506,8 +506,44 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     const existing = msg.attachments.find(
       (a) => a.name === meta.name && a.kind === meta.kind
     );
-    if (existing) fillAttachment(existing, meta);
-    else msg.attachments.push(meta);
+    if (existing) {
+      fillAttachment(existing, meta);
+      return;
+    }
+    msg.attachments.push(meta);
+    // Position the block where it arrived in the stream; a deduped re-send
+    // keeps the first position instead of rendering twice.
+    (msg.segments ??= []).push({ kind: 'attachment', index: msg.attachments.length - 1 });
+  }
+
+  /**
+   * The last text segment still open for appends, or a fresh one when a
+   * non-text part intervened — this is what keeps narration sent after a tool
+   * call from gluing onto the previous paragraph's tail without a separator.
+   */
+  function openTextSegment(msg: ChatMessage): MessageSegment & { kind: 'text' } {
+    const segs = (msg.segments ??= []);
+    const last = segs[segs.length - 1];
+    if (last?.kind === 'text') return last;
+    const seg: MessageSegment & { kind: 'text' } = { kind: 'text', text: '' };
+    segs.push(seg);
+    return seg;
+  }
+
+  /** Last assistant message in `sink`, creating one when the turn's first
+   *  frame isn't text (a tool call, a plan, a stray update). */
+  function openAssistantMessage(sink: ChatMessage[]): ChatMessage {
+    const last = sink[sink.length - 1];
+    if (last?.role === 'assistant') return last;
+    const msg: ChatMessage = {
+      id: uuid(),
+      role: 'assistant',
+      content: '',
+      timestamp: Date.now(),
+      toolCalls: [],
+    };
+    sink.push(msg);
+    return msg;
   }
 
   /**
@@ -583,6 +619,18 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     if ((a.thought ?? '') !== (b.thought ?? '')) return false;
     const tc = (m: ChatMessage) => (m.toolCalls ?? []).map((t) => t.toolCallId).join(' ');
     if (tc(a) !== tc(b)) return false;
+    // Arrival order too — but only when BOTH sides carry it: tails cached by
+    // pre-segments builds must still align with a segmented replay instead of
+    // being dropped as diverged.
+    if (a.segments && b.segments) {
+      const seg = (m: ChatMessage) => (m.segments ?? [])
+        .map((s) => s.kind === 'tool' ? `t:${s.toolCallId}`
+          : s.kind === 'text' ? `x:${s.text.length}`
+          : s.kind === 'attachment' ? `a:${s.index}` : 'p')
+        .join('|');
+      if (seg(a) !== seg(b)) return false;
+    }
+    if ((a.plan?.length ?? 0) !== (b.plan?.length ?? 0)) return false;
     const at = (m: ChatMessage) =>
       (m.attachments ?? []).map((x) => `${x.kind}:${x.name}`).join(' ');
     return at(a) === at(b);
@@ -818,6 +866,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         }
         if (update.content.type === 'text') {
           target.content += update.content.text;
+          openTextSegment(target).text += update.content.text;
         } else {
           attachContentBlock(target, update.content);
         }
@@ -826,19 +875,10 @@ export function createSessionRuntime(deps: RuntimeDeps) {
 
       case 'agent_message_chunk': {
         // Append to last assistant message or create new
-        let target = sink[sink.length - 1];
-        if (!target || target.role !== 'assistant') {
-          target = {
-            id: uuid(),
-            role: 'assistant',
-            content: '',
-            timestamp: Date.now(),
-            toolCalls: [],
-          };
-          sink.push(target);
-        }
+        const target = openAssistantMessage(sink);
         if (update.content.type === 'text') {
           target.content += update.content.text;
+          openTextSegment(target).text += update.content.text;
         } else {
           attachContentBlock(target, update.content);
         }
@@ -870,17 +910,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         // tool first) has to open that message itself. Otherwise every
         // intermediate step is dropped and a running turn looks silent until
         // the final text lands.
-        let targetMsg = sink[sink.length - 1];
-        if (!targetMsg || targetMsg.role !== 'assistant') {
-          targetMsg = {
-            id: uuid(),
-            role: 'assistant',
-            content: '',
-            timestamp: Date.now(),
-            toolCalls: [],
-          };
-          sink.push(targetMsg);
-        }
+        const targetMsg = openAssistantMessage(sink);
         if (!targetMsg.toolCalls) {
           targetMsg.toolCalls = [];
         }
@@ -898,6 +928,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
           rawInput: callRawInput,
           rawOutput: callOutput,
         });
+        (targetMsg.segments ??= []).push({ kind: 'tool', toolCallId: update.toolCallId });
         // Also keep in the map for updates
         toolCalls.value.set(update.toolCallId, {
           toolCallId: update.toolCallId,
@@ -919,17 +950,17 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         break;
       }
 
-      case 'tool_call_update':
+      case 'tool_call_update': {
+        // Late-arriving call args ride the same frame (safe cast — not in
+        // the SDK's typed union yet). Merge, don't overwrite blindly: an
+        // update without rawInput must not clear what tool_call set.
+        const updateRawInput = (update as { rawInput?: unknown }).rawInput;
+        const updateFrame = update as unknown as Record<string, unknown>;
         const existing = toolCalls.value.get(update.toolCallId);
         if (existing) {
           if (update.status) existing.status = update.status;
           if (update.title) existing.title = update.title;
-          // Late-arriving call args ride the same frame (safe cast — not in
-          // the SDK's typed union yet). Merge, don't overwrite blindly: an
-          // update without rawInput must not clear what tool_call set.
-          const updateRawInput = (update as { rawInput?: unknown }).rawInput;
           if (updateRawInput !== undefined) existing.rawInput = updateRawInput;
-          const updateFrame = update as unknown as Record<string, unknown>;
           mergeToolOutput(existing, updateFrame);
           // Also update in the message's toolCalls array
           for (const msg of sink) {
@@ -943,7 +974,50 @@ export function createSessionRuntime(deps: RuntimeDeps) {
               }
             }
           }
+        } else {
+          // An update for a call that was never announced (the agent skipped
+          // the `tool_call` frame, or frames reordered): materialize the chip
+          // rather than drop the output the frame carries. The map gets its
+          // own object — later updates merge into it and the message copy
+          // separately, exactly like the announced-call path above.
+          const targetMsg = openAssistantMessage(sink);
+          targetMsg.toolCalls ??= [];
+          const info: ToolCallInfo = {
+            toolCallId: update.toolCallId,
+            title: update.title || 'tool call',
+            kind: update.kind || 'other',
+            status: update.status || 'pending',
+            locations: update.locations ?? undefined,
+            rawInput: updateRawInput,
+          };
+          mergeToolOutput(info, updateFrame);
+          targetMsg.toolCalls.push(info);
+          (targetMsg.segments ??= []).push({ kind: 'tool', toolCallId: update.toolCallId });
+          toolCalls.value.set(update.toolCallId, { ...info });
         }
+        break;
+      }
+
+      case 'plan': {
+        // Whole-snapshot updates: keep the latest entries, pin the card where
+        // the agent first published it this turn.
+        const targetMsg = openAssistantMessage(sink);
+        targetMsg.plan = update.entries;
+        const segs = (targetMsg.segments ??= []);
+        if (!segs.some((s) => s.kind === 'plan')) segs.push({ kind: 'plan' });
+        break;
+      }
+
+      case 'config_option_update':
+        // Experimental ACP surface — no picker UI consumes it yet. Ledger
+        // entry keeps the frame observable instead of silently dropped.
+        if (!loadingHistory) useActivityStore().recordEntry({
+          kind: 'sync',
+          agentName: agentName.value || session.value?.agentName || 'unknown',
+          sessionId: notification.sessionId,
+          cwd: session.value?.cwd,
+          title: 'config options updated',
+        });
         break;
 
       case 'current_mode_update':
@@ -1507,7 +1581,10 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     }
 
     // Add user message (attachments kept as metadata so the transcript shows
-    // what went out, including a thumbnail for images).
+    // what went out, including a thumbnail for images). No `segments` here —
+    // the replayed twin carries only a text part (agents echo files as
+    // markers, not blocks), and a segment-shape mismatch would make
+    // `sameMessage` report a false divergence.
     messages.value.push({
       id: uuid(),
       role: 'user',

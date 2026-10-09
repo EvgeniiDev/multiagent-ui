@@ -8,12 +8,14 @@ import { loadKvStore, type KVStore } from '../lib/host';
 import { readAttachments, formatBytes, extractReplayedAttachments, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from '../lib/attachments';
 import ModePicker from './ModePicker.vue';
 import ModelPicker from './ModelPicker.vue';
+import ToolCallChip from './ToolCallChip.vue';
+import MessageAttachment from './MessageAttachment.vue';
 import UiComposerSettings from './ui/UiComposerSettings.vue';
 import WorkflowPanel from './WorkflowPanel.vue';
 import { useWorkflowStore } from '../stores/workflow';
 import CommandPalette from './CommandPalette.vue';
 import VoiceInput from './VoiceInput.vue';
-import type { Attachment, AttachmentMeta, SlashCommand } from '../lib/types';
+import type { Attachment, AttachmentMeta, ChatMessage, SlashCommand, ToolCallInfo } from '../lib/types';
 import type { SessionTab } from '../lib/sessionRuntime';
 import type { SttPartial } from '../lib/stt';
 import { transcriptSeparator, insertDictation, moveDictationAnchor } from '../lib/dictationText';
@@ -201,6 +203,57 @@ const renderedMessages = computed(() =>
 const windowOffset = computed(() =>
   messages.value.length - renderedMessages.value.length
 );
+
+/**
+ * Ordered render pieces of an assistant message. `segments` carry the true
+ * arrival order — a narration block sent between two tool calls renders
+ * between them instead of gluing onto the previous paragraph. Messages
+ * hydrated from a pre-segments cache entry have none and fall back to the
+ * legacy flat order (attachments → chips → one content blob).
+ */
+type RenderItem =
+  | { kind: 'text'; text: string; last: boolean }
+  | { kind: 'tool'; tc: ToolCallInfo; last: boolean }
+  | { kind: 'attachment'; att: AttachmentMeta; index: number; last: boolean }
+  | { kind: 'plan'; last: boolean };
+
+function assistantItems(message: ChatMessage): RenderItem[] {
+  const items: RenderItem[] = [];
+  const segs = message.segments;
+  if (segs?.length) {
+    // Attachments no segment claims (only possible when ingestion code paths
+    // missed one) keep the old top position instead of vanishing.
+    const claimed = new Set(
+      segs.flatMap((s) => (s.kind === 'attachment' ? [s.index] : []))
+    );
+    (message.attachments ?? []).forEach((att, index) => {
+      if (!claimed.has(index)) items.push({ kind: 'attachment', att, index, last: false });
+    });
+    for (const s of segs) {
+      if (s.kind === 'text') {
+        if (s.text) items.push({ kind: 'text', text: s.text, last: false });
+      } else if (s.kind === 'tool') {
+        const tc = message.toolCalls?.find((t) => t.toolCallId === s.toolCallId);
+        if (tc) items.push({ kind: 'tool', tc, last: false });
+      } else if (s.kind === 'attachment') {
+        const att = message.attachments?.[s.index];
+        if (att) items.push({ kind: 'attachment', att, index: s.index, last: false });
+      } else if (s.kind === 'plan' && message.plan?.length) {
+        items.push({ kind: 'plan', last: false });
+      }
+    }
+  } else {
+    (message.attachments ?? []).forEach((att, index) =>
+      items.push({ kind: 'attachment', att, index, last: false }));
+    for (const tc of message.toolCalls ?? [])
+      items.push({ kind: 'tool', tc, last: false });
+    if (message.plan?.length) items.push({ kind: 'plan', last: false });
+    if (message.content)
+      items.push({ kind: 'text', text: message.content, last: false });
+  }
+  if (items.length) items[items.length - 1].last = true;
+  return items;
+}
 
 // Per-attachment disclosure for the replayed file body (keyed message:index).
 const expandedAttachments = ref<Set<string>>(new Set());
@@ -822,51 +875,13 @@ function toggleToolCall(toolCallId: string): void {
   }
 }
 
-// Pretty-printed call arguments / outputs, truncated to ~4KB with an ellipsis note.
-const TOOL_ARGS_MAX_CHARS = 4096;
-
-function truncateToolText(text: string): string {
-  if (text.length > TOOL_ARGS_MAX_CHARS) {
-    return text.slice(0, TOOL_ARGS_MAX_CHARS) + '\n… (truncated, showing first 4KB)';
-  }
-  return text;
-}
-
-function formatToolArgs(rawInput: unknown): string {
-  let text: string;
-  try {
-    text = JSON.stringify(rawInput, null, 2) ?? 'undefined';
-  } catch {
-    text = String(rawInput);
-  }
-  return truncateToolText(text);
-}
-
-/** Expanded body: args section first, then output; absent sections skipped. */
-function formatToolBody(rawInput: unknown, rawOutput: string | undefined): string {
-  const parts: string[] = [];
-  if (rawInput != null) parts.push('args:\n' + formatToolArgs(rawInput));
-  if (rawOutput) parts.push('output:\n' + truncateToolText(rawOutput));
-  return parts.join('\n\n');
-}
-
 function renderMarkdown(content: string): string {
   return marked.parse(content, { async: false }) as string;
 }
 
-/** Short kind label for a tool chip (uppercased by CSS, set in mono). */
-function getToolKind(kind: string): string {
-  switch (kind) {
-    case 'read': return 'read';
-    case 'edit': return 'edit';
-    case 'delete': return 'del';
-    case 'move': return 'move';
-    case 'search': return 'find';
-    case 'execute': return 'run';
-    case 'think': return 'think';
-    case 'fetch': return 'fetch';
-    default: return 'tool';
-  }
+/** Status glyph for a plan card entry — same quiet register as the chevrons. */
+function planGlyph(status: string): string {
+  return status === 'completed' ? '✓' : status === 'in_progress' ? '▸' : '·';
 }
 </script>
 
@@ -913,44 +928,20 @@ function getToolKind(kind: string): string {
           }}</span>
         </div>
 
-        <!-- Attachments: one bordered block per file, attached to the message
-             rather than buried in its text. -->
-        <div v-if="message.attachments?.length" class="attachment-blocks">
-          <div
+        <!-- Attachments on a user/system turn: one bordered block per file,
+             stacked on top of the text. Assistant messages render theirs
+             inline via segments, where the block actually arrived. -->
+        <div
+          v-if="message.role !== 'assistant' && message.attachments?.length"
+          class="attachment-blocks"
+        >
+          <MessageAttachment
             v-for="(att, i) in message.attachments"
             :key="att.id || i"
-            class="attachment-block"
-          >
-            <img
-              v-if="att.kind === 'image' && att.previewUrl"
-              :src="att.previewUrl"
-              :alt="att.name"
-              class="attachment-image"
-            />
-            <div class="attachment-line">
-              <span class="attachment-kind">{{ att.kind }}</span>
-              <span class="attachment-name" :title="att.name">{{ att.name }}</span>
-              <span v-if="att.size" class="attachment-size">{{ formatBytes(att.size) }}</span>
-              <button
-                v-if="att.body"
-                class="attachment-toggle"
-                @click="toggleAttachment(message.id, i)"
-              >
-                {{ isAttachmentExpanded(message.id, i) ? 'Hide file' : 'Show file' }}
-              </button>
-              <!-- An image/file whose bytes could not be recovered is a named
-                   placeholder with a reason — never a silent gap. -->
-              <span
-                v-else-if="att.unavailableReason"
-                class="attachment-note attachment-missing"
-              >{{ att.unavailableReason }}</span>
-              <span v-else-if="att.kind === 'image' && !att.previewUrl" class="attachment-note">no preview in history</span>
-            </div>
-            <pre
-              v-if="att.body && isAttachmentExpanded(message.id, i)"
-              class="attachment-body"
-            >{{ att.body }}</pre>
-          </div>
+            :att="att"
+            :expanded="isAttachmentExpanded(message.id, i)"
+            @toggle="toggleAttachment(message.id, i)"
+          />
         </div>
 
         <!-- Collapsed reasoning: a quiet inline disclosure, closed by default. -->
@@ -964,41 +955,47 @@ function getToolKind(kind: string): string {
           </div>
         </div>
 
-        <!-- Tool calls: one dense chip per call, status carried by a dot.
-             Chips with call arguments expand behind a quiet disclosure. -->
-        <div v-if="message.toolCalls?.length" class="tool-calls-section">
-          <div class="tool-call-wrap" v-for="tc in message.toolCalls" :key="tc.toolCallId">
-            <button
-              v-if="tc.rawInput != null || tc.rawOutput"
-              :class="['tool-call-inline', 'is-expandable', `tool-${tc.status}`]"
-              :aria-expanded="isToolCallExpanded(tc.toolCallId)"
-              @click="toggleToolCall(tc.toolCallId)"
-            >
-              <span class="tool-dot" aria-hidden="true"></span>
-              <span class="tool-kind">{{ getToolKind(tc.kind) }}</span>
-              <span class="tool-name">{{ tc.title }}</span>
-              <span v-if="tc.locations?.length" class="tool-location">
-                {{ tc.locations[0].path }}
-              </span>
-              <span class="tool-chevron">{{ isToolCallExpanded(tc.toolCallId) ? '▾' : '▸' }}</span>
-            </button>
-            <div v-else :class="['tool-call-inline', `tool-${tc.status}`]">
-              <span class="tool-dot" aria-hidden="true"></span>
-              <span class="tool-kind">{{ getToolKind(tc.kind) }}</span>
-              <span class="tool-name">{{ tc.title }}</span>
-              <span v-if="tc.locations?.length" class="tool-location">
-                {{ tc.locations[0].path }}
-              </span>
+        <!-- Assistant parts in arrival order: text split around the tool
+             calls that separated it, chips where the calls ran, plan cards
+             and file blocks at their own positions. -->
+        <div v-if="message.role === 'assistant'" class="message-parts">
+          <template v-for="(item, i) in assistantItems(message)" :key="i">
+            <div
+              v-if="item.kind === 'text'"
+              class="message-content"
+              :class="{ 'stream-tail': item.last }"
+              v-html="renderMarkdown(item.text)"
+            />
+            <ToolCallChip
+              v-else-if="item.kind === 'tool'"
+              :tc="item.tc"
+              :expanded="isToolCallExpanded(item.tc.toolCallId)"
+              @toggle="toggleToolCall(item.tc.toolCallId)"
+            />
+            <MessageAttachment
+              v-else-if="item.kind === 'attachment'"
+              :att="item.att"
+              :expanded="isAttachmentExpanded(message.id, item.index)"
+              @toggle="toggleAttachment(message.id, item.index)"
+            />
+            <div v-else-if="item.kind === 'plan'" class="plan-card">
+              <div class="plan-head">Plan</div>
+              <ul class="plan-list">
+                <li
+                  v-for="(entry, pi) in message.plan"
+                  :key="pi"
+                  :class="['plan-entry', `plan-${entry.status}`]"
+                >
+                  <span class="plan-status" aria-hidden="true">{{ planGlyph(entry.status) }}</span>
+                  <span class="plan-text">{{ entry.content }}</span>
+                </li>
+              </ul>
             </div>
-            <pre
-              v-if="(tc.rawInput != null || tc.rawOutput) && isToolCallExpanded(tc.toolCallId)"
-              class="tool-args"
-            >{{ formatToolBody(tc.rawInput, tc.rawOutput) }}</pre>
-          </div>
+          </template>
         </div>
 
         <div
-          v-if="message.content"
+          v-else-if="message.content"
           class="message-content"
           v-html="renderMarkdown(message.content)"
         />
@@ -1352,7 +1349,10 @@ function getToolKind(kind: string): string {
   50% { opacity: 0; }
 }
 
-.message.streaming .message-content::after {
+/* The caret belongs on the LAST part only — a text segment still streaming.
+ *  When a tool chip or a plan card is the tail, the turn status line below
+ *  the feed already carries the "working" signal. */
+.message.streaming .message-content.stream-tail::after {
   content: '▍';
   margin-left: 2px;
   color: var(--text-accent, #c2532f);
@@ -1360,115 +1360,70 @@ function getToolKind(kind: string): string {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .message.streaming .message-content::after {
+  .message.streaming .message-content.stream-tail::after {
     animation: none;
   }
 }
 
-/* Tool calls inline styles */
-.tool-calls-section {
+/* Assistant parts stack: uniform rhythm between text blocks, chips, plan
+ *  cards and file blocks — parts arrive ordered, never glued. */
+.message-parts {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 0.375rem;
 }
 
-.tool-call-inline {
-  display: flex;
-  align-items: center;
-  gap: 0.4375rem;
-  min-height: 24px;
-  padding: 0 0.5rem;
-  border-radius: var(--radius-sm, 4px);
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  font-family: var(--font-mono, monospace);
-  font-size: 0.6875rem;
-}
-
-/* Expandable chips are buttons: same quiet pill, with a pointer affordance. */
-.tool-call-inline.is-expandable {
-  width: 100%;
-  border: none;
-  font: inherit;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.tool-call-inline.is-expandable:hover {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-}
-
-.tool-chevron {
-  flex: 0 0 auto;
-  margin-left: auto;
-  font-size: 0.625rem;
-  color: var(--text-muted, #a39a8e);
-}
-
-/* Call arguments: quiet pre behind the chip, same register as thought body. */
-.tool-args {
-  margin: 2px 0 0;
-  max-height: 260px;
-  overflow: auto;
+/* The agent's published plan: a quiet card in the same register as thought. */
+.plan-card {
   padding: 0.5rem 0.625rem;
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
   border-radius: var(--radius-md, 6px);
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  background: var(--bg-main, #fbf8f3);
+}
+
+.plan-head {
+  margin-bottom: 0.25rem;
   font-family: var(--font-mono, monospace);
-  font-size: 0.75rem;
-  line-height: 1.5;
-  color: var(--text-secondary, #6b6259);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.tool-in_progress {
-  background: rgba(59, 130, 246, 0.07);
-}
-
-.tool-failed {
-  background: rgba(179, 64, 46, 0.09);
-}
-
-.tool-dot {
-  flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--text-muted, #a39a8e);
-}
-
-.tool-pending .tool-dot { background: #d99a1f; }
-.tool-in_progress .tool-dot { background: #3b82f6; }
-.tool-completed .tool-dot { background: #4f8a52; }
-.tool-failed .tool-dot { background: #b3402e; }
-
-.tool-kind {
-  flex: 0 0 auto;
   font-size: 0.625rem;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-muted, #a39a8e);
 }
 
-.tool-name {
-  flex: 0 1 auto;
-  max-width: 45%;
-  color: var(--text-primary, #2b2723);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.plan-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.tool-location {
-  flex: 1;
-  min-width: 0;
-  color: var(--text-muted, #a39a8e);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  direction: rtl;
-  text-align: left;
+.plan-entry {
+  display: flex;
+  gap: 0.4375rem;
+  align-items: baseline;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--text-secondary, #6b6259);
 }
+
+.plan-entry.plan-completed .plan-text {
+  color: var(--text-muted, #a39a8e);
+  text-decoration: line-through;
+}
+
+.plan-entry.plan-in_progress .plan-text {
+  color: var(--text-primary, #2b2723);
+}
+
+.plan-status {
+  flex: 0 0 auto;
+  width: 0.75rem;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6875rem;
+  color: var(--text-muted, #a39a8e);
+}
+
+.plan-entry.plan-in_progress .plan-status { color: #3b82f6; }
+.plan-entry.plan-completed .plan-status { color: #4f8a52; }
 
 .message-content {
   font-size: 0.9375rem;
@@ -1830,103 +1785,13 @@ function getToolKind(kind: string): string {
 }
 
 /* Sent attachments in the transcript: one bordered block per file, stacked,
- * sitting on the message like an artefact rather than running as prose. */
+ * sitting on the message like an artefact rather than running as prose.
+ * The block itself lives in MessageAttachment.vue. */
 .attachment-blocks {
   display: flex;
   flex-direction: column;
   gap: 0.375rem;
   margin: 0.25rem 0 0.5rem;
-}
-
-.attachment-block {
-  padding: 0.5rem 0.625rem;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-main, #fbf8f3);
-}
-
-.attachment-line {
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-  min-width: 0;
-}
-
-.attachment-kind {
-  flex: 0 0 auto;
-  font-family: var(--font-mono, monospace);
-  font-size: 0.5625rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-muted, #a39a8e);
-}
-
-.attachment-name {
-  flex: 0 1 auto;
-  min-width: 0;
-  font-size: 0.8125rem;
-  font-weight: 500;
-  color: var(--text-primary, #2b2723);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.attachment-size {
-  flex: 0 0 auto;
-  font-family: var(--font-mono, monospace);
-  font-size: 0.6875rem;
-  color: var(--text-muted, #a39a8e);
-}
-
-.attachment-toggle {
-  flex: 0 0 auto;
-  margin-left: auto;
-  padding: 0;
-  border: none;
-  background: transparent;
-  font-family: inherit;
-  font-size: 0.6875rem;
-  color: var(--text-accent, #c2532f);
-  cursor: pointer;
-}
-
-.attachment-toggle:hover {
-  text-decoration: underline;
-}
-
-.attachment-note {
-  flex: 0 0 auto;
-  margin-left: auto;
-  font-size: 0.6875rem;
-  color: var(--text-muted, #a39a8e);
-}
-
-/* A file that is KNOWN missing (not just unpreviewed) reads as a warning,
-   not a quiet aside — the transcript must admit the gap. */
-.attachment-missing {
-  color: var(--bg-danger, #b3402e);
-}
-
-.attachment-image {
-  display: block;
-  max-width: 100%;
-  max-height: 220px;
-  margin-bottom: 0.4375rem;
-  border-radius: var(--radius-sm, 4px);
-}
-
-/* Replayed file content: monospace, bounded height, behind a disclosure. */
-.attachment-body {
-  margin: 0.5rem 0 0;
-  max-height: 260px;
-  overflow: auto;
-  font-family: var(--font-mono, monospace);
-  font-size: 0.75rem;
-  line-height: 1.5;
-  color: var(--text-secondary, #6b6259);
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 
 /* Borderless inside the shared frame; the box carries the hairline and the
