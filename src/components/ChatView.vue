@@ -8,13 +8,17 @@ import { loadKvStore, type KVStore } from '../lib/host';
 import { readAttachments, formatBytes, extractReplayedAttachments, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from '../lib/attachments';
 import ModePicker from './ModePicker.vue';
 import ModelPicker from './ModelPicker.vue';
+import ToolCallChip from './ToolCallChip.vue';
+import MessageAttachment from './MessageAttachment.vue';
+import UiComposerSettings from './ui/UiComposerSettings.vue';
 import WorkflowPanel from './WorkflowPanel.vue';
 import { useWorkflowStore } from '../stores/workflow';
 import CommandPalette from './CommandPalette.vue';
 import VoiceInput from './VoiceInput.vue';
-import type { Attachment, AttachmentMeta, SlashCommand } from '../lib/types';
+import type { Attachment, AttachmentMeta, ChatMessage, SlashCommand, ToolCallInfo } from '../lib/types';
 import type { SessionTab } from '../lib/sessionRuntime';
 import type { SttPartial } from '../lib/stt';
+import { transcriptSeparator, insertDictation, moveDictationAnchor } from '../lib/dictationText';
 
 const props = defineProps<{
   /** Working directory shown in the chat sidebar — the New session dialog
@@ -37,6 +41,7 @@ const RUN_MODES: { id: 'chat' | 'workflow'; name: string }[] = [
   { id: 'workflow', name: 'Workflow' },
 ];
 const inputText = ref('');
+const preparingSend = ref(false);
 const messagesContainer = ref<HTMLElement | null>(null);
 const commandPaletteRef = ref<InstanceType<typeof CommandPalette> | null>(null);
 
@@ -51,7 +56,7 @@ const voiceOverlayEl = ref<HTMLElement | null>(null);
 const rt = props.runtime;
 const supportsImages = computed(() => rt.supportsImages);
 const imageHint = computed(
-  () => `Images and text files (max ${formatBytes(MAX_IMAGE_ATTACHMENT_BYTES)} / ${formatBytes(MAX_TEXT_ATTACHMENT_BYTES)})`
+  () => `Images and text files (max ${formatBytes(MAX_IMAGE_ATTACHMENT_BYTES)} / ${formatBytes(MAX_TEXT_ATTACHMENT_BYTES)}) — Ctrl+V pastes a copied image`
 );
 
 // On mobile (iOS/Android) the soft-keyboard's Return key should insert a
@@ -198,6 +203,57 @@ const renderedMessages = computed(() =>
 const windowOffset = computed(() =>
   messages.value.length - renderedMessages.value.length
 );
+
+/**
+ * Ordered render pieces of an assistant message. `segments` carry the true
+ * arrival order — a narration block sent between two tool calls renders
+ * between them instead of gluing onto the previous paragraph. Messages
+ * hydrated from a pre-segments cache entry have none and fall back to the
+ * legacy flat order (attachments → chips → one content blob).
+ */
+type RenderItem =
+  | { kind: 'text'; text: string; last: boolean }
+  | { kind: 'tool'; tc: ToolCallInfo; last: boolean }
+  | { kind: 'attachment'; att: AttachmentMeta; index: number; last: boolean }
+  | { kind: 'plan'; last: boolean };
+
+function assistantItems(message: ChatMessage): RenderItem[] {
+  const items: RenderItem[] = [];
+  const segs = message.segments;
+  if (segs?.length) {
+    // Attachments no segment claims (only possible when ingestion code paths
+    // missed one) keep the old top position instead of vanishing.
+    const claimed = new Set(
+      segs.flatMap((s) => (s.kind === 'attachment' ? [s.index] : []))
+    );
+    (message.attachments ?? []).forEach((att, index) => {
+      if (!claimed.has(index)) items.push({ kind: 'attachment', att, index, last: false });
+    });
+    for (const s of segs) {
+      if (s.kind === 'text') {
+        if (s.text) items.push({ kind: 'text', text: s.text, last: false });
+      } else if (s.kind === 'tool') {
+        const tc = message.toolCalls?.find((t) => t.toolCallId === s.toolCallId);
+        if (tc) items.push({ kind: 'tool', tc, last: false });
+      } else if (s.kind === 'attachment') {
+        const att = message.attachments?.[s.index];
+        if (att) items.push({ kind: 'attachment', att, index: s.index, last: false });
+      } else if (s.kind === 'plan' && message.plan?.length) {
+        items.push({ kind: 'plan', last: false });
+      }
+    }
+  } else {
+    (message.attachments ?? []).forEach((att, index) =>
+      items.push({ kind: 'attachment', att, index, last: false }));
+    for (const tc of message.toolCalls ?? [])
+      items.push({ kind: 'tool', tc, last: false });
+    if (message.plan?.length) items.push({ kind: 'plan', last: false });
+    if (message.content)
+      items.push({ kind: 'text', text: message.content, last: false });
+  }
+  if (items.length) items[items.length - 1].last = true;
+  return items;
+}
 
 // Per-attachment disclosure for the replayed file body (keyed message:index).
 const expandedAttachments = ref<Set<string>>(new Set());
@@ -361,15 +417,15 @@ function pinFeedToBottom(): void {
 // pinned: scrollTop lands back on scrollHeight - clientHeight).
 function growFeedWindow(): void {
   const feed = messagesContainer.value;
-  const top = feed?.scrollTop ?? 0;
-  const height = feed?.scrollHeight ?? 0;
+  if (!feed || feed.clientHeight === 0) return;
+  const top = feed.scrollTop;
+  const height = feed.scrollHeight;
   feedWindow.value = Math.min(feedWindow.value + FEED_WINDOW_STEP, messages.value.length);
-  if (!feed) return;
   void nextTick(() => {
     feed.scrollTop = top + (feed.scrollHeight - height);
     // A window too short to overflow the feed produces no scroll at all —
     // no event, no trigger, unreachable history. Grow until it can scroll.
-    if (feed.scrollHeight <= feed.clientHeight && hiddenCount.value > 0) {
+    if (feed.clientHeight > 0 && feed.scrollHeight <= feed.clientHeight && hiddenCount.value > 0) {
       growFeedWindow();
     }
   });
@@ -430,7 +486,7 @@ watch(messages, async (list) => {
   // cannot scroll (tail window fits the viewport) means history is
   // unreachable — kick the growth chain started.
   const feed = messagesContainer.value;
-  if (feed && feed.scrollHeight <= feed.clientHeight && hiddenCount.value > 0) {
+  if (feed && feed.clientHeight > 0 && feed.scrollHeight <= feed.clientHeight && hiddenCount.value > 0) {
     growFeedWindow();
   }
 }, { deep: true });
@@ -487,11 +543,7 @@ watch(inputText, async (newVal, oldVal) => {
   // Edits typed while dictating move the insertion mark when they land in
   // front of it, so the voice text stays where the user last saw it.
   if (voicePhase.value !== 'idle') {
-    const delta = newVal.length - (oldVal?.length ?? 0);
-    const caret = composerEl.value?.selectionStart ?? newVal.length;
-    if (delta !== 0 && caret <= voiceAt.value) {
-      voiceAt.value = Math.max(0, Math.min(voiceAt.value + delta, newVal.length));
-    }
+    voiceAt.value = moveDictationAnchor(oldVal ?? '', newVal, voiceAt.value);
   }
   await nextTick();
   autosizeComposer();
@@ -517,13 +569,10 @@ const voicePre = computed(() => inputText.value.slice(0, voiceAt.value));
 const voicePost = computed(() => inputText.value.slice(voiceAt.value));
 // The overlay shows the same separator the final insert will add, so the
 // spacing doesn't jump when the take commits.
-const voiceSep = computed(() =>
-  (voiceCommitted.value || voiceVolatile.value) &&
-  voicePre.value.length > 0 &&
-  !/\s$/.test(voicePre.value)
-    ? ' '
-    : '',
-);
+const voiceText = computed(() => voiceCommitted.value + transcriptSeparator(voiceCommitted.value, voiceVolatile.value) + voiceVolatile.value);
+const voiceSep = computed(() => transcriptSeparator(voicePre.value, voiceText.value));
+const voiceTailSep = computed(() => transcriptSeparator(voiceCommitted.value, voiceVolatile.value));
+const voicePostSep = computed(() => transcriptSeparator(voiceText.value, voicePost.value));
 
 const voiceStatusText = computed(() => {
   switch (voicePhase.value) {
@@ -566,11 +615,9 @@ function onVoicePartial(p: SttPartial) {
 
 function onVoiceFinal(text: string) {
   if (text) {
-    const pre = inputText.value.slice(0, voiceAt.value);
-    const post = inputText.value.slice(voiceAt.value);
-    const insert = (pre.length > 0 && !/\s$/.test(pre) ? ' ' : '') + text;
-    inputText.value = pre + insert + post;
-    const caret = pre.length + insert.length;
+    const inserted = insertDictation(inputText.value, voiceAt.value, text);
+    inputText.value = inserted.value;
+    const caret = inserted.caret;
     void nextTick(() => {
       composerEl.value?.focus();
       composerEl.value?.setSelectionRange(caret, caret);
@@ -642,34 +689,39 @@ onBeforeUnmount(() => {
 });
 
 async function handleSend() {
-  const text = inputText.value.trim();
-  if (!text && attachments.value.length === 0) return;
+  if (preparingSend.value) return;
+  if (!inputText.value.trim() && attachments.value.length === 0 && !voiceActive.value) return;
 
-  // A take in flight would land its final text into the cleared field —
-  // stop it first so the send and the dictation don't interleave.
-  voiceInputRef.value?.stop();
-
-  // Sending is an explicit "show me the newest" — re-arm the follow even
-  // while the user has the feed scrolled up.
-  followBottom.value = true;
-
-  const files = attachments.value;
-  inputText.value = '';
-  attachments.value = [];
-  attachError.value = null;
+  preparingSend.value = true;
+  let text: string;
+  let files: Attachment[];
   try {
-    // A send while a turn is running is a steer: cancel it, then this text
-    // goes out as the next turn. Stop remains the pure-cancel path.
+    // Stop requests a final transcript asynchronously. Snapshot only after
+    // it has been committed, so a late voice final cannot refill the field.
+    if (voiceActive.value) await voiceInputRef.value?.finish();
+    text = inputText.value.trim();
+    files = attachments.value;
+    if (!text && files.length === 0) return;
+    followBottom.value = true;
+    inputText.value = '';
+    attachments.value = [];
+    attachError.value = null;
+  } finally {
+    preparingSend.value = false;
+  }
+  try {
+    // A send while a turn is running is a steer; further drafts stay editable.
     if (isLoading.value) await rt.steer(text, files);
     else await rt.sendPrompt(text, files);
   } catch (e) {
-    // A rejected prompt used to die in the console: the composer cleared, the
-    // turn produced nothing, and the user saw no reason. Surface it.
     console.error('Failed to send prompt:', e);
     rt.error = `Send failed: ${e instanceof Error ? e.message : String(e)}`;
-    // Hand the files back so the turn can be retried without re-picking them.
-    attachments.value = files;
-    inputText.value = text;
+    // A turn can fail much later. Restore only an untouched composer;
+    // never overwrite the next draft or its attachments.
+    if (!inputText.value && attachments.value.length === 0) {
+      attachments.value = files;
+      inputText.value = text;
+    }
   }
 }
 
@@ -678,13 +730,7 @@ function openFilePicker() {
   fileInput.value?.click();
 }
 
-async function handleFilesPicked(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const picked = Array.from(input.files ?? []);
-  // Reset so picking the same file twice still fires a change event.
-  input.value = '';
-  if (picked.length === 0) return;
-
+async function stageFiles(picked: File[]) {
   const { attachments: staged, errors } = await readAttachments(picked);
   // The agent advertises image support; attaching one it can't read would just
   // be ignored on its side, so refuse it here with an explanation.
@@ -698,6 +744,44 @@ async function handleFilesPicked(event: Event) {
       : []),
   ];
   attachError.value = notes.length ? notes.join(' · ') : null;
+}
+
+async function handleFilesPicked(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const picked = Array.from(input.files ?? []);
+  // Reset so picking the same file twice still fires a change event.
+  input.value = '';
+  if (picked.length === 0) return;
+  await stageFiles(picked);
+}
+
+// Clipboard screenshots arrive with a generic "image.png" name (or none at
+// all); a timestamp keeps the staged chip and the transcript readable. A real
+// name — a file copied in the file manager — is left alone.
+function namePastedFile(file: File): File {
+  if (file.name && file.name !== 'blob' && !/^image\.[a-z0-9]+$/i.test(file.name)) {
+    return file;
+  }
+  const sub = (file.type.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  const d = new Date();
+  const stamp = [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map(n => String(n).padStart(2, '0'))
+    .join('');
+  return new File([file], `pasted-${stamp}.${sub === 'jpeg' ? 'jpg' : sub || 'png'}`, {
+    type: file.type,
+  });
+}
+
+// Ctrl+V with a copied image or file stages it as an attachment — same as the
+// attach button. A text-only clipboard falls through to the textarea's own
+// paste; a mixed one (image + a URL) prefers the file.
+function handlePaste(event: ClipboardEvent) {
+  const files = Array.from(event.clipboardData?.files ?? []);
+  if (files.length === 0) return;
+  // Same gate as the attach button: no staging mid-turn or while offline.
+  if (isLoading.value || isReconnecting.value || !isConnected.value) return;
+  event.preventDefault();
+  void stageFiles(files.map(namePastedFile));
 }
 
 function removeAttachment(id?: string) {
@@ -791,51 +875,13 @@ function toggleToolCall(toolCallId: string): void {
   }
 }
 
-// Pretty-printed call arguments / outputs, truncated to ~4KB with an ellipsis note.
-const TOOL_ARGS_MAX_CHARS = 4096;
-
-function truncateToolText(text: string): string {
-  if (text.length > TOOL_ARGS_MAX_CHARS) {
-    return text.slice(0, TOOL_ARGS_MAX_CHARS) + '\n… (truncated, showing first 4KB)';
-  }
-  return text;
-}
-
-function formatToolArgs(rawInput: unknown): string {
-  let text: string;
-  try {
-    text = JSON.stringify(rawInput, null, 2) ?? 'undefined';
-  } catch {
-    text = String(rawInput);
-  }
-  return truncateToolText(text);
-}
-
-/** Expanded body: args section first, then output; absent sections skipped. */
-function formatToolBody(rawInput: unknown, rawOutput: string | undefined): string {
-  const parts: string[] = [];
-  if (rawInput != null) parts.push('args:\n' + formatToolArgs(rawInput));
-  if (rawOutput) parts.push('output:\n' + truncateToolText(rawOutput));
-  return parts.join('\n\n');
-}
-
 function renderMarkdown(content: string): string {
   return marked.parse(content, { async: false }) as string;
 }
 
-/** Short kind label for a tool chip (uppercased by CSS, set in mono). */
-function getToolKind(kind: string): string {
-  switch (kind) {
-    case 'read': return 'read';
-    case 'edit': return 'edit';
-    case 'delete': return 'del';
-    case 'move': return 'move';
-    case 'search': return 'find';
-    case 'execute': return 'run';
-    case 'think': return 'think';
-    case 'fetch': return 'fetch';
-    default: return 'tool';
-  }
+/** Status glyph for a plan card entry — same quiet register as the chevrons. */
+function planGlyph(status: string): string {
+  return status === 'completed' ? '✓' : status === 'in_progress' ? '▸' : '·';
 }
 </script>
 
@@ -882,44 +928,20 @@ function getToolKind(kind: string): string {
           }}</span>
         </div>
 
-        <!-- Attachments: one bordered block per file, attached to the message
-             rather than buried in its text. -->
-        <div v-if="message.attachments?.length" class="attachment-blocks">
-          <div
+        <!-- Attachments on a user/system turn: one bordered block per file,
+             stacked on top of the text. Assistant messages render theirs
+             inline via segments, where the block actually arrived. -->
+        <div
+          v-if="message.role !== 'assistant' && message.attachments?.length"
+          class="attachment-blocks"
+        >
+          <MessageAttachment
             v-for="(att, i) in message.attachments"
             :key="att.id || i"
-            class="attachment-block"
-          >
-            <img
-              v-if="att.kind === 'image' && att.previewUrl"
-              :src="att.previewUrl"
-              :alt="att.name"
-              class="attachment-image"
-            />
-            <div class="attachment-line">
-              <span class="attachment-kind">{{ att.kind }}</span>
-              <span class="attachment-name" :title="att.name">{{ att.name }}</span>
-              <span v-if="att.size" class="attachment-size">{{ formatBytes(att.size) }}</span>
-              <button
-                v-if="att.body"
-                class="attachment-toggle"
-                @click="toggleAttachment(message.id, i)"
-              >
-                {{ isAttachmentExpanded(message.id, i) ? 'Hide file' : 'Show file' }}
-              </button>
-              <!-- An image/file whose bytes could not be recovered is a named
-                   placeholder with a reason — never a silent gap. -->
-              <span
-                v-else-if="att.unavailableReason"
-                class="attachment-note attachment-missing"
-              >{{ att.unavailableReason }}</span>
-              <span v-else-if="att.kind === 'image' && !att.previewUrl" class="attachment-note">no preview in history</span>
-            </div>
-            <pre
-              v-if="att.body && isAttachmentExpanded(message.id, i)"
-              class="attachment-body"
-            >{{ att.body }}</pre>
-          </div>
+            :att="att"
+            :expanded="isAttachmentExpanded(message.id, i)"
+            @toggle="toggleAttachment(message.id, i)"
+          />
         </div>
 
         <!-- Collapsed reasoning: a quiet inline disclosure, closed by default. -->
@@ -933,41 +955,47 @@ function getToolKind(kind: string): string {
           </div>
         </div>
 
-        <!-- Tool calls: one dense chip per call, status carried by a dot.
-             Chips with call arguments expand behind a quiet disclosure. -->
-        <div v-if="message.toolCalls?.length" class="tool-calls-section">
-          <div class="tool-call-wrap" v-for="tc in message.toolCalls" :key="tc.toolCallId">
-            <button
-              v-if="tc.rawInput != null || tc.rawOutput"
-              :class="['tool-call-inline', 'is-expandable', `tool-${tc.status}`]"
-              :aria-expanded="isToolCallExpanded(tc.toolCallId)"
-              @click="toggleToolCall(tc.toolCallId)"
-            >
-              <span class="tool-dot" aria-hidden="true"></span>
-              <span class="tool-kind">{{ getToolKind(tc.kind) }}</span>
-              <span class="tool-name">{{ tc.title }}</span>
-              <span v-if="tc.locations?.length" class="tool-location">
-                {{ tc.locations[0].path }}
-              </span>
-              <span class="tool-chevron">{{ isToolCallExpanded(tc.toolCallId) ? '▾' : '▸' }}</span>
-            </button>
-            <div v-else :class="['tool-call-inline', `tool-${tc.status}`]">
-              <span class="tool-dot" aria-hidden="true"></span>
-              <span class="tool-kind">{{ getToolKind(tc.kind) }}</span>
-              <span class="tool-name">{{ tc.title }}</span>
-              <span v-if="tc.locations?.length" class="tool-location">
-                {{ tc.locations[0].path }}
-              </span>
+        <!-- Assistant parts in arrival order: text split around the tool
+             calls that separated it, chips where the calls ran, plan cards
+             and file blocks at their own positions. -->
+        <div v-if="message.role === 'assistant'" class="message-parts">
+          <template v-for="(item, i) in assistantItems(message)" :key="i">
+            <div
+              v-if="item.kind === 'text'"
+              class="message-content"
+              :class="{ 'stream-tail': item.last }"
+              v-html="renderMarkdown(item.text)"
+            />
+            <ToolCallChip
+              v-else-if="item.kind === 'tool'"
+              :tc="item.tc"
+              :expanded="isToolCallExpanded(item.tc.toolCallId)"
+              @toggle="toggleToolCall(item.tc.toolCallId)"
+            />
+            <MessageAttachment
+              v-else-if="item.kind === 'attachment'"
+              :att="item.att"
+              :expanded="isAttachmentExpanded(message.id, item.index)"
+              @toggle="toggleAttachment(message.id, item.index)"
+            />
+            <div v-else-if="item.kind === 'plan'" class="plan-card">
+              <div class="plan-head">Plan</div>
+              <ul class="plan-list">
+                <li
+                  v-for="(entry, pi) in message.plan"
+                  :key="pi"
+                  :class="['plan-entry', `plan-${entry.status}`]"
+                >
+                  <span class="plan-status" aria-hidden="true">{{ planGlyph(entry.status) }}</span>
+                  <span class="plan-text">{{ entry.content }}</span>
+                </li>
+              </ul>
             </div>
-            <pre
-              v-if="(tc.rawInput != null || tc.rawOutput) && isToolCallExpanded(tc.toolCallId)"
-              class="tool-args"
-            >{{ formatToolBody(tc.rawInput, tc.rawOutput) }}</pre>
-          </div>
+          </template>
         </div>
 
         <div
-          v-if="message.content"
+          v-else-if="message.content"
           class="message-content"
           v-html="renderMarkdown(message.content)"
         />
@@ -984,6 +1012,7 @@ function getToolKind(kind: string): string {
     </div>
     
     <div class="input-container">
+      <div class="input-content">
       <!-- Update nag: the agent's own npm update notice from stderr. Desktop
            only; the × persists the offered version, so this exact nag stays
            dismissed while a newer one re-arms the strip. -->
@@ -1040,7 +1069,7 @@ function getToolKind(kind: string): string {
         <!-- One framed card, Claude-Code style: the field on top, the bottom
              menu row under it — attach + mic, model and thinking pickers,
              then the context meter and send on the right. -->
-        <div ref="composerBox" class="composer-box">
+        <div ref="composerBox" class="composer-box" @paste="handlePaste">
           <div class="composer-field">
             <textarea
               ref="composerEl"
@@ -1060,7 +1089,7 @@ function getToolKind(kind: string): string {
               ref="voiceOverlayEl"
               class="voice-overlay"
               aria-hidden="true"
-            ><span>{{ voicePre }}</span><span>{{ voiceSep }}</span><span class="voice-commit">{{ voiceCommitted }}</span><span class="voice-volatile">{{ voiceVolatile }}</span><span>{{ voicePost }}</span></div>
+            ><span>{{ voicePre }}</span><span>{{ voiceSep }}</span><span class="voice-commit">{{ voiceCommitted }}</span><span>{{ voiceTailSep }}</span><span class="voice-volatile">{{ voiceVolatile }}</span><span>{{ voicePostSep }}</span><span>{{ voicePost }}</span></div>
           </div>
           <div class="composer-menu">
             <button
@@ -1101,28 +1130,30 @@ function getToolKind(kind: string): string {
               @final="onVoiceFinal"
               @error="onVoiceError"
             />
-            <ModelPicker
-              v-if="availableModels.length > 0"
-              :models="availableModels"
-              :current-model-id="currentModelId"
-              :disabled="isLoading"
-              compact
-              @change="handleModelChange"
-            />
-            <ModePicker
-              v-if="availableModes.length > 0"
-              :modes="availableModes"
-              :current-mode-id="currentModeId"
-              :disabled="isLoading"
-              compact
-              @change="handleModeChange"
-            />
-            <ModePicker
-              :modes="RUN_MODES"
-              :current-mode-id="wfStore.chatMode"
-              compact
-              @change="(id) => wfStore.setChatMode(id as 'chat' | 'workflow')"
-            />
+            <UiComposerSettings>
+              <ModelPicker
+                v-if="availableModels.length > 0"
+                :models="availableModels"
+                :current-model-id="currentModelId"
+                :disabled="isLoading"
+                compact
+                @change="handleModelChange"
+              />
+              <ModePicker
+                v-if="availableModes.length > 0"
+                :modes="availableModes"
+                :current-mode-id="currentModeId"
+                :disabled="isLoading"
+                compact
+                @change="handleModeChange"
+              />
+              <ModePicker
+                :modes="RUN_MODES"
+                :current-mode-id="wfStore.chatMode"
+                compact
+                @change="(id) => wfStore.setChatMode(id as 'chat' | 'workflow')"
+              />
+            </UiComposerSettings>
             <span class="composer-spacer" aria-hidden="true"></span>
             <span
               v-if="contextLabel"
@@ -1131,7 +1162,7 @@ function getToolKind(kind: string): string {
             >{{ contextLabel }}</span>
             <button
               class="icon-btn send-btn"
-              :disabled="(!inputText.trim() && attachments.length === 0) || isReconnecting || !isConnected"
+              :disabled="preparingSend || (!inputText.trim() && attachments.length === 0 && !voiceCommitted && !voiceVolatile) || isReconnecting || !isConnected"
               @click="handleSend"
               title="Send"
               aria-label="Send"
@@ -1154,6 +1185,7 @@ function getToolKind(kind: string): string {
           </div>
         </div>
       </div>
+      </div><!-- input-content -->
     </div>
     </div><!-- chat-column -->
 
@@ -1177,6 +1209,8 @@ function getToolKind(kind: string): string {
 /* The chat feed itself (header + messages + composer) stays a column; the
  * workflow side panel is a row sibling docked right of it. */
 .chat-column {
+  --chat-content-width: 780px;
+  --chat-content-gutter: 1.5rem;
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -1241,12 +1275,12 @@ function getToolKind(kind: string): string {
 .messages-container {
   flex: 1;
   overflow-y: auto;
-  padding: 1.25rem 1.5rem 0.75rem;
+  padding: 1.25rem var(--chat-content-gutter) 0.75rem;
 }
 
 /* Reading column: capped measure so long agent answers stay scannable. */
 .messages {
-  max-width: 780px;
+  max-width: var(--chat-content-width);
   margin: 0 auto;
   display: flex;
   flex-direction: column;
@@ -1315,7 +1349,10 @@ function getToolKind(kind: string): string {
   50% { opacity: 0; }
 }
 
-.message.streaming .message-content::after {
+/* The caret belongs on the LAST part only — a text segment still streaming.
+ *  When a tool chip or a plan card is the tail, the turn status line below
+ *  the feed already carries the "working" signal. */
+.message.streaming .message-content.stream-tail::after {
   content: '▍';
   margin-left: 2px;
   color: var(--text-accent, #c2532f);
@@ -1323,115 +1360,70 @@ function getToolKind(kind: string): string {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .message.streaming .message-content::after {
+  .message.streaming .message-content.stream-tail::after {
     animation: none;
   }
 }
 
-/* Tool calls inline styles */
-.tool-calls-section {
+/* Assistant parts stack: uniform rhythm between text blocks, chips, plan
+ *  cards and file blocks — parts arrive ordered, never glued. */
+.message-parts {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 0.375rem;
 }
 
-.tool-call-inline {
-  display: flex;
-  align-items: center;
-  gap: 0.4375rem;
-  min-height: 24px;
-  padding: 0 0.5rem;
-  border-radius: var(--radius-sm, 4px);
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  font-family: var(--font-mono, monospace);
-  font-size: 0.6875rem;
-}
-
-/* Expandable chips are buttons: same quiet pill, with a pointer affordance. */
-.tool-call-inline.is-expandable {
-  width: 100%;
-  border: none;
-  font: inherit;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.tool-call-inline.is-expandable:hover {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-}
-
-.tool-chevron {
-  flex: 0 0 auto;
-  margin-left: auto;
-  font-size: 0.625rem;
-  color: var(--text-muted, #a39a8e);
-}
-
-/* Call arguments: quiet pre behind the chip, same register as thought body. */
-.tool-args {
-  margin: 2px 0 0;
-  max-height: 260px;
-  overflow: auto;
+/* The agent's published plan: a quiet card in the same register as thought. */
+.plan-card {
   padding: 0.5rem 0.625rem;
+  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
   border-radius: var(--radius-md, 6px);
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
+  background: var(--bg-main, #fbf8f3);
+}
+
+.plan-head {
+  margin-bottom: 0.25rem;
   font-family: var(--font-mono, monospace);
-  font-size: 0.75rem;
-  line-height: 1.5;
-  color: var(--text-secondary, #6b6259);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.tool-in_progress {
-  background: rgba(59, 130, 246, 0.07);
-}
-
-.tool-failed {
-  background: rgba(179, 64, 46, 0.09);
-}
-
-.tool-dot {
-  flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--text-muted, #a39a8e);
-}
-
-.tool-pending .tool-dot { background: #d99a1f; }
-.tool-in_progress .tool-dot { background: #3b82f6; }
-.tool-completed .tool-dot { background: #4f8a52; }
-.tool-failed .tool-dot { background: #b3402e; }
-
-.tool-kind {
-  flex: 0 0 auto;
   font-size: 0.625rem;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-muted, #a39a8e);
 }
 
-.tool-name {
-  flex: 0 1 auto;
-  max-width: 45%;
-  color: var(--text-primary, #2b2723);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.plan-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.tool-location {
-  flex: 1;
-  min-width: 0;
-  color: var(--text-muted, #a39a8e);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  direction: rtl;
-  text-align: left;
+.plan-entry {
+  display: flex;
+  gap: 0.4375rem;
+  align-items: baseline;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--text-secondary, #6b6259);
 }
+
+.plan-entry.plan-completed .plan-text {
+  color: var(--text-muted, #a39a8e);
+  text-decoration: line-through;
+}
+
+.plan-entry.plan-in_progress .plan-text {
+  color: var(--text-primary, #2b2723);
+}
+
+.plan-status {
+  flex: 0 0 auto;
+  width: 0.75rem;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6875rem;
+  color: var(--text-muted, #a39a8e);
+}
+
+.plan-entry.plan-in_progress .plan-status { color: #3b82f6; }
+.plan-entry.plan-completed .plan-status { color: #4f8a52; }
 
 .message-content {
   font-size: 0.9375rem;
@@ -1562,12 +1554,19 @@ function getToolKind(kind: string): string {
 }
 
 .input-container {
+  padding: 0.625rem var(--chat-content-gutter);
+  border-top: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
+}
+
+/* Match the reading column, including notices and staged attachments. */
+.input-content {
   position: relative;
+  width: 100%;
+  max-width: var(--chat-content-width);
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 0.375rem;
-  padding: 0.625rem 0.75rem;
-  border-top: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
 }
 
 .input-row {
@@ -1786,103 +1785,13 @@ function getToolKind(kind: string): string {
 }
 
 /* Sent attachments in the transcript: one bordered block per file, stacked,
- * sitting on the message like an artefact rather than running as prose. */
+ * sitting on the message like an artefact rather than running as prose.
+ * The block itself lives in MessageAttachment.vue. */
 .attachment-blocks {
   display: flex;
   flex-direction: column;
   gap: 0.375rem;
   margin: 0.25rem 0 0.5rem;
-}
-
-.attachment-block {
-  padding: 0.5rem 0.625rem;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-main, #fbf8f3);
-}
-
-.attachment-line {
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-  min-width: 0;
-}
-
-.attachment-kind {
-  flex: 0 0 auto;
-  font-family: var(--font-mono, monospace);
-  font-size: 0.5625rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-muted, #a39a8e);
-}
-
-.attachment-name {
-  flex: 0 1 auto;
-  min-width: 0;
-  font-size: 0.8125rem;
-  font-weight: 500;
-  color: var(--text-primary, #2b2723);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.attachment-size {
-  flex: 0 0 auto;
-  font-family: var(--font-mono, monospace);
-  font-size: 0.6875rem;
-  color: var(--text-muted, #a39a8e);
-}
-
-.attachment-toggle {
-  flex: 0 0 auto;
-  margin-left: auto;
-  padding: 0;
-  border: none;
-  background: transparent;
-  font-family: inherit;
-  font-size: 0.6875rem;
-  color: var(--text-accent, #c2532f);
-  cursor: pointer;
-}
-
-.attachment-toggle:hover {
-  text-decoration: underline;
-}
-
-.attachment-note {
-  flex: 0 0 auto;
-  margin-left: auto;
-  font-size: 0.6875rem;
-  color: var(--text-muted, #a39a8e);
-}
-
-/* A file that is KNOWN missing (not just unpreviewed) reads as a warning,
-   not a quiet aside — the transcript must admit the gap. */
-.attachment-missing {
-  color: var(--bg-danger, #b3402e);
-}
-
-.attachment-image {
-  display: block;
-  max-width: 100%;
-  max-height: 220px;
-  margin-bottom: 0.4375rem;
-  border-radius: var(--radius-sm, 4px);
-}
-
-/* Replayed file content: monospace, bounded height, behind a disclosure. */
-.attachment-body {
-  margin: 0.5rem 0 0;
-  max-height: 260px;
-  overflow: auto;
-  font-family: var(--font-mono, monospace);
-  font-size: 0.75rem;
-  line-height: 1.5;
-  color: var(--text-secondary, #6b6259);
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 
 /* Borderless inside the shared frame; the box carries the hairline and the
@@ -2002,40 +1911,36 @@ function getToolKind(kind: string): string {
 /* ---------- Mobile / narrow-viewport tweaks ---------- */
 
 @media (max-width: 800px) {
+  .chat-column {
+    --chat-content-gutter: 0.75rem;
+  }
+
   /* Narrow screens: the stepper column would eat the feed — hide it; the
    * composer switch still works, the panel just isn't shown here. */
   .workflow-side {
     display: none;
   }
 
-  /* The mobile hamburger lives in the scope bar (in flow, right edge) —
-     the header needs no reserved gutter. Push the header below the camera
-     notch / status bar so picker buttons aren't clipped on phones with a
-     hole-punch or notch. */
+  /* Identity/title live in the drawer on phones. Keep only the OS safe
+     area here, without an empty header row above the transcript. */
   .chat-header {
-    display: flex;
-    flex-wrap: wrap;
-    padding-top: calc(0.625rem + env(safe-area-inset-top, 0px));
+    padding: env(safe-area-inset-top, 0px) 0 0;
+    border-bottom: 0;
   }
 
-  /* Mode/model pickers share one wrapping row — never crushed under
-     each other or the header edge on 390px viewports. */
+  /* The hidden identity row has no intrinsic height on phones. */
   .header-right {
     display: flex;
     flex-wrap: wrap;
     min-width: 0;
   }
 
-  /* Agent identity is already shown in the sidebar drawer; on a phone the
-     chat header should belong to mode/model/actions. Hiding the long name
-     also avoids awkward 4-line wraps for names like "Copilot CLI dev tunnel". */
+  /* Agent identity and the session title are available in the drawer. */
   .agent-name {
     display: none;
   }
 
-  /* Session title is also redundant on mobile (visible in the sidebar
-     SessionList) and otherwise gets crushed to a single character by the
-     mode/model pickers. Reclaim the horizontal space. */
+
   .chat-header h2 {
     display: none;
   }
@@ -2043,6 +1948,9 @@ function getToolKind(kind: string): string {
   .input-container {
     /* iOS home-indicator: keep Send button reachable above the gesture area. */
     padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .input-content {
     gap: 0.5rem;
   }
 
@@ -2068,7 +1976,10 @@ function getToolKind(kind: string): string {
      wrap, and nothing may overflow the 390px viewport. */
   .input-row {
     flex-wrap: nowrap;
-    overflow: hidden;
+  }
+
+  .composer-menu {
+    flex-wrap: nowrap;
   }
 
   .composer-box {
@@ -2086,9 +1997,21 @@ function getToolKind(kind: string): string {
     flex: 0 0 auto;
   }
 
+  /* The edge is part of the native feed scroller: a vertical swipe here
+     scrolls history; a horizontal one reaches the shell drawer handler. */
+  .messages-container::before {
+    content: '';
+    position: fixed;
+    inset: var(--mobile-navigation-height, 0px) auto 0 0;
+    width: 24px;
+    z-index: 80;
+    touch-action: pan-y pinch-zoom;
+  }
+
   /* Narrow screens: give the reading column the full width back. */
   .messages-container {
-    padding: 0.875rem 0.75rem 0.5rem;
+    touch-action: pan-y pinch-zoom;
+    padding: 0.875rem var(--chat-content-gutter) 0.5rem;
   }
 
   .message-user {

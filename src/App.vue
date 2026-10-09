@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue';
 import { canPickFolder, pickFolder, loadKvStore, type KVStore } from './lib/host';
 import { useConfigStore } from './stores/config';
 import { useSessionStore } from './stores/session';
@@ -8,6 +8,8 @@ import AgentSelector from './components/AgentSelector.vue';
 import SessionList from './components/SessionList.vue';
 import SessionTabs from './components/SessionTabs.vue';
 import ChatView from './components/ChatView.vue';
+import UiButton from './components/ui/UiButton.vue';
+import { createDrawerSwipe } from './lib/drawerSwipe';
 import PermissionDialog from './components/PermissionDialog.vue';
 import SettingsView from './components/SettingsView.vue';
 import AuthMethodDialog from './components/AuthMethodDialog.vue';
@@ -72,9 +74,70 @@ const scopeCwd = computed(() => projectsStore.activeProject?.path ?? '');
 // by the template to decide when the backdrop is interactive and by
 // onMounted to default the drawer closed.
 const isNarrowLayout = ref(false);
+// Browser bars and the soft keyboard change the visual viewport independently
+// of 100vh. Keep the entire composer inside the part the user can see.
+const viewportHeight = ref<number | null>(null);
+function syncViewportHeight() {
+  if (!isNarrowLayout.value) { viewportHeight.value = null; return; }
+  const viewport = window.visualViewport;
+  if (viewport && Math.abs(viewport.scale - 1) > 0.01) return;
+  const height = viewport?.height ?? window.innerHeight;
+  if (Number.isFinite(height) && height > 0) viewportHeight.value = height;
+}
+// Only user input in the transcript controls mobile navigation. Streamed
+// messages, replay and programmatic scroll corrections cannot hide it.
+const mobileNavigationHidden = ref(false);
+let navigationTravel = 0;
+let navigationTouch: { x: number; y: number } | null = null;
+function resetMobileNavigation() {
+  mobileNavigationHidden.value = false;
+  navigationTravel = 0;
+  navigationTouch = null;
+}
+watch([() => sessionStore.activeTabId, () => uiStore.activeView, isNarrowLayout, showSidebar], resetMobileNavigation);
+function navigationFeed(target: EventTarget | null): HTMLElement | null {
+  if (!isNarrowLayout.value || showSidebar.value || !(target instanceof Element)) return null;
+  const feed = target.closest<HTMLElement>('.messages-container');
+  return feed && feed.clientHeight > 0 && feed.scrollHeight > feed.clientHeight ? feed : null;
+}
+function moveMobileNavigation(delta: number, feed: HTMLElement) {
+  if (delta === 0) return;
+  if (Math.sign(delta) !== Math.sign(navigationTravel)) navigationTravel = 0;
+  navigationTravel += delta;
+  if (Math.abs(navigationTravel) < 16) return;
+  // Don't hide the only visible opener while the transcript is at its top.
+  mobileNavigationHidden.value = delta > 0 && feed.scrollTop > 0;
+  navigationTravel = 0;
+}
+function onNavigationWheel(event: WheelEvent) {
+  const feed = navigationFeed(event.target);
+  if (feed && Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
+    moveMobileNavigation(event.deltaY, feed);
+  }
+}
+function onNavigationTouchStart(event: TouchEvent) {
+  navigationTravel = 0;
+  const touch = event.touches.length === 1 ? event.touches[0] : null;
+  navigationTouch = touch && navigationFeed(event.target) ? { x: touch.clientX, y: touch.clientY } : null;
+}
+function onNavigationTouchMove(event: TouchEvent) {
+  const previous = navigationTouch;
+  const touch = event.touches.length === 1 ? event.touches[0] : null;
+  const feed = navigationFeed(event.target);
+  if (!previous || !touch || !feed) { navigationTouch = null; return; }
+  const delta = previous.y - touch.clientY;
+  navigationTouch = { x: touch.clientX, y: touch.clientY };
+  if (Math.abs(delta) > Math.abs(previous.x - touch.clientX)) moveMobileNavigation(delta, feed);
+}
+function onNavigationTouchEnd() {
+  navigationTouch = null;
+  navigationTravel = 0;
+}
+
 let narrowMql: MediaQueryList | null = null;
 function syncNarrowLayout() {
   if (narrowMql) isNarrowLayout.value = narrowMql.matches;
+  syncViewportHeight();
 }
 
 // Foreground-reconnect plumbing. Mobile OSes freeze the WebView when the
@@ -145,6 +208,8 @@ const pendingAuthAgentName = computed(() => sessionStore.pendingAuthAgentName);
 
 onMounted(async () => {
   window.addEventListener('popstate', restoreSessionFromHistory);
+  window.addEventListener('resize', syncViewportHeight);
+  window.visualViewport?.addEventListener('resize', syncViewportHeight);
   // Track viewport width so the sidebar can default-collapse into a drawer
   // on phones / narrow windows. We watch a MediaQueryList rather than
   // resize for correctness across orientation changes on iOS.
@@ -201,7 +266,7 @@ onMounted(async () => {
       // dropdown shows the URL agent while the header list still shows whatever
       // the last sync scoped to (the previous agent).
       try {
-        await sessionStore.setActiveAgent(focusSaved.agentName);
+        void sessionStore.setActiveAgent(focusSaved.agentName);
       } catch (e) {
         console.warn('Failed to scope sidebar to URL agent:', e);
       }
@@ -362,6 +427,22 @@ async function handleAuthNewSession() {
   sessionStore.clearError();
 }
 
+const drawerSwipe = createDrawerSwipe({
+  isEnabled: () => isNarrowLayout.value,
+  isOpen: () => showSidebar.value,
+  setOpen: (open) => { showSidebar.value = open; },
+});
+
+async function openDrawer() {
+  showSidebar.value = true;
+  await nextTick();
+  document.getElementById('app-sidebar')?.querySelector<HTMLButtonElement>('[aria-label="Collapse sidebar"]')?.focus();
+}
+
+function handleDrawerEscape() {
+  if (isNarrowLayout.value) showSidebar.value = false;
+}
+
 function toggleSidebar() {
   showSidebar.value = !showSidebar.value;
 }
@@ -385,6 +466,8 @@ function handleDrawerViewClick(view: ViewId) {
 
 onBeforeUnmount(() => {
   window.removeEventListener('popstate', restoreSessionFromHistory);
+  window.removeEventListener('resize', syncViewportHeight);
+  window.visualViewport?.removeEventListener('resize', syncViewportHeight);
   if (narrowMql) {
     narrowMql.removeEventListener('change', syncNarrowLayout);
     narrowMql = null;
@@ -409,7 +492,16 @@ function clearError() {
 </script>
 
 <template>
-  <div class="app-container" :class="{ 'narrow-layout': isNarrowLayout }">
+  <div
+    class="app-container"
+    :class="{ 'narrow-layout': isNarrowLayout }"
+    :style="viewportHeight ? { '--app-viewport-height': `${viewportHeight}px` } : undefined"
+    @pointerdown="drawerSwipe.start"
+    @pointermove="drawerSwipe.move"
+    @pointerup="drawerSwipe.end"
+    @pointercancel="drawerSwipe.cancel"
+    @keydown.esc="handleDrawerEscape"
+  >
     <!-- View rail: the shell's top-level navigation (Chat · Projects · Board · Dashboard) -->
     <nav class="view-rail" aria-label="Main views">
       <button
@@ -452,10 +544,11 @@ function clearError() {
 
     <!-- Sidebar (slides in as a drawer on narrow viewports). Global on
          narrow: the drawer is reachable from every view there, not just
-         chat — the hamburger in the scope-bar is the opener on all of them.
+         chat — an edge swipe opens it on all of them.
          On desktop unchanged: only the chat view shows the sidebar. -->
     <aside
       v-show="uiStore.ready && showSidebar && (isNarrowLayout || uiStore.activeView === 'chat')"
+      id="app-sidebar"
       class="sidebar"
       :class="{ 'is-drawer': isNarrowLayout }"
     >
@@ -477,7 +570,7 @@ function clearError() {
             aria-label="Settings"
             @click="showSettings = true"
           ><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1a1.7 1.7 0 0 0 1.9.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1a1.7 1.7 0 0 0-.3 1.9v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.4 1z"/></svg></button>
-          <button class="toggle-btn" aria-label="Collapse sidebar" @click="toggleSidebar"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 6l-6 6 6 6"/></svg></button>
+          <UiButton variant="ghost" icon aria-label="Collapse sidebar" aria-controls="app-sidebar" @click="toggleSidebar"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 6l-6 6 6 6"/></svg></UiButton>
         </div>
       </div>
       
@@ -618,20 +711,20 @@ function clearError() {
     </button>
     
     <!-- Main Content Area -->
-    <div class="main-area">
-      <!-- Narrow-only hamburger bar: the drawer opener. The old scope-bar
-           (project selector + traffic + settings) is gone from the desktop —
-           the selector filters sessions from the sidebar, the two actions
-           moved into the sidebar header. -->
-      <header v-if="isNarrowLayout" class="scope-bar">
-        <button
-          v-show="!showSidebar"
-          class="mobile-hamburger"
-          @click="showSidebar = true"
-          aria-label="Open menu"
-        ><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
-      </header>
-      <main class="main-content">
+    <div class="main-area" :style="{ '--mobile-navigation-height': isNarrowLayout && !mobileNavigationHidden ? '52px' : '0px' }">
+      <div
+        v-if="isNarrowLayout && !showSidebar"
+        class="drawer-swipe-edge"
+        :style="{ top: mobileNavigationHidden ? '0' : '52px' }"
+        aria-hidden="true"
+      />
+      <main class="main-content"
+        @wheel.capture.passive="onNavigationWheel"
+        @touchstart.capture.passive="onNavigationTouchStart"
+        @touchmove.capture.passive="onNavigationTouchMove"
+        @touchend.capture.passive="onNavigationTouchEnd"
+        @touchcancel.capture.passive="onNavigationTouchEnd"
+      >
         <!-- Reconnect banner takes priority over the error banner: while a
              reconnect is in progress we don't want a contradictory red
              "Connection lost" pill. -->
@@ -660,15 +753,26 @@ function clearError() {
           <p>Restoring view…</p>
         </div>
         <template v-else>
-        <!-- IDE-style tab strip: one tab per open session, each with its own
-             live connection — background tabs keep streaming and flag unread
-             output, pending permissions and dropped transports. On narrow
-             viewports a single tab doesn't earn a strip — the drawer's
-             SESSIONS list highlights the open session — so the strip only
-             appears with 2+ tabs. -->
-        <SessionTabs
-          v-if="uiStore.activeView === 'chat' && sessionStore.openTabs.length > (isNarrowLayout ? 1 : 0)"
-        />
+        <div
+          class="session-navigation"
+          :class="{ 'is-hidden': isNarrowLayout && mobileNavigationHidden }"
+          :inert="isNarrowLayout && mobileNavigationHidden"
+        >
+          <UiButton
+            v-if="isNarrowLayout"
+            variant="ghost"
+            icon
+            aria-label="Open menu"
+            aria-controls="app-sidebar"
+            :aria-expanded="showSidebar"
+            @click="openDrawer"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+          </UiButton>
+          <div class="navigation-items">
+            <SessionTabs v-if="uiStore.activeView === 'chat' && sessionStore.openTabs.length > 0" />
+          </div>
+        </div>
 
         <!-- Chat View per open tab. v-show (not v-if) keeps every mounted
              instance alive across switches: scroll position, expanded tool
@@ -676,15 +780,13 @@ function clearError() {
              tab is active — a replay streams live under isLoading before
              isConnected lands, and a failed connect keeps the tab's error
              visible. The composer disables itself when !isConnected. -->
-        <template v-if="uiStore.activeView === 'chat'">
           <ChatView
             v-for="rt in sessionStore.openTabs"
-            v-show="rt.id === sessionStore.activeTabId"
+            v-show="uiStore.activeView === 'chat' && rt.id === sessionStore.activeTabId"
             :key="rt.id"
             :runtime="rt"
             :sidebar-cwd="selectedCwd"
           />
-        </template>
 
         <!-- Welcome screen when no tabs are open at all. The New session
              dialog is reachable here too — a session start must not depend
@@ -803,6 +905,7 @@ html, body, #app {
 .app-container {
   display: flex;
   height: 100vh;
+  height: var(--app-viewport-height, 100dvh);
   overflow: hidden;
 }
 
@@ -833,19 +936,6 @@ html, body, #app {
 .header-actions {
   display: flex;
   gap: 0.25rem;
-}
-
-.toggle-btn {
-  padding: 0.25rem 0.5rem;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  font-size: 0.875rem;
-  color: var(--text-muted);
-}
-
-.toggle-btn:hover {
-  color: var(--text-primary);
 }
 
 .sidebar-content {
@@ -976,23 +1066,6 @@ html, body, #app {
   overflow: hidden;
 }
 
-/* Global scope strip: the project selector from §B. Slim chrome row pinned
- * above every view (chat, projects, board, dashboard). Positioned + z-indexed
- * above the mobile drawer backdrop (z 90) so the global Settings/Traffic
- * buttons stay clickable while the drawer is open on narrow viewports. */
-.scope-bar {
-  position: relative;
-  z-index: 95;
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  min-width: 0;
-  padding: 0.375rem 0.75rem;
-  border-bottom: 1px solid var(--border-faint);
-  background: var(--bg-main);
-}
-
 /* Sidebar-header icon buttons (Traffic + Settings). Same geometry as the
  * view rail (34×34, radius-md, hairline/ghost) so the header reads as one
  * chrome row. */
@@ -1025,22 +1098,50 @@ html, body, #app {
   outline-offset: 2px;
 }
 
-/* The drawer hamburger is a scope-bar item — static flow, right edge. It is
- * display:none on desktop via the base rule below and only re-enabled inside
- * the narrow-viewport media query (same pattern as before the move). */
-.mobile-hamburger {
-  display: none;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 44px;
-  height: 44px;
-  padding: 0;
-  background: var(--bg-sidebar);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  cursor: pointer;
-  color: var(--text-primary);
+.session-navigation { display: contents; }
+.navigation-items { display: contents; }
+@media (max-width: 800px) {
+  .session-navigation {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex: 0 0 auto;
+    height: 52px;
+    max-height: 52px;
+    overflow: hidden;
+    transition: max-height 160ms ease;
+  }
+  .navigation-items {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-self: stretch;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+  }
+  .navigation-items > .tab-strip {
+    flex: 0 0 auto;
+    min-width: max-content;
+    align-self: stretch;
+  }
+  .session-navigation.is-hidden {
+    max-height: 0;
+    visibility: hidden;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-navigation { transition: none; }
+}
+
+.drawer-swipe-edge {
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: 24px;
+  z-index: 80;
+  /* A fallback for views without a chat feed; the chat edge belongs to
+     its scroll container so vertical edge swipes scroll the transcript. */
+  touch-action: pan-y pinch-zoom;
 }
 
 .main-content {
@@ -1287,8 +1388,13 @@ html, body, #app {
     max-width: 360px;
     z-index: 100;
     box-shadow: 2px 0 16px rgba(0, 0, 0, 0.3);
+    touch-action: pan-y pinch-zoom;
     /* Honour iOS notch / Android status bar. */
     padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  .sidebar.is-drawer .sidebar-content {
+    touch-action: pan-y pinch-zoom;
   }
 
   .drawer-backdrop {
@@ -1299,13 +1405,9 @@ html, body, #app {
     z-index: 90;
   }
 
-  /* Hide the desktop chevron when the mobile hamburger is in play. */
+  /* Mobile navigation uses the edge gesture instead of the desktop handle. */
   .sidebar-toggle-collapsed {
     display: none;
-  }
-
-  .mobile-hamburger {
-    display: flex;
   }
 
   /* Drawer's first row: the view switcher that replaced the hidden rail.
@@ -1334,34 +1436,6 @@ html, body, #app {
     letter-spacing: -0.01em;
     color: var(--text-secondary, #6b6259);
     white-space: nowrap;
-  }
-
-  /* Tap-target sizing for the icon buttons inside the sidebar header. */
-  .toggle-btn {
-    min-width: 40px;
-    min-height: 40px;
-    font-size: 1rem;
-  }
-
-  /* Hamburger bar on phones — the drawer opener, nothing else. Single flex
-   * row, ~56px: children are flex items, never overlapping (regression:
-   * absolutely-positioned descendants). */
-  .scope-bar {
-    position: relative;
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    flex-wrap: nowrap;
-    overflow: hidden;
-    padding: 0.375rem 0.5rem;
-    min-height: 56px;
-    justify-content: flex-end;
-  }
-
-  .scope-bar > * {
-    position: static;
-    flex: 0 0 auto;
-    min-width: 0;
   }
 
   .scope-icon-btn {

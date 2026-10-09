@@ -57,7 +57,7 @@ withDefaults(defineProps<{
 .ds-button:focus-visible { outline: 2px solid var(--text-accent, #b04a28); outline-offset: 2px; }
 .ds-button:disabled { opacity: 0.5; cursor: not-allowed; }
 @media (max-width: 800px), (pointer: coarse) {
-  .ds-button, .ds-button--xs { min-height: 44px; }
+  .ds-button, .ds-button--xs { min-height: 44px; min-width: 44px; }
   .ds-button--icon, .ds-button--icon.ds-button--xs { width: 44px; }
 }
 </style>

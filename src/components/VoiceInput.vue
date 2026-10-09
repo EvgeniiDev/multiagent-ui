@@ -7,7 +7,8 @@
 // button stays disabled with the reason on its title; mic denied or a
 // dropped socket -> `error` is emitted so the composer shows a line, and
 // the text already recognised stays in the field.
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
+import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue';
+import UiButton from './ui/UiButton.vue';
 import { sttHealth, StreamingStt, type SttPartial } from '../lib/stt';
 
 const props = defineProps<{
@@ -205,6 +206,7 @@ async function startListening(): Promise<void> {
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
     });
   } catch (e) {
+    if (gen !== sessionGen) return;
     const name = (e as DOMException)?.name;
     fail(
       name === 'NotFoundError' || name === 'DevicesNotFoundError'
@@ -221,15 +223,20 @@ async function startListening(): Promise<void> {
 
   const session = new StreamingStt({
     onPartial: (p) => {
+      if (gen !== sessionGen || stt !== session) return;
       lastPartial = p;
       emit('partial', p);
     },
     onFinal: (text) => {
+      if (gen !== sessionGen || stt !== session) return;
       endSession();
       emit('final', text.trim());
     },
-    onError: (message) => emit('error', message),
+    onError: (message) => {
+      if (gen === sessionGen && stt === session) emit('error', message);
+    },
     onClose: (hadFinal) => {
+      if (gen !== sessionGen || stt !== session) return;
       // Clean finish after `stop()` is handled by onFinal; anything else is
       // a drop — keep the last hypothesis in the field and say what broke.
       if (phase.value === 'idle' || hadFinal) return;
@@ -244,11 +251,11 @@ async function startListening(): Promise<void> {
     await session.open();
   } catch {
     if (gen === sessionGen) fail('Speech service unreachable — websocket refused');
-    else teardownStt();
+    else session.close();
     return;
   }
   if (gen !== sessionGen) {
-    endSession();
+    session.close();
     return;
   }
 
@@ -263,7 +270,7 @@ async function startListening(): Promise<void> {
     audioCtx = new Ctor({ sampleRate: TARGET_RATE } as AudioContextOptions);
     if (audioCtx.state === 'suspended') await audioCtx.resume();
     if (gen !== sessionGen) {
-      endSession();
+      session.close();
       return;
     }
     resample = makeResampler(audioCtx.sampleRate);
@@ -272,11 +279,13 @@ async function startListening(): Promise<void> {
     // The ScriptProcessor only runs while connected; nothing is written to
     // its output buffer, so the mic is not echoed to the speakers.
     audioNode.onaudioprocess = (ev) => {
+      if (gen !== sessionGen || stt !== session || phase.value !== 'listening') return;
       feedPcm(ev.inputBuffer.getChannelData(0));
     };
     audioSrc.connect(audioNode);
     audioNode.connect(audioCtx.destination);
   } catch {
+    if (gen !== sessionGen) { session.close(); return; }
     fail('Could not start audio capture');
     return;
   }
@@ -296,6 +305,7 @@ function stopListening(): void {
     return;
   }
   if (phase.value !== 'listening') return;
+  const gen = sessionGen;
   setPhase('stopping');
   flushPending();
   stt?.stop();
@@ -304,7 +314,7 @@ function stopListening(): void {
   // The server re-decodes the whole utterance; give it room, then treat a
   // missing answer as a drop (onClose normally fires when the socket ends).
   finalTimer = setTimeout(() => {
-    if (phase.value === 'stopping') {
+    if (gen === sessionGen && phase.value === 'stopping') {
       const last = commitLast();
       teardownStt();
       setPhase('idle');
@@ -385,12 +395,27 @@ onBeforeUnmount(() => {
   stopElapsed();
 });
 
-defineExpose({ stop: stopListening });
+/** Wait for final/fallback text to reach ChatView before it snapshots a send. */
+async function finish(): Promise<void> {
+  if (phase.value === 'idle') return;
+  await new Promise<void>((resolve) => {
+    const unwatch = watch(phase, (value) => {
+      if (value === 'idle') {
+        unwatch();
+        // Final text is emitted synchronously after the idle state.
+        void nextTick(resolve);
+      }
+    });
+    stopListening();
+  });
+}
+
+defineExpose({ stop: stopListening, finish });
 </script>
 
 <template>
-  <button
-    type="button"
+  <UiButton
+    icon
     class="voice-btn"
     :class="{
       listening: phase === 'listening',
@@ -434,56 +459,12 @@ defineExpose({ stop: stopListening });
       <rect x="6" y="6" width="12" height="12" rx="2" />
     </svg>
     <span v-if="phase === 'listening'" class="voice-dot" aria-hidden="true"></span>
-  </button>
+  </UiButton>
 </template>
 
 <style scoped>
-/* Same square geometry as the composer's icon buttons (see .icon-btn in
- * ChatView.vue): 34px stroke-icon hit area, radius-md, no shadow — kept as
- * its own class so the button does not change the row's icon-btn count the
- * existing composer suite asserts. */
-.voice-btn {
-  position: relative;
-  flex: 0 0 auto;
-  width: 34px;
-  height: 34px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-secondary, #6b6259);
-  box-shadow: none;
-  cursor: pointer;
-}
-
-.voice-btn svg {
-  display: block;
-}
-
-.voice-btn:hover:not(:disabled) {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-primary, #2b2723);
-}
-
-.voice-btn:focus-visible {
-  outline: 2px solid var(--text-accent, #b04a28);
-  outline-offset: 2px;
-}
-
-.voice-btn:disabled {
-  color: var(--text-muted, #786d62);
-  cursor: not-allowed;
-}
-
-/* Listening: the quiet accent tint the attach button uses for "active",
- * a stop square, and a live dot in the corner. */
-.voice-btn.listening {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-  color: var(--text-accent, #b04a28);
-}
+.voice-btn { position: relative; flex: 0 0 auto; }
+.voice-btn svg { display: block; }
 
 .voice-dot {
   position: absolute;
@@ -508,10 +489,4 @@ defineExpose({ stop: stopListening });
   }
 }
 
-@media (max-width: 800px) {
-  .voice-btn {
-    width: 44px;
-    height: 44px;
-  }
-}
 </style>
