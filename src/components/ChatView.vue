@@ -1503,12 +1503,21 @@ function planGlyph(status: string): string {
   display: block;
   max-width: 100%;
   overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0.75rem 0;
 }
 
 .message-content :deep(td),
 .message-content :deep(th) {
+  border: 1px solid var(--border-strong);
+  padding: 0.5rem 0.75rem;
+  vertical-align: top;
   overflow-wrap: normal;
   word-break: normal;
+}
+
+.message-content :deep(th) {
+  background: var(--bg-hover);
 }
 
 .message-content :deep(pre code) {

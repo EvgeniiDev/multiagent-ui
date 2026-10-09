@@ -21,6 +21,7 @@
   --text-accent: #b04a28;
   --text-code: #e8e0d5;
   --border-color: #e3dbcf;
+  --border-strong: #b8ac9d;
   /* Design tokens: density + faint chrome. Flat colors, thin hairline
    * borders, no shadows-as-decoration. */
   --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
@@ -67,6 +68,7 @@
     --text-on-accent: #211d1a;
     --text-accent: #f0a184;
     --border-color: #3d362f;
+    --border-strong: #75685b;
     --border-faint: rgba(236, 229, 218, 0.13);
     --tint-hover: rgba(236, 229, 218, 0.06);
     --tint-active: rgba(224, 116, 80, 0.16);
