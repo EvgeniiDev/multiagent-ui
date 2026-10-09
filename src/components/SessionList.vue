@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
+import UiButton from './ui/UiButton.vue';
 import { useSessionStore } from '../stores/session';
 import { useUiStore } from '../stores/ui';
 import { useProjectsStore } from '../features/scope/registry';
@@ -65,9 +66,9 @@ const canListAgentSessions = computed(() => !sessionStore.sessionListUnsupported
 
 // The button goes dead while ANY tab is mid-connect — a double click would
 // spawn two agents for one intent.
-const startingSession = computed(() => sessionStore.anySessionBusy);
+const startingSession = computed(() => sessionStore.anySessionConnecting);
 const newSessionTitle = computed(() =>
-  props.canStart ? 'New session' : 'Select an agent first'
+  !props.canStart ? 'Select an agent first' : startingSession.value ? 'Starting session…' : 'New session'
 );
 
 /** Compact stamp: today -> HH:MM, this year -> "12 сен", else ISO date. */
@@ -118,13 +119,19 @@ function handleDelete(sessionId: string, event: Event) {
            where the user goes to switch runs. There is no Disconnect — a
            connection re-establishes on its own, so the only manual action
            left in the sidebar is starting another one. -->
-      <button
+      <UiButton
+        icon
+        size="xs"
+        variant="ghost"
         class="list-new-session"
         :disabled="startingSession || !canStart"
+        :aria-busy="startingSession"
         @click="emit('newSession')"
         :title="newSessionTitle"
         aria-label="New session"
-      >+</button>
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg>
+      </UiButton>
       <button
         v-if="canListAgentSessions"
         class="list-refresh"
@@ -214,33 +221,6 @@ function handleDelete(sessionId: string, event: Event) {
 
 /* Start another session. Shares the refresh button's footprint so the head
    row stays one dense line on a 390px phone. */
-.list-new-session {
-  flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm, 4px);
-  background: transparent;
-  color: var(--text-muted, #a39a8e);
-  font-size: 1rem;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.list-new-session:hover:not(:disabled) {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-primary, #2b2723);
-}
-
-.list-new-session:disabled {
-  cursor: default;
-  opacity: 0.55;
-}
-
 /* Pull the agent's session inventory (`session/list`) into this list. */
 .list-refresh {
   flex: 0 0 auto;

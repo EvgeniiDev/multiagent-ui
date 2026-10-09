@@ -617,9 +617,9 @@ export const useSessionStore = defineStore('session', () => {
   const resumableSessions = computed(() =>
     savedSessions.value.filter(s => s.supportsLoadSession === true)
   );
-  /** Any tab with a turn or connect in flight — gates the "+" button. */
-  const anySessionBusy = computed(() =>
-    openTabs.value.some((t) => t.isLoading || t.isConnecting)
+  /** Gate duplicate session starts during connection, independently of turns. */
+  const anySessionConnecting = computed(() =>
+    openTabs.value.some((t) => t.isConnecting)
   );
   /** At least one background tab has unseen content or a pending permission. */
   const anyUnread = computed(() => openTabs.value.some((t) => t.unread));
@@ -780,7 +780,7 @@ export const useSessionStore = defineStore('session', () => {
     activeTabId,
     activeRuntime,
     anyUnread,
-    anySessionBusy,
+    anySessionConnecting,
     hasStoredTabs,
 
     // Computed
