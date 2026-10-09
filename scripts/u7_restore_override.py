@@ -98,6 +98,9 @@ def emit_service(name: str, d: dict) -> list[str]:
     out.append("    pull_policy: never")
     if cfg.get("User"):
         out.append(f"    user: {q(cfg['User'])}")
+    if name.startswith("bridge-"):
+        # Docker socket access is equivalent to host root; grant only to agents.
+        out.append('    group_add: ["105"]')
     out.append("    network_mode: host")
     wd = cfg.get("WorkingDir")
     if wd:
@@ -120,6 +123,8 @@ def emit_service(name: str, d: dict) -> list[str]:
             mode = m.get("Mode") or "rw"
             out.append(
                 f"      - {q(m['Source'] + ':' + m['Destination'] + ':' + mode)}")
+    if name.startswith("bridge-"):
+        out.append('      - "/var/run/docker.sock:/var/run/docker.sock:rw"')
     rp = (host.get("RestartPolicy") or {})
     if rp.get("Name"):
         out.append("    restart: " + q(rp["Name"]))
