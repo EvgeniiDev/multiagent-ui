@@ -1,6 +1,9 @@
 """Static web bundle with explicit SPA entry routes; assets retain real 404s."""
+import os
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
+
+PORT = int(os.environ.get("PORT", "25808"))
 
 class PanelHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
@@ -19,4 +22,4 @@ class PanelHandler(SimpleHTTPRequestHandler):
             self.path = original
 
 if __name__ == '__main__':
-    ThreadingHTTPServer(('127.0.0.1', 25808), PanelHandler).serve_forever()
+    ThreadingHTTPServer(('127.0.0.1', PORT), PanelHandler).serve_forever()

@@ -6,7 +6,10 @@ pieces so they stop re-implementing them in different dialects:
   * `port_free` — True when nothing is LISTENING on the port. Asks
     `ss -ltn` (never a bare bind-probe): a port with only TIME_WAIT
     sockets left over from the previous run is FREE.
-  * `serve_web(port, dist)` — serve `dist` over `python -m http.server`.
+  * `serve_web(port, dist)` — serve `dist` over the production
+    `server/web-server.py` (its SPA entry routes matter: the app
+    navigates with history-mode URLs like `/chat?s=…`, which a bare
+    `python -m http.server` would 404 on reload).
   * `serve_state(port, state_dir)` — spawn server/acp-state-server.mjs.
 
 Both serve helpers take a PREFERRED port. When it is already taken (e.g.
@@ -26,6 +29,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist-web"
+WEB_SERVER = ROOT / "server" / "web-server.py"
 STATE_SERVER = ROOT / "server" / "acp-state-server.mjs"
 PORT_SPAN = 50  # how far above the preferred port to scan for a free one
 
@@ -103,11 +107,13 @@ def serve_web(preferred: int, dist: Path | str = DIST):
     if not (dist / "index.html").exists():
         print(f"FAIL  {dist} missing — run `npm run build:web` first")
         sys.exit(1)
+    import os
     for port in _candidates(preferred):
         proc = subprocess.Popen(
-            [sys.executable, "-m", "http.server", str(port),
-             "--bind", "127.0.0.1"],
-            cwd=str(dist), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            [sys.executable, str(WEB_SERVER)],
+            cwd=str(dist),
+            env={**os.environ, "PORT": str(port)},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         base = f"http://127.0.0.1:{port}/"
         for _ in range(100):

@@ -220,6 +220,10 @@ SAVED = {
     }],
     "currentSessionId": "saved-s",
     "lastAgent": AGENT_NAME,
+    # Restore is tab-driven now: `currentSessionId` alone reopens nothing —
+    # openTabs is the set restoreTabs reconnects, activeTab the focused one.
+    "openTabs": [{"agentName": AGENT_NAME, "sessionId": SID}],
+    "activeTab": {"agentName": AGENT_NAME, "sessionId": SID},
 }
 
 
@@ -488,8 +492,13 @@ def run_checks():
         check("killed replay: feed pinned to cached newest",
               0 <= page.evaluate(FROM_BOTTOM) <= 2,
               f"fromBottom={page.evaluate(FROM_BOTTOM)}")
-        check("killed replay: error banner instead of a fake 'live' view",
-              page.evaluate("() => !!document.querySelector('.error-banner')"))
+        # Auto-reconnect arms on the transport drop (and the mock keeps
+        # killing it), so the visible signal is the reconnect banner, which
+        # takes precedence over the error banner by design. Either one is
+        # the honest "not live" notice this assertion exists for.
+        check("killed replay: failure banner instead of a fake 'live' view",
+              page.evaluate(
+                  "() => !!document.querySelector('.error-banner, .reconnect-banner')"))
         check("killed replay: composer disabled while offline",
               page.evaluate("() => document.querySelector('.composer-box textarea').disabled"))
         state["mode"] = "full"   # restore before the next reload

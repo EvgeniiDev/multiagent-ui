@@ -32,8 +32,12 @@ Asserts:
   * opening ANOTHER session from the sidebar (chat stays mounted) ends
     with the same two facts — this is the case that used to sit at the
     top with fromBottom ~= the whole feed height;
-  * scrolling UP mid-replay is respected: more chunks arrive and the
-    feed is not yanked back down;
+  * an UNCACHED session's replay stays off the DOM until it settles —
+    the merge buffer is armed for every resume now, since the replay's
+    early chunks are the oldest turns, not the tail the user opened;
+  * scrolling UP during a WARM replay (cached tail on screen while the
+    replay still streams invisibly) is respected — the feed is not
+    yanked back down;
   * when the replay finishes the newest message is in the viewport;
   * sending a message from a scrolled-up position returns the feed to
     the bottom;
@@ -303,6 +307,18 @@ def poll_eval(page, expr, timeout=30.0, interval=0.15):
     return page.evaluate(expr)
 
 
+def poll_value(page, expr, timeout=30.0, interval=0.15):
+    """Same as poll_eval, but returns the first truthy evaluated value —
+    for non-boolean probes like the history marker's data-state."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        v = page.evaluate(expr)
+        if v:
+            return v
+        page.wait_for_timeout(int(interval * 1000))
+    return page.evaluate(expr)
+
+
 def wait_replay_done(page, marker, timeout=30.0):
     """Last chunk is in the DOM and `session/load` has resolved (the
     `Working…` indicator detaches when isLoading drops)."""
@@ -424,31 +440,26 @@ def run_checks():
         check("sidebar open: last replayed message inside the viewport",
               last_b is True, repr(last_b))
 
-        # --- User scroll UP during a replay must be respected --------------
+        # --- Session C: an UNCACHED replay stays off the DOM ---------------
+        # The merge buffer is armed for every resume now (cache or not): the
+        # replay's early chunks are the OLDEST turns, so nothing renders
+        # until the buffered transcript swaps in at load-resolve. The feed
+        # shows only the loading-history marker while chunks drip in.
         click_session(page, "HistC")
-        # Wait until C's OWN history has real scroll room. A raw message
-        # count races the clear: session B's rows still sit in the DOM until
-        # `messages = []` re-renders, so counting `.message` can pass before
-        # a single replayed chunk has landed — the wheel then hits a feed
-        # with nothing to scroll. 'C turn 12' only exists once C's replay
-        # is ~24 messages deep (~1.5 viewports), guaranteed scrollable.
-        enough = poll_eval(
-            page, "document.body.textContent.includes('C turn 12')",
-            timeout=15.0)
-        check("replay streams in (enough messages to scroll)", enough)
-        wheel_up(page, 700)
-        page.wait_for_timeout(80)
-        fb_up1 = from_bottom(page)
-        # More replay chunks keep arriving below; the feed must stay put.
-        page.wait_for_timeout(550)
-        fb_up2 = from_bottom(page)
-        check("scroll up mid-replay leaves the bottom",
-              fb_up1 > 200, f"fromBottom={fb_up1}px right after the wheel")
-        check("scroll up mid-replay is not yanked back",
-              fb_up2 > 200 and fb_up2 >= fb_up1,
-              f"fromBottom {fb_up1}px -> {fb_up2}px while chunks arrived")
+        note = poll_value(
+            page,
+            "(() => { const n = "
+            "  [...document.querySelectorAll('.history-note')]"
+            "  .find(e => e.offsetParent !== null);"
+            "  return n ? n.dataset.state : null; })()",
+            timeout=10.0)
+        check("uncached replay: loading marker while the buffer fills",
+              note == "loading", f"note={note}")
+        check("uncached replay: no oldest-first flash mid-replay",
+              not page.evaluate(
+                  "document.body.textContent.includes('C turn 12')"))
 
-        # The replay still lands on the newest once it finishes.
+        # The buffered transcript lands pinned to the newest once it settles.
         wait_replay_done(page, C_LAST)
         fb_c = from_bottom(page)
         check("replay end lands on the newest message",
@@ -466,6 +477,50 @@ def run_checks():
         check("foreign frames did not grow the transcript",
               expand_feed(page) and page.evaluate(MESSAGE_COUNT) == PAIRS_C * 2,
               f"{page.evaluate(MESSAGE_COUNT)} messages")
+
+        # --- User scroll UP during a warm replay must be respected --------
+        # C's tail was cached at settle, so a reload re-runs the same drip
+        # with the transcript on screen — the only case where a feed is
+        # scrollable while the replay still streams (invisibly, into the
+        # merge buffer).
+        page.reload(wait_until="load")
+        painted = poll_eval(
+            page, "document.body.textContent.includes('C turn 20')",
+            timeout=15.0)
+        check("warm replay: cached tail paints before settle", painted)
+        streaming = page.evaluate(
+            "(() => { const n = "
+            "  [...document.querySelectorAll('.history-note')]"
+            "  .find(e => e.offsetParent !== null);"
+            "  return n ? n.dataset.state : null; })()")
+        check("warm replay: replay still in flight behind the tail",
+              streaming == "loading", f"note={streaming}")
+        wheel_up(page, 700)
+        page.wait_for_timeout(80)
+        fb_up1 = from_bottom(page)
+        # The replay keeps streaming below (into the buffer); the feed the
+        # user is reading must stay put.
+        page.wait_for_timeout(550)
+        fb_up2 = from_bottom(page)
+        check("scroll up mid-replay leaves the bottom",
+              fb_up1 > 200, f"fromBottom={fb_up1}px right after the wheel")
+        check("scroll up mid-replay is not yanked back",
+              fb_up2 > 200 and fb_up2 >= fb_up1,
+              f"fromBottom {fb_up1}px -> {fb_up2}px while chunks arrived")
+
+        # The settle still lands on the newest message.
+        settled = poll_eval(
+            page,
+            "![...document.querySelectorAll('.history-note')]"
+            "  .find(e => e.offsetParent !== null)",
+            timeout=15.0)
+        check("warm replay settles", settled)
+        fb_c2 = from_bottom(page)
+        check("settle lands on the newest message",
+              fb_c2 >= 0 and fb_c2 <= 2, f"fromBottom={fb_c2}px")
+        check("settle: last message inside the viewport",
+              page.evaluate(LAST_IN_VIEW) is True,
+              repr(page.evaluate(LAST_IN_VIEW)))
 
         # --- Sending from a scrolled-up position returns to the bottom -----
         wheel_up(page, 700)
