@@ -1,0 +1,815 @@
+{
+  "date": "2026-10-08",
+  "scope": "Historical read-only audit; no provider calls, product edits or deployment",
+  "codex_acp_ui": {
+    "session": "01a0f3e6-cd15-7383-860c-f7a36171decf",
+    "path": "/home/hermes/.codex/sessions/2026/09/30/rollout-2026-09-30T19-59-44-01a0f3e6-cd15-7383-860c-f7a36171decf.jsonl",
+    "usage": {
+      "input_tokens": 370733628,
+      "cached_input_tokens": 365995392,
+      "output_tokens": 648793,
+      "reasoning_output_tokens": 143697,
+      "total_tokens": 371382421,
+      "uncached_input_tokens": 4738236
+    },
+    "usage_records": 2682,
+    "tool_calls": 2670,
+    "categories": {
+      "other work": {
+        "steps": 852,
+        "inclusive_tokens": 112468362,
+        "evidence": [
+          {
+            "call_line": 13,
+            "usage_line": 14
+          },
+          {
+            "call_line": 18,
+            "usage_line": 20
+          },
+          {
+            "call_line": 28,
+            "usage_line": 29
+          }
+        ]
+      },
+      "sleep": {
+        "steps": 753,
+        "inclusive_tokens": 107053416,
+        "evidence": [
+          {
+            "call_line": 93,
+            "usage_line": 94
+          },
+          {
+            "call_line": 143,
+            "usage_line": 144
+          },
+          {
+            "call_line": 252,
+            "usage_line": 253
+          }
+        ]
+      },
+      "polling only": {
+        "steps": 559,
+        "inclusive_tokens": 75896932,
+        "evidence": [
+          {
+            "call_line": 120,
+            "usage_line": 121
+          },
+          {
+            "call_line": 131,
+            "usage_line": 132
+          },
+          {
+            "call_line": 148,
+            "usage_line": 149
+          }
+        ]
+      },
+      "mixed polling/work": {
+        "steps": 506,
+        "inclusive_tokens": 72972221,
+        "evidence": [
+          {
+            "call_line": 169,
+            "usage_line": 170
+          },
+          {
+            "call_line": 283,
+            "usage_line": 284
+          },
+          {
+            "call_line": 292,
+            "usage_line": 293
+          }
+        ]
+      }
+    },
+    "separate_compaction_generations": {
+      "steps": 12,
+      "inclusive_tokens": 2991490
+    },
+    "before_pi_tokens": 354379207,
+    "after_pi_tokens": 17003214,
+    "sleep_and_poll_only_tokens": 182950348,
+    "after_pi_sleep_and_poll_only_tokens": 11878464
+  },
+  "devin": [
+    {
+      "calls": 97,
+      "input_tokens": 764171,
+      "output_tokens": 200275,
+      "cache_read_tokens": 9825330,
+      "cache_creation_tokens": 0,
+      "id": "obsidian-dewberry",
+      "title": "Implement ACP Core U2: Durable Cards, Blobs, Revisions & Writers",
+      "raw_nodes": 197,
+      "total": 10789776
+    },
+    {
+      "calls": 325,
+      "input_tokens": 1194113,
+      "output_tokens": 356606,
+      "cache_read_tokens": 33759459,
+      "cache_creation_tokens": 0,
+      "id": "marked-cell",
+      "title": "Implement core U3 workspace, launch handshake, and scheduler limits",
+      "raw_nodes": 661,
+      "total": 35310178
+    },
+    {
+      "calls": 428,
+      "input_tokens": 2704098,
+      "output_tokens": 427173,
+      "cache_read_tokens": 46894080,
+      "cache_creation_tokens": 0,
+      "id": "lyrical-field",
+      "title": "Core U4 Observation, Stop & Recovery",
+      "raw_nodes": 901,
+      "total": 50025351
+    },
+    {
+      "calls": 266,
+      "input_tokens": 1080537,
+      "output_tokens": 257400,
+      "cache_read_tokens": 29065832,
+      "cache_creation_tokens": 0,
+      "id": "speckled-stealer",
+      "title": "Finish core U4 agent modes: tests, helper, docs",
+      "raw_nodes": 550,
+      "total": 30403769
+    },
+    {
+      "calls": 1439,
+      "input_tokens": 6811479,
+      "output_tokens": 1126149,
+      "cache_read_tokens": 159201792,
+      "cache_creation_tokens": 0,
+      "id": "abrasive-button",
+      "title": "Implement U5 validation, review, checker, and snapshot lifecycle",
+      "raw_nodes": 2991,
+      "total": 167139420
+    },
+    {
+      "calls": 384,
+      "input_tokens": 2503873,
+      "output_tokens": 339513,
+      "cache_read_tokens": 43537920,
+      "cache_creation_tokens": 0,
+      "id": "nine-tuba",
+      "title": "U6: Complete card/Workflow execution, documents, approvals, composition",
+      "raw_nodes": 823,
+      "total": 46381306
+    },
+    {
+      "calls": 144,
+      "input_tokens": 658163,
+      "output_tokens": 168990,
+      "cache_read_tokens": 15231582,
+      "cache_creation_tokens": 0,
+      "id": "viridian-wolverine",
+      "title": "U7 agent-core implementation and verification for agent modes",
+      "raw_nodes": 296,
+      "total": 16058735
+    },
+    {
+      "calls": 309,
+      "input_tokens": 900231,
+      "output_tokens": 232221,
+      "cache_read_tokens": 32898745,
+      "cache_creation_tokens": 0,
+      "id": "fire-berry",
+      "title": "U7 agent-modes continuation: runner recovery and core implementation",
+      "raw_nodes": 625,
+      "total": 34031197
+    },
+    {
+      "calls": 728,
+      "input_tokens": 1897139,
+      "output_tokens": 466810,
+      "cache_read_tokens": 75135454,
+      "cache_creation_tokens": 0,
+      "id": "military-satin",
+      "title": "U7 managed-core codex rerun, devin/browser/crash phases, deviation journal",
+      "raw_nodes": 1468,
+      "total": 77499403
+    },
+    {
+      "calls": 309,
+      "input_tokens": 3777408,
+      "output_tokens": 242607,
+      "cache_read_tokens": 32670720,
+      "cache_creation_tokens": 0,
+      "id": "snowy-hemisphere",
+      "title": "Implement F1 Fusion trusted execution environment and access boundaries",
+      "raw_nodes": 624,
+      "total": 36690735
+    }
+  ],
+  "calc_sessions": [
+    {
+      "id": "01a0f398-8c34-7911-a2b6-9b030c373a96",
+      "path": "/home/hermes/.codex/sessions/2026/09/30/rollout-2026-09-30T18-34-15-01a0f398-8c34-7911-a2b6-9b030c373a96.jsonl",
+      "agent": "root",
+      "models": {
+        "gpt-6-luna": 7717355,
+        "gpt-6.1-sol": 158548847
+      },
+      "usage": {
+        "input_tokens": 165705770,
+        "cached_input_tokens": 162712320,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 560432,
+        "reasoning_output_tokens": 229706,
+        "total_tokens": 166266202
+      },
+      "usage_records": 1449,
+      "first_usage": 16,
+      "last_usage": 12730
+    },
+    {
+      "id": "01a0f3a9-f2f6-7793-9f37-b3509868c1d6",
+      "path": "/home/hermes/.codex/sessions/2026/09/30/rollout-2026-09-30T18-53-16-01a0f3a9-f2f6-7793-9f37-b3509868c1d6.jsonl",
+      "agent": "/root/barrier_audit",
+      "models": {
+        "gpt-6-luna": 81320832
+      },
+      "usage": {
+        "input_tokens": 80865673,
+        "cached_input_tokens": 79081216,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 455159,
+        "reasoning_output_tokens": 265708,
+        "total_tokens": 81320832
+      },
+      "usage_records": 745,
+      "first_usage": 29,
+      "last_usage": 6397
+    },
+    {
+      "id": "01a0f3d8-5588-7983-afa4-023f299a94ee",
+      "path": "/home/hermes/.codex/sessions/2026/09/30/rollout-2026-09-30T19-43-56-01a0f3d8-5588-7983-afa4-023f299a94ee.jsonl",
+      "agent": "/root/durability_audit",
+      "models": {
+        "gpt-6.1-sol": 51624636
+      },
+      "usage": {
+        "input_tokens": 51404283,
+        "cached_input_tokens": 50352896,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 220353,
+        "reasoning_output_tokens": 76598,
+        "total_tokens": 51624636
+      },
+      "usage_records": 457,
+      "first_usage": 29,
+      "last_usage": 3419
+    },
+    {
+      "id": "01a0f431-8a6b-7b63-ade3-3b2e2bb52399",
+      "path": "/home/hermes/.codex/sessions/2026/09/30/rollout-2026-09-30T21-21-22-01a0f431-8a6b-7b63-ade3-3b2e2bb52399.jsonl",
+      "agent": "/root/event_order_audit",
+      "models": {
+        "gpt-6.1-sol": 41094823
+      },
+      "usage": {
+        "input_tokens": 40943625,
+        "cached_input_tokens": 40157696,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 151198,
+        "reasoning_output_tokens": 40565,
+        "total_tokens": 41094823
+      },
+      "usage_records": 350,
+      "first_usage": 35,
+      "last_usage": 2536
+    },
+    {
+      "id": "01a0f4c5-26f8-70e1-8378-a2c720965021",
+      "path": "/home/hermes/.codex/sessions/2026/10/01/rollout-2026-10-01T00-02-36-01a0f4c5-26f8-70e1-8378-a2c720965021.jsonl",
+      "agent": "/root/source_coverage_resume",
+      "models": {
+        "gpt-6.1-sol": 12869784
+      },
+      "usage": {
+        "input_tokens": 12826354,
+        "cached_input_tokens": 12556160,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 43430,
+        "reasoning_output_tokens": 16228,
+        "total_tokens": 12869784
+      },
+      "usage_records": 118,
+      "first_usage": 43,
+      "last_usage": 825
+    },
+    {
+      "id": "01a0f4c5-7b79-7500-828e-5331033881b2",
+      "path": "/home/hermes/.codex/sessions/2026/10/01/rollout-2026-10-01T00-02-58-01a0f4c5-7b79-7500-828e-5331033881b2.jsonl",
+      "agent": "/root/go_parity_resume",
+      "models": {
+        "gpt-6.1-sol": 12602359
+      },
+      "usage": {
+        "input_tokens": 12562755,
+        "cached_input_tokens": 12285568,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 39604,
+        "reasoning_output_tokens": 8148,
+        "total_tokens": 12602359
+      },
+      "usage_records": 118,
+      "first_usage": 43,
+      "last_usage": 828
+    },
+    {
+      "id": "01a0f502-8c08-7742-a5ba-b92d3d771b59",
+      "path": "/home/hermes/.codex/sessions/2026/10/01/rollout-2026-10-01T01-09-39-01a0f502-8c08-7742-a5ba-b92d3d771b59.jsonl",
+      "agent": "/root/orderbook_repeated_vectors",
+      "models": {
+        "gpt-6.1-sol": 1953084
+      },
+      "usage": {
+        "input_tokens": 1941578,
+        "cached_input_tokens": 1872384,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 11506,
+        "reasoning_output_tokens": 1681,
+        "total_tokens": 1953084
+      },
+      "usage_records": 32,
+      "first_usage": 31,
+      "last_usage": 239
+    },
+    {
+      "id": "01a0f526-2349-7bd0-8f42-f75b8db8846d",
+      "path": "/home/hermes/.codex/sessions/2026/10/01/rollout-2026-10-01T01-48-32-01a0f526-2349-7bd0-8f42-f75b8db8846d.jsonl",
+      "agent": "/root/coverage_cleanup_errors",
+      "models": {
+        "gpt-6.1-sol": 510230
+      },
+      "usage": {
+        "input_tokens": 506126,
+        "cached_input_tokens": 469120,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 4104,
+        "reasoning_output_tokens": 431,
+        "total_tokens": 510230
+      },
+      "usage_records": 12,
+      "first_usage": 21,
+      "last_usage": 100
+    },
+    {
+      "id": "01a0f529-9fee-7b83-a5cf-accb0ea22790",
+      "path": "/home/hermes/.codex/sessions/2026/10/01/rollout-2026-10-01T01-52-20-01a0f529-9fee-7b83-a5cf-accb0ea22790.jsonl",
+      "agent": "/root/outbox_capacity_atomicity",
+      "models": {
+        "gpt-6.1-sol": 402511
+      },
+      "usage": {
+        "input_tokens": 399875,
+        "cached_input_tokens": 381568,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 2636,
+        "reasoning_output_tokens": 265,
+        "total_tokens": 402511
+      },
+      "usage_records": 9,
+      "first_usage": 27,
+      "last_usage": 79
+    },
+    {
+      "id": "01a0f529-e22b-79c1-86d4-5af6c160f776",
+      "path": "/home/hermes/.codex/sessions/2026/10/01/rollout-2026-10-01T01-52-37-01a0f529-e22b-79c1-86d4-5af6c160f776.jsonl",
+      "agent": "/root/source_fingerprint_design",
+      "models": {
+        "gpt-6.1-sol": 1093435
+      },
+      "usage": {
+        "input_tokens": 1087450,
+        "cached_input_tokens": 1058816,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 5985,
+        "reasoning_output_tokens": 127,
+        "total_tokens": 1093435
+      },
+      "usage_records": 22,
+      "first_usage": 27,
+      "last_usage": 149
+    },
+    {
+      "id": "01a0f52a-5a17-75f0-b4cf-3549b359d2b0",
+      "path": "/home/hermes/.codex/sessions/2026/10/01/rollout-2026-10-01T01-53-08-01a0f52a-5a17-75f0-b4cf-3549b359d2b0.jsonl",
+      "agent": "/root/repeated_boundary_fixture",
+      "models": {
+        "gpt-6.1-sol": 1038674
+      },
+      "usage": {
+        "input_tokens": 1032978,
+        "cached_input_tokens": 1003520,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 5696,
+        "reasoning_output_tokens": 225,
+        "total_tokens": 1038674
+      },
+      "usage_records": 20,
+      "first_usage": 28,
+      "last_usage": 149
+    },
+    {
+      "id": "01a0f52f-3631-74e3-aff2-3566a9f26f7f",
+      "path": "/home/hermes/.codex/sessions/2026/10/01/rollout-2026-10-01T01-58-27-01a0f52f-3631-74e3-aff2-3566a9f26f7f.jsonl",
+      "agent": "/root/persist_source_fingerprint",
+      "models": {
+        "gpt-6.1-sol": 2109831
+      },
+      "usage": {
+        "input_tokens": 2099872,
+        "cached_input_tokens": 2048512,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 9959,
+        "reasoning_output_tokens": 676,
+        "total_tokens": 2109831
+      },
+      "usage_records": 36,
+      "first_usage": 34,
+      "last_usage": 255
+    },
+    {
+      "id": "01a0f53a-70d9-7802-831d-a93f27db1a39",
+      "path": "/home/hermes/.codex/sessions/2026/10/01/rollout-2026-10-01T02-10-43-01a0f53a-70d9-7802-831d-a93f27db1a39.jsonl",
+      "agent": "/root/coverage_durable_fingerprint",
+      "models": {
+        "gpt-6.1-sol": 3999210
+      },
+      "usage": {
+        "input_tokens": 3980631,
+        "cached_input_tokens": 3842048,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 18579,
+        "reasoning_output_tokens": 5379,
+        "total_tokens": 3999210
+      },
+      "usage_records": 53,
+      "first_usage": 41,
+      "last_usage": 396
+    },
+    {
+      "id": "01a0f53a-b30b-7af3-959e-a42fb61874c1",
+      "path": "/home/hermes/.codex/sessions/2026/10/01/rollout-2026-10-01T02-10-59-01a0f53a-b30b-7af3-959e-a42fb61874c1.jsonl",
+      "agent": "/root/collector_startup_transition_audit",
+      "models": {
+        "gpt-6.1-sol": 244895
+      },
+      "usage": {
+        "input_tokens": 243011,
+        "cached_input_tokens": 222976,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 1884,
+        "reasoning_output_tokens": 44,
+        "total_tokens": 244895
+      },
+      "usage_records": 5,
+      "first_usage": 41,
+      "last_usage": 70
+    },
+    {
+      "id": "01a0f543-17e6-7c61-9640-8deefccb5bb9",
+      "path": "/home/hermes/.codex/sessions/2026/10/01/rollout-2026-10-01T02-20-10-01a0f543-17e6-7c61-9640-8deefccb5bb9.jsonl",
+      "agent": "/root/pending_coverage_reconciliation",
+      "models": {
+        "gpt-6.1-sol": 10777376
+      },
+      "usage": {
+        "input_tokens": 10730389,
+        "cached_input_tokens": 10566528,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 46987,
+        "reasoning_output_tokens": 11786,
+        "total_tokens": 10777376
+      },
+      "usage_records": 105,
+      "first_usage": 48,
+      "last_usage": 746
+    },
+    {
+      "id": "01a0f544-f767-75a2-958b-c363469a3398",
+      "path": "/home/hermes/.codex/sessions/2026/10/01/rollout-2026-10-01T02-22-12-01a0f544-f767-75a2-958b-c363469a3398.jsonl",
+      "agent": "/root/full_universe_repeated_gc_probe",
+      "models": {
+        "gpt-6.1-sol": 12854837
+      },
+      "usage": {
+        "input_tokens": 12817803,
+        "cached_input_tokens": 12603904,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 37034,
+        "reasoning_output_tokens": 8231,
+        "total_tokens": 12854837
+      },
+      "usage_records": 139,
+      "first_usage": 48,
+      "last_usage": 957
+    }
+  ],
+  "calc_dashboard_unreconciled": {
+    "user_value": 395551723,
+    "native_tree_total": 400762719,
+    "compatibility_sqlite_tree_total": 396700340
+  },
+  "pi_continuation": {
+    "session": {
+      "path": "/home/hermes/.pi/agent/sessions/--home-hermes-projects-acp-ui--/2026-10-01T08-38-01-193Z_01a0f69d-06e8-72f0-b5d0-9a0fdc5f724c.jsonl",
+      "lines": 662,
+      "bytes": 1548872,
+      "maxline": 98982,
+      "id": "01a0f69d-06e8-72f0-b5d0-9a0fdc5f724c",
+      "first": "2026-10-01T08:38:34.776Z",
+      "last": "2026-10-02T12:11:58.957Z",
+      "usage": {
+        "calls": 318,
+        "input": 19523482,
+        "output": 74508,
+        "cacheRead": 31119476,
+        "cacheWrite": 0,
+        "totalTokens": 50717466
+      }
+    },
+    "daily": {
+      "2026-10-01": {
+        "input": 6543296,
+        "output": 43161,
+        "cacheRead": 13485555,
+        "cacheWrite": 0,
+        "totalTokens": 20072012,
+        "calls": 170
+      },
+      "2026-10-02": {
+        "input": 12980186,
+        "output": 31347,
+        "cacheRead": 17633921,
+        "cacheWrite": 0,
+        "totalTokens": 30645454,
+        "calls": 148
+      }
+    },
+    "tool_counts": {
+      "read": 15,
+      "bash": 263,
+      "write": 6
+    },
+    "porch_polls": 165,
+    "prompts": [
+      {
+        "line": 4,
+        "ts": "2026-10-01T08:38:26.822Z"
+      },
+      {
+        "line": 63,
+        "ts": "2026-10-01T09:13:47.458Z"
+      },
+      {
+        "line": 93,
+        "ts": "2026-10-01T09:54:32.769Z"
+      },
+      {
+        "line": 163,
+        "ts": "2026-10-01T11:38:32.728Z"
+      },
+      {
+        "line": 187,
+        "ts": "2026-10-01T14:05:00.358Z"
+      },
+      {
+        "line": 211,
+        "ts": "2026-10-01T16:10:43.893Z"
+      },
+      {
+        "line": 254,
+        "ts": "2026-10-01T17:06:18.325Z"
+      },
+      {
+        "line": 267,
+        "ts": "2026-10-01T17:15:06.923Z"
+      },
+      {
+        "line": 291,
+        "ts": "2026-10-01T17:40:39.198Z"
+      },
+      {
+        "line": 305,
+        "ts": "2026-10-01T18:12:11.415Z"
+      },
+      {
+        "line": 310,
+        "ts": "2026-10-01T18:20:45.891Z"
+      },
+      {
+        "line": 319,
+        "ts": "2026-10-01T18:30:14.657Z"
+      },
+      {
+        "line": 327,
+        "ts": "2026-10-01T18:38:14.220Z"
+      },
+      {
+        "line": 335,
+        "ts": "2026-10-01T18:47:28.336Z"
+      },
+      {
+        "line": 357,
+        "ts": "2026-10-02T05:13:39.135Z"
+      },
+      {
+        "line": 372,
+        "ts": "2026-10-02T05:24:58.707Z"
+      },
+      {
+        "line": 380,
+        "ts": "2026-10-02T05:35:21.614Z"
+      },
+      {
+        "line": 395,
+        "ts": "2026-10-02T05:44:45.292Z"
+      },
+      {
+        "line": 404,
+        "ts": "2026-10-02T05:58:48.701Z"
+      },
+      {
+        "line": 424,
+        "ts": "2026-10-02T06:10:59.031Z"
+      },
+      {
+        "line": 431,
+        "ts": "2026-10-02T06:21:57.797Z"
+      },
+      {
+        "line": 434,
+        "ts": "2026-10-02T06:37:12.042Z"
+      },
+      {
+        "line": 448,
+        "ts": "2026-10-02T06:43:31.450Z"
+      },
+      {
+        "line": 456,
+        "ts": "2026-10-02T06:52:44.825Z"
+      },
+      {
+        "line": 462,
+        "ts": "2026-10-02T07:00:53.975Z"
+      },
+      {
+        "line": 468,
+        "ts": "2026-10-02T07:09:13.807Z"
+      },
+      {
+        "line": 469,
+        "ts": "2026-10-02T07:17:32.726Z"
+      },
+      {
+        "line": 477,
+        "ts": "2026-10-02T07:25:10.847Z"
+      },
+      {
+        "line": 483,
+        "ts": "2026-10-02T07:36:43.123Z"
+      },
+      {
+        "line": 497,
+        "ts": "2026-10-02T07:47:32.024Z"
+      },
+      {
+        "line": 503,
+        "ts": "2026-10-02T07:58:11.344Z"
+      },
+      {
+        "line": 509,
+        "ts": "2026-10-02T08:06:53.329Z"
+      },
+      {
+        "line": 515,
+        "ts": "2026-10-02T08:15:42.497Z"
+      },
+      {
+        "line": 521,
+        "ts": "2026-10-02T08:24:15.083Z"
+      },
+      {
+        "line": 529,
+        "ts": "2026-10-02T08:31:50.441Z"
+      },
+      {
+        "line": 533,
+        "ts": "2026-10-02T08:40:05.609Z"
+      },
+      {
+        "line": 539,
+        "ts": "2026-10-02T08:41:35.731Z"
+      },
+      {
+        "line": 544,
+        "ts": "2026-10-02T08:51:57.453Z"
+      },
+      {
+        "line": 548,
+        "ts": "2026-10-02T09:01:01.483Z"
+      },
+      {
+        "line": 554,
+        "ts": "2026-10-02T09:09:46.878Z"
+      },
+      {
+        "line": 562,
+        "ts": "2026-10-02T09:17:56.944Z"
+      },
+      {
+        "line": 568,
+        "ts": "2026-10-02T09:28:03.577Z"
+      },
+      {
+        "line": 572,
+        "ts": "2026-10-02T09:36:17.913Z"
+      },
+      {
+        "line": 578,
+        "ts": "2026-10-02T09:44:06.055Z"
+      },
+      {
+        "line": 586,
+        "ts": "2026-10-02T09:51:52.929Z"
+      },
+      {
+        "line": 590,
+        "ts": "2026-10-02T10:01:21.196Z"
+      },
+      {
+        "line": 596,
+        "ts": "2026-10-02T10:09:18.880Z"
+      },
+      {
+        "line": 602,
+        "ts": "2026-10-02T10:17:03.637Z"
+      },
+      {
+        "line": 608,
+        "ts": "2026-10-02T10:27:22.849Z"
+      },
+      {
+        "line": 615,
+        "ts": "2026-10-02T10:36:27.041Z"
+      },
+      {
+        "line": 619,
+        "ts": "2026-10-02T10:44:23.525Z"
+      },
+      {
+        "line": 623,
+        "ts": "2026-10-02T10:52:25.698Z"
+      },
+      {
+        "line": 629,
+        "ts": "2026-10-02T11:00:18.605Z"
+      },
+      {
+        "line": 631,
+        "ts": "2026-10-02T11:08:20.956Z"
+      },
+      {
+        "line": 633,
+        "ts": "2026-10-02T11:16:25.469Z"
+      },
+      {
+        "line": 635,
+        "ts": "2026-10-02T11:24:50.490Z"
+      },
+      {
+        "line": 639,
+        "ts": "2026-10-02T11:32:02.410Z"
+      },
+      {
+        "line": 643,
+        "ts": "2026-10-02T11:40:02.111Z"
+      },
+      {
+        "line": 645,
+        "ts": "2026-10-02T11:47:53.645Z"
+      },
+      {
+        "line": 649,
+        "ts": "2026-10-02T11:55:22.352Z"
+      },
+      {
+        "line": 655,
+        "ts": "2026-10-02T12:11:34.493Z"
+      }
+    ]
+  },
+  "missing_artifact": "/home/hermes/.cache/acp-ui-supervision/2026-09-30-four-plans/pi-supervisor-events.jsonl",
+  "money_and_counterfactual": "Not established: invoice and equivalent single-model accepted run unavailable"
+}
