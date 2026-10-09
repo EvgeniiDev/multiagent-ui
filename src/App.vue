@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue';
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue';
 import { canPickFolder, pickFolder, loadKvStore, type KVStore } from './lib/host';
 import { useConfigStore } from './stores/config';
 import { useSessionStore } from './stores/session';
@@ -74,9 +74,70 @@ const scopeCwd = computed(() => projectsStore.activeProject?.path ?? '');
 // by the template to decide when the backdrop is interactive and by
 // onMounted to default the drawer closed.
 const isNarrowLayout = ref(false);
+// Browser bars and the soft keyboard change the visual viewport independently
+// of 100vh. Keep the entire composer inside the part the user can see.
+const viewportHeight = ref<number | null>(null);
+function syncViewportHeight() {
+  if (!isNarrowLayout.value) { viewportHeight.value = null; return; }
+  const viewport = window.visualViewport;
+  if (viewport && Math.abs(viewport.scale - 1) > 0.01) return;
+  const height = viewport?.height ?? window.innerHeight;
+  if (Number.isFinite(height) && height > 0) viewportHeight.value = height;
+}
+// Only user input in the transcript controls mobile navigation. Streamed
+// messages, replay and programmatic scroll corrections cannot hide it.
+const mobileNavigationHidden = ref(false);
+let navigationTravel = 0;
+let navigationTouch: { x: number; y: number } | null = null;
+function resetMobileNavigation() {
+  mobileNavigationHidden.value = false;
+  navigationTravel = 0;
+  navigationTouch = null;
+}
+watch([() => sessionStore.activeTabId, () => uiStore.activeView, isNarrowLayout, showSidebar], resetMobileNavigation);
+function navigationFeed(target: EventTarget | null): HTMLElement | null {
+  if (!isNarrowLayout.value || showSidebar.value || !(target instanceof Element)) return null;
+  const feed = target.closest<HTMLElement>('.messages-container');
+  return feed && feed.clientHeight > 0 && feed.scrollHeight > feed.clientHeight ? feed : null;
+}
+function moveMobileNavigation(delta: number, feed: HTMLElement) {
+  if (delta === 0) return;
+  if (Math.sign(delta) !== Math.sign(navigationTravel)) navigationTravel = 0;
+  navigationTravel += delta;
+  if (Math.abs(navigationTravel) < 16) return;
+  // Don't hide the only visible opener while the transcript is at its top.
+  mobileNavigationHidden.value = delta > 0 && feed.scrollTop > 0;
+  navigationTravel = 0;
+}
+function onNavigationWheel(event: WheelEvent) {
+  const feed = navigationFeed(event.target);
+  if (feed && Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
+    moveMobileNavigation(event.deltaY, feed);
+  }
+}
+function onNavigationTouchStart(event: TouchEvent) {
+  navigationTravel = 0;
+  const touch = event.touches.length === 1 ? event.touches[0] : null;
+  navigationTouch = touch && navigationFeed(event.target) ? { x: touch.clientX, y: touch.clientY } : null;
+}
+function onNavigationTouchMove(event: TouchEvent) {
+  const previous = navigationTouch;
+  const touch = event.touches.length === 1 ? event.touches[0] : null;
+  const feed = navigationFeed(event.target);
+  if (!previous || !touch || !feed) { navigationTouch = null; return; }
+  const delta = previous.y - touch.clientY;
+  navigationTouch = { x: touch.clientX, y: touch.clientY };
+  if (Math.abs(delta) > Math.abs(previous.x - touch.clientX)) moveMobileNavigation(delta, feed);
+}
+function onNavigationTouchEnd() {
+  navigationTouch = null;
+  navigationTravel = 0;
+}
+
 let narrowMql: MediaQueryList | null = null;
 function syncNarrowLayout() {
   if (narrowMql) isNarrowLayout.value = narrowMql.matches;
+  syncViewportHeight();
 }
 
 // Foreground-reconnect plumbing. Mobile OSes freeze the WebView when the
@@ -147,6 +208,8 @@ const pendingAuthAgentName = computed(() => sessionStore.pendingAuthAgentName);
 
 onMounted(async () => {
   window.addEventListener('popstate', restoreSessionFromHistory);
+  window.addEventListener('resize', syncViewportHeight);
+  window.visualViewport?.addEventListener('resize', syncViewportHeight);
   // Track viewport width so the sidebar can default-collapse into a drawer
   // on phones / narrow windows. We watch a MediaQueryList rather than
   // resize for correctness across orientation changes on iOS.
@@ -203,7 +266,7 @@ onMounted(async () => {
       // dropdown shows the URL agent while the header list still shows whatever
       // the last sync scoped to (the previous agent).
       try {
-        await sessionStore.setActiveAgent(focusSaved.agentName);
+        void sessionStore.setActiveAgent(focusSaved.agentName);
       } catch (e) {
         console.warn('Failed to scope sidebar to URL agent:', e);
       }
@@ -403,6 +466,8 @@ function handleDrawerViewClick(view: ViewId) {
 
 onBeforeUnmount(() => {
   window.removeEventListener('popstate', restoreSessionFromHistory);
+  window.removeEventListener('resize', syncViewportHeight);
+  window.visualViewport?.removeEventListener('resize', syncViewportHeight);
   if (narrowMql) {
     narrowMql.removeEventListener('change', syncNarrowLayout);
     narrowMql = null;
@@ -430,6 +495,7 @@ function clearError() {
   <div
     class="app-container"
     :class="{ 'narrow-layout': isNarrowLayout }"
+    :style="viewportHeight ? { '--app-viewport-height': `${viewportHeight}px` } : undefined"
     @pointerdown="drawerSwipe.start"
     @pointermove="drawerSwipe.move"
     @pointerup="drawerSwipe.end"
@@ -645,25 +711,20 @@ function clearError() {
     </button>
     
     <!-- Main Content Area -->
-    <div class="main-area">
-      <!-- No in-flow menu bar: touch opens the drawer from the left edge.
-           Keep a keyboard/screen-reader opener that appears when focused. -->
-      <UiButton
-        v-if="isNarrowLayout && !showSidebar"
-        class="drawer-menu-access"
-        variant="ghost"
-        icon
-        aria-label="Open menu"
-        aria-controls="app-sidebar"
-        :aria-expanded="showSidebar"
-        @click="openDrawer"
-      >☰</UiButton>
+    <div class="main-area" :style="{ '--mobile-navigation-height': isNarrowLayout && !mobileNavigationHidden ? '52px' : '0px' }">
       <div
         v-if="isNarrowLayout && !showSidebar"
         class="drawer-swipe-edge"
+        :style="{ top: mobileNavigationHidden ? '0' : '52px' }"
         aria-hidden="true"
       />
-      <main class="main-content">
+      <main class="main-content"
+        @wheel.capture.passive="onNavigationWheel"
+        @touchstart.capture.passive="onNavigationTouchStart"
+        @touchmove.capture.passive="onNavigationTouchMove"
+        @touchend.capture.passive="onNavigationTouchEnd"
+        @touchcancel.capture.passive="onNavigationTouchEnd"
+      >
         <!-- Reconnect banner takes priority over the error banner: while a
              reconnect is in progress we don't want a contradictory red
              "Connection lost" pill. -->
@@ -692,15 +753,26 @@ function clearError() {
           <p>Restoring view…</p>
         </div>
         <template v-else>
-        <!-- IDE-style tab strip: one tab per open session, each with its own
-             live connection — background tabs keep streaming and flag unread
-             output, pending permissions and dropped transports. On narrow
-             viewports a single tab doesn't earn a strip — the drawer's
-             SESSIONS list highlights the open session — so the strip only
-             appears with 2+ tabs. -->
-        <SessionTabs
-          v-if="uiStore.activeView === 'chat' && sessionStore.openTabs.length > (isNarrowLayout ? 1 : 0)"
-        />
+        <div
+          class="session-navigation"
+          :class="{ 'is-hidden': isNarrowLayout && mobileNavigationHidden }"
+          :inert="isNarrowLayout && mobileNavigationHidden"
+        >
+          <UiButton
+            v-if="isNarrowLayout"
+            variant="ghost"
+            icon
+            aria-label="Open menu"
+            aria-controls="app-sidebar"
+            :aria-expanded="showSidebar"
+            @click="openDrawer"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+          </UiButton>
+          <div class="navigation-items">
+            <SessionTabs v-if="uiStore.activeView === 'chat' && sessionStore.openTabs.length > 0" />
+          </div>
+        </div>
 
         <!-- Chat View per open tab. v-show (not v-if) keeps every mounted
              instance alive across switches: scroll position, expanded tool
@@ -708,15 +780,13 @@ function clearError() {
              tab is active — a replay streams live under isLoading before
              isConnected lands, and a failed connect keeps the tab's error
              visible. The composer disables itself when !isConnected. -->
-        <template v-if="uiStore.activeView === 'chat'">
           <ChatView
             v-for="rt in sessionStore.openTabs"
-            v-show="rt.id === sessionStore.activeTabId"
+            v-show="uiStore.activeView === 'chat' && rt.id === sessionStore.activeTabId"
             :key="rt.id"
             :runtime="rt"
             :sidebar-cwd="selectedCwd"
           />
-        </template>
 
         <!-- Welcome screen when no tabs are open at all. The New session
              dialog is reachable here too — a session start must not depend
@@ -835,6 +905,7 @@ html, body, #app {
 .app-container {
   display: flex;
   height: 100vh;
+  height: var(--app-viewport-height, 100dvh);
   overflow: hidden;
 }
 
@@ -1027,17 +1098,40 @@ html, body, #app {
   outline-offset: 2px;
 }
 
-/* Accessible menu opener is out of flow; keyboard focus reveals it. */
-.drawer-menu-access {
-  position: fixed;
-  top: calc(0.5rem + env(safe-area-inset-top, 0px));
-  left: 0.5rem;
-  z-index: 110;
-  clip-path: inset(50%);
+.session-navigation { display: contents; }
+.navigation-items { display: contents; }
+@media (max-width: 800px) {
+  .session-navigation {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex: 0 0 auto;
+    height: 52px;
+    max-height: 52px;
+    overflow: hidden;
+    transition: max-height 160ms ease;
+  }
+  .navigation-items {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-self: stretch;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+  }
+  .navigation-items > .tab-strip {
+    flex: 0 0 auto;
+    min-width: max-content;
+    align-self: stretch;
+  }
+  .session-navigation.is-hidden {
+    max-height: 0;
+    visibility: hidden;
+  }
 }
-
-.drawer-menu-access:focus-visible {
-  clip-path: none;
+@media (prefers-reduced-motion: reduce) {
+  .session-navigation { transition: none; }
 }
 
 .drawer-swipe-edge {

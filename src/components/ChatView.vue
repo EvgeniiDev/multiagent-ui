@@ -1153,13 +1153,13 @@ function planGlyph(status: string): string {
                 compact
                 @change="(id) => wfStore.setChatMode(id as 'chat' | 'workflow')"
               />
-              <span
-                v-if="contextLabel"
-                class="context-meter"
-                :title="contextTitle"
-              >{{ contextLabel }}</span>
             </UiComposerSettings>
             <span class="composer-spacer" aria-hidden="true"></span>
+            <span
+              v-if="contextLabel"
+              class="context-meter"
+              :title="contextTitle"
+            >{{ contextLabel }}</span>
             <button
               class="icon-btn send-btn"
               :disabled="preparingSend || (!inputText.trim() && attachments.length === 0 && !voiceCommitted && !voiceVolatile) || isReconnecting || !isConnected"
@@ -2002,7 +2002,7 @@ function planGlyph(status: string): string {
   .messages-container::before {
     content: '';
     position: fixed;
-    inset: 0 auto 0 0;
+    inset: var(--mobile-navigation-height, 0px) auto 0 0;
     width: 24px;
     z-index: 80;
     touch-action: pan-y pinch-zoom;
