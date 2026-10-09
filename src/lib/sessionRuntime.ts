@@ -1,3 +1,4 @@
+import { readSharedHistoryCache, writeSharedHistoryCache } from './historySharedCache';
 // Per-session runtime: everything one open chat tab needs — its ACP client,
 // transcript, tool calls, permission state, modes/models, startup progress
 // and the tail-cache replay merge. The session store creates one runtime per
@@ -12,7 +13,7 @@ import type { SavedSession, ChatMessage, ToolCallInfo, PermissionRequest, Sessio
 import { getTransportKind } from './types';
 import { attachmentFromContentBlock } from './attachments';
 import { recordTurnAttachments, turnAttachments, resolveCachedBytes } from './attachmentHistory';
-import { readHistoryCache, writeHistoryCache, dropHistoryCache } from './historyCache';
+import { readHistoryCache, storeHistoryCacheEntry, type HistoryCacheEntry, writeHistoryCache, dropHistoryCache } from './historyCache';
 import { AcpClientBridge, createAcpClient } from './acp-bridge';
 import { onAgentStderr, spawnAgent, killAgent } from './host';
 import { isDesktop } from './platform';
@@ -593,8 +594,9 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       historyFlushTimer = null;
     }
     lastHistoryFlushAt = Date.now();
-    if (!cacheScope || messages.value.length === 0) return;
-    writeHistoryCache(cacheScope.agent, cacheScope.sessionId, messages.value);
+    if (!cacheScope || messages.value.length === 0 || loadingHistory || replayMerge || historyCacheNote.value) return;
+    const entry = writeHistoryCache(cacheScope.agent, cacheScope.sessionId, messages.value);
+    if (entry) void writeSharedHistoryCache(cacheScope.agent, cacheScope.sessionId, entry);
   }
 
   /** At most one write per HISTORY_FLUSH_MS while chunks stream in. */
@@ -642,8 +644,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
    * coming replay into the side buffer. Returns false when nothing usable
    * is cached (the caller then takes the old clear-and-stream path).
    */
-  function hydrateHistoryCache(agent: string, sessionId: string): boolean {
-    const entry = readHistoryCache(agent, sessionId);
+  function hydrateHistoryCache(agent: string, sessionId: string, entry: HistoryCacheEntry | null = readHistoryCache(agent, sessionId)): boolean {
     if (!entry || entry.messages.length === 0) return false;
     // Clone: chunk appends and tool-call updates mutate message objects in
     // place — that must never write back into the stored copy.
@@ -682,7 +683,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       }
     }
     if (anchorIdx < 0) anchorIdx = cached.length - 1;
-    replayMerge = { sessionId, cached, anchorIdx, buffer: [] };
+    replayMerge = { sessionId, cached, anchorIdx, buffer: replayMerge?.buffer ?? [] };
     historyCacheNote.value = 'loading';
     return true;
   }
@@ -704,7 +705,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     const cached = merge.cached;
     const anchor = cached[merge.anchorIdx];
     let base = -1;
-    for (let ai = replayed.length - 1; ai >= 0; ai--) {
+    for (let ai = replayed.length - 1; anchor && ai >= 0; ai--) {
       const cand = replayed[ai];
       if (cand.role !== anchor.role || cand.content !== anchor.content) continue;
       const b = ai - merge.anchorIdx;
@@ -721,7 +722,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         break;
       }
     }
-    if (base < 0) {
+    if (cached.length && base < 0) {
       if (cacheScope) dropHistoryCache(cacheScope.agent, cacheScope.sessionId);
     } else {
       for (let i = 0; i < cached.length; i++) {
@@ -1386,8 +1387,18 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     // the connect + replay run; the replay streams into the merge buffer.
     cacheScope = { agent: savedSession.agentName, sessionId: savedSession.sessionId };
     historyCacheNote.value = null;
-    replayMerge = null;
-    hydrateHistoryCache(savedSession.agentName, savedSession.sessionId);
+    // Keep replay off the DOM even on a cache miss: its early chunks are
+    // oldest messages, not the newest tail the user opened this chat to see.
+    replayMerge = { sessionId: savedSession.sessionId, cached: [], anchorIdx: -1, buffer: [] };
+    historyCacheNote.value = 'loading';
+    const local = readHistoryCache(savedSession.agentName, savedSession.sessionId);
+    hydrateHistoryCache(savedSession.agentName, savedSession.sessionId, local);
+    const pendingMerge = replayMerge;
+    void readSharedHistoryCache(savedSession.agentName, savedSession.sessionId).then((entry) => {
+      if (!entry || replayMerge !== pendingMerge || entry.savedAt <= (local?.savedAt ?? 0)) return;
+      storeHistoryCacheEntry(savedSession.agentName, savedSession.sessionId, entry);
+      hydrateHistoryCache(savedSession.agentName, savedSession.sessionId, entry);
+    });
 
     try {
       const configStore = useConfigStore();

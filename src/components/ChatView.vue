@@ -417,15 +417,15 @@ function pinFeedToBottom(): void {
 // pinned: scrollTop lands back on scrollHeight - clientHeight).
 function growFeedWindow(): void {
   const feed = messagesContainer.value;
-  const top = feed?.scrollTop ?? 0;
-  const height = feed?.scrollHeight ?? 0;
+  if (!feed || feed.clientHeight === 0) return;
+  const top = feed.scrollTop;
+  const height = feed.scrollHeight;
   feedWindow.value = Math.min(feedWindow.value + FEED_WINDOW_STEP, messages.value.length);
-  if (!feed) return;
   void nextTick(() => {
     feed.scrollTop = top + (feed.scrollHeight - height);
     // A window too short to overflow the feed produces no scroll at all —
     // no event, no trigger, unreachable history. Grow until it can scroll.
-    if (feed.scrollHeight <= feed.clientHeight && hiddenCount.value > 0) {
+    if (feed.clientHeight > 0 && feed.scrollHeight <= feed.clientHeight && hiddenCount.value > 0) {
       growFeedWindow();
     }
   });
@@ -486,7 +486,7 @@ watch(messages, async (list) => {
   // cannot scroll (tail window fits the viewport) means history is
   // unreachable — kick the growth chain started.
   const feed = messagesContainer.value;
-  if (feed && feed.scrollHeight <= feed.clientHeight && hiddenCount.value > 0) {
+  if (feed && feed.clientHeight > 0 && feed.scrollHeight <= feed.clientHeight && hiddenCount.value > 0) {
     growFeedWindow();
   }
 }, { deep: true });

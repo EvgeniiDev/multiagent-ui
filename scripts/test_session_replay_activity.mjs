@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import * as vue from 'vue';
 import ts from 'typescript';
 
-let client, entries, cached, cacheWrites;
+let client, entries, cached, cacheWrites, sharedReader;
 let seq = 0;
 globalThis.__replayRuntimeDeps = {
   ref: vue.ref, computed: vue.computed, watch: vue.watch,
@@ -19,7 +19,10 @@ globalThis.__replayRuntimeDeps = {
   createAcpClient: async () => client,
   AcpClientBridge: class {},
   readHistoryCache: () => cached,
-  writeHistoryCache: (...args) => cacheWrites.push(args),
+  readSharedHistoryCache: (...args) => sharedReader(...args),
+  writeSharedHistoryCache: async () => {},
+  storeHistoryCacheEntry() {},
+  writeHistoryCache: (...args) => { cacheWrites.push(args); return null; },
   dropHistoryCache() {},
   turnAttachments: () => [], recordTurnAttachments() {},
   resolveCachedBytes: async () => {}, attachmentFromContentBlock: () => null,
@@ -48,7 +51,7 @@ function live() {
   assert.deepEqual(entries.filter(e => e.kind === 'tool-call' || e.kind === 'sync').map(e => e.title), ['new search', 'new title']);
 }
 beforeEach(() => {
-  entries = []; cached = null; cacheWrites = [];
+  entries = []; cached = null; cacheWrites = []; sharedReader = async () => null;
   client = {
     pendingPermissionRequest: vue.ref(null),
     async initialize() { return {}; },
@@ -136,6 +139,36 @@ test('both initial and authenticated retry loads suppress historical activity', 
   } finally { await rt.close(); }
 });
 
+
+test('shared newest tail arrives during replay, never replaced by its older prefix', async () => {
+  const tail = { version: 1, savedAt: Date.now(), userTurnBase: 0, messages: [
+    { id: 'shared-user', role: 'user', content: 'old question', timestamp: 1 },
+    { id: 'shared-agent', role: 'assistant', content: 'old answer', timestamp: 1 },
+  ] };
+  let deliverShared, finishLoad, beginLoad;
+  sharedReader = () => new Promise(resolve => { deliverShared = resolve; });
+  const begun = new Promise(resolve => { beginLoad = resolve; });
+  client.loadSession = () => { beginLoad(); return new Promise(resolve => { finishLoad = resolve; }); };
+  const rt = createSessionRuntime(deps);
+  try {
+    const restoring = rt.resume({ ...saved });
+    await begun;
+    emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'old question' } });
+    assert.equal(rt.messages.value.length, 0, 'cold replay prefixes stay off the rendered feed');
+    deliverShared(tail);
+    await vue.nextTick();
+    assert.equal(rt.messages.value.at(-1).content, 'old answer');
+    assert.equal(rt.historyCacheNote.value, 'loading');
+    assert.equal(cacheWrites.length, 0, 'replay cannot overwrite the newest tail cache');
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'old answer' } });
+    assert.equal(rt.messages.value.at(-1).id, 'shared-agent');
+    finishLoad({}); await restoring;
+    assert.equal(rt.messages.value.length, 2);
+    assert.equal(rt.messages.value.at(-1).id, 'shared-agent');
+    assert.equal(rt.historyCacheNote.value, null);
+  } finally { await rt.close(); }
+});
+
 test('tool calls split narration into ordered parts instead of gluing text', async () => {
   const rt = createSessionRuntime(deps);
   try {
@@ -194,4 +227,15 @@ test('plan updates land as a card pinned where the agent published it', async ()
     assert.deepEqual(m.segments.map(s => s.kind), ['text', 'plan', 'text']);
     assert.equal(m.plan[0].status, 'completed');
   } finally { await rt.close(); }
+});
+
+test('late shared snapshot cannot resurrect a closed or settled runtime', async () => {
+  let deliver;
+  sharedReader = () => new Promise(resolve => { deliver = resolve; });
+  const rt = createSessionRuntime(deps);
+  await rt.resume({ ...saved });
+  await rt.close();
+  deliver({ version: 1, savedAt: Date.now(), userTurnBase: 0, messages: [{ id: 'late', role: 'user', content: 'late cached data', timestamp: 1 }] });
+  await vue.nextTick();
+  assert.equal(rt.messages.value.length, 0);
 });

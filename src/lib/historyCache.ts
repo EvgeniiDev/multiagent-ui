@@ -27,6 +27,8 @@ const VERSION = 1;
 
 /** Keep at most this many tail messages per session (oldest dropped first). */
 const MAX_MESSAGES = 100;
+const MAX_ENTRY_CHARS = 512 * 1024;
+const MAX_TOOL_DETAIL_CHARS = 16 * 1024;
 /** Entries not opened within this window are evicted on store init. */
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 /** Whole-cache budget; oldest sessions are evicted first when over it. */
@@ -61,7 +63,14 @@ function storageAvailable(): boolean {
 function toCachedMessages(messages: ChatMessage[]): ChatMessage[] {
   return tailOf(messages).map((m) => ({
     ...m,
-    toolCalls: m.toolCalls?.map((t) => ({ ...t })),
+    toolCalls: m.toolCalls?.map((t) => {
+      const cached = { ...t };
+      // Large tool bodies are restored by the background replay; headings,
+      // identities and status are enough to paint the cached feed quickly.
+      if ((cached.rawOutput?.length ?? 0) > MAX_TOOL_DETAIL_CHARS) delete cached.rawOutput;
+      if (cached.rawInput && JSON.stringify(cached.rawInput).length > MAX_TOOL_DETAIL_CHARS) delete cached.rawInput;
+      return cached;
+    }),
     attachments: m.attachments?.map((a) => {
       const cached: typeof a = { ...a };
       delete cached.previewUrl;
@@ -101,26 +110,32 @@ export function readHistoryCache(
 }
 
 /** Persist the tail of `messages`. Never throws (quota/private mode). */
+export function storeHistoryCacheEntry(agentName: string, sessionId: string, entry: HistoryCacheEntry): void {
+  if (!storageAvailable()) return;
+  try {
+    localStorage.setItem(historyCacheKey(agentName, sessionId), JSON.stringify(entry));
+  } catch (e) {
+    console.warn('history cache write failed:', e);
+  }
+}
+
 export function writeHistoryCache(
   agentName: string,
   sessionId: string,
   messages: ChatMessage[]
-): void {
-  if (!storageAvailable() || messages.length === 0) return;
-  try {
-    const entry: HistoryCacheEntry = {
-      version: VERSION,
-      savedAt: Date.now(),
-      userTurnBase: countUser(messages) - countUser(tailOf(messages)),
-      messages: toCachedMessages(messages),
-    };
-    localStorage.setItem(
-      historyCacheKey(agentName, sessionId),
-      JSON.stringify(entry)
-    );
-  } catch (e) {
-    console.warn('history cache write failed:', e);
+): HistoryCacheEntry | null {
+  if (messages.length === 0) return null;
+  const entry: HistoryCacheEntry = {
+    version: VERSION, savedAt: Date.now(),
+    userTurnBase: countUser(messages) - countUser(tailOf(messages)),
+    messages: toCachedMessages(messages),
+  };
+  while (entry.messages.length > 1 && JSON.stringify(entry).length > MAX_ENTRY_CHARS) {
+    if (entry.messages.shift()?.role === 'user') entry.userTurnBase++;
   }
+  if (JSON.stringify(entry).length > MAX_ENTRY_CHARS) return null;
+  storeHistoryCacheEntry(agentName, sessionId, entry);
+  return entry;
 }
 
 /** Forget one session's tail (diverged replay, deleted session). */
