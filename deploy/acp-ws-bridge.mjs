@@ -60,6 +60,7 @@
 //
 // Usage: node acp-ws-bridge.mjs --port 25901 --cmd "hermes acp" [--root /home/x]
 //        [--idle-timeout-ms 180000] [--agent-name "Hermes Agent"]
+//        [--defer-load-on-prompt]
 // Env:   ACP_TOKEN_METER=0 disables metering (default on),
 //        ACP_STATE_URL=http://127.0.0.1:25900 state server for the ledger,
 //        ACP_TOKEN_METER_INTERVAL_MS=10000 min write interval per session.
@@ -82,6 +83,18 @@ const port = Number(argValue('--port', ''));
 const command = String(argValue('--cmd', '') || '').trim();
 const root = path.resolve(String(argValue('--root', os.homedir())));
 const home = os.homedir();
+
+// --defer-load-on-prompt: queue a session/load|resume for a session whose
+// session/prompt is still in flight instead of forwarding it immediately —
+// see deferredLoads for why. Devin needs it (its load rebuilds the session
+// agent and kills the live turn); agents whose load merely resumes a live
+// turn must NOT have their open-tab stalled, so it stays opt-in there.
+// Auto-enabled when the wrapped command is devin — a plain container restart
+// picks up the fix without a compose recreate.
+const DEFER_LOAD_DURING_PROMPT =
+  process.argv.includes('--defer-load-on-prompt') ||
+  (process.env.ACP_DEFER_LOAD_ON_PROMPT ?? '0') === '1' ||
+  /\bdevin\b/.test(command);
 
 if (!Number.isInteger(port) || port <= 0 || !command) {
   console.error('usage: acp-ws-bridge.mjs --port <port> --cmd "<command>" [--root <dir>]');
@@ -629,9 +642,87 @@ const WATCHDOG_TICK_MS = Math.min(30_000, Math.max(500, Math.floor(IDLE_TIMEOUT_
  * { method, ws, origId }. The bridged id is what the child sees; origId is
  * what the requesting socket sent and gets restored into the response. */
 const pendingClientReqs = new Map();
-/** agent -> client requests awaiting our response (agent is blocked on us). */
-const pendingAgentReqs = new Set();
+/** agent -> client requests awaiting our response (agent is blocked on us):
+ * bridged id -> { line, sid }. The raw frame is kept so a client that just
+ * connected can be handed a request it never saw (deferLoad re-broadcast). */
+const pendingAgentReqs = new Map();
 let lastTrafficAt = Date.now();
+
+/** sessionId -> queued { ws, line } `session/load`/`session/resume` frames
+ * held back while that session has a `session/prompt` in flight. Devin's acp
+ * server answers a load by REBUILDING the session agent: the in-flight prompt
+ * then fails with "Agent communication channel closed" and the turn dies.
+ * Verified 2026-10-09 (devin 3000.11.3): a second client's session/load kills
+ * the running turn outright — no updates ever follow. Since every reconnect
+ * (page reload, second device, auto-reconnect after a socket drop) replays
+ * `session/load` unconditionally, each flap used to murder every live Devin
+ * turn. Holding the load until the prompt settles keeps the turn alive — the
+ * reconnecting tab just finishes connecting when the turn ends. */
+const deferredLoads = new Map();
+
+/** True while a `session/prompt` request for `sid` is unanswered. */
+function promptInFlight(sid) {
+  for (const req of pendingClientReqs.values()) {
+    if (req.method === 'session/prompt' && req.sid === sid) return true;
+  }
+  return false;
+}
+
+/** Hold a session/load|resume frame until the session's prompt settles. */
+function deferLoad(sid, ws, line) {
+  let q = deferredLoads.get(sid);
+  if (!q) {
+    q = [];
+    deferredLoads.set(sid, q);
+  }
+  q.push({ ws, line });
+  log(`deferring session load for ${sid} — prompt in flight (${q.length} queued)`);
+  // The turn may be waiting on an agent->client request (permission prompt,
+  // fs/read_text_file) that was broadcast before this socket existed — replay
+  // it so the loading client can answer and let the turn finish instead of
+  // both sides waiting forever.
+  for (const req of pendingAgentReqs.values()) {
+    if (req.sid === sid) {
+      try {
+        ws.send(req.line);
+      } catch {
+        /* socket dying — the close handler cleans up */
+      }
+    }
+  }
+}
+
+/** Forward queued loads whose sessions no longer have an in-flight prompt.
+ * With a `sid` argument only that session is checked; without, all queued
+ * sessions (used by the close handler, where a dead socket may have held the
+ * last pending prompt). */
+function flushDeferredLoads(sid) {
+  const sids = sid ? [sid] : [...deferredLoads.keys()];
+  for (const s of sids) {
+    const q = deferredLoads.get(s);
+    if (!q) continue;
+    deferredLoads.delete(s);
+    if (promptInFlight(s)) {
+      // A newer prompt started since this queue formed — keep waiting.
+      deferredLoads.set(s, q);
+      continue;
+    }
+    for (const entry of q) {
+      const ws = entry.ws;
+      if (!clients.has(ws) || ws.readyState !== 1) continue;
+      try {
+        const out = noteOutbound(entry.line + '\n', ws);
+        if (out) {
+          if (!child) spawnChild();
+          child.stdin.write(out);
+        }
+        log(`released deferred session load for ${s}`);
+      } catch (e) {
+        log('deferred load forward failed:', e.message);
+      }
+    }
+  }
+}
 
 /** Any frame on the wire — request, response, or notification — is progress. */
 function noteTraffic() {
@@ -686,11 +777,26 @@ function noteOutbound(payload, ws) {
       }
       continue;
     }
+    if (msg && DEFER_LOAD_DURING_PROMPT &&
+        (msg.method === 'session/load' || msg.method === 'session/resume')) {
+      const sid = msg.params?.sessionId;
+      if (typeof sid === 'string' && promptInFlight(sid)) {
+        // Queue, don't forward — the in-flight turn survives; this frame
+        // reaches the child when the prompt settles (flushDeferredLoads).
+        // Deferral happens BEFORE the request-id rewrite, so the stored line
+        // still carries the caller's original id.
+        deferLoad(sid, ws, trimmed);
+        continue;
+      }
+    }
     if (msg && msg.id !== undefined && msg.id !== null && typeof msg.method === 'string') {
       const bridged = nextBridgeId++;
-      pendingClientReqs.set(bridged, { method: msg.method, ws, origId: msg.id });
-      msg.id = bridged;
       const sid = msg.params?.sessionId;
+      pendingClientReqs.set(bridged, {
+        method: msg.method, ws, origId: msg.id,
+        sid: typeof sid === 'string' ? sid : undefined,
+      });
+      msg.id = bridged;
       if (typeof sid === 'string' &&
           (msg.method === 'session/load' || msg.method === 'session/prompt')) {
         sessionOwner.set(sid, ws);
@@ -740,7 +846,10 @@ function noteInbound(line) {
   }
   if (!msg || msg.id === undefined || msg.id === null) return { msg, dest: null };
   if (typeof msg.method === 'string') {
-    pendingAgentReqs.add(msg.id);
+    const sid = msg.params?.sessionId;
+    pendingAgentReqs.set(msg.id, {
+      line, sid: typeof sid === 'string' ? sid : undefined,
+    });
     return { msg, dest: null };
   }
   const req = pendingClientReqs.get(msg.id) ?? null;
@@ -752,6 +861,10 @@ function noteInbound(line) {
     if (req.method === 'session/new') {
       const sid = msg.result?.sessionId;
       if (typeof sid === 'string') sessionOwner.set(sid, req.ws);
+    }
+    // A settled prompt releases any session/load queued behind it.
+    if (req.method === 'session/prompt' && typeof req.sid === 'string') {
+      flushDeferredLoads(req.sid);
     }
   }
   return { msg, dest: req ? req.ws : null, rewritten: !!req };
@@ -1000,6 +1113,14 @@ wss.on('connection', (ws) => {
     for (const [bid, req] of pendingClientReqs) {
       if (req.ws === ws) pendingClientReqs.delete(bid);
     }
+    // Queued loads owned by this socket die with it; loads blocked on a prompt
+    // this socket abandoned can finally go through.
+    for (const [sid, q] of deferredLoads) {
+      const kept = q.filter((e) => e.ws !== ws);
+      if (kept.length) deferredLoads.set(sid, kept);
+      else deferredLoads.delete(sid);
+    }
+    flushDeferredLoads();
     log(`client closed (${clients.size} active)`);
   });
 });
