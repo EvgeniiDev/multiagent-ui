@@ -51,8 +51,13 @@ namespacing on the shared child. Do not break either.
 
 `npm run build:web` may run on the host or inside the agent container.
 The live `dist-web/` is bind-mounted into the `web` container; verify its
-actual mount before publishing. Publish built assets to that mount, keep
-older hashed assets for open tabs, and replace `index.html` last.
+actual mount before publishing (`docker inspect acp-ui-web-1` Mounts —
+2026-10-09: the live container was still bound to the deleted
+`acp-ui-lead-integration` worktree and 500ing every request; publish only
+to the path the container actually mounts). Publish built assets to that
+mount, keep older hashed assets for open tabs, and replace `index.html`
+last. Never restart the `web` container while its mount source is missing:
+the recreate fails and leaves the container exited.
 The Docker socket allows agents inside ACP UI to inspect and manage the
 existing stack; service lifecycle still follows the Compose rules above.
 
