@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue';
+import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount, type Directive } from 'vue';
 import { marked, Renderer, type Tokens } from 'marked';
 import { useSessionStore } from '../stores/session';
 import { useActivityStore } from '../stores/activity';
@@ -20,7 +20,7 @@ import type { SessionTab } from '../lib/sessionRuntime';
 import { promptRecorded } from '../lib/promptError';
 import type { SttPartial } from '../lib/stt';
 import { transcriptSeparator, insertDictation, moveDictationAnchor } from '../lib/dictationText';
-import { renderFlowchart } from '../lib/flowchart';
+import { hydrateMermaid } from '../lib/mermaid';
 
 const props = defineProps<{
   /** The tab's session runtime — one ChatView instance per open tab, kept
@@ -876,24 +876,30 @@ function toggleToolCall(toolCallId: string): void {
   }
 }
 
-// `flowchart`/`graph`/`mermaid` fences render as inline SVG; anything we
-// can't parse falls through to the default code block. A bare fence whose
-// first line is a flowchart header counts too — agents often skip the tag.
+// Diagram fences emit a `.mermaid-src` placeholder (an escaped <pre>, so a
+// source mermaid rejects still shows as an ordinary code block); the
+// v-mermaid directive swaps it for rendered SVG once it lands in the DOM.
+// A bare fence opening with a diagram keyword counts — agents often skip
+// the language tag.
+const DIAGRAM_RE =
+  /^\s*(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|gitGraph|mindmap|timeline|quadrantChart|requirementDiagram|C4\w+|sankey(?:-beta)?|xychart(?:-beta)?|block(?:-beta)?|packet(?:-beta)?|kanban|architecture(?:-beta)?|treemap|radar(?:-beta)?)\b/i;
+
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+}
+
 const mdRenderer = new Renderer();
 mdRenderer.code = function (this: Renderer, token: Tokens.Code): string {
   const lang = (token.lang ?? '').trim().toLowerCase();
-  const wantsFlow =
-    lang === 'mermaid' || lang === 'flowchart' || lang === 'graph' ||
-    (!lang && /^\s*(?:flowchart|graph)\b/i.test(token.text));
-  if (wantsFlow) {
-    try {
-      const svg = renderFlowchart(token.text);
-      if (svg) return svg;
-    } catch {
-      /* fall back to the code block below */
-    }
+  if (lang === 'mermaid' || lang === 'flowchart' || lang === 'graph' || (!lang && DIAGRAM_RE.test(token.text))) {
+    return `<pre class="mermaid-src">${escapeHtml(token.text)}</pre>`;
   }
   return Renderer.prototype.code.call(this, token);
+};
+
+const vMermaid: Directive<HTMLElement> = {
+  mounted: (el) => hydrateMermaid(el),
+  updated: (el) => hydrateMermaid(el),
 };
 
 function renderMarkdown(content: string): string {
@@ -972,7 +978,7 @@ function planGlyph(status: string): string {
             <span class="thought-label">{{ isThoughtExpanded(message.id) ? 'Hide thinking' : 'Thinking' }}</span>
           </button>
           <div v-if="isThoughtExpanded(message.id)" class="thought-content">
-            <div v-html="renderMarkdown(message.thought)" />
+            <div v-mermaid v-html="renderMarkdown(message.thought)" />
           </div>
         </div>
 
@@ -985,6 +991,7 @@ function planGlyph(status: string): string {
               v-if="item.kind === 'text'"
               class="message-content"
               :class="{ 'stream-tail': item.last }"
+              v-mermaid
               v-html="renderMarkdown(item.text)"
             />
             <ToolCallChip
@@ -1018,6 +1025,7 @@ function planGlyph(status: string): string {
         <div
           v-else-if="message.content"
           class="message-content"
+          v-mermaid
           v-html="renderMarkdown(message.content)"
         />
       </div>
@@ -1547,48 +1555,20 @@ function planGlyph(status: string): string {
   font-size: inherit;
 }
 
-/* Flowchart diagrams (flowchart/graph/mermaid fences) render as inline
- * SVG through lib/flowchart.ts. Colors ride the theme tokens so light and
- * dark stay readable; an oversized diagram scrolls inside the message. */
-.message-content :deep(.flowchart) {
+/* Mermaid diagrams hydrate asynchronously from `.mermaid-src` code blocks
+ * (lib/mermaid.ts); until then they render exactly like a code fence. An
+ * oversized diagram scrolls inside the message instead of widening it. */
+.message-content :deep(.mermaid),
+.thought-content :deep(.mermaid) {
   margin: 0.5rem 0;
   overflow-x: auto;
 }
 
-.message-content :deep(.flowchart svg) {
+.message-content :deep(.mermaid svg),
+.thought-content :deep(.mermaid svg) {
   display: block;
   max-width: 100%;
   height: auto;
-}
-
-.message-content :deep(.flowchart .fc-node) {
-  fill: var(--bg-main);
-  stroke: var(--border-strong);
-  stroke-width: 1.2;
-}
-
-.message-content :deep(.flowchart .fc-text) {
-  fill: var(--text-primary);
-  font: 13px var(--font-ui, sans-serif);
-}
-
-.message-content :deep(.flowchart .fc-edge) {
-  fill: none;
-  stroke: var(--text-secondary);
-  stroke-width: 1.2;
-}
-
-.message-content :deep(.flowchart .fc-arrow) {
-  fill: var(--text-secondary);
-}
-
-.message-content :deep(.flowchart .fc-elabel) {
-  fill: var(--text-secondary);
-  font: 12px var(--font-ui, sans-serif);
-  /* Knockout under the label keeps it readable where it crosses an edge. */
-  paint-order: stroke;
-  stroke: var(--bg-assistant);
-  stroke-width: 4px;
 }
 
 .loading-indicator {
