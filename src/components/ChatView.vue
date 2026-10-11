@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue';
-import { marked } from 'marked';
+import { marked, Renderer, type Tokens } from 'marked';
 import { useSessionStore } from '../stores/session';
 import { useActivityStore } from '../stores/activity';
 import { isMobile } from '../lib/platform';
@@ -20,6 +20,7 @@ import type { SessionTab } from '../lib/sessionRuntime';
 import { promptRecorded } from '../lib/promptError';
 import type { SttPartial } from '../lib/stt';
 import { transcriptSeparator, insertDictation, moveDictationAnchor } from '../lib/dictationText';
+import { renderFlowchart } from '../lib/flowchart';
 
 const props = defineProps<{
   /** The tab's session runtime — one ChatView instance per open tab, kept
@@ -875,8 +876,28 @@ function toggleToolCall(toolCallId: string): void {
   }
 }
 
+// `flowchart`/`graph`/`mermaid` fences render as inline SVG; anything we
+// can't parse falls through to the default code block. A bare fence whose
+// first line is a flowchart header counts too — agents often skip the tag.
+const mdRenderer = new Renderer();
+mdRenderer.code = function (this: Renderer, token: Tokens.Code): string {
+  const lang = (token.lang ?? '').trim().toLowerCase();
+  const wantsFlow =
+    lang === 'mermaid' || lang === 'flowchart' || lang === 'graph' ||
+    (!lang && /^\s*(?:flowchart|graph)\b/i.test(token.text));
+  if (wantsFlow) {
+    try {
+      const svg = renderFlowchart(token.text);
+      if (svg) return svg;
+    } catch {
+      /* fall back to the code block below */
+    }
+  }
+  return Renderer.prototype.code.call(this, token);
+};
+
 function renderMarkdown(content: string): string {
-  return marked.parse(content, { async: false }) as string;
+  return marked.parse(content, { async: false, renderer: mdRenderer }) as string;
 }
 
 /** Status glyph for a plan card entry — same quiet register as the chevrons. */
@@ -1524,6 +1545,50 @@ function planGlyph(status: string): string {
   background: none;
   padding: 0;
   font-size: inherit;
+}
+
+/* Flowchart diagrams (flowchart/graph/mermaid fences) render as inline
+ * SVG through lib/flowchart.ts. Colors ride the theme tokens so light and
+ * dark stay readable; an oversized diagram scrolls inside the message. */
+.message-content :deep(.flowchart) {
+  margin: 0.5rem 0;
+  overflow-x: auto;
+}
+
+.message-content :deep(.flowchart svg) {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.message-content :deep(.flowchart .fc-node) {
+  fill: var(--bg-main);
+  stroke: var(--border-strong);
+  stroke-width: 1.2;
+}
+
+.message-content :deep(.flowchart .fc-text) {
+  fill: var(--text-primary);
+  font: 13px var(--font-ui, sans-serif);
+}
+
+.message-content :deep(.flowchart .fc-edge) {
+  fill: none;
+  stroke: var(--text-secondary);
+  stroke-width: 1.2;
+}
+
+.message-content :deep(.flowchart .fc-arrow) {
+  fill: var(--text-secondary);
+}
+
+.message-content :deep(.flowchart .fc-elabel) {
+  fill: var(--text-secondary);
+  font: 12px var(--font-ui, sans-serif);
+  /* Knockout under the label keeps it readable where it crosses an edge. */
+  paint-order: stroke;
+  stroke: var(--bg-assistant);
+  stroke-width: 4px;
 }
 
 .loading-indicator {
