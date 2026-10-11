@@ -23,8 +23,8 @@
   },
   "roots": {
     "env": {
-      "hostPath": "/home/hermes/.hermes/acp-ui-state/f1-env",
-      "mountPath": "/home/hermes/.hermes/acp-ui-state/f1-env",
+      "hostPath": "/home/hermes/projects/acp-ui-state/f1-env",
+      "mountPath": "/home/hermes/projects/acp-ui-state/f1-env",
       "access": "rw",
       "purpose": "environment root: workers/, runtime/, capability/, depsets/, canonical/, controller/"
     },

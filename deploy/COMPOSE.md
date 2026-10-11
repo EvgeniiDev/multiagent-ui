@@ -40,7 +40,7 @@ cron заменяет `acp-pm-wakeup.timer` (`OnBootSec=10min`, `OnUnitInactiveS
   opencode, pi-acp, gigaam-venv bin), `/home/hermes/.local/share/devin`
   (бинарь devin), `/usr/bin/pi` (ro).
 - TLS: `/home/hermes/.hermes/acp-tls:ro` (`ACP_TLS_DIR`).
-- Данные: `/home/hermes/.hermes/acp-ui-state:rw` (`STATE_DIR`).
+- Данные: `/home/hermes/projects/acp-ui-state:rw` (`STATE_DIR`).
 - Код: `.` → `/repo:ro` (серверы не меняются, dist-web пересобирается на хосте).
 
 PATH в node-контейнерах: `/home/hermes/.local/bin:...` как в юнитах.

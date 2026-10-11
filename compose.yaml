@@ -132,7 +132,7 @@ services:
       HOME: /home/hermes
       PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       NODE_PATH: /home/hermes/.local/lib/node_modules
-      STATE_DIR: /home/hermes/.hermes/acp-ui-state
+      STATE_DIR: /home/hermes/projects/acp-ui-state
       PORT: "25900"
       # External porch-run reader root (read-only mount below). Explicit so
       # it does not depend on HOME/XDG resolution; managed runs are NOT here —
@@ -202,7 +202,7 @@ services:
       # absolute path is visible in both namespaces via the projects mount.
       ACP_WORKSPACE_DIR: /home/hermes/projects/.acp-workspaces
       # Persistent execution root for porch registry/output/attempt dirs.
-      ACP_EXEC_DIR: /home/hermes/.hermes/acp-ui-state/execution
+      ACP_EXEC_DIR: /home/hermes/projects/acp-ui-state/execution
     # Volumes REPLACE the anchor list, so repeat it and add runner-only mounts:
     # ~/.codex (Codex auth + session store) and ~/.gitconfig (commit identity).
     volumes:
@@ -288,7 +288,7 @@ services:
       - ./deploy/execution/environment.config.json:/run/f1/environment.config.json:ro
       # env root at the IDENTICAL host path — controller-written pointers
       # (worktree .git files, worker dirs) resolve verbatim on the host.
-      - /home/hermes/.hermes/acp-ui-state/f1-env:/home/hermes/.hermes/acp-ui-state/f1-env
+      - /home/hermes/projects/acp-ui-state/f1-env:/home/hermes/projects/acp-ui-state/f1-env
       - /home/hermes/projects:/home/hermes/projects:ro
       - /home/hermes/.pi/agent:/ro/pi-agent:ro
       - /home/hermes/.pi/agent/npm/node_modules:/ro/pi-ext:ro

@@ -15,12 +15,12 @@
 #     /home/hermes/projects/acp-ui-lead-integration so
 #     /repo/deploy/execution/environment.config.json exists in BOTH
 #     containers (prod /repo mount is that checkout, read-only).
-#   * real production STATE_DIR is kept: /home/hermes/.hermes/acp-ui-state
+#   * real production STATE_DIR is kept: /home/hermes/projects/acp-ui-state
 #     (no isolated -u7 tree here — this overlay never redirects state).
 #   * F1 controller + egress-gw already up in project acp-ui-agent-modes
-#     (profile f1); f1-env root at /home/hermes/.hermes/acp-ui-state/f1-env
-#     is reachable through the existing ~/.hermes rw mount (verified
-#     2026-10-03: prod runner uid reads token + socket at that path).
+#     (profile f1); f1-env root at /home/hermes/projects/acp-ui-state/f1-env
+#     is mounted at that exact path into the controller (and shared with the
+#     runner); no dependence on the broad ~/.hermes mount.
 #   * host provisioning done per deploy/COMPOSE.md (ops token, ce scratch).
 #
 # Scope: state + runner ONLY. Every other service untouched

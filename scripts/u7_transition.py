@@ -66,7 +66,7 @@ TEST_EXEC_DIR = TEST_STATE_DIR / "execution"
 TEST_WS_DIR = Path("/home/hermes/projects/.acp-workspaces-u7")
 TEST_OPS_DIR = Path("/home/hermes/.acp-ops-u7")
 SANDBOX = Path("/home/hermes/projects/acp-u7-sandbox")
-LIVE_STATE_DIR = "/home/hermes/.hermes/acp-ui-state"
+LIVE_STATE_DIR = "/home/hermes/projects/acp-ui-state"
 TEST_IMAGE = "acp-ui-u7:latest"
 PORCH = os.path.expanduser(
     "~/.pi/agent/skills/pragmatic-orchestration/scripts/porch")
