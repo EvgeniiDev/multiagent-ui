@@ -57,6 +57,17 @@ const BRIDGE_PORTS: Record<string, number> = {
   'Codex': 25907,
 };
 
+/**
+ * Session modes new panels should open in, per bridge agent. `devin acp`
+ * reports `accept-edits` as its initial mode regardless of its launch env,
+ * so the panel asks for `bypass` itself right after `session/new` — that is
+ * what makes the mode a UI default rather than a hard override (the picker
+ * stays free to move it afterwards).
+ */
+const AGENT_DEFAULT_MODES: Record<string, string> = {
+  'Devin': 'bypass',
+};
+
 function defaultWebConfig(): AgentsConfig {
   const hostname =
     (typeof location !== 'undefined' && location.hostname) || '127.0.0.1';
@@ -65,7 +76,11 @@ function defaultWebConfig(): AgentsConfig {
     // Over https the browser blocks ws:// as mixed content, so the seed
     // points at the bridge's TLS front (port + 10) — over http the raw
     // ws:// URL comes back untouched.
-    agents[name] = { transport: 'websocket', url: toSecureUrl(`ws://${hostname}:${port}/`) };
+    agents[name] = {
+      transport: 'websocket',
+      url: toSecureUrl(`ws://${hostname}:${port}/`),
+      defaultMode: AGENT_DEFAULT_MODES[name],
+    };
   }
   return { agents };
 }
@@ -77,7 +92,18 @@ function loadWebConfig(): AgentsConfig {
   try {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object' && parsed.agents) {
-      return parsed as AgentsConfig;
+      const config = parsed as AgentsConfig;
+      // Backfill deployment defaults into configs stored before the fields
+      // existed — a stored config wins over the seed wholesale, so seeded
+      // agents missing the new key get it re-applied here. Anything the
+      // stored entry already carries is left alone.
+      for (const [name, mode] of Object.entries(AGENT_DEFAULT_MODES)) {
+        const agent = config.agents[name];
+        if (agent && agent.defaultMode === undefined) {
+          agent.defaultMode = mode;
+        }
+      }
+      return config;
     }
   } catch (e) {
     console.warn('Failed to parse stored agents config:', e);

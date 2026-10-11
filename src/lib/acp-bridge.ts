@@ -436,6 +436,15 @@ export class AcpClientBridge implements Client {
     await this.sendRequest('session/set_mode', params);
   }
 
+  /**
+   * `session/set_config_option` — the experimental select-based surface
+   * some agents (OpenCode, Devin) use for mode/model changes instead of
+   * `session/set_mode`/`session/set_model`.
+   */
+  async setConfigOption(params: { sessionId: string; configId: string; value: string }): Promise<unknown> {
+    return this.sendRequest('session/set_config_option', params);
+  }
+
   async unstable_setSessionModel(params: { sessionId: string; modelId: string }): Promise<void> {
     await this.sendRequest('session/set_model', params);
   }

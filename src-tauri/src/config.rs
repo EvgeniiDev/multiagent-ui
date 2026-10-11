@@ -47,6 +47,16 @@ pub struct AgentConfig {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<std::collections::HashMap<String, String>>,
+
+    /// Session mode requested right after `session/new` when the agent
+    /// advertises it (e.g. `bypass` for the Devin bridge). Serialized as
+    /// `defaultMode` to match the frontend's AgentConfig.
+    #[serde(
+        rename = "defaultMode",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub default_mode: Option<String>,
 }
 
 fn is_default_transport(t: &AgentTransport) -> bool {
@@ -68,6 +78,7 @@ impl AgentConfig {
             env,
             url: None,
             headers: None,
+            default_mode: None,
         }
     }
 }

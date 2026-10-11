@@ -1310,6 +1310,14 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         currentModeId.value = '';
       }
 
+      // The agent's configured default mode replaces whatever it opened
+      // with — e.g. `devin acp` always starts in accept-edits while this
+      // deployment wants bypass, and its bridge env cannot change that
+      // (`devin acp` ignores DEVIN_PERMISSION_MODE; verified 3000.11.3).
+      // Best-effort: a refused switch leaves the session usable in the
+      // agent-reported mode.
+      await applyDefaultMode(agentConfig, sessionResponse);
+
       // Set up session models if available
       if (sessionResponse.models) {
         availableModels.value = (sessionResponse.models.availableModels || []).map(m => ({
@@ -1806,6 +1814,59 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     currentModelId.value = '';
     contextUsed.value = null;
     contextSize.value = null;
+  }
+
+  /**
+   * Apply the agent's configured `defaultMode` right after `session/new`.
+   * Prefers `session/set_mode`; agents that refuse it but expose the mode
+   * as a config select (OpenCode-style `configOptions` entries with
+   * category/id `mode`) get `session/set_config_option` as a fallback.
+   * Failures are logged, never thrown — the fresh session must stay usable
+   * in whichever mode the agent reported.
+   */
+  async function applyDefaultMode(
+    agentConfig: AgentConfig,
+    sessionResponse: Awaited<ReturnType<AcpClientBridge['newSession']>>
+  ): Promise<void> {
+    const wanted = agentConfig.defaultMode;
+    if (
+      !wanted ||
+      wanted === currentModeId.value ||
+      !availableModes.value.some((m) => m.id === wanted) ||
+      !acpClient ||
+      !session.value
+    ) {
+      return;
+    }
+    const sessionId = session.value.sessionId;
+    try {
+      await acpClient.setMode({ sessionId, modeId: wanted });
+      currentModeId.value = wanted;
+      return;
+    } catch (e) {
+      const modeOption = (sessionResponse.configOptions ?? []).find(
+        (o) => o && (o.category === 'mode' || o.id === 'mode')
+      );
+      const options = modeOption?.options;
+      const offers = Array.isArray(options) && options.some(
+        // Flat option lists carry `{value}`; grouped selects nest them.
+        (entry) => entry && 'value' in entry
+          ? entry.value === wanted
+          : (entry as { options?: { value: string }[] }).options?.some(
+              (o) => o.value === wanted
+            )
+      );
+      if (!modeOption || !offers) {
+        console.warn(`default mode '${wanted}' refused:`, e);
+        return;
+      }
+      try {
+        await acpClient.setConfigOption({ sessionId, configId: modeOption.id, value: wanted });
+        currentModeId.value = wanted;
+      } catch (e2) {
+        console.warn(`default mode '${wanted}' refused:`, e2);
+      }
+    }
   }
 
   // Set session mode

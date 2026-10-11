@@ -163,6 +163,7 @@ fn build_agent_config(
                 env: env.unwrap_or_default(),
                 url: None,
                 headers: None,
+                default_mode: None,
             })
         }
         AgentTransport::Websocket | AgentTransport::Http => {
@@ -194,6 +195,7 @@ fn build_agent_config(
                 env: std::collections::HashMap::new(),
                 url: Some(url),
                 headers,
+                default_mode: None,
             })
         }
     }

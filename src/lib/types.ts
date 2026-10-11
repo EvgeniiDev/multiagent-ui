@@ -26,6 +26,15 @@ export interface AgentConfig {
   // ----- remote fields (used when transport != 'stdio') -----
   url?: string;
   headers?: Record<string, string>;
+
+  /**
+   * Session mode to request right after `session/new`, when the agent
+   * advertises it in `modes.availableModes` — e.g. `bypass` on the Devin
+   * bridge so panels open without permission prompts. Absent or not
+   * advertised: the agent's own default mode wins. Applies to new sessions
+   * only; a resumed session keeps the mode it was persisted with.
+   */
+  defaultMode?: string;
 }
 
 export interface AgentsConfig {
