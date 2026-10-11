@@ -12,6 +12,7 @@ import { uuid } from './uuid';
 import type { SavedSession, ChatMessage, ToolCallInfo, PermissionRequest, SessionMode, SlashCommand, ModelInfo, AgentConfig, Attachment, AttachmentMeta, MessageSegment } from './types';
 import { getTransportKind } from './types';
 import { attachmentFromContentBlock } from './attachments';
+import { markPromptRecorded } from './promptError';
 import { recordTurnAttachments, turnAttachments, resolveCachedBytes } from './attachmentHistory';
 import { readHistoryCache, storeHistoryCacheEntry, type HistoryCacheEntry, writeHistoryCache, dropHistoryCache } from './historyCache';
 import { AcpClientBridge, createAcpClient } from './acp-bridge';
@@ -1678,7 +1679,9 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         title: session.value.title,
         detail: e instanceof Error ? e.message : String(e),
       });
-      throw e;
+      // The user turn above stays in the transcript — tag the failure so a
+      // caller restoring the composer draft doesn't invite a duplicate resend.
+      throw markPromptRecorded(e);
     } finally {
       inFlightPrompts = Math.max(0, inFlightPrompts - 1);
       if (inFlightPrompts === 0) isLoading.value = false;

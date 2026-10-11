@@ -17,6 +17,7 @@ import CommandPalette from './CommandPalette.vue';
 import VoiceInput from './VoiceInput.vue';
 import type { Attachment, AttachmentMeta, ChatMessage, SlashCommand, ToolCallInfo } from '../lib/types';
 import type { SessionTab } from '../lib/sessionRuntime';
+import { promptRecorded } from '../lib/promptError';
 import type { SttPartial } from '../lib/stt';
 import { transcriptSeparator, insertDictation, moveDictationAnchor } from '../lib/dictationText';
 
@@ -714,8 +715,10 @@ async function handleSend() {
     console.error('Failed to send prompt:', e);
     rt.error = `Send failed: ${e instanceof Error ? e.message : String(e)}`;
     // A turn can fail much later. Restore only an untouched composer;
-    // never overwrite the next draft or its attachments.
-    if (!inputText.value && attachments.value.length === 0) {
+    // never overwrite the next draft or its attachments. A failure after
+    // the user turn reached the transcript keeps the field empty — the
+    // text already sits in the feed and restoring it invites a duplicate.
+    if (!promptRecorded(e) && !inputText.value && attachments.value.length === 0) {
       attachments.value = files;
       inputText.value = text;
     }
