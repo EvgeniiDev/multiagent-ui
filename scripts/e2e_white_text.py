@@ -231,13 +231,15 @@ def run_scheme(browser, scheme):
     page.goto(BASE, wait_until="load")
     page.wait_for_selector(".view-rail", timeout=10000)
 
-    # The session list's "+" is muted-on-transparent, not accent ink — it is
-    # only the way into a connected state, not a subject of this suite.
-    page.wait_for_selector(".list-new-session", timeout=10000)
+    # The tab bar's "+" is muted-on-transparent, not accent ink — it is only
+    # the way into a connected state, not a subject of this suite.
+    page.wait_for_selector(".tab-new:not([disabled])", timeout=10000)
 
     # Connect through the mocked ACP handshake so the ChatView (.send-btn)
-    # mounts.
-    page.click(".list-new-session")
+    # mounts — the menu opens prefilled (seeded agent + lastCwd).
+    page.click(".tab-new")
+    page.wait_for_selector(".nsm-start:not([disabled])", timeout=5000)
+    page.click(".nsm-start")
     page.wait_for_selector(".send-btn", timeout=15000)
     page.fill(".chat-view textarea", "e2e probe")  # enable the send button
     measure(page, scheme, ".send-btn", "ChatView.vue:980")

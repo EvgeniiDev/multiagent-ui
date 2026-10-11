@@ -117,13 +117,12 @@ def open_chat(page, tag):
     page.route_web_socket(re.compile(r"^wss?://"), acp_ws)
     page.on("pageerror", lambda exc: page_errors.append(f"{tag}: {exc}"))
     page.goto(BASE, wait_until="load")
-    # Narrow layouts keep the sidebar in a drawer — open it first.
-    if page.viewport_size and page.viewport_size["width"] < 800:
-        page.wait_for_selector(".mobile-hamburger", timeout=10000)
-        page.click(".mobile-hamburger")
-        page.wait_for_selector(".sidebar .list-new-session", timeout=5000)
-    page.wait_for_selector(".list-new-session:not([disabled])", timeout=10000)
-    page.click(".list-new-session")
+    # The "+" lives on the tab bar — reachable on narrow layouts too (it is
+    # part of the top navigation row, not the drawer).
+    page.wait_for_selector(".tab-new:not([disabled])", timeout=10000)
+    page.click(".tab-new")
+    page.wait_for_selector(".nsm-start:not([disabled])", timeout=5000)
+    page.click(".nsm-start")
     page.wait_for_selector(".input-row", timeout=15000)
     page.wait_for_timeout(400)  # autosize + first paint
 

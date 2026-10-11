@@ -115,8 +115,11 @@ def main() -> int:
             check("traffic opens (SVG icons) and closes",
                   traffic_open and has_svg and not page.query_selector(".traffic-monitor"))
 
-            # Directory picker browse overlay (no agent needed to open it).
-            page.click(".dir-picker .browse-btn")
+            # Directory picker browse overlay — it lives inside the tab bar's
+            # "+" menu now.
+            page.click(".tab-new")
+            page.wait_for_selector(".nsm-menu .dir-picker .browse-btn", timeout=5000)
+            page.click(".nsm-menu .dir-picker .browse-btn")
             page.wait_for_selector(".tree-overlay", timeout=5000)
             picker_open = page.is_visible(".tree-overlay")
             bad = page.evaluate(SCAN_JS)
@@ -125,9 +128,10 @@ def main() -> int:
             page.click(".tree-panel .tree-close")
             page.wait_for_timeout(300)
             check("directory picker closes", not page.query_selector(".tree-overlay"))
+            page.keyboard.press("Escape")  # close the "+" menu
 
-            # Error banner path: add a fake ws agent, try New Session with
-            # empty cwd -> store error -> banner with SVG icon, dismissable.
+            # Error banner path: add a fake ws agent and start a session on it
+            # -> connect fails -> banner with SVG icon, dismissable.
             page.click('.scope-icon-btn[title="Settings"]')
             page.wait_for_selector(".settings-panel", timeout=5000)
             page.click(".settings-panel .add-btn")
@@ -142,10 +146,15 @@ def main() -> int:
             if page.query_selector(".settings-panel"):
                 page.click(".settings-panel .close-btn")
                 page.wait_for_timeout(300)
-            new_session = page.query_selector(".list-new-session")
-            if new_session:
-                page.click(".list-new-session")
-                page.wait_for_timeout(500)
+            # The tab bar's "+" menu: pick the dead agent and start — the
+            # connect failure must surface as the app's error banner.
+            page.wait_for_selector(".tab-new:not([disabled])", timeout=5000)
+            page.click(".tab-new")
+            page.wait_for_selector("#nsm-agent", timeout=5000)
+            page.select_option("#nsm-agent", "e2e-fake")
+            page.click(".nsm-start")
+            page.wait_for_timeout(1000)
+            page.keyboard.press("Escape")  # dismiss the menu if still open
             banner = page.query_selector(".error-banner")
             banner_svg = page.query_selector(".error-banner .error-icon svg")
             bad = page.evaluate(SCAN_JS)

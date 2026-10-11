@@ -123,14 +123,15 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
 </template>
 
 <style scoped>
+/* Pure scroll container: the bar chrome (background, border, padding) lives
+ * on .session-navigation in App.vue so the "+" menu and the tabs share one
+ * strip. */
 .tab-strip {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: stretch;
   gap: 2px;
-  padding: 4px 6px 0;
-  background: var(--bg-sidebar);
-  border-bottom: 1px solid var(--border-faint);
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: thin;

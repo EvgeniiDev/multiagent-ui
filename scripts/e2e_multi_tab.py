@@ -229,11 +229,11 @@ def run_checks():
             page.goto(base, wait_until="load")
 
             # --- Two tabs on agent A -------------------------------------
-            page.wait_for_selector("#agent-select", timeout=10000)
-            page.select_option("#agent-select", AGENT_A)
-            page.wait_for_selector(".list-new-session:not([disabled])",
-                                   timeout=10000)
-            page.click(".list-new-session")
+            page.wait_for_selector(".tab-new:not([disabled])", timeout=10000)
+            page.click(".tab-new")
+            page.wait_for_selector("#nsm-agent", timeout=5000)
+            page.select_option("#nsm-agent", AGENT_A)
+            page.click(".nsm-start")
             page.wait_for_selector(".input-row:visible", timeout=15000)
             check("first tab opens a fresh session", tab_count(page) == 1,
                   f"tabs={tab_count(page)}")
@@ -250,8 +250,9 @@ def run_checks():
                   page.locator(".tab.active").inner_text())
 
             # --- A third tab on a DIFFERENT agent -------------------------
-            page.select_option("#agent-select", AGENT_B)
-            page.wait_for_selector(".session-row", timeout=10000)
+            # The sidebar lists all agents merged — a refresh pulls every
+            # agent's inventory, which is how agent B's Delta row arrives.
+            page.click(".list-refresh")
             click_session(page, "Delta")
             page.wait_for_function(
                 "() => document.body.textContent.includes('%s')" % MARK_DELTA,
@@ -321,10 +322,7 @@ def run_checks():
                   and bg_tab.locator(".tab-badge.perm").count() == 0)
 
             # --- Sidebar click on an open session focuses, no dup ----------
-            # The sidebar is still scoped to agent B — re-scope to A so the
-            # Alpha row is THE session the Alpha tab is bound to.
-            page.select_option("#agent-select", AGENT_A)
-            page.wait_for_timeout(400)
+            # The merged list always shows agent A's rows — click Alpha.
             click_session(page, "Alpha")
             page.wait_for_timeout(300)
             check("clicking an open session keeps a single tab",

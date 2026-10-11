@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue';
-import { canPickFolder, pickFolder, loadKvStore, type KVStore } from './lib/host';
+import { loadKvStore, type KVStore } from './lib/host';
 import { useConfigStore } from './stores/config';
 import { useSessionStore } from './stores/session';
 import { initTelemetry } from './lib/telemetry';
-import AgentSelector from './components/AgentSelector.vue';
+import NewSessionMenu from './components/NewSessionMenu.vue';
 import SessionList from './components/SessionList.vue';
 import SessionTabs from './components/SessionTabs.vue';
 import ChatView from './components/ChatView.vue';
@@ -15,7 +15,6 @@ import SettingsView from './components/SettingsView.vue';
 import AuthMethodDialog from './components/AuthMethodDialog.vue';
 import TrafficMonitor from './components/TrafficMonitor.vue';
 import StartupProgress from './components/StartupProgress.vue';
-import DirectoryPicker from './components/DirectoryPicker.vue';
 import ProjectsView from './components/ProjectsView.vue';
 import BoardView from './components/BoardView.vue';
 import DashboardView from './components/DashboardView.vue';
@@ -37,26 +36,10 @@ const activityStore = useActivityStore();
 const claimsStore = useClaimsStore();
 const projectsStore = useProjectsStore();
 
-const selectedAgent = ref('');
-const selectedCwd = ref('');
-// On mobile / web there is no native folder picker (and the cwd refers to
-// a path on the *agent's* machine, not the local device), so we expose a
-// directory tree browser backed by the bridge's fs-list API instead of a
-// free-text field.
-const folderPickerAvailable = canPickFolder();
-
-/** HTTP base URL of the selected agent's bridge (same origin as its ws URL).
- * The tree picker lists directories through `/api/fs/*` on this bridge. */
-const fsBaseUrl = computed(() => {
-  if (folderPickerAvailable) return '';
-  const cfg = configStore.getAgent(selectedAgent.value);
-  if (!cfg || !cfg.url) return '';
-  const u = cfg.url.trim();
-  if (u.startsWith('ws://') || u.startsWith('wss://')) {
-    return (u.startsWith('wss://') ? 'https://' : 'http://') + u.slice(u.indexOf('://') + 3).replace(/\/+$/, '');
-  }
-  return '';
-});
+// Last working directory the user started a session in — persisted in
+// preferences.json, used to prefill the welcome screen's New session dialog
+// (the tab strip's "+" menu owns the pref itself).
+const lastCwd = ref('');
 const showSidebar = ref(true);
 const showSettings = ref(false);
 const showTrafficMonitor = ref(false);
@@ -179,6 +162,17 @@ const reconnectingAgentName = computed(
   () => sessionStore.currentSession?.agentName ?? 'agent'
 );
 
+/** Agent whose connect is in flight — labels the sidebar's startup progress. */
+const connectingAgentName = computed(() => {
+  const rt = sessionStore.activeRuntime;
+  return (
+    rt?.session?.agentName ??
+    rt?.descriptor?.agentName ??
+    rt?.agentName ??
+    sessionStore.lastAgentName
+  );
+});
+
 // True when there is a saved session we *could* reconnect to but the
 // transport is currently down. Surfaces a manual "Reconnect" affordance on
 // the error banner so users don't have to background+foreground the app to
@@ -242,7 +236,7 @@ onMounted(async () => {
 
   const savedCwd = await prefsStore.get<string>('lastCwd');
   if (savedCwd) {
-    selectedCwd.value = savedCwd;
+    lastCwd.value = savedCwd;
   }
 
   // F5 restores the open TABS: initStore read the persisted openTabs set,
@@ -260,32 +254,23 @@ onMounted(async () => {
         )
       : null;
     if (focusSaved) {
-      selectedAgent.value = focusSaved.agentName;
-      selectedCwd.value = focusSaved.cwd || selectedCwd.value;
-      // Scope the sidebar to the URL's agent as well — without this the
-      // dropdown shows the URL agent while the header list still shows whatever
-      // the last sync scoped to (the previous agent).
+      // Refresh the URL agent's inventory so the merged session list is
+      // current — the sidebar is no longer agent-scoped.
       try {
-        void sessionStore.setActiveAgent(focusSaved.agentName);
+        void sessionStore.syncAgentSessions(focusSaved.agentName);
       } catch (e) {
-        console.warn('Failed to scope sidebar to URL agent:', e);
+        console.warn('Failed to refresh URL agent sessions:', e);
       }
     }
     await sessionStore.restoreTabs(focus);
   }
   if (sessionStore.openTabs.length === 0) {
-    // No open session — pre-select the last used agent + cwd so a reload
-    // with no session (or after Disconnect) keeps the new-session form
-    // filled instead of dropping to blanks. The sidebar scope follows the
-    // agent the same way a manual pick would.
+    // Nothing to restore — refresh the last used agent's inventory in the
+    // background so the merged session list is fresh. (Fire-and-forget: the
+    // list already renders persisted sessions.)
     const lastAgent = sessionStore.lastAgentName;
     if (lastAgent && configStore.getAgent(lastAgent)) {
-      selectedAgent.value = lastAgent;
-      try {
-        await sessionStore.setActiveAgent(lastAgent);
-      } catch (e) {
-        console.warn('Failed to scope sidebar to last agent:', e);
-      }
+      void sessionStore.syncAgentSessions(lastAgent);
     }
   }
 
@@ -301,56 +286,6 @@ onMounted(async () => {
   }
 });
 
-async function handleAgentSelect(agentName: string) {
-  selectedAgent.value = agentName;
-  // Scope the sidebar to this agent: blank the list, show a loader, re-fetch
-  // its inventory. Without this a switch looks like nothing happened.
-  await sessionStore.setActiveAgent(agentName);
-}
-
-async function handleSelectFolder() {
-  const folder = await pickFolder('Select Working Directory');
-  if (folder) {
-    selectedCwd.value = folder;
-    // Persist the selection
-    if (prefsStore) {
-      await prefsStore.set('lastCwd', folder);
-      await prefsStore.save();
-    }
-  }
-}
-
-/** Persist a cwd picked from the directory tree. */
-async function handleTreeSelect(value: string) {
-  selectedCwd.value = value;
-  if (prefsStore) {
-    await prefsStore.set('lastCwd', value);
-    await prefsStore.save();
-  }
-}
-
-/** Start another session from the session list's header. Each session gets
- *  its own tab and its own connection — nothing to tear down first. */
-async function handleNewSession() {
-  if (!selectedAgent.value) return;
-
-  // ACP requires a working directory. Absolute paths pass through; relative
-  // paths (e.g. `./projects/foo` or `projects/foo`) are resolved by the
-  // bridge against the agent's home directory. Empty is the only error we
-  // can catch client-side.
-  const cwd = selectedCwd.value.trim();
-  if (!cwd) {
-    sessionStore.error = 'Please enter a working directory (absolute path on the agent\u2019s machine, or a path relative to its home directory).';
-    return;
-  }
-
-  try {
-    await sessionStore.createSession(selectedAgent.value, cwd);
-  } catch (e) {
-    console.error('Failed to create session:', e);
-  }
-}
-
 function restoreSessionFromHistory(): void {
   if (viewFromUrl() !== 'chat') return;
   const target = sessionFromUrl();
@@ -364,7 +299,6 @@ function restoreSessionFromHistory(): void {
 }
 
 async function handleResumeSession(session: SavedSession) {
-  selectedAgent.value = session.agentName;
   // The URL carries the user's intent at click time — F5 restores exactly this
   // chat even when the resume fails or a background sync rewrites the store.
   setSessionInUrl(session.agentName, session.sessionId);
@@ -379,15 +313,10 @@ async function handleDeleteSession(sessionId: string) {
   await sessionStore.deleteSession(sessionId);
 }
 
-/**
- * Pull the agent's own session inventory (`session/list`) into the sidebar.
- * When no session is connected there is no live target, so pass the selected
- * agent; the store falls back to the last agent it talked to.
- */
+/** Refresh the merged sidebar list — pulls `session/list` from every
+ *  configured agent (the store iterates them). */
 async function handleRefreshSessions() {
-  await sessionStore.refreshAgentSessions(
-    isConnected.value ? undefined : selectedAgent.value || undefined
-  );
+  await sessionStore.refreshAgentSessions();
 }
 
 async function handleCancelConnection() {
@@ -626,48 +555,12 @@ function clearError() {
           <label>Project:</label>
           <ProjectScopeSelector />
         </div>
-        <!-- Agent Selection -->
-        <div class="section">
-          <AgentSelector 
-            v-model:selected="selectedAgent"
-            @select="handleAgentSelect"
-          />
-          
-          <!-- Working Directory Picker -->
-          <div class="cwd-picker">
-            <label>Working Directory:</label>
-            <!-- Desktop: read-only display + folder picker. -->
-            <div v-if="folderPickerAvailable" class="cwd-row">
-              <span class="cwd-path" :title="selectedCwd || 'Current directory'">
-                {{ selectedCwd ? selectedCwd.split(/[\\/]/).pop() : '.' }}
-              </span>
-              <button 
-                class="cwd-btn" 
-                @click="handleSelectFolder"
-                title="Select folder"
-                aria-label="Select folder"
-                :disabled="isConnecting || isConnected"
-              >
-                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-              </button>
-            </div>
-            <!-- Mobile / web: directory tree browser (bridge fs API) + editable
-                 path. The path is interpreted on the agent's host. -->
-            <DirectoryPicker
-              v-else
-              :base-url="fsBaseUrl"
-              v-model="selectedCwd"
-              :disabled="isConnecting || isConnected"
-              @select="handleTreeSelect"
-            />
-          </div>
-          <!-- New session lives in the session list's header; there is no
-               Disconnect — the connection re-establishes on its own. -->
-          
-          <!-- Startup Progress -->
-          <StartupProgress 
-            v-if="isConnecting"
-            :agent-name="selectedAgent"
+        <!-- Startup progress while a session is being created/resumed.
+             New sessions start from the "+" on the tab strip — the sidebar
+             is pure inventory now (project scope + merged session list). -->
+        <div v-if="isConnecting" class="section">
+          <StartupProgress
+            :agent-name="connectingAgentName"
             :phase="sessionStore.startupPhase"
             :logs="sessionStore.startupLogs"
             :elapsed-seconds="sessionStore.startupElapsed"
@@ -675,17 +568,14 @@ function clearError() {
             @cancel="handleCancelConnection"
             @toggle-details="showStartupDetails = !showStartupDetails"
           />
-          
         </div>
-        
+
         <!-- Session List -->
         <div class="section">
-          <SessionList 
-            :can-start="hasAgents && !!selectedAgent"
+          <SessionList
             @resume="handleResumeSession"
             @delete="handleDeleteSession"
             @refresh="handleRefreshSessions"
-            @new-session="handleNewSession"
           />
         </div>
       </div>
@@ -754,12 +644,14 @@ function clearError() {
         </div>
         <template v-else>
         <div
+          v-if="isNarrowLayout || uiStore.activeView === 'chat'"
           class="session-navigation"
           :class="{ 'is-hidden': isNarrowLayout && mobileNavigationHidden }"
           :inert="isNarrowLayout && mobileNavigationHidden"
         >
           <UiButton
             v-if="isNarrowLayout"
+            class="mobile-hamburger"
             variant="ghost"
             icon
             aria-label="Open menu"
@@ -769,6 +661,10 @@ function clearError() {
           >
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
           </UiButton>
+          <!-- "+" starts a session: agent + working directory dropdown. It
+               sits before the tabs and stays fixed on narrow layouts, where
+               the tab strip itself scrolls horizontally. -->
+          <NewSessionMenu v-if="uiStore.ready && uiStore.activeView === 'chat'" />
           <div class="navigation-items">
             <SessionTabs v-if="uiStore.activeView === 'chat' && sessionStore.openTabs.length > 0" />
           </div>
@@ -785,7 +681,6 @@ function clearError() {
             v-show="uiStore.activeView === 'chat' && rt.id === sessionStore.activeTabId"
             :key="rt.id"
             :runtime="rt"
-            :sidebar-cwd="selectedCwd"
           />
 
         <!-- Welcome screen when no tabs are open at all. The New session
@@ -843,11 +738,12 @@ function clearError() {
     />
 
     <!-- New session from the welcome screen (no connection required).
-         Prefills with the path shown in the sidebar's Working Directory
-         field; the project scope fills in only when that field is empty. -->
+         Prefills with the last used agent/directory; the project scope fills
+         in only when no last directory is known. -->
     <NewSessionDialog
       v-if="showWelcomeNewSession"
-      :initial-cwd="selectedCwd || scopeCwd"
+      :initial-agent="sessionStore.lastAgentName"
+      :initial-cwd="lastCwd || scopeCwd"
       @close="showWelcomeNewSession = false"
     />
   </div>
@@ -980,63 +876,6 @@ html, body, #app {
   width: 100%;
 }
 
-.cwd-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.cwd-path {
-  flex: 1;
-  height: 30px;
-  display: flex;
-  align-items: center;
-  padding: 0 0.5rem;
-  background: var(--bg-main);
-  border: 1px solid var(--border-faint);
-  border-radius: var(--radius-md);
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.cwd-btn {
-  padding: 0.375rem 0.5rem;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: transparent;
-  cursor: pointer;
-  font-size: 1rem;
-}
-
-.cwd-btn:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-
-.cwd-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* Mobile-only free-text cwd input. */
-.cwd-input {
-  width: 100%;
-  padding: 0.5rem 0.6rem;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: var(--bg-main);
-  color: var(--text-primary);
-  font-size: 16px; /* 16px = no iOS auto-zoom */
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-}
-
-.cwd-input:disabled {
-  opacity: 0.5;
-}
-
 .sidebar-toggle-collapsed {
   position: fixed;
   left: 0;
@@ -1098,7 +937,17 @@ html, body, #app {
   outline-offset: 2px;
 }
 
-.session-navigation { display: contents; }
+/* The tab bar: "+" menu + scrollable session tabs. Carries the strip chrome
+ * itself (it used to live on .tab-strip) so the "+" shares the same bar even
+ * with zero open tabs. */
+.session-navigation {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 4px 6px 0;
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border-faint);
+}
 .navigation-items { display: contents; }
 @media (max-width: 800px) {
   .session-navigation {

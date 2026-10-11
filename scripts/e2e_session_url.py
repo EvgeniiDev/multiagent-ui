@@ -125,8 +125,10 @@ def main():
             page.route_web_socket(re.compile(r"^wss?://"), acp_ws)
             page.on("pageerror", lambda e: page_errors.append(str(e)))
             page.goto(base, wait_until="load")
-            page.wait_for_selector(".list-new-session:not([disabled])", timeout=10000)
-            page.click(".list-new-session")
+            page.wait_for_selector(".tab-new:not([disabled])", timeout=10000)
+            page.click(".tab-new")
+            page.wait_for_selector(".nsm-start:not([disabled])", timeout=5000)
+            page.click(".nsm-start")
             page.wait_for_selector(".input-row", timeout=15000)
             page.wait_for_selector(".session-row", timeout=10000)
 

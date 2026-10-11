@@ -163,8 +163,12 @@ def run_checks():
             page.on("pageerror", lambda exc: page_errors.append(str(exc)))
 
             page.goto(BASE, wait_until="load")
-            page.wait_for_selector(".list-new-session:not([disabled])", timeout=15000)
-            page.click(".list-new-session")
+            # New sessions start from the tab bar's "+" menu (prefilled with
+            # the seeded agent + lastCwd).
+            page.wait_for_selector(".tab-new:not([disabled])", timeout=15000)
+            page.click(".tab-new")
+            page.wait_for_selector(".nsm-start:not([disabled])", timeout=5000)
+            page.click(".nsm-start")
             page.wait_for_selector(".composer-box textarea", timeout=15000)
             page.wait_for_timeout(400)
 

@@ -21,9 +21,6 @@ import type { SttPartial } from '../lib/stt';
 import { transcriptSeparator, insertDictation, moveDictationAnchor } from '../lib/dictationText';
 
 const props = defineProps<{
-  /** Working directory shown in the chat sidebar — the New session dialog
-   *  opens with it so the modal matches the path the user picked there. */
-  sidebarCwd?: string;
   /** The tab's session runtime — one ChatView instance per open tab, kept
    *  alive (v-show) so scroll position and composer draft survive a switch.
    *  Reached through the reactive tabs array, so its ref fields surface

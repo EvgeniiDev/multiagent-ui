@@ -377,9 +377,12 @@ def run_checks():
         page.wait_for_selector(".welcome-screen", timeout=10000)
         check("fresh boot shows the welcome screen", True)
 
-        # Connect a session like a user would.
-        page.wait_for_selector(".list-new-session:not([disabled])", timeout=10000)
-        page.click(".list-new-session")
+        # Connect a session like a user would — "+" on the tab bar opens the
+        # new-session menu (prefilled agent + cwd), Start begins it.
+        page.wait_for_selector(".tab-new:not([disabled])", timeout=10000)
+        page.click(".tab-new")
+        page.wait_for_selector(".nsm-start:not([disabled])", timeout=5000)
+        page.click(".nsm-start")
         page.wait_for_selector(".input-row:visible", timeout=15000)
         check("session connects before reload", True)
 
@@ -395,7 +398,8 @@ def run_checks():
         page.wait_for_selector(".input-row:visible", timeout=15000)
         check("reload restores the chat view, not the welcome screen",
               page.locator(".welcome-screen").count() == 0)
-        agent = page.eval_on_selector("#agent-select", "el => el.value")
+        agent = page.evaluate(
+            "() => window.__session?.currentSession?.agentName ?? ''")
         check("agent selection survives the reload",
               agent == AGENT_NAME, repr(agent))
         wait_replay_done(page, A_LAST)
@@ -537,13 +541,17 @@ def run_checks():
         check("sending a message returns the feed to the bottom",
               fb_send >= 0 and fb_send <= 2, f"fromBottom={fb_send}px")
 
-        # Closing the open session from the list's "+" (New session). There is
-        # no Disconnect button any more — this is the only manual close left,
-        # and it must not leave the reload pointing at the session it replaced.
+        # Closing the open session via the tab strip's "+" (New session).
+        # There is no Disconnect button any more — this is the only manual
+        # close left, and it must not leave the reload pointing at the
+        # session it replaced.
         pointer_before = page.evaluate(
             "() => JSON.parse(localStorage.getItem('acp-ui:sessions.json') || '{}')"
         ).get("currentSessionId")
-        page.click(".list-new-session")
+        page.wait_for_selector(".tab-new:not([disabled])", timeout=10000)
+        page.click(".tab-new")
+        page.wait_for_selector(".nsm-start:not([disabled])", timeout=5000)
+        page.click(".nsm-start")
         page.wait_for_selector(".input-row:visible", timeout=15000)
         page.reload(wait_until="load")
         page.wait_for_selector(".input-row:visible", timeout=15000)

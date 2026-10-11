@@ -213,8 +213,10 @@ def wire_routes(page, tag, health=health_ok):
 def open_chat(page, tag, **kwargs):
     wire_routes(page, tag, **kwargs)
     page.goto(BASE, wait_until="load")
-    page.wait_for_selector(".list-new-session:not([disabled])", timeout=10000)
-    page.click(".list-new-session")
+    page.wait_for_selector(".tab-new:not([disabled])", timeout=10000)
+    page.click(".tab-new")
+    page.wait_for_selector(".nsm-start:not([disabled])", timeout=5000)
+    page.click(".nsm-start")
     page.wait_for_selector(".input-row", timeout=15000)
     page.wait_for_timeout(400)
 

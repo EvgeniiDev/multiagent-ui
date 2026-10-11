@@ -354,9 +354,11 @@ def main():
             expect_view(page, "1", "Chat", focus_sel=".scope-icon-btn")
 
             # ---- composer (needs a connected session) ---------------------
-            page.wait_for_selector(".list-new-session:not([disabled])",
+            page.wait_for_selector(".tab-new:not([disabled])",
                                    timeout=10000)
-            page.click(".list-new-session")
+            page.click(".tab-new")
+            page.wait_for_selector(".nsm-start:not([disabled])", timeout=5000)
+            page.click(".nsm-start")
             page.wait_for_selector(".input-row", timeout=15000)
             page.wait_for_timeout(400)
             expect_guarded(page, "the composer", "3", "Chat",

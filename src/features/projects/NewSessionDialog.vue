@@ -6,6 +6,7 @@
 // own default directory. On success the app switches to the Chat view,
 // exactly like the project-scoped "New session here" path.
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { loadKvStore } from '../../lib/host';
 import { useSessionStore } from '../../stores/session';
 import { useConfigStore } from '../../stores/config';
 import { useUiStore } from '../../stores/ui';
@@ -15,6 +16,8 @@ const props = defineProps<{
   /** Working directory the field opens with — the scoped project's path when
    *  the dialog is launched under a project scope, empty otherwise. */
   initialCwd?: string;
+  /** Agent preselected on open — the caller passes the last used one. */
+  initialAgent?: string;
 }>();
 
 const emit = defineEmits<{
@@ -25,7 +28,7 @@ const sessionStore = useSessionStore();
 const configStore = useConfigStore();
 const uiStore = useUiStore();
 
-const agent = ref('');
+const agent = ref(props.initialAgent ?? '');
 const cwd = ref(props.initialCwd ?? '');
 const busy = ref(false);
 const error = ref('');
@@ -33,7 +36,7 @@ const error = ref('');
 const agents = computed(() => configStore.agentNames);
 
 /** Display labels — stdio agents are plain names, remote ones carry their
- * transport (same convention as AgentSelector). */
+ * transport (same convention as the "+" menu on the tab strip). */
 const agentLabels = computed<Record<string, string>>(() => {
   const out: Record<string, string> = {};
   for (const name of agents.value) {
@@ -68,6 +71,10 @@ async function confirm() {
   busy.value = true;
   error.value = '';
   try {
+    // Remember the directory — the tab strip's "+" menu prefills from it.
+    const prefs = await loadKvStore('preferences.json');
+    await prefs.set('lastCwd', cwd.value.trim());
+    await prefs.save();
     await sessionStore.createSession(agent.value, cwd.value.trim());
     emit('close');
     await uiStore.setView('chat');

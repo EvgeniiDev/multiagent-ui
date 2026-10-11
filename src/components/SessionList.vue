@@ -1,31 +1,24 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import UiButton from './ui/UiButton.vue';
 import { useSessionStore } from '../stores/session';
 import { useUiStore } from '../stores/ui';
 import { useProjectsStore } from '../features/scope/registry';
 import type { SavedSession } from '../lib/types';
 
-const props = defineProps<{
-  /** An agent is picked and configured — otherwise "+" has nothing to start. */
-  canStart: boolean;
-}>();
-
 const emit = defineEmits<{
   resume: [session: SavedSession];
   delete: [sessionId: string];
   refresh: [];
-  newSession: [];
 }>();
 
 const sessionStore = useSessionStore();
 const uiStore = useUiStore();
 const projectsStore = useProjectsStore();
 
-// The sidebar mirrors ONE agent's inventory at a time (switching agents is the
-// filter) — a merged list of every agent runs to hundreds of rows. On top of
-// that the global project scope applies: with a project selected only
-// sessions whose cwd lies inside its path show; 'all' is unfiltered.
+// The sidebar lists every agent's sessions merged, newest first — the
+// per-row agent chip carries the distinction. On top of that the global
+// project scope applies: with a project selected only sessions whose cwd
+// lies inside its path show; 'all' is unfiltered.
 const sessions = computed(() =>
   projectsStore.sessionsOfProject(sessionStore.visibleSessions)
 );
@@ -37,39 +30,19 @@ function isUnassigned(session: SavedSession): boolean {
   return !projectsStore.projectIdForCwd(session.cwd);
 }
 
-const scope = computed(() => sessionStore.activeAgentName);
 const activeSessionId = computed(() => sessionStore.currentSession?.id ?? '');
 /** Ids of sessions already open in a tab — they get a marker and a click
  *  just focuses the tab instead of re-resuming. */
 const openSessionIds = computed(
   () => new Set(sessionStore.openTabs.map((t) => t.session?.id))
 );
-const isLoading = computed(() => sessionStore.sidebarLoading);
-
-/** One dense line: which agent this list belongs to + what the last fetch did. */
-const scopeLine = computed(() => {
-  const name = sessionStore.activeAgentName;
-  if (!name) return '';
-  if (sessionStore.isSyncingSessions) return `${name} · loading…`;
-  const sync = sessionStore.lastSync;
-  if (!sync || sync.agent !== name) return name;
-  if (sync.unsupported) return `${name} · no session list`;
-  const seconds = (sync.ms / 1000).toFixed(sync.ms < 1000 ? 2 : 1);
-  return `${name} · ${sync.count} sessions in ${seconds}s`;
-});
 
 const isSyncing = computed(() => sessionStore.isSyncingSessions);
 const syncError = computed(() => sessionStore.syncError);
-// Hidden only once the agent itself said it has no `session/list` — before the
-// first attempt the capability is unknown, and clicking is how we find out.
+// Hidden only once EVERY configured agent said it has no `session/list` —
+// before the first attempt the capability is unknown, and clicking is how we
+// find out.
 const canListAgentSessions = computed(() => !sessionStore.sessionListUnsupported);
-
-// The button goes dead while ANY tab is mid-connect — a double click would
-// spawn two agents for one intent.
-const startingSession = computed(() => sessionStore.anySessionConnecting);
-const newSessionTitle = computed(() =>
-  !props.canStart ? 'Select an agent first' : startingSession.value ? 'Starting session…' : 'New session'
-);
 
 /** Compact stamp: today -> HH:MM, this year -> "12 сен", else ISO date. */
 function formatStamp(timestamp: number): string {
@@ -114,53 +87,27 @@ function handleDelete(sessionId: string, event: Event) {
   <div class="session-list">
     <div class="list-head">
       <span class="list-label">Sessions</span>
-      <span class="list-count">{{ isLoading ? '' : (sessions.length || '') }}</span>
-      <!-- New session lives with the list, not in the agent block: the list is
-           where the user goes to switch runs. There is no Disconnect — a
-           connection re-establishes on its own, so the only manual action
-           left in the sidebar is starting another one. -->
-      <UiButton
-        icon
-        size="xs"
-        variant="ghost"
-        class="list-new-session"
-        :disabled="startingSession || !canStart"
-        :aria-busy="startingSession"
-        @click="emit('newSession')"
-        :title="newSessionTitle"
-        aria-label="New session"
-      >
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg>
-      </UiButton>
+      <span class="list-count">{{ sessions.length || '' }}</span>
+      <!-- New sessions start from the "+" on the tab strip; the only manual
+           action left here is re-pulling the agents' inventories. -->
       <button
         v-if="canListAgentSessions"
         class="list-refresh"
         :class="{ busy: isSyncing }"
         :disabled="isSyncing"
         @click="handleRefresh"
-        :title="isSyncing ? 'Loading sessions from the agent…' : 'Load sessions from the agent'"
-        aria-label="Load sessions from the agent"
+        :title="isSyncing ? 'Loading sessions from agents…' : 'Load sessions from all agents'"
+        aria-label="Load sessions from all agents"
       >⟳</button>
     </div>
 
-    <div v-if="scopeLine" class="list-scope">{{ scopeLine }}</div>
-
     <div v-if="syncError" class="sync-note error" :title="syncError">Couldn&rsquo;t load agent sessions</div>
     <div v-else-if="sessionStore.sessionListUnsupported" class="sync-note">
-      This agent can&rsquo;t list its sessions.
+      None of the configured agents can list sessions.
     </div>
 
-    <!-- Switching agents blanks the list on purpose: a visible load beats a
-         silent swap that looks like nothing happened. -->
-    <div v-if="isLoading" class="list-loading" aria-live="polite">
-      <div class="skel s1"></div>
-      <div class="skel s2"></div>
-      <div class="skel s3"></div>
-      <div class="loading-text">Loading {{ scope || 'agent' }} sessions…</div>
-    </div>
-
-    <div v-else-if="sessions.length === 0" class="empty-state">
-      {{ scope ? `No sessions on ${scope} yet.` : 'Select an agent to see its sessions.' }}
+    <div v-if="sessions.length === 0" class="empty-state">
+      No sessions yet — start one with the &ldquo;+&rdquo; on the tab bar.
     </div>
 
     <ul v-else>
@@ -172,6 +119,7 @@ function handleDelete(sessionId: string, event: Event) {
         :title="`${session.title}\n${session.agentName} · ${session.cwd || '—'}`"
         @click="handleResume(session)"
       >
+        <span class="row-agent" :title="session.agentName">{{ session.agentName }}</span>
         <span
           v-if="openSessionIds.has(session.id)"
           class="row-open"
@@ -219,9 +167,7 @@ function handleDelete(sessionId: string, event: Event) {
   color: var(--text-muted, #a39a8e);
 }
 
-/* Start another session. Shares the refresh button's footprint so the head
-   row stays one dense line on a 390px phone. */
-/* Pull the agent's session inventory (`session/list`) into this list. */
+/* Pull the agents' session inventories (`session/list`) into this list. */
 .list-refresh {
   flex: 0 0 auto;
   width: 20px;
@@ -269,42 +215,6 @@ function handleDelete(sessionId: string, event: Event) {
   color: var(--bg-danger, #b3402e);
 }
 
-/* Which agent this list belongs to — the per-row agent label is gone, since
- * the whole list is scoped now. */
-.list-scope {
-  padding: 0 0.375rem 0.375rem;
-  font-family: var(--font-mono, monospace);
-  font-size: 0.625rem;
-  letter-spacing: 0.02em;
-  color: var(--text-muted, #a39a8e);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Loading state: flat skeleton bars, no shimmer — the accent belongs to the
- * content, not to the chrome. */
-.list-loading {
-  padding: 0 0 0.25rem;
-}
-
-.skel {
-  height: 9px;
-  margin: 0 0.375rem 7px;
-  border-radius: 3px;
-  background: var(--border-faint, rgba(43, 39, 35, 0.09));
-}
-
-.skel.s1 { width: 78%; }
-.skel.s2 { width: 62%; }
-.skel.s3 { width: 70%; }
-
-.loading-text {
-  padding: 0.25rem 0.375rem 0;
-  font-size: 0.6875rem;
-  color: var(--text-muted, #a39a8e);
-}
-
 .list-count {
   font-size: 0.6875rem;
   font-variant-numeric: tabular-nums;
@@ -327,7 +237,7 @@ ul {
   gap: 1px;
 }
 
-/* One dense line per session: title on the left, agent · folder and the
+/* One dense line per session: agent chip and title on the left, the
  * timestamp right-aligned. No card chrome — a hover tint carries the state. */
 .session-row {
   display: flex;
@@ -345,6 +255,24 @@ ul {
 
 .session-row.active {
   background: var(--tint-active, rgba(194, 83, 47, 0.10));
+}
+
+/* Agent chip at the start of every row — the merged list's answer to the
+ * old per-agent scoping. Collapses to its max width on narrow sidebars. */
+.row-agent {
+  flex: 0 1 auto;
+  max-width: 7.5em;
+  padding: 0 0.3rem;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-hover, #efe9e0);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.625rem;
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary, #6b6259);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Small accent tick marking sessions already open in a tab. */
@@ -371,18 +299,6 @@ ul {
 
 .session-row.active .row-title {
   font-weight: 600;
-}
-
-/* Agent name collapses first when the sidebar is narrow. */
-.row-meta {
-  flex: 0 1 auto;
-  min-width: 0;
-  font-family: var(--font-mono, monospace);
-  font-size: 0.6875rem;
-  color: var(--text-muted, #a39a8e);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /* Small muted tag marking sessions outside every project (All mode only). */

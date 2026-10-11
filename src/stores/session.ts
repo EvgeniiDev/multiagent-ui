@@ -69,32 +69,19 @@ export const useSessionStore = defineStore('session', () => {
   // ---- Agent-side session inventory (`session/list`) -----------------------
   // The agent owns its history; this client mirrors the metadata into the
   // sidebar so sessions created elsewhere (CLI, Telegram, another device)
-  // show up here and can be resumed.
-  const supportsListSessions = ref(false);
+  // show up here and can be resumed. The sidebar lists ALL agents' sessions
+  // merged — there is no per-agent scope any more.
   const isSyncingSessions = ref(false);
   const syncError = ref<string | null>(null);
   /**
-   * The agent answered initialize without the `session/list` capability. Known
-   * only after a sync attempt, so the UI hides the refresh affordance rather
-   * than offering a button that can never work.
+   * Agents that answered initialize without the `session/list` capability.
+   * Tracked per agent — a merged list can't carry one global flag. Known only
+   * after a sync attempt, so the UI hides the refresh affordance rather than
+   * offering a button that can never work.
    */
-  const sessionListUnsupported = ref(false);
-  /** Agent of the most recent connection — the default target for a refresh. */
+  const listUnsupportedAgents = ref<string[]>([]);
+  /** Agent of the most recent connection — prefill for the new-session menu. */
   const lastAgentName = ref('');
-  /**
-   * Agent whose sessions the sidebar is scoped to. Switching it blanks the list
-   * and shows a loader while the agent's inventory is re-fetched, so a switch is
-   * visibly different from "nothing happened".
-   */
-  const activeAgentName = ref('');
-  /** True from an agent switch until that agent's session list settles. */
-  const sidebarLoading = ref(false);
-  /**
-   * Outcome of the last inventory fetch, rendered next to the sidebar scope.
-   * Without it a failed or empty sync is indistinguishable from a click that
-   * did nothing.
-   */
-  const lastSync = ref<{ agent: string; count: number; ms: number; unsupported: boolean } | null>(null);
   /**
    * `${agentName}::${sessionId}` keys the user removed from the sidebar while
    * the agent still holds them. Persisted, because otherwise the next sync
@@ -203,7 +190,7 @@ export const useSessionStore = defineStore('session', () => {
     }
     // Resume surfaced the agent's inventory the old way — keep that habit so
     // the sidebar mirrors whatever this agent holds.
-    void setActiveAgent(savedSession.agentName);
+    void syncAgentSessions(savedSession.agentName);
     return asTab(rt);
   }
 
@@ -250,7 +237,7 @@ export const useSessionStore = defineStore('session', () => {
       // Auto-load the agent's session inventory once connected, so sessions
       // created outside this client (CLI, Telegram, another device) show up
       // in the sidebar without a manual refresh.
-      void setActiveAgent(agentName);
+      void syncAgentSessions(agentName);
     } catch (e) {
       console.error('Failed to create session:', e);
       throw e;
@@ -375,8 +362,17 @@ export const useSessionStore = defineStore('session', () => {
     return added;
   }
 
+  /** Record whether `agentName` answered initialize with `session/list`. */
+  function markListSupport(agentName: string, supports: boolean): void {
+    const i = listUnsupportedAgents.value.indexOf(agentName);
+    if (supports && i >= 0) listUnsupportedAgents.value.splice(i, 1);
+    else if (!supports && i < 0) listUnsupportedAgents.value.push(agentName);
+  }
+
   /**
-   * Pull the agent's own session list into the sidebar.
+   * Pull one agent's session list into the sidebar inventory. Returns the
+   * number of newly discovered rows, or the error message — it never throws,
+   * so a multi-agent refresh can collect per-agent failures.
    *
    * Reuses a live tab connection when one already belongs to `agentName`;
    * otherwise opens a short-lived one. That second case is cheap: the bridge
@@ -384,21 +380,19 @@ export const useSessionStore = defineStore('session', () => {
    * initialize round-trip, not a respawn. Session updates are deliberately
    * left unwired on a transient connection — it only issues requests.
    */
-  async function syncAgentSessions(agentName: string, cwd?: string): Promise<number> {
-    if (!agentName || isSyncingSessions.value) return 0;
-    isSyncingSessions.value = true;
-    syncError.value = null;
-    const startedAt = Date.now();
+  async function syncOneAgentSessions(
+    agentName: string,
+    cwd?: string
+  ): Promise<{ added: number; error: string | null }> {
+    // Any open tab on this agent can carry the `session/list` call.
+    // (cast: the tabs array surfaces the bridge through UnwrapRef — the
+    // runtime object itself is the same.)
+    const localTab = openTabs.value.find(
+      (t) => tabSession(t)?.agentName === agentName && t.acpClient
+    );
+    let client = (localTab?.acpClient ?? null) as AcpClientBridge | null;
     let transient: AcpClientBridge | null = null;
     try {
-      // Any open tab on this agent can carry the `session/list` call.
-      // (cast: the tabs array surfaces the bridge through UnwrapRef — the
-      // runtime object itself is the same.)
-      const local = (openTabs.value.find(
-        (t) => tabSession(t)?.agentName === agentName && t.acpClient
-      )?.acpClient ?? null) as AcpClientBridge | null;
-      let client: AcpClientBridge | null = local;
-
       if (!client) {
         const configStore = useConfigStore();
         const agentConfig: AgentConfig | undefined = configStore.getAgent(agentName);
@@ -406,29 +400,26 @@ export const useSessionStore = defineStore('session', () => {
         transient = await createAcpClient({ name: agentName, config: agentConfig });
         client = transient;
         const initResponse = await initializeHandshake(client);
-        supportsListSessions.value = !!initResponse.agentCapabilities?.sessionCapabilities?.list;
-        sessionListUnsupported.value = !supportsListSessions.value;
+        const supports = !!initResponse.agentCapabilities?.sessionCapabilities?.list;
+        markListSupport(agentName, supports);
         lastAgentName.value = agentName;
-        if (!supportsListSessions.value) {
-          lastSync.value = { agent: agentName, count: 0, ms: Date.now() - startedAt, unsupported: true };
-          return 0;
-        }
-      } else if (!supportsListSessions.value) {
-        lastSync.value = { agent: agentName, count: 0, ms: Date.now() - startedAt, unsupported: true };
-        return 0;
+        if (!supports) return { added: 0, error: null };
+      } else {
+        // The tab's own handshake already answered the capability question.
+        const supports = !localTab?.sessionListUnsupported;
+        markListSupport(agentName, supports);
+        if (!supports) return { added: 0, error: null };
       }
 
       const infos = await listAllAgentSessions(client, cwd);
       const added = mergeAgentSessions(agentName, infos);
       await saveSessionsToStore();
-      lastSync.value = { agent: agentName, count: infos.length, ms: Date.now() - startedAt, unsupported: false };
       trackEvent('SessionsListed', { agentName, total: String(infos.length) });
-      return added;
+      return { added, error: null };
     } catch (e) {
-      syncError.value = e instanceof Error ? e.message : String(e);
-      lastSync.value = { agent: agentName, count: 0, ms: Date.now() - startedAt, unsupported: false };
+      const message = e instanceof Error ? e.message : String(e);
       console.warn('Failed to list agent sessions:', e);
-      return 0;
+      return { added: 0, error: message };
     } finally {
       if (transient) {
         try {
@@ -437,44 +428,52 @@ export const useSessionStore = defineStore('session', () => {
           console.warn('disconnect after session list failed:', e);
         }
       }
+    }
+  }
+
+  /**
+   * Single-agent sync used by the connect/resume paths: after a session on
+   * `agentName` comes up, its inventory is refreshed so the merged sidebar
+   * mirrors whatever the agent holds.
+   */
+  async function syncAgentSessions(agentName: string, cwd?: string): Promise<number> {
+    if (!agentName || isSyncingSessions.value) return 0;
+    isSyncingSessions.value = true;
+    syncError.value = null;
+    try {
+      const result = await syncOneAgentSessions(agentName, cwd);
+      syncError.value = result.error;
+      return result.added;
+    } finally {
       isSyncingSessions.value = false;
     }
   }
 
   /**
-   * Refresh entry point for the UI: default to the active tab's agent, else
-   * the selected one (nothing is connected yet), else the last agent we
-   * talked to.
+   * Refresh entry point for the UI. With an explicit agent name it syncs just
+   * that agent; without one it syncs every configured agent in parallel —
+   * the sidebar shows all sessions merged, so a refresh must too. Per-agent
+   * failures land in `syncError` as `name: message` pairs.
    */
   async function refreshAgentSessions(agentName?: string): Promise<void> {
-    const target =
-      agentName || activeRuntime.value?.session?.agentName || lastAgentName.value;
-    if (!target) {
-      syncError.value = 'Select an agent first';
+    const targets = agentName ? [agentName] : useConfigStore().agentNames;
+    if (targets.length === 0) {
+      syncError.value = 'No agents configured';
       return;
     }
-    await syncAgentSessions(target);
-  }
-
-  /**
-   * Point the sidebar at `agentName` and load its inventory.
-   *
-   * The visible list is intentionally blank while the first page is in flight
-   * (switching agents must look like a load, not like a no-op). Re-selecting
-   * the agent already shown keeps the rows and just re-fetches.
-   */
-  async function setActiveAgent(agentName: string): Promise<void> {
-    if (!agentName) return;
-    const switched = activeAgentName.value !== agentName;
-    activeAgentName.value = agentName;
-    if (switched) {
-      sidebarLoading.value = true;
-      syncError.value = null;
-    }
+    if (isSyncingSessions.value) return;
+    isSyncingSessions.value = true;
+    syncError.value = null;
     try {
-      await syncAgentSessions(agentName);
+      const results = await Promise.all(
+        targets.map((name) => syncOneAgentSessions(name))
+      );
+      const errors = targets
+        .map((name, i) => (results[i].error ? `${name}: ${results[i].error}` : ''))
+        .filter(Boolean);
+      syncError.value = errors.length ? errors.join('; ') : null;
     } finally {
-      sidebarLoading.value = false;
+      isSyncingSessions.value = false;
     }
   }
 
@@ -646,13 +645,6 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
-  /**
-   * Sessions the sidebar shows: the agent-scoped view of the inventory the
-   * agent itself reported. Scoping per agent keeps a 170-row mixed list
-   * legible — switching agents is the filter. Open tabs always show, even
-   * when hidden by a prefix (otherwise the list would deny what a tab is
-   * displaying).
-   */
   // Delete saved session — also closes its tab if one is open.
   async function deleteSession(sessionId: string): Promise<void> {
     const doomed = savedSessions.value.find(s => s.id === sessionId);
@@ -689,14 +681,31 @@ export const useSessionStore = defineStore('session', () => {
           .filter((id): id is string => id !== undefined)
       )
   );
+  /**
+   * Sessions the sidebar shows: every agent's inventory merged and sorted by
+   * last activity — the per-row agent chip carries the distinction that a
+   * scoped list used to. Open tabs always show, even when hidden by a prefix
+   * (otherwise the list would deny what a tab is displaying).
+   */
   const visibleSessions = computed(() =>
-    activeAgentName.value
-      ? savedSessions.value
-          .filter(s => s.agentName === activeAgentName.value && s.supportsLoadSession === true)
-          .filter(s => openSessionIds.value.has(s.id) || !isHiddenSession(s))
-          .sort((a, b) => b.lastUpdated - a.lastUpdated)
-      : []
+    savedSessions.value
+      .filter(s => s.supportsLoadSession === true)
+      .filter(s => openSessionIds.value.has(s.id) || !isHiddenSession(s))
+      .sort((a, b) => b.lastUpdated - a.lastUpdated)
   );
+
+  /**
+   * True when EVERY configured agent is known to lack `session/list` — only
+   * then is the refresh affordance useless and hidden. Until a sync attempt
+   * the capability is unknown, so the button stays.
+   */
+  const sessionListUnsupported = computed(() => {
+    const names = useConfigStore().agentNames;
+    return (
+      names.length > 0 &&
+      names.every((n) => listUnsupportedAgents.value.includes(n))
+    );
+  });
 
   // ---- Active-tab facade (legacy single-session API) ------------------------
   // Components and the e2e (`window.__session`) keep reading these names;
@@ -763,15 +772,11 @@ export const useSessionStore = defineStore('session', () => {
     startupPhase,
     startupLogs,
     startupElapsed,
-    supportsListSessions,
     supportsImages,
     isSyncingSessions,
     syncError,
     sessionListUnsupported,
     lastAgentName,
-    activeAgentName,
-    sidebarLoading,
-    lastSync,
     historyCacheNote,
     hiddenSessionPrefixes,
 
@@ -825,7 +830,6 @@ export const useSessionStore = defineStore('session', () => {
     tryReconnect,
     syncAgentSessions,
     refreshAgentSessions,
-    setActiveAgent,
     setHiddenSessionPrefixes,
 
     // Expose client for permission handling
