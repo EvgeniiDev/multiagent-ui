@@ -54,3 +54,11 @@ test('the same model on different providers has separate totals', () => {
   const s = store([row(1, 100, { model: 'M', provider: 'P1', accounting: 'delta' }), row(2, 200, { model: 'M', provider: 'P2', accounting: 'delta' })]);
   assert.equal(s.usageByModel(0, 10).length, 2);
 });
+test('token mix buckets follow cumulative deltas', () => {
+  const s = store([row(1, 100, { input: 60, cacheRead: 30, output: 10 }),
+                   row(2, 250, { input: 160, cacheRead: 70, output: 20 })]);
+  const r = s.deltaRows(0, 10);
+  assert.equal(r[1].input, 100);
+  assert.equal(r[1].cacheRead, 40);
+  assert.equal(r[1].output, 10);
+});

@@ -3,9 +3,12 @@ import { projectName, type ActivityEntry, type UsageSourceStatus, type UsageSour
 export interface SpendRow {
   at: number; agentName: string; sessionId: string; cwd?: string;
   model: string; provider: string; tokens: number; cost?: number; currency?: string; source: UsageSource;
+  input?: number; output?: number; cacheRead?: number; cacheWrite?: number;
 }
 export interface UsageGroup {
   key: string; name: string; detail: string; tokens: number; estTokens: number;
+  /** Token mix reported by providers; `input` excludes cached reads/writes. */
+  input: number; output: number; cacheRead: number; cacheWrite: number;
   costs: Array<{ currency: string; amount: number }>; turns: number; lastAt: number;
   agentName?: string; sessionId?: string; cwd?: string; model?: string; provider?: string; day?: string;
 }
@@ -15,10 +18,15 @@ export function localDayKey(at: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 function bucket(key: string, name: string, detail = ''): Accumulator {
-  return { key, name, detail, tokens: 0, estTokens: 0, money: new Map(), turns: 0, lastAt: 0 };
+  return { key, name, detail, tokens: 0, estTokens: 0,
+    input: 0, output: 0, cacheRead: 0, cacheWrite: 0, money: new Map(), turns: 0, lastAt: 0 };
 }
 function add(acc: Accumulator, row: SpendRow): void {
   acc.tokens += row.tokens;
+  acc.input += row.input ?? 0;
+  acc.output += row.output ?? 0;
+  acc.cacheRead += row.cacheRead ?? 0;
+  acc.cacheWrite += row.cacheWrite ?? 0;
   if (row.source === 'estimate') acc.estTokens += row.tokens;
   acc.lastAt = Math.max(acc.lastAt, row.at);
   if (typeof row.cost === 'number' && Number.isFinite(row.cost)) {

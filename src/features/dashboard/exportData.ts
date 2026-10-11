@@ -2,7 +2,15 @@
 import { fileDate, type RangeId } from './range';
 import { fmtCost } from './format';
 
-export interface ExportDay {
+/** Token mix as providers report it; `input` excludes cached reads/writes. */
+export interface TokenMix {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+}
+
+export interface ExportDay extends TokenMix {
   day: string;
   tokens: number;
   cost: number | null;
@@ -10,7 +18,7 @@ export interface ExportDay {
   costs?: Array<{ currency: string; amount: number }>;
 }
 
-export interface ExportAgent {
+export interface ExportAgent extends TokenMix {
   agentName: string;
   tokens: number;
   cost: number | null;
@@ -23,7 +31,7 @@ export interface ExportPayload {
   range: RangeId;
   from: string;
   to: string;
-  summary: { tokens: number; cost: number | null; turns: number; sessions: number; toolCalls: number; costs?: Array<{ currency: string; amount: number }> };
+  summary: { tokens: number; cost: number | null; turns: number; sessions: number; toolCalls: number; costs?: Array<{ currency: string; amount: number }> } & TokenMix;
   byAgent: ExportAgent[];
   byDay: ExportDay[];
 }

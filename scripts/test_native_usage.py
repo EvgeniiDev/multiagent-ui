@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -159,5 +160,104 @@ class NativeUsageTest(unittest.TestCase):
             p = Path(tmp) / 'session.jsonl'
             p.write_text(json.dumps(dict(type='message', id='m', timestamp='2026-10-07T10:00:00Z', message=dict(role='assistant', usage=dict(totalTokens=42)))) + '\n{"type":')
             self.assertEqual(sum(r['used'] for r in native.read_pi_file(p)), 42)
+
+    def test_unchanged_sessions_are_served_from_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            sessions = home / '.pi/agent/sessions'; sessions.mkdir(parents=True)
+            record = dict(type='message', id='m', timestamp='2026-10-07T10:00:00Z',
+                          message=dict(role='assistant', usage=dict(totalTokens=42)))
+            (sessions / 's.jsonl').write_text(json.dumps(record))
+            env = {'STATE_DIR': str(home / 'state')}
+            with patch.dict(os.environ, env):
+                first = native.collect(home, porch_output=home / 'porch')
+                with patch.object(native, 'read_pi_file', side_effect=AssertionError('rescanned')):
+                    second = native.collect(home, porch_output=home / 'porch')
+            self.assertEqual(first['usage'], second['usage'])
+
+    def test_changed_session_file_is_rescanned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            sessions = home / '.pi/agent/sessions'; sessions.mkdir(parents=True)
+            p = sessions / 's.jsonl'
+            record = dict(type='message', id='m', timestamp='2026-10-07T10:00:00Z',
+                          message=dict(role='assistant', usage=dict(totalTokens=42)))
+            p.write_text(json.dumps(record) + '\n')
+            env = {'STATE_DIR': str(home / 'state')}
+            with patch.dict(os.environ, env):
+                first = native.collect(home, porch_output=home / 'porch')
+                with p.open('a') as stream:
+                    stream.write(json.dumps(dict(record, id='m2', message=dict(
+                        role='assistant', usage=dict(totalTokens=8)))) + '\n')
+                second = native.collect(home, porch_output=home / 'porch')
+            self.assertEqual(sum(r['used'] for r in first['usage']), 42)
+            self.assertEqual(sum(r['used'] for r in second['usage']), 50)
+
+    def test_finished_porch_runs_are_served_from_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            root = home / 'run'; (root / 'raw').mkdir(parents=True)
+            (root / 'meta.json').write_text(json.dumps(dict(started_at='2026-10-07T10:00:00Z')))
+            event = dict(method='thread/tokenUsage/updated', emittedAtMs=1791367200000,
+                         params=dict(threadId='t', tokenUsage=dict(total=dict(totalTokens=42))))
+            (root / 'raw/codex.jsonl').write_text(json.dumps(event))
+            env = {'STATE_DIR': str(home / 'state'), 'ACP_PORCH_OUTPUT_DIR': str(home)}
+            with patch.dict(os.environ, env):
+                first = native.collect(home)
+                with patch.object(native, 'read_porch_root', side_effect=AssertionError('rescanned')):
+                    second = native.collect(home)
+            self.assertEqual(first['usage'], second['usage'])
+            self.assertEqual(sum(r['used'] for r in first['usage']), 42)
+
+    def test_pi_token_mix_buckets_partition_total(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / 'session.jsonl'
+            usage = dict(input=100, output=40, reasoning=10, cacheRead=200, cacheWrite=20, totalTokens=360)
+            p.write_text(json.dumps(dict(type='message', id='m', timestamp='2026-10-07T10:00:00Z',
+                                         message=dict(role='assistant', usage=usage))))
+            row = native.read_pi_file(p)[0]
+            self.assertEqual((row['input'], row['output'], row['cacheRead'], row['cacheWrite']), (100, 40, 200, 20))
+            self.assertEqual(row['input'] + row['output'] + row['cacheRead'] + row['cacheWrite'], row['used'])
+
+    def test_codex_buckets_split_cached_input_out_of_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / 'session.jsonl'
+            usage = dict(input_tokens=1160, cached_input_tokens=1000, cache_write_input_tokens=60,
+                         output_tokens=40, reasoning_output_tokens=10, total_tokens=1200)
+            records = [dict(type='session_meta', payload=dict(id='s')),
+                       dict(type='token_usage_record', timestamp='2026-10-07T10:00:00Z',
+                            payload=dict(response_id='r', usage=usage))]
+            p.write_text('\n'.join(map(json.dumps, records)))
+            row = native.read_codex_file(p)[0]
+            self.assertEqual((row['input'], row['output'], row['cacheRead'], row['cacheWrite']), (100, 50, 1000, 60))
+            self.assertEqual(row['used'], 1200)
+
+    def test_porch_snapshot_buckets_follow_cumulative_deltas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / 'raw').mkdir()
+            def snap(used, at):
+                return dict(method='thread/tokenUsage/updated', emittedAtMs=1791367200000 + at,
+                            params=dict(threadId='t', tokenUsage=dict(total=dict(
+                                totalTokens=used, inputTokens=used - 50, cachedInputTokens=used - 150,
+                                outputTokens=50, reasoningOutputTokens=0))))
+            (root / 'raw/codex.jsonl').write_text('\n'.join(map(json.dumps, [snap(200, 0), snap(500, 1)])))
+            rows = native.read_porch_usage([root], set())
+            self.assertEqual([(r['used'], r['cacheRead']) for r in rows], [(200, 50), (300, 300)])
+
+    def test_cached_porch_snapshots_are_not_subtracted_twice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            root = home / 'run'; (root / 'raw').mkdir(parents=True)
+            (root / 'meta.json').write_text(json.dumps(dict(started_at='2026-10-07T10:00:00Z')))
+            records = [dict(method='thread/tokenUsage/updated', emittedAtMs=1791367200000 + n,
+                            params=dict(threadId='t', tokenUsage=dict(total=dict(totalTokens=used))))
+                       for n, used in enumerate([100, 250])]
+            (root / 'raw/codex.jsonl').write_text('\n'.join(map(json.dumps, records)))
+            env = {'STATE_DIR': str(home / 'state'), 'ACP_PORCH_OUTPUT_DIR': str(home)}
+            with patch.dict(os.environ, env):
+                first = native.collect(home)
+                second = native.collect(home)
+            for result in (first, second):
+                self.assertEqual(sum(r['used'] for r in result['usage']), 250)
 
 if __name__ == '__main__': unittest.main()

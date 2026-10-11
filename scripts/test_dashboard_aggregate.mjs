@@ -33,3 +33,8 @@ test('CSV preserves separate currencies and distinguishes unavailable cost from 
   ]);
   assert.equal(csv,'day,tokens,cost,turns,currency,reported_costs\n2026-10-07,100,,1,,1 USD | 0.5 EUR\n2026-10-06,50,,1,,\n2026-10-05,20,0,1,USD,0 USD\n');
 });
+test('token mix buckets aggregate per group and total', () => {
+  const r = aggregateUsage([row(360,{input:100,output:40,cacheRead:200,cacheWrite:20}),row(50,{agentName:'Codex',input:50,output:0})],[]);
+  assert.equal(r.total.input,150);assert.equal(r.total.output,40);assert.equal(r.total.cacheRead,200);assert.equal(r.total.cacheWrite,20);
+  assert.equal(r.agents.find(x=>x.name==='Pi').cacheRead,200);
+});

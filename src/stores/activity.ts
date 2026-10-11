@@ -93,6 +93,12 @@ export interface UsageSample {
    * `info.providerID`). `undefined` reads as `unknown` — the panel and the
    * bridge see a model id, never a structured provider field. */
   provider?: string;
+  /** Token mix when the provider reports it: `input` excludes cached reads
+   * and cache writes so input+cacheRead+cacheWrite+output partition `used`. */
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
 }
 
 /** Last path segment of a working directory — the project's display name. */
@@ -219,10 +225,12 @@ export const useActivityStore = defineStore('activity', () => {
 
   /** One delta per recorded call, retaining its model and currency. Native
    * records are already deltas; legacy running counters are differenced. */
+  const BUCKET_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite'] as const;
   function deltaRows(from: number, to: number) {
     const previous = new Map<string, UsageSample>();
     const out: Array<{ at: number; agentName: string; cwd?: string; sessionId: string;
-      model: string; provider: string; tokens: number; cost?: number; currency?: string; source: UsageSource }> = [];
+      model: string; provider: string; tokens: number; cost?: number; currency?: string; source: UsageSource;
+      input?: number; output?: number; cacheRead?: number; cacheWrite?: number }> = [];
     for (const row of [...countableRows(allUsage.value)].sort((a, b) => a.at - b.at)) {
       if (row.at > to) continue;
       const key = sessionKey(row);
@@ -230,6 +238,14 @@ export const useActivityStore = defineStore('activity', () => {
       const value = Math.max(0, Number.isFinite(row.used) ? row.used : 0);
       const delta = row.accounting === 'delta' ? value
         : value >= (before?.used ?? 0) ? value - (before?.used ?? 0) : value;
+      const buckets: Partial<Record<(typeof BUCKET_KEYS)[number], number>> = {};
+      for (const k of BUCKET_KEYS) {
+        const v = row[k];
+        if (v == null || !Number.isFinite(v)) continue;
+        // Cumulative rows carry cumulative buckets too — difference them
+        // against the last snapshot like `used`.
+        buckets[k] = row.accounting === 'delta' ? v : Math.max(0, v - (before?.[k] ?? 0));
+      }
       let cost: number | undefined;
       if (typeof row.cost === 'number' && Number.isFinite(row.cost)) {
         const base = before?.currency === row.currency ? before?.cost ?? 0 : 0;
@@ -239,7 +255,7 @@ export const useActivityStore = defineStore('activity', () => {
       if (row.at < from) continue;
       out.push({ at: row.at, agentName: row.agentName, cwd: row.cwd, sessionId: row.sessionId,
         model: sampleModel(row), provider: sampleProvider(row), tokens: delta, cost,
-        currency: row.currency, source: sampleSource(row) });
+        currency: row.currency, source: sampleSource(row), ...buckets });
     }
     return out;
   }

@@ -41,7 +41,8 @@ const scalarCost = (r: UsageGroup) => r.costs.length === 1 ? r.costs[0].amount :
 
 interface DayPoint {
   day: string; label: string; from: number; to: number; step: number;
-  tokens: number; estTokens: number; cost: number; turns: number; costs: string;
+  tokens: number; estTokens: number; input: number; output: number; cacheRead: number; cacheWrite: number;
+  cost: number; turns: number; costs: string;
   costGroups: UsageGroup['costs'];
 }
 const dayPoints = computed<DayPoint[]>(() => {
@@ -56,16 +57,17 @@ const dayPoints = computed<DayPoint[]>(() => {
     const finalDay = new Date(next); finalDay.setDate(finalDay.getDate() - 1);
     const day = localDayKey(d.getTime());
     const costs = new Map<string, number>();
-    let tokens = 0, estTokens = 0, turns = 0;
+    let tokens = 0, estTokens = 0, turns = 0, input = 0, output = 0, cacheRead = 0, cacheWrite = 0;
     for (let cursor = new Date(d); cursor < next; cursor.setDate(cursor.getDate() + 1)) {
       const r = byDay.get(localDayKey(cursor.getTime()));
       if (!r) continue;
       tokens += r.tokens; estTokens += r.estTokens; turns += r.turns;
+      input += r.input; output += r.output; cacheRead += r.cacheRead; cacheWrite += r.cacheWrite;
       for (const c of r.costs) costs.set(c.currency, (costs.get(c.currency) ?? 0) + c.amount);
     }
     const costGroups = [...costs].map(([currency, amount]) => ({ currency, amount })).sort((a, b) => b.amount - a.amount);
     out.push({ day, label: step === 1 ? shortDate(day) : `${shortDate(day)} – ${shortDate(localDayKey(finalDay.getTime()))}`,
-      from: d.getTime(), to: next.getTime() - 1, step, tokens, estTokens, turns,
+      from: d.getTime(), to: next.getTime() - 1, step, tokens, estTokens, turns, input, output, cacheRead, cacheWrite,
       cost: costGroups.reduce((n, c) => n + c.amount, 0), costs: fmtCostGroups(costGroups), costGroups });
     d = next;
   }
@@ -190,6 +192,10 @@ const chartWidth = ref(640);
 const chartHeight = computed(() => chartWidth.value < 500 ? 190 : 240);
 const PAD_L = 42, PAD_B = 28, PAD_T = 8;
 const compactTokens = (n: number) => n >= 1e9 ? `${Number((n / 1e9).toFixed(2))}B` : fmtCompact(n);
+const mixText = (g: { input: number; output: number; cacheRead: number; cacheWrite: number }, fmt = compactTokens) =>
+  g.input || g.output || g.cacheRead || g.cacheWrite
+    ? `${fmt(g.input)} in · ${fmt(g.cacheRead)} cached${g.cacheWrite ? ` · ${fmt(g.cacheWrite)} written` : ''} · ${fmt(g.output)} out`
+    : '';
 let chartObserver: ResizeObserver | null = null;
 watch(chartSvg, svg => {
   chartObserver?.disconnect();
@@ -237,10 +243,13 @@ function payload(): ExportPayload {
     exportedAt: new Date(now.value).toISOString(), range: range.value,
     from: new Date(from).toISOString(), to: new Date(to).toISOString(),
     summary: { tokens: total.tokens, cost: scalarCost(total), turns: total.turns,
-      sessions: total.sessions, toolCalls: total.toolCalls, costs: total.costs },
+      sessions: total.sessions, toolCalls: total.toolCalls, costs: total.costs,
+      input: total.input, output: total.output, cacheRead: total.cacheRead, cacheWrite: total.cacheWrite },
     byAgent: periodStats.value.agents.map(r => ({ agentName: r.name, tokens: r.tokens,
-      cost: scalarCost(r), turns: r.turns, costs: r.costs })),
-    byDay: tableRows.value.map(d => ({ day: d.day, tokens: d.tokens, cost: d.costGroups.length === 1 ? d.costGroups[0].amount : null, turns: d.turns, costs: d.costGroups })),
+      cost: scalarCost(r), turns: r.turns, costs: r.costs,
+      input: r.input, output: r.output, cacheRead: r.cacheRead, cacheWrite: r.cacheWrite })),
+    byDay: tableRows.value.map(d => ({ day: d.day, tokens: d.tokens, cost: d.costGroups.length === 1 ? d.costGroups[0].amount : null, turns: d.turns, costs: d.costGroups,
+      input: d.input, output: d.output, cacheRead: d.cacheRead, cacheWrite: d.cacheWrite })),
   };
 }
 
@@ -363,7 +372,7 @@ watch(
               <aside class="inspector" aria-label="Selected period summary" data-testid="summary-strip" :aria-busy="initialLoading" aria-live="polite">
                 <div><h4 data-testid="inspector-title">{{ inspectorTitle }}</h4><p class="inspector-dates">{{ inspectorDates }}</p></div>
                 <dl class="inspector-metrics">
-                  <div><dt>Tokens used</dt><dd class="metric-value">{{ initialLoading ? '—' : `${summary.estTokens >= summary.tokens && summary.estTokens > 0 ? '~' : ''}${compactTokens(summary.tokens)}` }}</dd><dd class="metric-exact mono" data-testid="sum-tokens" :data-est="summary.estTokens > 0">{{ initialLoading ? '—' : fmtTokensWithEst(summary.tokens, summary.estTokens) }}</dd><dd class="metric-caption">Includes cached input</dd></div>
+                  <div><dt>Tokens used</dt><dd class="metric-value">{{ initialLoading ? '—' : `${summary.estTokens >= summary.tokens && summary.estTokens > 0 ? '~' : ''}${compactTokens(summary.tokens)}` }}</dd><dd class="metric-exact mono" data-testid="sum-tokens" :data-est="summary.estTokens > 0">{{ initialLoading ? '—' : fmtTokensWithEst(summary.tokens, summary.estTokens) }}</dd><dd class="metric-caption" :title="mixText(summary, fmtInt)" data-testid="token-mix">{{ mixText(summary) || 'Includes cached input' }}</dd></div>
                   <div><dt>Reported cost <span v-if="hasMissingCosts" class="muted">· partial</span></dt><dd class="metric-value metric-money" data-testid="sum-cost">{{ initialLoading ? '—' : fmtCostGroups(summary.costs) }}</dd><dd v-if="hasMissingCosts" class="metric-caption">Some costs are unavailable</dd></div>
                   <div><dt>Sessions</dt><dd class="metric-value" data-testid="sum-sessions">{{ initialLoading ? '—' : fmtInt(summary.sessions) }}</dd></div>
                 </dl>
@@ -384,7 +393,7 @@ watch(
               </div>
               <section v-if="activeBreakdown === 'sessions' && sessionDetail" id="session-detail" tabindex="-1" class="session-detail" data-testid="session-detail" aria-label="Session usage details">
                 <div class="panel-heading"><h3>{{ detailSaved?.title || sessionDetail.name }}</h3><UiButton size="xs" @click="sessionDetailKey = null">Close details</UiButton></div>
-                <dl><dt>Session ID</dt><dd class="mono">{{ sessionDetail.sessionId }}</dd><dt>Agent</dt><dd>{{ sessionDetail.agentName }}</dd><dt>Project / folder</dt><dd>{{ sessionDetail.cwd || 'Unknown' }}</dd><dt>Selected period</dt><dd>{{ inspectorDates }}</dd><dt>Tokens in this selection</dt><dd>{{ fmtTokensWithEst(sessionDetail.tokens, sessionDetail.estTokens) }}</dd><dt>Last usage in this selection</dt><dd>{{ fmtStamp(sessionDetail.lastAt) }}</dd></dl>
+                <dl><dt>Session ID</dt><dd class="mono">{{ sessionDetail.sessionId }}</dd><dt>Agent</dt><dd>{{ sessionDetail.agentName }}</dd><dt>Project / folder</dt><dd>{{ sessionDetail.cwd || 'Unknown' }}</dd><dt>Selected period</dt><dd>{{ inspectorDates }}</dd><dt>Tokens in this selection</dt><dd>{{ fmtTokensWithEst(sessionDetail.tokens, sessionDetail.estTokens) }}</dd><template v-if="mixText(sessionDetail, fmtInt)"><dt>Token mix</dt><dd data-testid="session-token-mix">{{ mixText(sessionDetail, fmtInt) }}</dd></template><dt>Last usage in this selection</dt><dd>{{ fmtStamp(sessionDetail.lastAt) }}</dd></dl>
                 <ul><li v-for="model in detailModels" :key="model.key">{{ model.name }} · {{ model.provider }}: <strong>{{ fmtInt(model.tokens) }}</strong> tokens</li></ul>
                 <UiButton v-if="detailSaved" data-testid="open-saved-chat" @click="openSession(sessionDetail.key)">Open saved chat</UiButton>
                 <p v-else class="muted">Historical session from agent logs. This chat is not saved in this browser.</p>
