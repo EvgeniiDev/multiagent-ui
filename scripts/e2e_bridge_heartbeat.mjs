@@ -112,7 +112,9 @@ class Client {
         }
       }
     });
-    this.ws.on('close', () => {
+    this.ws.on('close', (code, reason) => {
+      this.closeCode = code;
+      this.closeReason = reason.toString();
       for (const [id, p] of this.pending) {
         this.pending.delete(id);
         p.reject(new Error('socket closed'));
@@ -162,6 +164,14 @@ class Client {
       await sleep(25);
     }
     return false;
+  }
+  async waitForClose(timeoutMs = 3000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (this.ws.readyState === WebSocket.CLOSED) return true;
+      await sleep(25);
+    }
+    return this.ws.readyState === WebSocket.CLOSED;
   }
   close() {
     try { this.ws.terminate(); } catch { /* ignore */ }
@@ -366,6 +376,10 @@ async function main() {
     await sleep(300);
     check('2: bridge log shows the watchdog fire',
       /watchdog: no traffic for \d+s/.test(B.log.text));
+    const closed = await g.waitForClose();
+    check('2: watchdog closes clients after detaching the stuck child',
+      closed && g.closeCode === 1011 && /watchdog: agent appears wedged/.test(g.closeReason),
+      `readyState=${g.ws.readyState} code=${g.closeCode} reason=${g.closeReason}`);
   } finally {
     if (pingTimer) clearInterval(pingTimer);
     g.close();

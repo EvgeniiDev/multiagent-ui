@@ -889,6 +889,16 @@ function failPending(message) {
   }
 }
 
+function closeClients(reason) {
+  for (const ws of clients) {
+    try {
+      ws.close(1011, reason);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 const watchdog = setInterval(() => {
   if (pendingClientReqs.size === 0 || pendingAgentReqs.size > 0) return;
   const idleFor = Date.now() - lastTrafficAt;
@@ -898,11 +908,13 @@ const watchdog = setInterval(() => {
     `(idle limit ${Math.round(IDLE_TIMEOUT_MS / 1000)}s)`;
   log(`watchdog: ${message}; failing ${pendingClientReqs.size} pending request(s)`);
   failPending(message);
-  // The process produced nothing for a whole idle window; it cannot be
-  // trusted. Detach this generation before signaling it so the next client
-  // message may start a replacement without accepting stale callbacks.
+  // stop() detaches this generation, so its later exit callback is stale by
+  // design. Perform the child-exit cleanup here before that callback is lost.
+  buffer = '';
+  pendingAgentReqs.clear();
   const stuck = processOwner.current;
   processOwner.stop(stuck, 'SIGKILL');
+  closeClients('watchdog: agent appears wedged');
 }, WATCHDOG_TICK_MS);
 watchdog.unref?.();
 
