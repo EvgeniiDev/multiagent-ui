@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // E2E: heartbeat, liveness sweep, reconnect re-claim and steer in
-// server/acp-ws-bridge.mjs — the companion to e2e_bridge_routing.mjs.
+// deploy/acp-ws-bridge.mjs — the companion to e2e_bridge_routing.mjs.
 //
 //   bridge A (--idle-timeout-ms 4000 --ws-ping-interval-ms 400):
 //     1. $/ping notification -> $/pong on the SAME socket only (B sees none);
@@ -33,7 +33,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const BRIDGE = path.join(ROOT, 'server', 'acp-ws-bridge.mjs');
+const BRIDGE = path.join(ROOT, 'deploy', 'acp-ws-bridge.mjs');
 const AGENT = path.join(ROOT, 'scripts', 'e2e_bridge_heartbeat_agent.mjs');
 
 const results = [];

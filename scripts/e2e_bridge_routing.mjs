@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// E2E: per-session routing in server/acp-ws-bridge.mjs.
+// E2E: per-session routing in deploy/acp-ws-bridge.mjs.
 //
 // One bridge, one shared agent child, TWO WebSocket clients — the real
 // deployment shape behind the "second tab hangs" bug: before routing,
@@ -28,7 +28,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const BRIDGE = path.join(ROOT, 'server', 'acp-ws-bridge.mjs');
+const BRIDGE = path.join(ROOT, 'deploy', 'acp-ws-bridge.mjs');
 const AGENT = path.join(ROOT, 'scripts', 'e2e_bridge_routing_agent.mjs');
 
 const REPLAY_CHUNKS = 60; // keep in sync with the mock agent

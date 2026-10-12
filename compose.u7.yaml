@@ -77,13 +77,13 @@ services:
     # Live runs uid 1001 (foreign fix present in main compose, mirrored here
     # so the fixture container matches the real owner).
     user: "1001:1001"
-    # Real bridge code (deploy/ == server/ byte-identical) + a deterministic
+    # Canonical deploy bridge code + a deterministic
     # mock ACP child. This proves bridge-level protocol invariants only —
     # per-session routing and per-socket request-id namespacing — NOT real
     # CLI integration, which is proven separately through managed porch runs.
     command:
       [
-        "node", "/repo/server/acp-ws-bridge.mjs",
+        "node", "/repo/deploy/acp-ws-bridge.mjs",
         "--port", "25901",
         "--cmd", "node /repo/scripts/u7_mock_acp.mjs",
         "--agent-name", "MockACP",

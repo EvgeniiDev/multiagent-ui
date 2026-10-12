@@ -8,8 +8,8 @@ Systemd user-юниты переведены в `compose.yaml` (корень р�
 
 | Сервис | Команда | Порт |
 |---|---|---|
-| bridge-hermes/opencode/devin/pi | `node server/acp-ws-bridge.mjs --port 2590X --cmd "..."` | 25901–25904 |
-| bridge-codex | `node server/acp-ws-bridge.mjs --port 25907 --cmd "codex-acp" --agent-name "Codex"` | 25907 |
+| bridge-hermes/opencode/devin/pi | `node deploy/acp-ws-bridge.mjs --port 2590X --cmd "..."` | 25901–25904 |
+| bridge-codex | `node deploy/acp-ws-bridge.mjs --port 25907 --cmd "codex-acp" --agent-name "Codex"` | 25907 |
 | state | `node server/acp-state-server.mjs` | 25900 |
 | runner | `node server/acp-runner.mjs --serve` | — |
 | https-front | `node server/https-front.mjs` | 25809, 25906, 25910–25914, 25917 |
