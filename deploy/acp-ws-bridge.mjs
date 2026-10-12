@@ -64,7 +64,7 @@
 // Env:   ACP_TOKEN_METER=0 disables metering (default on),
 //        ACP_STATE_URL=http://127.0.0.1:25900 state server for the ledger,
 //        ACP_TOKEN_METER_INTERVAL_MS=10000 min write interval per session.
-import { spawn } from 'node:child_process';
+import { BridgeProcessOwner } from './bridge-process-owner.mjs';
 import { createRequire } from 'node:module';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -611,7 +611,7 @@ function handleHttp(req, res) {
 // ---------------------------------------------------------------------------
 
 const clients = new Set();
-let child = null;
+const processOwner = new BridgeProcessOwner();
 let buffer = '';
 
 /** sessionId -> ws that owns it: the socket that last sent session/load or
@@ -713,8 +713,8 @@ function flushDeferredLoads(sid) {
       try {
         const out = noteOutbound(entry.line + '\n', ws);
         if (out) {
-          if (!child) spawnChild();
-          child.stdin.write(out);
+          if (!processOwner.current) spawnChild();
+          processOwner.current.stdin.write(out);
         }
         log(`released deferred session load for ${s}`);
       } catch (e) {
@@ -899,14 +899,10 @@ const watchdog = setInterval(() => {
   log(`watchdog: ${message}; failing ${pendingClientReqs.size} pending request(s)`);
   failPending(message);
   // The process produced nothing for a whole idle window; it cannot be
-  // trusted. Kill it — the next client message respawns a fresh one.
-  const stuck = child;
-  child = null;
-  try {
-    stuck?.kill('SIGKILL');
-  } catch {
-    /* ignore */
-  }
+  // trusted. Detach this generation before signaling it so the next client
+  // message may start a replacement without accepting stale callbacks.
+  const stuck = processOwner.current;
+  processOwner.stop(stuck, 'SIGKILL');
 }, WATCHDOG_TICK_MS);
 watchdog.unref?.();
 
@@ -988,13 +984,42 @@ function broadcast(line, msg, dest) {
 
 function spawnChild() {
   const [bin, ...args] = command.split(/\s+/);
-  child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = processOwner.start([bin, ...args], { stdio: ['pipe', 'pipe', 'pipe'] }, {
+    onError: (e, state) => {
+      if (!state.current) return;
+      log('child error:', e.message);
+      failPending(`agent CLI failed to start: ${e.message}`);
+      pendingAgentReqs.clear();
+      for (const ws of clients) {
+        try {
+          ws.close(1011, 'child error');
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+    onExit: (code, signal, state) => {
+      if (!state.current) return;
+      log(`child exited code=${code} signal=${signal}`);
+      buffer = '';
+      failPending(`agent CLI exited (code=${code} signal=${signal})`);
+      pendingAgentReqs.clear();
+      for (const ws of clients) {
+        try {
+          ws.close(1011, `child exited code=${code}`);
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+  });
   log(`spawned ${bin} pid=${child.pid}`);
   buffer = '';
   pendingAgentReqs.clear();
 
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk) => {
+    if (processOwner.current !== child) return;
     buffer += chunk;
     let idx;
     // Emit only complete NDJSON lines, one per WebSocket frame.
@@ -1012,36 +1037,10 @@ function spawnChild() {
   });
 
   child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (d) => process.stderr.write(d));
-
-  child.on('error', (e) => {
-    log('child error:', e.message);
-    child = null;
-    failPending(`agent CLI failed to start: ${e.message}`);
-    pendingAgentReqs.clear();
-    for (const ws of clients) {
-      try {
-        ws.close(1011, 'child error');
-      } catch {
-        /* ignore */
-      }
-    }
+  child.stderr.on('data', (d) => {
+    if (processOwner.current === child) process.stderr.write(d);
   });
 
-  child.on('exit', (code, signal) => {
-    log(`child exited code=${code} signal=${signal}`);
-    child = null;
-    buffer = '';
-    failPending(`agent CLI exited (code=${code} signal=${signal})`);
-    pendingAgentReqs.clear();
-    for (const ws of clients) {
-      try {
-        ws.close(1011, `child exited code=${code}`);
-      } catch {
-        /* ignore */
-      }
-    }
-  });
 }
 
 const server = http.createServer(handleHttp);
@@ -1060,7 +1059,7 @@ wss.on('connection', (ws) => {
     ws.isAlive = true;
   });
   ws.on('error', (e) => log('ws error:', e instanceof Error ? e.message : e));
-  if (!child) spawnChild();
+  if (!processOwner.current) spawnChild();
 
   ws.on('message', (data) => {
     ws.isAlive = true;
@@ -1095,8 +1094,8 @@ wss.on('connection', (ws) => {
       // the child (nor respawn it just to keep a NAT mapping warm).
       const out = noteOutbound(line, ws);
       if (out) {
-        if (!child) spawnChild();
-        child.stdin.write(out);
+        if (!processOwner.current) spawnChild();
+        processOwner.current.stdin.write(out);
       }
     } catch (e) {
       log('stdin write failed:', e.message);

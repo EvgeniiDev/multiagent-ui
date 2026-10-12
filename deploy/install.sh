@@ -13,7 +13,9 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BRIDGE_SRC="$REPO_DIR/deploy/acp-ws-bridge.mjs"
+BRIDGE_OWNER_SRC="$REPO_DIR/deploy/bridge-process-owner.mjs"
 BRIDGE_DST="$HOME/.hermes/acp-ws-bridge.mjs"
+BRIDGE_OWNER_DST="$HOME/.hermes/bridge-process-owner.mjs"
 UNIT_SRC="$REPO_DIR/deploy/systemd"
 UNIT_DST="$HOME/.config/systemd/user"
 WEB_DIR="$REPO_DIR/dist-web"
@@ -37,7 +39,9 @@ fi
 
 mkdir -p "$HOME/.hermes" "$UNIT_DST"
 install -m 0755 "$BRIDGE_SRC" "$BRIDGE_DST"
+install -m 0644 "$BRIDGE_OWNER_SRC" "$BRIDGE_OWNER_DST"
 echo "installed bridge -> $BRIDGE_DST"
+echo "installed process owner -> $BRIDGE_OWNER_DST"
 
 # OpenCode token-meter plugin: exact usage figures land in the panel ledger
 # via `session.idle`. Global plugin dir — opencode auto-loads it at startup.
