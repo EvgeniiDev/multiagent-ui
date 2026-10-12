@@ -11,7 +11,7 @@
 // so a single process fronts every upstream by port:
 //
 //   https 25809 -> http 127.0.0.1:25808   the panel bundle
-//   https 25906 -> http 127.0.0.1:25905   GigaAM STT (health + /ws/stream)
+//   https 25906 -> http 127.0.0.1:8099    audio-video-to-text REST API
 //   https 25910 -> http 127.0.0.1:25900   shared state server (board/claims/roles)
 //   https 25911 -> http 127.0.0.1:25901   ACP bridge: Hermes Agent
 //   https 25912 -> http 127.0.0.1:25902   ACP bridge: OpenCode
@@ -21,12 +21,11 @@
 //
 // The +10 offset for the state server and the bridges is the convention the
 // panel reads too (`src/lib/host/secure.ts`): insecure port + 10 = secure port.
-// STT (25905 -> 25906) and the panel (25808 -> 25809) predate that convention
-// and keep their +1 ports, which the panel also knows.
+// The panel uses +1 (25808 -> 25809); the transcriber maps HTTP 8099 -> TLS 25906.
 //
 // CORS: the panel is one origin (https://host:25809) and every other service is
-// a different port, i.e. a different origin. Cross-origin fetches (the STT
-// health probe, POST /api/fs/write with a JSON body) need CORS headers and a
+// a different port, i.e. a different origin. Cross-origin fetches (including
+// the transcriber OpenAPI probe and multipart upload) need CORS headers and a
 // preflight answer, so this proxy adds `Access-Control-Allow-Origin: *` to
 // every proxied response and answers OPTIONS itself. WebSockets are not
 // CORS-gated and pass through raw.
@@ -48,7 +47,7 @@ const UPSTREAM_HOST = '127.0.0.1';
 // suites then exercise the real terminator, not a re-implementation of it.
 const DEFAULT_TARGETS = {
   25809: 25808,   // the panel itself
-  25906: 25905,   // GigaAM STT service (health + ws/stream)
+  25906: 8099,    // audio-video-to-text REST API (OpenAPI + transcription)
   25910: 25900,   // shared state server (board/claims/roles/sessions/activity)
   25911: 25901,   // ACP bridge: Hermes Agent
   25912: 25902,   // ACP bridge: OpenCode

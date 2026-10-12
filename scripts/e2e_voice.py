@@ -1,61 +1,44 @@
 #!/usr/bin/env python3
-"""E2E for composer voice input (cc/w7-voice): mic button, streaming STT.
+"""E2E for composer voice input using the audio-video-to-text HTTP API.
 
-Serves dist-web on http://127.0.0.1:25991/ and stubs BOTH websockets the app
-opens: the ACP agent handshake (same mock as the other suites) and the STT
-stream on :25905/ws/stream — a canned script that answers binary PCM frames
-with partials and {"type":"stop"} with a final. Chromium runs with
---use-fake-ui-for-media-stream --use-fake-device-for-media-stream so
-getUserMedia really resolves and audio frames actually flow; the stub counts
-the bytes to prove the capture+resample pipeline end-to-end.
-
-Covers, per the brief:
-  * mic button present in .input-row, 34x34, radius 6px, no shadow, svg icon;
-  * click opens the STT ws and flips to a listening state with a timer line;
-  * committed text renders in the normal field colour, volatile muted;
-  * {"type":"stop"} -> final text stays in the field, button idles;
-  * a second click starts a fresh take; Escape stops too;
-  * hand-typed text survives (dictation lands at the caret, with a space);
-  * /health failing -> button disabled with a reason on the title;
-  * getUserMedia rejecting -> visible error line, nothing hangs;
-  * ws dropping mid-take -> error shown, recognised text kept;
-  * zero pageerror events.
-
-Usage:
-    npm run build:web
-    ~/.hermes/tools-venv/bin/python scripts/e2e_voice.py
-
-Artefacts: the canned transcript lands in ./tmp-voice-test/, screenshots in
-docs/ like the other suites.
-Prints PASS/FAIL per assertion and exits non-zero on any failure.
+Serves dist-web on http://127.0.0.1:25991/, stubs the ACP websocket, and
+intercepts the transcriber's OpenAPI probe and multipart WAV request. Chromium
+uses a fake microphone so audio capture and WAV encoding run through production
+code, while inference remains deterministic.
 """
 
+import io
 import json
+import os
 import re
 import sys
 import time
+import wave
+from email.parser import BytesParser
+from email.policy import default
 from pathlib import Path
+from typing import cast
+from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright
 
 from _e2e_harness import serve_web, stop
 
 ROOT = Path(__file__).resolve().parent.parent
-DIST = ROOT / "dist-web"
-SHOTS = ROOT / "docs"
+DIST = Path(os.environ.get("ACP_UI_DIST", str(ROOT / "dist-web")))
 TMP = ROOT / "tmp-voice-test"
+SHOTS = TMP / "screenshots"
 PORT = 25991
 BASE = f"http://127.0.0.1:{PORT}/"
 
-# Canned transcript the stub plays back. Partial 2 settles "the quick" and
-# keeps "brown fox" volatile; the final polishes the whole utterance.
-PARTIAL_1 = {"committed": "", "volatile": "the quick"}
-PARTIAL_2 = {"committed": "the quick", "volatile": "brown fox"}
 FINAL_TEXT = "the quick brown fox"
 
 results = []
 page_errors = []
-stt_stats = {"opens": 0, "binary_frames": 0, "binary_bytes": 0, "stops": 0}
+stt_stats = {
+    "health_checks": 0, "health_path": "", "requests": 0,
+    "method": "", "multipart": False, "wav_bytes": 0, "valid_wav": False,
+}
 
 
 def check(name, ok, extra=""):
@@ -64,7 +47,7 @@ def check(name, ok, extra=""):
 
 
 # --------------------------------------------------------------------------
-# Fakes: ACP websocket agent + bridge fs API + the STT stream.
+# Fakes: ACP websocket agent + bridge fs API + transcription HTTP API.
 # --------------------------------------------------------------------------
 
 def acp_ws(ws):
@@ -98,44 +81,55 @@ def acp_ws(ws):
     ws.on_message(on_message)
 
 
-def stt_ws(ws):
-    """Stand in for stt-server's /ws/stream with a canned transcript.
+def make_mime_envelope(content_type: str, body: bytes) -> bytes:
+    """Add RFC-compliant CRLF-delimited headers around a browser multipart body."""
+    crlf = bytes((13, 10))
+    return (
+        b"MIME-Version: 1.0" + crlf
+        + b"Content-Type: " + content_type.encode("ascii") + crlf + crlf
+        + body
+    )
 
-    Binary frames are counted (the capture pipeline must really stream);
-    partials are emitted after 3 and 7 frames (~0.3s/~0.7s of audio); a
-    {"type":"stop"} text frame yields the final, then the socket closes —
-    exactly what the real server does. mode='drop' closes abruptly after the
-    second partial to exercise the mid-take failure path.
-    """
-    stt_stats["opens"] += 1
-    state = {"frames": 0}
-    mode = STUB["mode"]
 
-    def on_message(message):
-        if isinstance(message, (bytes, bytearray)):
-            state["frames"] += 1
-            stt_stats["binary_frames"] += 1
-            stt_stats["binary_bytes"] += len(message)
-            if state["frames"] == 3:
-                ws.send(json.dumps({"type": "partial", **PARTIAL_1,
-                                    "text": PARTIAL_1["volatile"], "audio_s": 0.3}))
-            elif state["frames"] == 7:
-                ws.send(json.dumps({"type": "partial", **PARTIAL_2,
-                                    "text": "the quick brown fox", "audio_s": 0.7}))
-                if mode == "drop":
-                    ws.close()
-            return
-        try:
-            ctrl = json.loads(str(message))
-        except ValueError:
-            return
-        if ctrl.get("type") == "stop":
-            stt_stats["stops"] += 1
-            ws.send(json.dumps({"type": "final", "text": FINAL_TEXT,
-                                "audio_s": 1.0, "total_s": 0.4}))
-            ws.close()
-
-    ws.on_message(on_message)
+def transcribe(route):
+    """Stub the synchronous multipart API and inspect the production WAV."""
+    stt_stats["requests"] += 1
+    body = cast(bytes, route.request.post_data_buffer) or b""
+    content_type = route.request.header_value("content-type") or ""
+    stt_stats["method"] = route.request.method
+    stt_stats["multipart"] = content_type.lower().startswith("multipart/form-data; boundary=")
+    stt_stats["wav_bytes"] = len(body)
+    stt_stats["valid_wav"] = False
+    try:
+        envelope = make_mime_envelope(content_type, body)
+        message = BytesParser(policy=default).parsebytes(envelope)
+        if message.get_content_type() != "multipart/form-data" or not message.is_multipart():
+            raise ValueError("invalid multipart/form-data envelope")
+        files = [
+            part for part in message.iter_parts()
+            if part.get_param("name", header="content-disposition") == "file"
+        ]
+        if len(files) == 1:
+            file_part = files[0]
+            payload = file_part.get_payload(decode=True) or b""
+            with wave.open(io.BytesIO(payload), "rb") as wav:
+                stt_stats["valid_wav"] = (
+                    file_part.get_filename() == "recording.wav"
+                    and file_part.get_content_type() == "audio/wav"
+                    and wav.getnchannels() == 1
+                    and wav.getframerate() == 16000
+                    and wav.getsampwidth() == 2
+                    and wav.getnframes() > 0
+                )
+    except (ValueError, OSError, TypeError, EOFError, wave.Error):
+        stt_stats["valid_wav"] = False
+    headers = {"access-control-allow-origin": "*"}
+    if STUB["mode"] == "error":
+        route.fulfill(status=503, content_type="text/plain", headers=headers,
+                      body="inference unavailable")
+    else:
+        route.fulfill(status=200, content_type="text/plain", headers=headers,
+                      body=FINAL_TEXT)
 
 
 STUB = {"mode": "normal"}
@@ -156,14 +150,13 @@ def fs_api(route):
 
 
 def health_ok(route):
-    # ACAO:* is what stt-server should send (and what the verified probe
-    # path needs); the streaming ws itself is not subject to CORS.
+    stt_stats["health_checks"] += 1
+    stt_stats["health_path"] = urlsplit(route.request.url).path
     route.fulfill(
         status=200,
         content_type="application/json",
         headers={"access-control-allow-origin": "*"},
-        body=json.dumps({"ok": True, "model": "e2e-stub", "loaded": True,
-                         "sample_rate": 16000, "window_s": 6, "hop_s": 1}),
+        body=json.dumps({"paths": {"/v1/audio/transcriptions": {"post": {}}}}),
     )
 
 
@@ -198,15 +191,13 @@ def deny_mic(context):
 
 def wire_routes(page, tag, health=health_ok):
     page.route(re.compile(r"/api/fs/"), fs_api)
-    page.route(re.compile(r":25905/health"), health)
+    page.route(re.compile(r":8099/openapi\.json"), health)
+    page.route(re.compile(r":8099/v1/audio/transcriptions"), transcribe)
     # A real state server may be running on the host (it holds a persisted
     # activeView that hid the sidebar once). Refuse it so the page falls
     # back to localStorage and every run starts from the same state.
     page.route(re.compile(r":25900/"), lambda route: route.abort())
-    # The generic ACP mock is registered first so the narrower STT pattern
-    # wins for :25905 sockets (last matching route takes precedence).
     page.route_web_socket(re.compile(r"^wss?://"), acp_ws)
-    page.route_web_socket(re.compile(r":25905/ws/stream"), stt_ws)
     page.on("pageerror", lambda exc: page_errors.append(f"{tag}: {exc}"))
 
 
@@ -283,6 +274,14 @@ def run_checks():
         seed(ctx)
         page = ctx.new_page()
         open_chat(page, "main")
+        for _ in range(20):
+            if stt_stats["health_checks"]:
+                break
+            page.wait_for_timeout(50)
+        check("voice readiness probes the OpenAPI transcription endpoint",
+              stt_stats["health_checks"] > 0
+              and stt_stats["health_path"] == "/openapi.json",
+              repr(stt_stats))
 
         btn = rect(page, ".voice-btn")
         check("mic button mounts in the input row", btn is not None)
@@ -302,70 +301,50 @@ def run_checks():
         page.click(".composer-box textarea")
         page.click(".voice-btn")
         page.wait_for_selector(".voice-btn.listening", timeout=8000)
-        check("click opens STT ws and shows the listening state", True)
+        check("click starts recording and shows the listening state", True)
         check("status line shows the listening timer",
               page.locator(".voice-status").inner_text().startswith("Listening"),
               page.locator(".voice-status").inner_text())
-
-        # Frames really stream: wait until the stub's second partial lands.
-        page.wait_for_selector(".voice-overlay .voice-commit", timeout=8000)
-        check("binary PCM frames reached the stub",
-              stt_stats["binary_frames"] >= 7 and stt_stats["binary_bytes"] > 0,
-              f"{stt_stats['binary_frames']} frames, {stt_stats['binary_bytes']} B")
-
-        commit = css(page, ".voice-overlay .voice-commit", ["color"])
-        volatile = css(page, ".voice-overlay .voice-volatile", ["color"])
-        texts = page.evaluate(
-            """() => ({ c: document.querySelector('.voice-overlay .voice-commit')?.textContent,
-                        v: document.querySelector('.voice-overlay .voice-volatile')?.textContent })"""
-        )
-        check("committed span carries the settled words",
-              texts["c"] == PARTIAL_2["committed"], repr(texts))
-        check("volatile span carries the hypothesis",
-              texts["v"] == PARTIAL_2["volatile"], repr(texts))
-        check("committed renders in the normal field colour",
-              commit and commit["color"] == token(page, "--text-primary"),
-              repr(commit))
-        check("volatile renders muted",
-              volatile and volatile["color"] == token(page, "--text-muted"),
-              repr(volatile))
-        check("typed text still visible in the overlay",
-              page.locator(".voice-overlay").inner_text().startswith("note:"))
+        page.wait_for_timeout(700)
         page.screenshot(path=str(SHOTS / "voice-listening.png"))
 
-        # Stop via the button -> final lands at the caret with a space.
+        # Stop sends the captured audio as one multipart WAV request.
         page.click(".voice-btn")
         page.wait_for_function(
-            "() => !document.querySelector('.voice-btn.listening')", timeout=8000
+            "() => document.querySelector('.composer-box textarea')?.value === 'note: the quick brown fox'",
+            timeout=20000,
         )
-        page.wait_for_timeout(300)
-        check("final text stays in the field after stop",
+        check("recording reached the transcription API as a multipart WAV",
+              stt_stats["requests"] == 1
+              and stt_stats["method"] == "POST"
+              and stt_stats["multipart"]
+              and stt_stats["wav_bytes"] > 44
+              and stt_stats["valid_wav"], repr(stt_stats))
+        check("final text stays in the field after transcription",
               field_value(page) == f"note: {FINAL_TEXT}", repr(field_value(page)))
-        check("stop frame reached the stub", stt_stats["stops"] == 1)
-        check("overlay cleared once idle",
-              page.locator(".voice-overlay").count() == 0)
+        check("overlay cleared once idle", page.locator(".voice-overlay").count() == 0)
 
-        # A second click starts a fresh take; Escape ends it.
+        # A second click starts a fresh take; Escape stops it too.
         page.click(".voice-btn")
         page.wait_for_selector(".voice-btn.listening", timeout=8000)
         check("second click starts a new take", True)
         before = field_value(page)
         page.keyboard.press("Escape")
+        expected_after_escape = before + " " + FINAL_TEXT
         page.wait_for_function(
-            "() => !document.querySelector('.voice-btn.listening')", timeout=8000
+            "() => document.querySelector('.composer-box textarea')?.value === "
+            + json.dumps(expected_after_escape),
+            timeout=5000,
         )
-        page.wait_for_timeout(300)
-        check("Escape stops the take and keeps the text",
-              field_value(page) == before + " " + FINAL_TEXT
-              or field_value(page).endswith(FINAL_TEXT),
-              repr(field_value(page)))
-        check("two STT sessions opened in total", stt_stats["opens"] == 2,
+        check("Escape submits the second take and keeps the text",
+              field_value(page) == expected_after_escape, repr(field_value(page)))
+        check("two audio uploads reached the API", stt_stats["requests"] == 2,
               repr(stt_stats))
         page.screenshot(path=str(SHOTS / "voice-after.png"))
         ctx.close()
 
-        # ---------------- ws drop mid-take keeps recognised text ----------------
-        STUB["mode"] = "drop"
+        # ---------------- API failure is visible and does not hang ----------------
+        STUB["mode"] = "error"
         ctx = browser.new_context(
             ignore_https_errors=True,
             viewport={"width": 1440, "height": 900},
@@ -373,22 +352,17 @@ def run_checks():
         )
         seed(ctx)
         page = ctx.new_page()
-        open_chat(page, "drop")
+        open_chat(page, "api-error")
         page.click(".voice-btn")
         page.wait_for_selector(".voice-btn.listening", timeout=8000)
-        # The stub drops the socket after the second partial (~7 frames).
-        page.wait_for_selector(".voice-status.is-error", timeout=8000)
-        page.wait_for_timeout(200)
-        check("dropped ws surfaces a visible error",
-              "connection lost" in page.locator(".voice-status").inner_text().lower()
-              or "lost" in page.locator(".voice-status").inner_text().lower(),
-              page.locator(".voice-status").inner_text())
-        val = field_value(page)
-        check("recognised text stays in the field after a drop",
-              PARTIAL_2["committed"] in val, repr(val))
-        check("mic button idles again after the drop",
-              page.locator(".voice-btn.listening").count() == 0
-              and page.locator(".voice-btn:not([disabled])").count() == 1)
+        page.wait_for_timeout(400)
+        page.click(".voice-btn")
+        page.wait_for_selector(".voice-status.is-error", timeout=20000)
+        message = page.locator(".voice-status").inner_text()
+        check("transcription API failure is visible",
+              "503" in message or "inference unavailable" in message.lower(), message)
+        check("mic returns to idle after API failure",
+              page.locator(".voice-btn.listening").count() == 0)
         STUB["mode"] = "normal"
         ctx.close()
 
@@ -472,10 +446,10 @@ def main():
         print(f"FAIL  {DIST} missing — run `npm run build:web` first")
         sys.exit(1)
     TMP.mkdir(exist_ok=True)
-    # The canned transcript lives with the suite's artefacts, not inline.
+    SHOTS.mkdir(exist_ok=True)
+    # The canned transcript is stored with the suite's artefacts.
     (TMP / "stub-transcript.json").write_text(
-        json.dumps({"partials": [PARTIAL_1, PARTIAL_2], "final": FINAL_TEXT},
-                   indent=2)
+        json.dumps({"api": "/v1/audio/transcriptions", "text": FINAL_TEXT}, indent=2)
     )
     global BASE
     server, BASE = serve_web(PORT, DIST)
