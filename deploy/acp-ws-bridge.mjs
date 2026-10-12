@@ -935,8 +935,9 @@ watchdog.unref?.();
 const WS_PING_INTERVAL_MS = Number(
   argValue('--ws-ping-interval-ms', process.env.ACP_WS_PING_INTERVAL_MS || 30_000)
 );
+let wsSweep;
 if (WS_PING_INTERVAL_MS > 0) {
-  const wsSweep = setInterval(() => {
+  wsSweep = setInterval(() => {
     for (const ws of clients) {
       if (ws.readyState !== 1) continue;
       if (ws.isAlive === false) {
@@ -995,6 +996,7 @@ function broadcast(line, msg, dest) {
 }
 
 function spawnChild() {
+  if (shuttingDown) return null;
   const [bin, ...args] = command.split(/\s+/);
   const child = processOwner.start([bin, ...args], { stdio: ['pipe', 'pipe', 'pipe'] }, {
     onError: (e, state) => {
@@ -1060,7 +1062,59 @@ const wss = new WebSocketServer({ server });
 
 server.on('error', (e) => log('server error:', e.message));
 
+let shuttingDown = false;
+function shutdownBridge(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log(`shutting down on ${signal}`);
+  clearInterval(watchdog);
+  if (wsSweep) clearInterval(wsSweep);
+  buffer = '';
+  pendingAgentReqs.clear();
+  deferredLoads.clear();
+  failPending('bridge shutting down');
+
+  for (const ws of clients) {
+    try { ws.close(1012, 'bridge shutting down'); }
+    catch { /* socket already closing */ }
+  }
+  const forceWebSockets = setTimeout(() => {
+    for (const ws of clients) {
+      try { ws.terminate(); }
+      catch { /* socket already closed */ }
+    }
+  }, 1000);
+  forceWebSockets.unref?.();
+
+  const child = processOwner.current;
+  if (child) {
+    const forceChild = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        log(`agent child pid=${child.pid} did not stop; sending SIGKILL`);
+        try { child.kill('SIGKILL'); }
+        catch (e) { log('child SIGKILL failed:', e.message); }
+      }
+    }, 5000);
+    forceChild.unref?.();
+    child.once('exit', () => clearTimeout(forceChild));
+    processOwner.stop(child, signal);
+  }
+
+  server.close((err) => {
+    if (err) log('server close error:', err.message);
+    wss.close();
+  });
+}
+process.once('SIGTERM', () => shutdownBridge('SIGTERM'));
+process.once('SIGINT', () => shutdownBridge('SIGINT'));
+
 wss.on('connection', (ws) => {
+  if (shuttingDown) {
+    // It is not in `clients`, so no normal shutdown timer owns this socket.
+    // Terminate immediately rather than waiting for a peer close handshake.
+    ws.terminate();
+    return;
+  }
   clients.add(ws);
   log(`client connected (${clients.size} active)`);
   // Liveness lease for the sweep: any inbound frame (protocol pong or data)
@@ -1074,6 +1128,7 @@ wss.on('connection', (ws) => {
   if (!processOwner.current) spawnChild();
 
   ws.on('message', (data) => {
+    if (shuttingDown) return;
     ws.isAlive = true;
     const payload = data.toString();
     try {
