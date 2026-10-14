@@ -1,6 +1,6 @@
-# W7 — Голосовой ввод в композер: отчёт
+# W7 — Голосовой ввод в композер: исторический отчёт
 
-STATUS: DONE
+STATUS: HISTORICAL — superseded by the 2026-10-11 HTTP API migration at the end of this file.
 
 ## Что сделано
 
@@ -119,3 +119,34 @@ TypeError. Обход с моей стороны: `sttHealth()` после не�
   `.icon-btn`-кнопок по-прежнему две, поле и рамка на месте.
 - ScriptProcessorNode deprecated-warning в консоли (AudioWorklet требовал
   бы отдельного module-url; выбран один узел по букве брифа).
+
+## 2026-10-11 — HTTP API migration (current)
+
+STATUS: DEPLOYED; real-browser microphone E2E is not confirmed.
+
+- Voice input now records mono PCM16 at 16 kHz, builds one WAV after stop,
+  then submits multipart `POST /v1/audio/transcriptions` with `model=gigaam-v3`,
+  `language=ru`, `response_format=text`. This API belongs to the neighboring
+  `audio-video-to-text` project; there are no interim transcripts in this flow.
+- HTTPS path: UI `:25809` → `https-front :25906` → host API `127.0.0.1:8099`.
+  The dedicated `stt` Compose service and old `:25905` listener are absent.
+- Verification: Node regression suite 9/9; `vue-tsc` + web build passed;
+  Python E2E parser tests 2/2 and Python E2E scripts compile; Compose config
+  validates without `stt`. The rebuilt entrypoint and current hashed JS/CSS
+  match the live bind mount; all 70 staged assets were published before
+  replacing `index.html`. Live `/` and the JS asset return HTTP 200; served JS
+  contains the transcription endpoint and `25906`, not retired `25905`.
+  Live `:25906/openapi.json` returns 200 and declares
+  `POST /v1/audio/transcriptions`; CORS preflight returns 204 with
+  `Access-Control-Allow-Origin: *`. A real test-WAV POST through the API was
+  exercised earlier in this migration and its temporary upload was removed.
+  Compose-only deployment requires the separately managed
+  `../audio-video-to-text` service on host `127.0.0.1:8099`; its live OpenAPI
+  endpoint was reachable during this verification.
+- The Playwright Python package is available, but its Chromium headless-shell
+  binary is not installed; `scripts/e2e_voice.py` stops at browser launch.
+  Camoufox also lacks `~/.cache/camoufox/version.json`, so live microphone,
+  permission, and visible-result behavior remain unverified.
+- Rollback patch and pre-publication index backup are recorded in
+  `/home/hermes/.hermes/backups/acp-ui-audio-video-transcriber-20261011.patch`
+  and `/home/hermes/.hermes/backups/acp-ui-index-pre-final-20261011.html`.

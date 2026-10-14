@@ -5,7 +5,8 @@
 //     bridge; a WebSocket upgrade on any path completes the handshake and
 //     speaks just enough ACP JSON-RPC (initialize / session/load /
 //     session/list / session/prompt) for the panel to reach isConnected.
-//   STT_PORT (HTTP): GET /health -> {ok, model, loaded, sample_rate}.
+//   STT_PORT (HTTP): GET /openapi.json exposes the transcription API contract;
+//     POST /v1/audio/transcriptions returns a canned text response.
 //
 // Every ws upgrade and every HTTP request appends one line to MARKER_FILE
 // so the suite can assert the bytes really arrived here through the proxy:
@@ -200,9 +201,14 @@ bridge.on('upgrade', (req, sock) => {
 const stt = http.createServer((req, res) => {
   mark(`STT ${req.method} ${req.url}`);
   const url = new URL(req.url || '/', 'http://localhost');
-  if (url.pathname === '/health') {
+  if (url.pathname === '/openapi.json') {
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, model: 'e2e-stub', loaded: true, sample_rate: 16000 }));
+    res.end(JSON.stringify({ paths: { '/v1/audio/transcriptions': { post: {} } } }));
+    return;
+  }
+  if (url.pathname === '/v1/audio/transcriptions' && req.method === 'POST') {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('e2e transcript');
     return;
   }
   res.writeHead(404, { 'content-type': 'application/json' });

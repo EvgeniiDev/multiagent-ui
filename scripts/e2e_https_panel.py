@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """E2E: the panel must be fully usable over HTTPS — zero mixed content.
 
-The panel hardcodes LAN service ports (state :25900, bridges :25901-4,
-STT :25905). Over https:// every one of those has a TLS twin on the
-`https-front` terminator (state :25910, bridges :25911-4, STT :25906), and
-`src/lib/host/secure.ts` is the single place that knows the +10/+1 rules.
+The panel uses LAN service ports (state :25900, bridges :25901-4,
+transcriber API :8099). Over https:// state and bridges use TLS twins on
+`https-front`; the transcriber API is proxied through TLS port :25906.
+`src/lib/host/secure.ts` handles the panel's state and bridge rules.
 
 This suite exercises the REAL pieces, nothing re-implemented:
 
@@ -14,8 +14,8 @@ This suite exercises the REAL pieces, nothing re-implemented:
     `http.server`, and reached over TLS THROUGH that front;
   * the shared-state stub is the real `server/acp-state-server.mjs` with its
     own STATE_DIR; the bridge stub (`scripts/https_panel_stubs.mjs`) answers
-    `/api/fs/*` and completes a real ACP handshake over ws; the STT stub
-    answers `/health`.
+    `/api/fs/*` and completes a real ACP handshake over ws; the transcriber
+    stub answers `/openapi.json` and the transcription path.
 
 The one shim is a tiny CONNECT proxy the browser is pointed at
 (`proxy={server}` launch option). The page and every fetch/ws keep their
@@ -26,7 +26,7 @@ suite's own listeners:
     acp.local:25809 -> PANEL_TLS   acp.local:25808 -> PANEL_UP
     acp.local:25910 -> STATE_TLS   acp.local:25900 -> STATE_UP
     acp.local:25911..25914 -> BRIDGE_TLS   acp.local:25901..25904 -> BRIDGE_UP
-    acp.local:25906 -> STT_TLS     acp.local:25905 -> STT_UP
+    acp.local:25906 -> STT_TLS     acp.local:8099 -> STT_UP
 
 The production ports on this host are never touched: nothing the browser
 opens leaves the proxy except to the mapped test sockets.
@@ -38,13 +38,13 @@ Asserted, https leg (page at https://acp.local:25809/):
     (transcript marker rendered);
   * `board.json` loaded through the front renders its card in the Board
     view (not just a URL check);
-  * the STT probe fetches `https://acp.local:25906/health`;
+  * the transcriber probe fetches `https://acp.local:25906/openapi.json`;
   * ZERO requests/ws to `http://` or `ws://` (the mixed-content proof);
   * zero pageerrors.
 
 Asserted, http control leg (page at http://acp.local:25808/):
-  * the panel still builds the OLD URLs — `http://acp.local:25900/health`
-    probe and a `ws://acp.local:25901/` dial — byte-identical behaviour;
+  * the panel still builds `http://acp.local:8099/openapi.json` for the
+    transcription probe and `ws://acp.local:25901/` for the agent;
   * the same restore + board assertions hold over plain http;
   * no `https://`/`wss://` requests to service ports at all.
 
@@ -339,7 +339,7 @@ def start_infra():
     mapping = {
         25809: panel_tls,                      # https panel entry
         25808: panel_up,                       # http panel entry
-        25906: stt_tls, 25905: stt_up,         # STT secure / plain
+        25906: stt_tls, 8099: stt_up,          # transcriber secure / plain
         25910: state_tls, 25900: state_up,     # state secure / plain
     }
     for insecure in (25901, 25902, 25903, 25904):
@@ -453,13 +453,13 @@ def run_https_leg(browser, rec):
     check("https: page is a secure context",
           page.evaluate("() => window.isSecureContext") is True)
 
-    # Wait for the STT health probe (VoiceInput probes on ChatView mount).
-    stt_seen = poll(lambda: any(
-        u.startswith(f"https://{HOST}:25906/") for u in urls_of(rec, "https")),
-        12.0)
-    check("https: STT base resolves to https://acp.local:25906", stt_seen,
-          next((u for u in urls_of(rec, "https") if ":25905" in u or ":25906" in u),
-               "no STT request seen"))
+    # Wait for the OpenAPI transcription probe (VoiceInput probes on ChatView mount).
+    stt_probe = f"https://{HOST}:25906/openapi.json"
+    stt_seen = poll(lambda: stt_probe in urls_of(rec, "https"), 12.0)
+    check("https: transcriber probe uses the exact OpenAPI endpoint",
+          stt_seen,
+          next((u for u in urls_of(rec, "https") if ":8099" in u or ":25906" in u),
+               "no transcriber request seen"))
 
     ws_urls = [u for u in urls_of(rec, "https") if u.startswith("ws")]
     check("https: agent dialed wss://acp.local:25911/",
@@ -496,6 +496,10 @@ def run_http_leg(browser, rec):
     ws_urls = [u for u in urls if u.startswith("ws")]
     check("http: agent dialed the OLD ws://acp.local:25901/",
           f"ws://{HOST}:25901/" in ws_urls, repr(ws_urls))
+
+    check("http: transcriber probe uses http://acp.local:8099/openapi.json",
+          any(u.startswith(f"http://{HOST}:8099/openapi.json") for u in urls),
+          repr([u for u in urls if ":8099" in u]))
 
     check("http: no https:// or wss:// requests to services",
           not any(re.match(r"^(https|wss)://", u) for u in urls),

@@ -1,15 +1,14 @@
 <script setup lang="ts">
-// Mic button for the composer: streams microphone audio to the host's STT
-// service (lib/stt.ts) as 100 ms PCM16 @16 kHz frames and forwards the
-// transcript events to ChatView, which owns the textarea.
+// Mic button for the composer: records mono PCM16 @16 kHz and submits one WAV
+// to audio-video-to-text when dictation stops. The API returns a final transcript
+// only after processing; partial text is not available during recording.
 //
-// Failure modes are surfaced, never silent: service unreachable -> the
-// button stays disabled with the reason on its title; mic denied or a
-// dropped socket -> `error` is emitted so the composer shows a line, and
-// the text already recognised stays in the field.
+// Failure modes are surfaced, never silent: API unreachable -> the button stays
+// disabled with the reason on its title; mic denial or a failed request emits
+// `error` so the composer shows a line, while typed draft text stays untouched.
 import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue';
 import UiButton from './ui/UiButton.vue';
-import { sttHealth, StreamingStt, type SttPartial } from '../lib/stt';
+import { sttHealth, StreamingStt, createVoiceEvents, type SttPartial } from '../lib/stt';
 
 const props = defineProps<{
   /** Composer busy (a turn is running / reconnecting) — matches the other
@@ -20,14 +19,18 @@ const props = defineProps<{
 const emit = defineEmits<{
   /** phase transition or elapsed-second tick */
   state: [{ phase: VoicePhase; elapsedS: number }];
-  /** interim transcript: committed is settled text, volatile may change */
+  /** reserved for a streaming provider; current HTTP API returns only final */
   partial: [p: SttPartial];
-  /** final text to keep in the field (also used to commit the last
-   *  hypothesis when the socket drops mid-recording) */
+  /** final transcript to insert into the composer after the HTTP request */
   final: [text: string];
   /** visible, human-readable failure */
   error: [message: string];
 }>();
+
+const voiceEvents = createVoiceEvents(
+  (text) => emit('final', text),
+  (message) => emit('error', message),
+);
 
 type VoicePhase = 'idle' | 'connecting' | 'listening' | 'stopping';
 
@@ -38,7 +41,7 @@ const micUnavailable = ref(false);
 
 // Re-probe a dead service every so often so the button recovers on its own.
 const REPROBE_MS = 15000;
-const FINAL_WAIT_MS = 9000; // the server re-decodes the whole utterance once
+const FINAL_WAIT_MS = 310_000; // API request is synchronous; allow up to 5 min
 
 let reprobeTimer: ReturnType<typeof setInterval> | null = null;
 let elapsedTimer: ReturnType<typeof setInterval> | null = null;
@@ -58,7 +61,7 @@ let pending: number[] = [];
 let resample: ((input: Float32Array) => Float32Array) | null = null;
 
 const TARGET_RATE = 16000;
-const CHUNK_SAMPLES = 1600; // 100 ms at 16 kHz — the cadence the server expects
+const CHUNK_SAMPLES = 1600; // 100 ms at 16 kHz, batched into the final WAV
 
 /** Linear resampler inRate -> 16 kHz with carry across callbacks. A plain
  *  decimator would alias; interpolation keeps speech intelligible for STT
@@ -174,10 +177,10 @@ function stopElapsed(): void {
 }
 
 function endSession(): void {
+  setPhase('idle');
   teardownAudio();
   teardownStt();
   stopElapsed();
-  setPhase('idle');
 }
 
 /** Commit the last hypothesis so a dropped socket still keeps the text the
@@ -193,6 +196,7 @@ function fail(message: string): void {
 
 async function startListening(): Promise<void> {
   const gen = ++sessionGen;
+  voiceEvents.reset();
   lastPartial = { committed: '', volatile: '' };
   setPhase('connecting');
 
@@ -230,27 +234,29 @@ async function startListening(): Promise<void> {
     onFinal: (text) => {
       if (gen !== sessionGen || stt !== session) return;
       endSession();
-      emit('final', text.trim());
+      voiceEvents.final(text.trim());
     },
     onError: (message) => {
-      if (gen === sessionGen && stt === session) emit('error', message);
+      if (gen === sessionGen && stt === session) {
+        voiceEvents.error(message);
+      }
     },
     onClose: (hadFinal) => {
       if (gen !== sessionGen || stt !== session) return;
-      // Clean finish after `stop()` is handled by onFinal; anything else is
-      // a drop — keep the last hypothesis in the field and say what broke.
+      // A closed session without a final transcript is incomplete — retain the
+      // composer draft and explain why the request ended.
       if (phase.value === 'idle' || hadFinal) return;
       const last = commitLast();
       endSession();
-      emit('final', last);
-      emit('error', 'Speech service connection lost — kept recognised text');
+      voiceEvents.final(last);
+      voiceEvents.error('Transcription ended before a final transcript was returned');
     },
   });
   stt = session;
   try {
     await session.open();
   } catch {
-    if (gen === sessionGen) fail('Speech service unreachable — websocket refused');
+    if (gen === sessionGen) fail('Transcription API unreachable');
     else session.close();
     return;
   }
@@ -311,15 +317,14 @@ function stopListening(): void {
   stt?.stop();
   teardownAudio(); // mic off immediately — the "recording" affordance is honest
   stopElapsed();
-  // The server re-decodes the whole utterance; give it room, then treat a
-  // missing answer as a drop (onClose normally fires when the socket ends).
+  // The API re-decodes the recorded WAV synchronously; allow up to five minutes.
   finalTimer = setTimeout(() => {
     if (gen === sessionGen && phase.value === 'stopping') {
       const last = commitLast();
-      teardownStt();
       setPhase('idle');
-      emit('final', last);
-      emit('error', 'Speech service did not send a final — kept recognised text');
+      teardownStt();
+      voiceEvents.final(last);
+      voiceEvents.error('Transcription timed out — no transcript was returned');
     }
   }, FINAL_WAIT_MS);
 }

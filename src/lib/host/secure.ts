@@ -7,8 +7,8 @@
 //
 //     insecure port + 10  ==  secure port      (state server, ACP bridges)
 //
-// The two older services predate the rule and keep their historical +1 ports:
-// the panel bundle (25808 -> 25809) and GigaAM STT (25905 -> 25906, see stt.ts).
+// The panel bundle predates this rule and keeps its historical +1 port.
+// The audio-video-to-text API has its own direct TLS endpoint in stt.ts (8099 -> 25906).
 //
 // Nothing here changes the http path: opened over http:// everything resolves
 // exactly as before, so a local non-TLS session still works.
@@ -16,7 +16,6 @@
 /** Insecure port -> secure port. `+10` unless the pair is an explicit legacy one. */
 const SECURE_PORT: Record<number, number> = {
   25808: 25809, // the panel bundle itself (front serves it)
-  25905: 25906, // GigaAM STT (matches stt.ts)
 };
 
 const SECURE_PORT_OFFSET = 10;

@@ -1,8 +1,8 @@
 # Docker Compose deployment
 
-Systemd user-юниты переведены в `compose.yaml` (корень репо). Порты те же,
-`network_mode: host` — STATE_URL/CORS/фронт-маппинг не меняются.
-Код серверов не менялся.
+Основной стек описан в `compose.yaml` (корень репо), `network_mode: host`.
+Голосовая транскрибация предоставляется отдельным проектом
+`../audio-video-to-text`, а не Compose-сервисом ACP UI.
 
 Режим пяти постоянных chat bridges выбирается отдельно: `docker` по умолчанию
 или явный `host`. Используй `node scripts/acp-bridges.mjs status` и инструкции
@@ -17,10 +17,18 @@ Systemd user-юниты переведены в `compose.yaml` (корень р�
 | bridge-codex | `node deploy/acp-ws-bridge.mjs --port 25907 --required-mode docker --cmd "node deploy/codex-acp.mjs" --agent-name "Codex"` | 25907 |
 | state | `node server/acp-state-server.mjs` | 25900 |
 | runner | `node server/acp-runner.mjs --serve` | — |
-| https-front | `node server/https-front.mjs` | 25809, 25906, 25910–25914, 25917 |
+| https-front | `node server/https-front.mjs` | 25809, 25906, 25910–25914, 25917; `25906` проксирует host `127.0.0.1:8099` |
 | web | `python3 -m http.server 25808` в `dist-web/` | 25808 |
-| stt | хост-venv python + `server/stt-server.py` | 25905 |
 | cron | `acp-pm-wakeup.mjs` в цикле `sleep 1800` | — |
+
+### Внешняя зависимость голоса
+
+`../audio-video-to-text` должен отдельно слушать host `127.0.0.1:8099` и
+предоставлять `POST /v1/audio/transcriptions`. HTTPS-front принимает UI-запросы
+на `25906` и проксирует их на этот API. Compose ACP UI не запускает и не
+контролирует жизненный цикл transcriber; без внешнего API голосовой ввод
+недоступен. Старый STT listener `25905`, `server/stt-server.py`,
+`Dockerfile.stt` и `gigaam-venv` больше не являются частью развёртывания.
 
 cron заменяет `acp-pm-wakeup.timer` (`OnBootSec=10min`, `OnUnitInactiveSec=30min` —
 примерно каждые 30 мин; в стеке ровно каждые 30 мин, без OnBootSec-задержки).
@@ -28,21 +36,14 @@ cron заменяет `acp-pm-wakeup.timer` (`OnBootSec=10min`, `OnUnitInactiveS
 ## Образы
 
 - `Dockerfile.node` — `node:22-slim` + `npm install -g ws` (мосты требуют `ws`).
-- `Dockerfile.stt` — `python:3.12-slim` + `ffmpeg` только. torch/gigaam НЕ ставятся
-  (долго, ~GB): контейнер монтирует готовый хост-venv
-  `/home/hermes/.hermes/gigaam-venv` (ro) и запускает его python.
-  Дополнительно монтируются `/home/hermes/.hermes/GigaAM-src:ro`
-  (gigaam стоит editable-ссылкой на исходники) и `/home/hermes/.local:ro`
-  (venv-python — симлинк в uv-каталог `~/.local/share/uv`).
-  Fallback: оставить stt на хосте (`systemctl --user start acp-stt`) —
-  он слушает 25905, фронт его найдёт.
+
 
 ## Монты
 
 - `/home/hermes/projects:/home/hermes/projects:rw` — мосты/раннер пишут
   briefs/логи/артефакты в проекты.
 - Рантаймы/CLI хоста (bind, строки в yaml): `/home/hermes/.local` (node, hermes,
-  opencode, pi-acp, gigaam-venv bin), `/home/hermes/.local/share/devin`
+  opencode, pi-acp), `/home/hermes/.local/share/devin`
   (бинарь devin), `/usr/bin/pi` (ro).
 - TLS: `/home/hermes/.hermes/acp-tls:ro` (`ACP_TLS_DIR`).
 - Данные: `/home/hermes/projects/acp-ui-state:rw` (`STATE_DIR`).
@@ -51,8 +52,7 @@ cron заменяет `acp-pm-wakeup.timer` (`OnBootSec=10min`, `OnUnitInactiveS
 PATH в node-контейнерах: `/home/hermes/.local/bin:...` как в юнитах.
 `HOME=/home/hermes` чтобы `os.homedir()`/`--root` совпадали с хостом.
 Env: `ACP_STATE_URL=http://127.0.0.1:25900`, `STATE_URL=...`,
-`ROOT_DIR=/home/hermes/projects`, `RUNNER_ID=host-runner`,
-`PORT/STT_WINDOW_S/STT_HOP_S` для stt.
+`ROOT_DIR=/home/hermes/projects`, `RUNNER_ID=host-runner`.
 
 ## Host provisioning (run BEFORE enabling managed execution)
 

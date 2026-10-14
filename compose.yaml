@@ -237,6 +237,8 @@ services:
 
   https-front:
     <<: *node
+    # External API owned by ../audio-video-to-text; this stack does not start it.
+    # It must listen on host :8099; the HTTPS front exposes it to the UI on :25906.
     command: ["node", "/repo/server/https-front.mjs"]
     environment:
       ACP_TLS_DIR: /home/hermes/.hermes/acp-tls
@@ -251,25 +253,6 @@ services:
       - ./server/web-server.py:/repo/server/web-server.py:ro
     restart: unless-stopped
 
-  stt:
-    build:
-      context: .
-      dockerfile: Dockerfile.stt
-    network_mode: host
-    working_dir: /repo/server
-    # Готовый хост-venv монтируется; torch/gigaam в образ НЕ ставятся.
-    # /home/hermes/.local нужен тоже: venv-python это симлинк в uv-каталог.
-    command: ["/home/hermes/.hermes/gigaam-venv/bin/python", "/repo/server/stt-server.py"]
-    environment:
-      PORT: "25905"
-      STT_WINDOW_S: "6"
-      STT_HOP_S: "1"
-    volumes:
-      - .:/repo:ro
-      - /home/hermes/.hermes/gigaam-venv:/home/hermes/.hermes/gigaam-venv:ro
-      - /home/hermes/.hermes/GigaAM-src:/home/hermes/.hermes/GigaAM-src:ro
-      - /home/hermes/.local:/home/hermes/.local:ro
-    restart: unless-stopped
 
   cron:
     <<: *node
