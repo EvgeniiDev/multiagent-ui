@@ -83,8 +83,11 @@ services:
     # CLI integration, which is proven separately through managed porch runs.
     command:
       [
-        "node", "/repo/deploy/acp-ws-bridge.mjs",
+        "/repo/deploy/acp-bridge-launcher.sh", "hermes", "node", "/repo/deploy/acp-ws-bridge.mjs",
         "--port", "25901",
+        "--required-mode", "docker",
         "--cmd", "node /repo/scripts/u7_mock_acp.mjs",
         "--agent-name", "MockACP",
       ]
+    environment:
+      ACP_BRIDGE_LOCK_DIR: /run/acp-bridge-locks

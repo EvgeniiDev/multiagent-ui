@@ -16,15 +16,20 @@ parent scoped CSS. Keep page CSS for layout; extend shared primitives when a
 new variant is needed. Verify actual browser styles, theme, focus, disabled,
 and touch sizing as required by TESTING.md.
 
-## Runtime: docker compose only
+## Runtime: explicit mode for five ACP bridges; other services unchanged
 
-The stack lives in `compose.yaml` (repo root). Control it with
-`docker compose up -d` / `docker compose down` from this directory.
-The old systemd user units (`acp-bridge-*`, `acp-ui-web`, `acp-state`,
-`acp-runner`, `acp-https`, `acp-stt`, `acp-pm-wakeup.*`) are disabled —
-do not re-enable them, do not start services by hand (`python -m
-http.server`, `nohup`, bare `node server/...`). Before starting
-anything: `docker compose ps` + `ss -tlnp`.
+Do not change lifecycle, deployment, or systemd ownership for services outside the five bridges in this task. Only `bridge-hermes`, `bridge-opencode`, `bridge-devin`,
+`bridge-pi`, and `bridge-codex` may switch between Docker and host, under the
+exclusive controller `scripts/acp-bridges.mjs`. Docker is the default selected
+mode; host mode must be explicitly selected. Never start a bridge with bare
+Node, a retired `acp-bridge-*.service`, or an ad-hoc Compose command. Never fall
+back between modes. Do not re-enable retired bridge units. Before any bridge
+lifecycle operation inspect `scripts/acp-bridges.mjs status` and `ss -tlnp`.
+
+Host bridges run as `hermes` and have direct access to the host user's files;
+that is a broader filesystem boundary than their current containers. Host mode
+is only for the five chat bridges, not web/state/runner/F1/Porch workers. Use
+`scripts/acp-bridges.mjs preflight --mode host` before selecting it. Keep the systemd `guard-start --mode host --bridge <name>` check in place; direct unit starts must verify the selected mode and live owners before binding.
 
 ## One port — one owner
 
@@ -36,8 +41,8 @@ anything: `docker compose ps` + `ss -tlnp`.
 | 25901–25904, 25907 | bridges: hermes / opencode / devin / pi / codex |
 | 25905 | stt |
 
-A stray process on an occupied port is killed, not worked around.
-Never "fix it nearby" with a second server on another port.
+A conflicting listener is reported with its owner; never kill an unknown
+process and never work around it by choosing another port.
 
 ## Bridge: single source of truth
 

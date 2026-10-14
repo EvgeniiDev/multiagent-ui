@@ -1,0 +1,14 @@
+[Unit]
+Description=ACP UI bridge mode supervisor (five chat bridges only)
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
+Environment=HOME=%h
+Environment=NODE_PATH=%h/.local/lib/node_modules
+ExecStart=%h/.local/bin/node %h/projects/acp-ui/scripts/acp-bridges.mjs reconcile
+
+[Install]
+WantedBy=default.target

@@ -28,16 +28,20 @@ services:
       - /home/hermes/.local:/home/hermes/.local:rw
       - /home/hermes/.pi:/home/hermes/.pi:rw
       - /home/hermes/.hermes:/home/hermes/.hermes:rw
+      - /home/hermes/.config/acp-ui-bridge-state:/run/acp-bridge-mode:ro
+      - /home/hermes/.config/acp-ui-bridge-state/locks/hermes.lock:/run/acp-bridge-locks/hermes.lock:rw
       - /home/hermes/.local/share/devin:/home/hermes/.local/share/devin:rw
       - /var/run/docker.sock:/var/run/docker.sock
     # Match the host owner: OAuth refresh atomically replaces ~/.hermes/auth.json.
     user: "1001:1001"
-    command: ["node", "/repo/deploy/acp-ws-bridge.mjs", "--port", "25901", "--cmd", "hermes acp"]
+    command: ["/repo/deploy/acp-bridge-launcher.sh", "hermes", "node", "/repo/deploy/acp-ws-bridge.mjs", "--port", "25901", "--required-mode", "docker", "--cmd", "hermes acp"]
     environment:
       HOME: /home/hermes
       PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       NODE_PATH: /home/hermes/.local/lib/node_modules
       ACP_STATE_URL: http://127.0.0.1:25900
+      ACP_BRIDGE_MODE_FILE: /run/acp-bridge-mode/selected
+      ACP_BRIDGE_LOCK_DIR: /run/acp-bridge-locks
   bridge-opencode:
     <<: *node
     group_add: ["105"]
@@ -47,14 +51,18 @@ services:
       - /home/hermes/.local:/home/hermes/.local:rw
       - /home/hermes/.pi:/home/hermes/.pi:rw
       - /home/hermes/.hermes:/home/hermes/.hermes:rw
+      - /home/hermes/.config/acp-ui-bridge-state:/run/acp-bridge-mode:ro
+      - /home/hermes/.config/acp-ui-bridge-state/locks/opencode.lock:/run/acp-bridge-locks/opencode.lock:rw
       - /home/hermes/.local/share/devin:/home/hermes/.local/share/devin:rw
       - /var/run/docker.sock:/var/run/docker.sock
-    command: ["node", "/repo/deploy/acp-ws-bridge.mjs", "--port", "25902", "--cmd", "opencode acp"]
+    command: ["/repo/deploy/acp-bridge-launcher.sh", "opencode", "node", "/repo/deploy/acp-ws-bridge.mjs", "--port", "25902", "--required-mode", "docker", "--cmd", "opencode acp"]
     environment:
       HOME: /home/hermes
       PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       NODE_PATH: /home/hermes/.local/lib/node_modules
       ACP_STATE_URL: http://127.0.0.1:25900
+      ACP_BRIDGE_MODE_FILE: /run/acp-bridge-mode/selected
+      ACP_BRIDGE_LOCK_DIR: /run/acp-bridge-locks
   bridge-devin:
     <<: *node
     group_add: ["105"]
@@ -64,14 +72,18 @@ services:
       - /home/hermes/.local:/home/hermes/.local:rw
       - /home/hermes/.pi:/home/hermes/.pi:rw
       - /home/hermes/.hermes:/home/hermes/.hermes:rw
+      - /home/hermes/.config/acp-ui-bridge-state:/run/acp-bridge-mode:ro
+      - /home/hermes/.config/acp-ui-bridge-state/locks/devin.lock:/run/acp-bridge-locks/devin.lock:rw
       - /home/hermes/.local/share/devin:/home/hermes/.local/share/devin:rw
       - /var/run/docker.sock:/var/run/docker.sock
-    command: ["node", "/repo/deploy/acp-ws-bridge.mjs", "--port", "25903", "--cmd", "devin acp", "--defer-load-on-prompt"]
+    command: ["/repo/deploy/acp-bridge-launcher.sh", "devin", "node", "/repo/deploy/acp-ws-bridge.mjs", "--port", "25903", "--required-mode", "docker", "--cmd", "devin acp", "--defer-load-on-prompt"]
     environment:
       HOME: /home/hermes
       PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       NODE_PATH: /home/hermes/.local/lib/node_modules
       ACP_STATE_URL: http://127.0.0.1:25900
+      ACP_BRIDGE_MODE_FILE: /run/acp-bridge-mode/selected
+      ACP_BRIDGE_LOCK_DIR: /run/acp-bridge-locks
       # `devin acp` does not read DEVIN_PERMISSION_MODE (that env only feeds
       # the interactive/`devin -p` --permission-mode flag): new ACP sessions
       # always report accept-edits. The panel opens them in bypass itself —
@@ -86,25 +98,31 @@ services:
       - /home/hermes/.local:/home/hermes/.local:rw
       - /home/hermes/.pi:/home/hermes/.pi:rw
       - /home/hermes/.hermes:/home/hermes/.hermes:rw
+      - /home/hermes/.config/acp-ui-bridge-state:/run/acp-bridge-mode:ro
+      - /home/hermes/.config/acp-ui-bridge-state/locks/pi.lock:/run/acp-bridge-locks/pi.lock:rw
       - /home/hermes/.local/share/devin:/home/hermes/.local/share/devin:rw
       - /var/run/docker.sock:/var/run/docker.sock
-    command: ["node", "/repo/deploy/acp-ws-bridge.mjs", "--port", "25904", "--cmd", "/usr/local/bin/pi-acp"]
+    command: ["/repo/deploy/acp-bridge-launcher.sh", "pi", "node", "/repo/deploy/acp-ws-bridge.mjs", "--port", "25904", "--required-mode", "docker", "--cmd", "/usr/local/bin/pi-acp"]
     environment:
       HOME: /home/hermes
       PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       NODE_PATH: /home/hermes/.local/lib/node_modules
       ACP_STATE_URL: http://127.0.0.1:25900
+      ACP_BRIDGE_MODE_FILE: /run/acp-bridge-mode/selected
+      ACP_BRIDGE_LOCK_DIR: /run/acp-bridge-locks
   bridge-codex:
     <<: *node
     group_add: ["105"]
     # OAuth credentials and session files belong to the host user.
     user: "1001:1001"
-    command: ["node", "/repo/deploy/acp-ws-bridge.mjs", "--port", "25907", "--cmd", "node /repo/deploy/codex-acp.mjs", "--agent-name", "Codex"]
+    command: ["/repo/deploy/acp-bridge-launcher.sh", "codex", "node", "/repo/deploy/acp-ws-bridge.mjs", "--port", "25907", "--required-mode", "docker", "--cmd", "node /repo/deploy/codex-acp.mjs", "--agent-name", "Codex"]
     environment:
       HOME: /home/hermes
       PATH: /home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       NODE_PATH: /home/hermes/.local/lib/node_modules
       ACP_STATE_URL: http://127.0.0.1:25900
+      ACP_BRIDGE_MODE_FILE: /run/acp-bridge-mode/selected
+      ACP_BRIDGE_LOCK_DIR: /run/acp-bridge-locks
       # Default Codex session mode: full access — approval_policy=never,
       # dangerFullAccess sandbox (no approval prompts, no Guardian auto-review).
       # Per-session downgrade still available via the UI mode picker.
@@ -116,6 +134,8 @@ services:
       - /home/hermes/.local:/home/hermes/.local:rw
       - /home/hermes/.pi:/home/hermes/.pi:rw
       - /home/hermes/.hermes:/home/hermes/.hermes:rw
+      - /home/hermes/.config/acp-ui-bridge-state:/run/acp-bridge-mode:ro
+      - /home/hermes/.config/acp-ui-bridge-state/locks/codex.lock:/run/acp-bridge-locks/codex.lock:rw
       - /home/hermes/.local/share/devin:/home/hermes/.local/share/devin:rw
       - /home/hermes/.codex:/home/hermes/.codex:rw
       - /var/run/docker.sock:/var/run/docker.sock

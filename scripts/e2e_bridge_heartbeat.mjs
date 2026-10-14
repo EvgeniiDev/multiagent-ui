@@ -25,9 +25,10 @@
 // Usage: node scripts/e2e_bridge_heartbeat.mjs
 // Prints PASS/FAIL per assertion, exits non-zero on any failure.
 
+import { testEnv, stopTestBridge } from './bridge-test-harness.mjs';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,17 +68,6 @@ const { WebSocket } = wsModule;
 const WS_NODE_MODULES = wsEntry.includes(`${path.sep}node_modules${path.sep}`)
   ? wsEntry.split(`${path.sep}node_modules${path.sep}`)[0] + `${path.sep}node_modules`
   : path.dirname(wsEntry);
-
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-    srv.on('error', reject);
-  });
-}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -179,20 +169,23 @@ class Client {
 }
 
 /** Spawn the real bridge + mock agent. Returns { proc, logBuf }. */
-async function spawnBridge(port, idleMs, wsPingMs) {
+async function spawnBridge(idleMs, wsPingMs) {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'acp-heartbeat-'));
+  const env = await testEnv(temp, 'docker');
+  let port = 0;
   const proc = spawn(
     process.execPath,
-    [BRIDGE, '--port', String(port), '--cmd', `${process.execPath} ${AGENT}`,
+    [BRIDGE, '--port', '0', '--bind', '127.0.0.1', '--required-mode', 'docker', '--cmd', `${process.execPath} ${AGENT}`,
      '--root', os.tmpdir(), '--idle-timeout-ms', String(idleMs),
      '--ws-ping-interval-ms', String(wsPingMs)],
     {
-      env: { ...process.env, NODE_PATH: WS_NODE_MODULES, ACP_TOKEN_METER: '0' },
+      env: { ...env, NODE_PATH: WS_NODE_MODULES, ACP_TOKEN_METER: '0' },
       stdio: ['ignore', 'pipe', 'pipe'],
     }
   );
   proc.stderr.on('data', (d) => process.stderr.write(`[bridge:${port}] ${d}`));
   const log = { text: '' };
-  await new Promise((resolve, reject) => {
+  try { await new Promise((resolve, reject) => {
     const to = setTimeout(() => reject(new Error('bridge never listened')), 10000);
     proc.stdout.on('data', (d) => {
       log.text += d.toString();
@@ -204,7 +197,9 @@ async function spawnBridge(port, idleMs, wsPingMs) {
     });
     proc.once('exit', (c) => reject(new Error(`bridge exited early code=${c}`)));
   });
-  return { proc, log };
+  } catch (error) { await stopTestBridge(proc); await rm(temp, { recursive: true, force: true }); throw error; }
+  port = Number(log.text.match(/listening on :(\d+)/)[1]);
+  return { proc, log, port, temp };
 }
 
 /** Wait until `log.text` gains a line matching `re` after `from` chars. */
@@ -224,8 +219,8 @@ async function main() {
   // ------------------------------------------------------------------
   // Bridge A: heartbeat routing, sweep, reconnect re-claim, steer.
   // ------------------------------------------------------------------
-  const portA = await freePort();
-  const A = await spawnBridge(portA, 4000, 400);
+  const A = await spawnBridge(4000, 400);
+  const portA = A.port;
   const clients = [];
   const track = (c) => { clients.push(c); return c; };
   try {
@@ -340,14 +335,15 @@ async function main() {
       `${b.sessionUpdates('sess-b').length} leaked`);
   } finally {
     for (const c of clients) c.close();
-    A.proc.kill('SIGKILL');
+    await stopTestBridge(A.proc);
+    await rm(A.temp, { recursive: true, force: true });
   }
 
   // ------------------------------------------------------------------
   // Bridge B: the watchdog must not be masked by keepalive pings.
   // ------------------------------------------------------------------
-  const portB = await freePort();
-  const B = await spawnBridge(portB, 3000, 400);
+  const B = await spawnBridge(3000, 400);
+  const portB = B.port;
   const g = new Client(portB, 'G');
   let pingTimer = null;
   try {
@@ -383,7 +379,8 @@ async function main() {
   } finally {
     if (pingTimer) clearInterval(pingTimer);
     g.close();
-    B.proc.kill('SIGKILL');
+    await stopTestBridge(B.proc);
+    await rm(B.temp, { recursive: true, force: true });
   }
 
   const failed = results.filter(([, ok]) => !ok);

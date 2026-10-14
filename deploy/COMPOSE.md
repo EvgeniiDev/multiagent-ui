@@ -4,12 +4,17 @@ Systemd user-юниты переведены в `compose.yaml` (корень р�
 `network_mode: host` — STATE_URL/CORS/фронт-маппинг не меняются.
 Код серверов не менялся.
 
+Режим пяти постоянных chat bridges выбирается отдельно: `docker` по умолчанию
+или явный `host`. Используй `node scripts/acp-bridges.mjs status` и инструкции
+в [BRIDGE-MODES.md](BRIDGE-MODES.md); прямой `docker compose up/stop` для
+`bridge-*` запрещён, потому что он обходит единый mode guard.
+
 ## Состав
 
 | Сервис | Команда | Порт |
 |---|---|---|
-| bridge-hermes/opencode/devin/pi | `node deploy/acp-ws-bridge.mjs --port 2590X --cmd "..."` | 25901–25904 |
-| bridge-codex | `node deploy/acp-ws-bridge.mjs --port 25907 --cmd "codex-acp" --agent-name "Codex"` | 25907 |
+| bridge-hermes/opencode/devin/pi | `node deploy/acp-ws-bridge.mjs --port 2590X --required-mode docker --cmd "..."` | 25901–25904 |
+| bridge-codex | `node deploy/acp-ws-bridge.mjs --port 25907 --required-mode docker --cmd "node deploy/codex-acp.mjs" --agent-name "Codex"` | 25907 |
 | state | `node server/acp-state-server.mjs` | 25900 |
 | runner | `node server/acp-runner.mjs --serve` | — |
 | https-front | `node server/https-front.mjs` | 25809, 25906, 25910–25914, 25917 |

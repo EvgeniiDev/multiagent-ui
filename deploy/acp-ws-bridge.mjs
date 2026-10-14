@@ -65,6 +65,7 @@
 //        ACP_STATE_URL=http://127.0.0.1:25900 state server for the ledger,
 //        ACP_TOKEN_METER_INTERVAL_MS=10000 min write interval per session.
 import { BridgeProcessOwner } from './bridge-process-owner.mjs';
+import { assertBridgeMode, assertBridgeModeSync } from './bridge-mode.mjs';
 import { createRequire } from 'node:module';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -80,7 +81,9 @@ function argValue(name, fallback) {
 }
 
 const port = Number(argValue('--port', ''));
+const bindAddress = argValue('--bind', undefined);
 const command = String(argValue('--cmd', '') || '').trim();
+const requiredMode = argValue('--required-mode', process.env.ACP_BRIDGE_REQUIRED_MODE || '');
 const root = path.resolve(String(argValue('--root', os.homedir())));
 const home = os.homedir();
 
@@ -96,9 +99,16 @@ const DEFER_LOAD_DURING_PROMPT =
   (process.env.ACP_DEFER_LOAD_ON_PROMPT ?? '0') === '1' ||
   /\bdevin\b/.test(command);
 
-if (!Number.isInteger(port) || port <= 0 || !command) {
-  console.error('usage: acp-ws-bridge.mjs --port <port> --cmd "<command>" [--root <dir>]');
+if (!Number.isInteger(port) || port < 0 || port > 65535 || !process.argv.includes('--port') || !command) {
+  console.error('usage: acp-ws-bridge.mjs --port <port> --cmd "<command>" --required-mode <docker|host> [--root <dir>]');
   process.exit(1);
+}
+
+try {
+  await assertBridgeMode(requiredMode);
+} catch (error) {
+  console.error(`bridge mode guard: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(78);
 }
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
@@ -408,6 +418,7 @@ function listDirs(abs, hidden) {
 }
 
 function handleHttp(req, res) {
+  if (!runtimeModeAllowed()) { res.destroy(); return; }
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
@@ -1059,14 +1070,37 @@ function spawnChild() {
 
 const server = http.createServer(handleHttp);
 const wss = new WebSocketServer({ server });
+const rawSockets = new Set();
+server.on('connection', (socket) => {
+  if (!runtimeModeAllowed()) { socket.destroy(); return; }
+  rawSockets.add(socket);
+  socket.once('close', () => rawSockets.delete(socket));
+});
 
-server.on('error', (e) => log('server error:', e.message));
+server.on('error', (e) => refuseRuntime(`server error: ${e.message}`));
+wss.on('error', (e) => refuseRuntime(`websocket server error: ${e.message}`));
 
 let shuttingDown = false;
+// Polling is a bounded revocation detector, not an ownership/exclusion lock.
+// Admission callbacks check synchronously as well; no async result can race
+// a newer check. Opposite-mode mutual exclusion remains a separate gate.
+const modeGuard = setInterval(runtimeModeAllowed, 100);
+modeGuard.unref();
+function refuseRuntime(reason) {
+  log(`bridge mode guard: ${reason}`);
+  process.exitCode = 78;
+  shutdownBridge('SIGTERM');
+}
+function runtimeModeAllowed() {
+  if (shuttingDown) return false;
+  try { assertBridgeModeSync(requiredMode); return true; }
+  catch (error) { refuseRuntime(error.message); return false; }
+}
 function shutdownBridge(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   log(`shutting down on ${signal}`);
+  clearInterval(modeGuard);
   clearInterval(watchdog);
   if (wsSweep) clearInterval(wsSweep);
   buffer = '';
@@ -1079,6 +1113,10 @@ function shutdownBridge(signal) {
     catch { /* socket already closing */ }
   }
   const forceWebSockets = setTimeout(() => {
+    log(`forcing shutdown of ${rawSockets.size} raw socket(s)`);
+    // WebSocketServer emits `connection` only after the HTTP upgrade. A raw
+    // socket can be stuck in an incomplete handshake and is not in `clients`.
+    for (const socket of rawSockets) socket.destroy();
     for (const ws of clients) {
       try { ws.terminate(); }
       catch { /* socket already closed */ }
@@ -1109,7 +1147,7 @@ process.once('SIGTERM', () => shutdownBridge('SIGTERM'));
 process.once('SIGINT', () => shutdownBridge('SIGINT'));
 
 wss.on('connection', (ws) => {
-  if (shuttingDown) {
+  if (!runtimeModeAllowed()) {
     // It is not in `clients`, so no normal shutdown timer owns this socket.
     // Terminate immediately rather than waiting for a peer close handshake.
     ws.terminate();
@@ -1128,7 +1166,7 @@ wss.on('connection', (ws) => {
   if (!processOwner.current) spawnChild();
 
   ws.on('message', (data) => {
-    if (shuttingDown) return;
+    if (!runtimeModeAllowed()) return;
     ws.isAlive = true;
     const payload = data.toString();
     try {
@@ -1191,4 +1229,4 @@ wss.on('connection', (ws) => {
   });
 });
 
-server.listen(port, () => log(`http+ws listening on :${port} -> ${command} (root=${root})`));
+if (runtimeModeAllowed()) server.listen(port, bindAddress, () => log(`http+ws listening on :${server.address().port} -> ${command} (root=${root})`));

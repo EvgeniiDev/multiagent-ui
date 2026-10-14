@@ -6,12 +6,17 @@ FROM node:22-slim
 # U1 runtime deps: porch is a bash CLI driving python3 (steer supervisor /
 # control / config parse) and CLI agents need git for worktree/commit work.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libatomic1 bash git python3 ca-certificates \
+ && apt-get install -y --no-install-recommends libatomic1 bash git python3 ca-certificates util-linux \
  && rm -rf /var/lib/apt/lists/*
 RUN npm install -g ws \
  && npm install -g @earendil-works/pi-coding-agent@0.85.1 pi-acp@0.0.33
 # The shared bridge must retain independent Pi tabs instead of killing peers.
 COPY deploy/patch-pi-acp-multisession.mjs /opt/acp-ui/patch-pi-acp-multisession.mjs
 RUN node /opt/acp-ui/patch-pi-acp-multisession.mjs /usr/local/lib/node_modules/pi-acp
+# Lock files are individually bind-mounted over these immutable mountpoints.
+# The bridge user can flock its own file but cannot alter the directory namespace.
+RUN mkdir -p /run/acp-bridge-locks \
+ && touch /run/acp-bridge-locks/hermes.lock /run/acp-bridge-locks/opencode.lock /run/acp-bridge-locks/devin.lock /run/acp-bridge-locks/pi.lock /run/acp-bridge-locks/codex.lock \
+ && chmod 0555 /run/acp-bridge-locks
 WORKDIR /repo
 CMD ["node", "--version"]

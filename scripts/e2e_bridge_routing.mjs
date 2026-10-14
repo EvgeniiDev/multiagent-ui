@@ -20,9 +20,10 @@
 // Usage: node scripts/e2e_bridge_routing.mjs
 // Prints PASS/FAIL per assertion, exits non-zero on any failure.
 
+import { testEnv, stopTestBridge } from './bridge-test-harness.mjs';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -65,17 +66,6 @@ const { WebSocket } = wsModule;
 const WS_NODE_MODULES = wsEntry.includes(`${path.sep}node_modules${path.sep}`)
   ? wsEntry.split(`${path.sep}node_modules${path.sep}`)[0] + `${path.sep}node_modules`
   : path.dirname(wsEntry); // resolved to a bare dir — ws sits next to it anyway
-
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-    srv.on('error', reject);
-  });
-}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -138,14 +128,16 @@ class Client {
 }
 
 async function main() {
-  const port = await freePort();
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'acp-routing-'));
+  const env = await testEnv(temp, 'docker');
+  let port;
   const bridge = spawn(
     process.execPath,
-    [BRIDGE, '--port', String(port), '--cmd', `${process.execPath} ${AGENT}`,
+    [BRIDGE, '--port', '0', '--bind', '127.0.0.1', '--required-mode', 'docker', '--cmd', `${process.execPath} ${AGENT}`,
      '--root', os.tmpdir()],
     {
       env: {
-        ...process.env,
+        ...env,
         NODE_PATH: WS_NODE_MODULES,
         ACP_TOKEN_METER: '0',
       },
@@ -153,9 +145,11 @@ async function main() {
     }
   );
   bridge.stderr.on('data', (d) => process.stderr.write(`[bridge] ${d}`));
-  await new Promise((resolve, reject) => {
+  let output = '';
+  try { await new Promise((resolve, reject) => {
     const to = setTimeout(() => reject(new Error('bridge never listened')), 10000);
     bridge.stdout.on('data', (d) => {
+      output += d.toString();
       process.stdout.write(`[bridge] ${d}`);
       if (d.toString().includes('listening')) {
         clearTimeout(to);
@@ -165,6 +159,8 @@ async function main() {
     bridge.once('exit', (c) => reject(new Error(`bridge exited early code=${c}`)));
   });
 
+  } catch (error) { await stopTestBridge(bridge); await rm(temp, { recursive: true, force: true }); throw error; }
+  port = Number(output.match(/listening on :(\d+)/)[1]);
   const a = new Client(port, 'A');
   const b = new Client(port, 'B');
   const tryCall = (p) => p.then((r) => ({ ok: true, r })).catch((e) => ({ ok: false, r: e }));
@@ -227,7 +223,8 @@ async function main() {
   } finally {
     a.close();
     b.close();
-    bridge.kill('SIGKILL');
+    await stopTestBridge(bridge);
+    await rm(temp, { recursive: true, force: true });
   }
 
   const failed = results.filter(([, ok]) => !ok);
