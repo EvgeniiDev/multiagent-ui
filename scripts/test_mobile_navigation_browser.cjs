@@ -74,8 +74,12 @@ if(width<800){
 
   await swipe(350,500);
   assert.equal(await p.evaluate(()=>!!document.fullscreenElement),false,'scrolling toward older messages never enters fullscreen');
+  // Swiping a link in a message is still a history gesture; tapping it stays native.
+  await p.evaluate(x=>{const feed=document.querySelector('.chat-view:not([style*="display: none"]) .messages-container');const anchor=document.createElement('a');anchor.href='#qa-drag';anchor.textContent='Swipe across this link';anchor.style.cssText=`position:fixed;left:${x-60}px;top:530px;width:120px;height:40px;z-index:1`;feed.append(anchor);window.qaLinkFixture=anchor;},width/2);
   await swipe(550,350,true);
   await p.waitForFunction(()=>document.fullscreenElement===document.documentElement,{},{timeout:2000});
+  assert.equal(new URL(p.url()).hash,'','a history drag on a link must not activate the link');
+  await p.evaluate(()=>{qaLinkFixture.remove();delete window.qaLinkFixture;});
   assert.equal(await draft.inputValue(),'Draft preserved while the viewport changes','automatic fullscreen preserves draft');
   const autoComposer=await p.locator('.chat-view:visible .composer-box').boundingBox();
   assert(autoComposer.y+autoComposer.height<=await p.evaluate(()=>visualViewport.offsetTop+visualViewport.height),'automatic fullscreen keeps composer visible');

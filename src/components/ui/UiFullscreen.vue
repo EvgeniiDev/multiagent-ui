@@ -32,7 +32,7 @@ function onTouchStart(event: TouchEvent) {
       !(event.target instanceof Element)) return;
   const feed = event.target.closest('.messages-container');
   if (!feed?.closest('.chat-view')?.contains(control.value) ||
-      event.target.closest('a, button, input, textarea, select, [contenteditable="true"]')) return;
+      event.target.closest('button, input, textarea, select, [contenteditable="true"]')) return;
   const scroller = document.scrollingElement;
   if (!scroller || scroller.scrollHeight <= scroller.clientHeight + 32) return;
   const touch = event.touches[0]!;
