@@ -1,5 +1,10 @@
 # Fullscreen after a downward swipe — 15 October 2026
 
+> Superseded: the user reported that ordinary phone scrolling did not enter
+> fullscreen. The successful automation below carried unrelated transient user
+> activation. See [the correction](mobile-fullscreen-gesture-20261015.md) for a
+> regression that first expires activation and the gesture implementation.
+
 The user confirmed explicit fullscreen worked and requested entry without opening
 settings. On mobile browser chat, a trusted upward finger swipe (toward newer
 messages) of at least 32 CSS pixels now requests fullscreen when the gesture ends.
