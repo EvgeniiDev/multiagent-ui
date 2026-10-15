@@ -7,7 +7,7 @@ const fs=require('node:fs');const path=require('node:path');const assert=require
 const b=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH,args:['--no-sandbox','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream']});
 globalThis.qaBrowser=b;
 for (const width of [320,390,430,780,1440]) {
-const c=await b.newContext({ignoreHTTPSErrors:true,hasTouch:width<800,isMobile:width<800,viewport:{width,height:844}});
+const c=await b.newContext({ignoreHTTPSErrors:true,hasTouch:width<800,isMobile:width<800,userAgent:width===430?'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1':undefined,viewport:{width,height:844}});
 await c.grantPermissions(['local-network-access','microphone']);
 await c.addInitScript(()=>{localStorage.setItem('acp-ui:sessions.json',JSON.stringify({sessions:['e2e','other'].map(id=>({id,agentName:'E2E',sessionId:id,cwd:'/tmp',title:id,supportsLoadSession:true,lastUpdated:Date.now()})),openTabs:[{agentName:'E2E',sessionId:'e2e'},{agentName:'E2E',sessionId:'other'}]}));localStorage.setItem('acp-ui:agents',JSON.stringify({agents:{E2E:{transport:'websocket',url:'ws://127.0.0.1:25993/'}}}));localStorage.setItem('acp-ui:preferences.json',JSON.stringify({telemetryEnabled:false,lastCwd:'/tmp'}));});
 const p=await c.newPage();const errors=[],rpcCalls=[];p.on('pageerror',e=>{errors.push(e.message);console.log('ERROR',e.message)});
@@ -82,6 +82,24 @@ if(width<800){
     assert.equal(await p.evaluate(()=>window.__session.activeTabId),activeBefore,'menu opens the drawer without changing sessions');
     await p.locator('[aria-label="Collapse sidebar"]').click();
   }
+  await p.locator('.chat-view:visible .settings-toggle').tap();
+  const fullscreen=p.locator('.chat-view:visible .fullscreen-toggle');
+  assert.equal(await fullscreen.count(),1,'mobile settings offer fullscreen with the composer included');const fullButtonBox=await fullscreen.boundingBox();assert(fullButtonBox.width>=44&&fullButtonBox.height>=44);await p.keyboard.press('Tab');await fullscreen.focus();assert.equal(await fullscreen.evaluate(e=>getComputedStyle(e).outlineWidth),'2px');
+  await p.evaluate(()=>{window.qaRequestFullscreen=document.documentElement.requestFullscreen;document.documentElement.requestFullscreen=()=>Promise.reject(new DOMException('Test denial','NotAllowedError'));});
+  await fullscreen.click();await p.locator('.chat-view:visible .fullscreen-control [role="alert"]').waitFor();assert.equal(await fullscreen.getAttribute('aria-pressed'),'false','a rejected request must not claim fullscreen');assert(await fullscreen.isEnabled(),'rejected fullscreen remains retryable');
+  await p.evaluate(()=>{document.documentElement.requestFullscreen=window.qaRequestFullscreen;delete window.qaRequestFullscreen;});
+  await fullscreen.click();await p.waitForFunction(()=>document.fullscreenElement===document.documentElement);
+  assert.equal(await fullscreen.getAttribute('aria-pressed'),'true');assert.equal(await p.locator('.chat-view:visible .fullscreen-control [role="alert"]').count(),0);
+  let fullComposer=await p.locator('.chat-view:visible .composer-box').boundingBox(),visualBottom=await p.evaluate(()=>visualViewport.offsetTop+visualViewport.height);
+  assert(fullComposer.y>=0&&fullComposer.y+fullComposer.height<=visualBottom,'real fullscreen includes a visible bottom composer');assert.equal(await draft.inputValue(),'Draft preserved while the viewport changes');
+  assert(await p.evaluate(()=>{const e=document.scrollingElement,top=e.scrollTop,max=e.scrollHeight-e.clientHeight;e.scrollTop=top<max/2?Math.min(max,top+100):Math.max(0,top-100);return e.scrollTop!==top;}),'history remains scrollable inside real fullscreen');
+  assert.equal(await p.evaluate(()=>document.fullscreenElement.contains(document.querySelector('.chat-view:not([style*="display: none"]) .input-container'))),true,'fullscreen targets the whole app, including the input');
+  await p.evaluate(()=>document.exitFullscreen());await p.waitForFunction(()=>!document.fullscreenElement);await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) .fullscreen-toggle')?.getAttribute('aria-pressed')==='false');assert.equal(await fullscreen.getAttribute('aria-pressed'),'false','browser-initiated exit updates the control');
+  await fullscreen.click();await p.waitForFunction(()=>document.fullscreenElement===document.documentElement);const rotation=await c.newCDPSession(p);await rotation.send('Emulation.setDeviceMetricsOverride',{width:900,height:844,deviceScaleFactor:1,mobile:true});assert(await fullscreen.isVisible(),'fullscreen exit stays available after rotating to a wide layout');await fullscreen.click();await p.waitForFunction(()=>!document.fullscreenElement);await p.waitForTimeout(100);await p.setViewportSize({width,height:844});await rotation.detach();await p.waitForTimeout(100);
+  await p.evaluate(()=>{Object.defineProperty(document,'fullscreenEnabled',{configurable:true,value:false});document.dispatchEvent(new Event('fullscreenchange'));});await p.waitForTimeout(50);
+  assert.equal(await fullscreen.count(),0,'unsupported fullscreen does not show a broken action');const help=await p.locator('.chat-view:visible .fullscreen-help').innerText();assert.match(help,width===430?/Share.*Add to Home Screen/:/unavailable/);
+  await p.evaluate(()=>{delete document.fullscreenEnabled;document.dispatchEvent(new Event('fullscreenchange'));});
+  await p.locator('.chat-view:visible .settings-toggle').tap();
   await p.evaluate(()=>{window.__session.activeRuntime.isLoading=true;window.scrollTo(0,document.documentElement.scrollHeight/2);});await p.waitForTimeout(200);
   const working=p.locator('.chat-view:visible .input-container .loading-indicator');
   assert.equal(await working.count(),1,'live thinking status stays beside the composer rather than in history');
@@ -91,7 +109,7 @@ if(width<800){
   assert(statusBox.y>=0&&statusBox.y+statusBox.height<=fieldBox.y,'working status remains visible above the fixed composer while reading older history');
   assert.equal(await working.getByRole('button').count(),0,'the status line has no separate Stop action');
   const stop=p.locator('.chat-view:visible .composer-menu .stop-btn');assert.equal(await stop.count(),1,'Stop is in the bottom toolbar');const stopBox=await stop.boundingBox(),sendBox=await p.locator('.chat-view:visible .send-btn').boundingBox();assert(stopBox.width>=44&&stopBox.height>=44,'Stop remains a reachable touch target');assert(Math.abs(stopBox.y-sendBox.y)<=4&&stopBox.x+stopBox.width<=sendBox.x,'Stop sits directly beside Send');assert.equal(await stop.innerText(),'','Stop is a square icon, without a text label');
-  await stop.focus();assert.equal(await stop.evaluate(e=>getComputedStyle(e).outlineWidth),'2px');assert(stopBox.x>=4&&stopBox.x+stopBox.width+4<=width,'Stop focus ring fits inside the screen');
+  await p.keyboard.press('Tab');await stop.focus();assert.equal(await stop.evaluate(e=>getComputedStyle(e).outlineWidth),'2px');assert(stopBox.x>=4&&stopBox.x+stopBox.width+4<=width,'Stop focus ring fits inside the screen');
   assert(await p.locator('.chat-view:visible .voice-btn').isEnabled(),'voice recording stays enabled during model output');
   const draftBeforeVoice=await draft.inputValue();
   await p.evaluate(()=>{const rt=window.__session.activeRuntime;window.qaPickerOriginal={models:rt.availableModels,modes:rt.availableModes,model:rt.currentModelId,mode:rt.currentModeId};rt.availableModels=[{modelId:'qa-a',name:'QA Model A'},{modelId:'qa-b',name:'QA Model B'}];rt.currentModelId='qa-a';rt.availableModes=[{id:'qa-ask',name:'QA Ask'},{id:'qa-auto',name:'QA Auto'}];rt.currentModeId='qa-ask';});
@@ -175,7 +193,8 @@ if(width<800){
   const tab=await p.locator('.tab-strip [role="tab"]').boundingBox();
   assert(tab.x+tab.width<=width,'session tab reachable by horizontal scrolling');
 }else{await p.evaluate(()=>window.__session.activeRuntime.isLoading=true);await p.waitForTimeout(200);assert.equal(await p.locator('.chat-view:visible .input-container .loading-indicator').count(),1,'desktop live status also stays beside the composer');assert.equal(await p.locator('.chat-view:visible .messages-container .loading-indicator').count(),0);await p.evaluate(()=>window.__session.activeRuntime.isLoading=false);await feed.hover();await p.mouse.wheel(0,200);await p.waitForTimeout(250);assert.equal(await nav.getAttribute('inert'),null,'desktop tabs stay visible');}
+if(width===430){await p.addInitScript(()=>Object.defineProperty(navigator,'standalone',{configurable:true,value:true}));await p.reload({waitUntil:'domcontentloaded'});await p.waitForSelector('.chat-view:visible .settings-toggle');await p.locator('.chat-view:visible .settings-toggle').tap();assert.equal(await p.locator('.chat-view:visible .fullscreen-control').count(),0,'Home Screen app needs no fullscreen action');assert.equal(await p.locator('meta[name=apple-mobile-web-app-capable]').getAttribute('content'),'yes','iPhone Home Screen launch is configured without browser bars');}
 assert.deepEqual(errors,[]);await p.screenshot({path:`/tmp/acp-navigation-${width}.png`});await c.close();
 }
-await b.close();console.log('PASS native page scrolling, fixed composer, inline recording and thinking status, Stop beside Send, busy voice/settings, history/follow, saved positions, keyboard viewport, desktop unchanged');
+await b.close();console.log('PASS native page scrolling, fixed composer, inline recording and thinking status, Stop beside Send, busy voice/settings, real fullscreen/exit/fallback, history/follow, saved positions, keyboard viewport, desktop unchanged');
 })().catch(async e=>{console.error(e);await globalThis.qaBrowser?.close();process.exit(1)});

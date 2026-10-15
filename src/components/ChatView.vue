@@ -13,6 +13,7 @@ import ToolCallChip from './ToolCallChip.vue';
 import MessageAttachment from './MessageAttachment.vue';
 import UiComposerSettings from './ui/UiComposerSettings.vue';
 import UiButton from './ui/UiButton.vue';
+import UiFullscreen from './ui/UiFullscreen.vue';
 import WorkflowPanel from './WorkflowPanel.vue';
 import { useWorkflowStore } from '../stores/workflow';
 import CommandPalette from './CommandPalette.vue';
@@ -1236,6 +1237,7 @@ function planGlyph(status: string): string {
                 compact
                 @change="handleModeChange"
               />
+              <UiFullscreen />
               <ModePicker
                 :modes="RUN_MODES"
                 :current-mode-id="wfStore.chatMode"
