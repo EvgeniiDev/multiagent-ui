@@ -1,7 +1,7 @@
 <script setup lang="ts">
-// Mic button for the composer: records mono PCM16 @16 kHz and submits one WAV
-// to audio-video-to-text when dictation stops. The API returns a final transcript
-// only after processing; partial text is not available during recording.
+// Mic button for the composer: streams mono PCM16 into pause-delimited WAVs.
+// Finalized phrases stay stable; only the current phrase has a replaceable
+// hypothesis. Stop drains the remaining phrases rather than re-decoding the take.
 //
 // Failure modes are surfaced, never silent: API unreachable -> the button stays
 // disabled with the reason on its title; mic denial or a failed request emits
@@ -19,9 +19,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   /** phase transition or elapsed-second tick */
   state: [{ phase: VoicePhase; elapsedS: number }];
-  /** reserved for a streaming provider; current HTTP API returns only final */
+  /** Ordered committed phrases plus the current replaceable hypothesis. */
   partial: [p: SttPartial];
-  /** final transcript to insert into the composer after the HTTP request */
+  /** Aggregate transcript inserted once when recording has finished. */
   final: [text: string];
   /** visible, human-readable failure */
   error: [message: string];
@@ -61,7 +61,7 @@ let pending: number[] = [];
 let resample: ((input: Float32Array) => Float32Array) | null = null;
 
 const TARGET_RATE = 16000;
-const CHUNK_SAMPLES = 1600; // 100 ms at 16 kHz, batched into the final WAV
+const CHUNK_SAMPLES = 1600; // 100 ms at 16 kHz; segmenter handles pause boundaries
 
 /** Linear resampler inRate -> 16 kHz with carry across callbacks. A plain
  *  decimator would alias; interpolation keeps speech intelligible for STT
@@ -317,14 +317,15 @@ function stopListening(): void {
   stt?.stop();
   teardownAudio(); // mic off immediately — the "recording" affordance is honest
   stopElapsed();
-  // The API re-decodes the recorded WAV synchronously; allow up to five minutes.
+  if (!stt) return; // all phrases may already be decoded and the session closed
+  // Drain queued phrases and the final tail; the microphone is already off.
   finalTimer = setTimeout(() => {
     if (gen === sessionGen && phase.value === 'stopping') {
       const last = commitLast();
       setPhase('idle');
       teardownStt();
       voiceEvents.final(last);
-      voiceEvents.error('Transcription timed out — no transcript was returned');
+      voiceEvents.error('Transcription timed out — kept the text recognized so far');
     }
   }, FINAL_WAIT_MS);
 }

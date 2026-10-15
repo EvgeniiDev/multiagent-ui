@@ -1,6 +1,6 @@
 // Browser client for the audio-video-to-text OpenAI-compatible transcription API.
-// Captured mono PCM16 @16 kHz is kept in memory and submitted as a WAV once
-// dictation ends. The API is synchronous, so no partial transcript is available.
+// Mono PCM16 @16 kHz is split into disjoint utterances at pauses. Finalized
+// phrases are decoded once; replaceable previews cover only the current phrase.
 
 export const STT_PORT = 8099;
 /** HTTPS-front listener on 25906 now proxies to the transcription API on :8099. */
@@ -154,9 +154,94 @@ function encodeWav(chunks: Int16Array[]): ArrayBuffer {
   return buffer;
 }
 
-/** Collects PCM16 chunks and submits one WAV when the user stops recording. */
+const SAMPLE_RATE = 16000;
+const FRAME_SAMPLES = 320; // 20 ms; independent of audio callback boundaries
+const PAUSE_FRAMES = 40; // 800 ms
+const PAD_FRAMES = 10; // 200 ms of context before/after speech
+const MAX_SAMPLES = 20 * SAMPLE_RATE;
+const PREVIEW_SAMPLES = 3 * SAMPLE_RATE;
+const MAX_BACKLOG_SAMPLES = 10 * 60 * SAMPLE_RATE;
+
+type Utterance = { id: number; chunks: Int16Array[] };
+type DecodeTask = Utterance & { final: boolean; epoch: number };
+
+/** Audio partitions, never overlapping rolling windows or text-prefix guesses. */
+class PcmUtterances {
+  id = 0;
+  private frame = new Int16Array(FRAME_SAMPLES);
+  private used = 0;
+  private leading: Int16Array[] = [];
+  private active: Int16Array[] = [];
+  private samples = 0;
+  private silentFrames = 0;
+  private previewAt = PREVIEW_SAMPLES;
+
+  constructor(
+    private complete: (phrase: Utterance) => void,
+    private preview: (phrase: Utterance) => void,
+  ) {}
+
+  push(pcm: Int16Array): void {
+    let offset = 0;
+    while (offset < pcm.length) {
+      const take = Math.min(FRAME_SAMPLES - this.used, pcm.length - offset);
+      this.frame.set(pcm.subarray(offset, offset + take), this.used);
+      this.used += take;
+      offset += take;
+      if (this.used === FRAME_SAMPLES) {
+        this.consume(this.frame);
+        this.frame = new Int16Array(FRAME_SAMPLES);
+        this.used = 0;
+      }
+    }
+  }
+
+  finish(): void {
+    if (this.used) this.consume(this.frame.slice(0, this.used));
+    this.used = 0;
+    this.seal();
+  }
+
+  private consume(frame: Int16Array): void {
+    let energy = 0;
+    for (const sample of frame) energy += sample * sample;
+    const voiced = energy > 200 * 200 * frame.length;
+    if (!this.active.length && !voiced) {
+      this.leading.push(frame);
+      if (this.leading.length > PAD_FRAMES) this.leading.shift();
+      return;
+    }
+    if (!this.active.length) {
+      this.active = this.leading;
+      this.leading = [];
+      this.samples = this.active.reduce((n, block) => n + block.length, 0);
+    }
+    this.active.push(frame);
+    this.samples += frame.length;
+    this.silentFrames = voiced ? 0 : this.silentFrames + 1;
+    if (this.silentFrames >= PAUSE_FRAMES) {
+      this.active.splice(this.active.length - this.silentFrames + PAD_FRAMES);
+      this.seal();
+    } else if (this.samples >= MAX_SAMPLES) {
+      this.seal();
+    } else if (this.samples >= this.previewAt) {
+      this.previewAt = this.samples + PREVIEW_SAMPLES;
+      this.preview({ id: this.id, chunks: this.active.slice() });
+    }
+  }
+
+  private seal(): void {
+    if (!this.active.length) return;
+    this.complete({ id: this.id++, chunks: this.active });
+    this.active = [];
+    this.samples = 0;
+    this.silentFrames = 0;
+    this.previewAt = PREVIEW_SAMPLES;
+  }
+}
+
+/** One serial decoder: ordered final phrases + one coalesced live hypothesis. */
 export class StreamingStt {
-  private chunks: Int16Array[] = [];
   private started = false;
   private stopping = false;
   private gotFinal = false;
@@ -164,6 +249,16 @@ export class StreamingStt {
   private disposed = false;
   private controller: AbortController | null = null;
   private stopPromise: Promise<void> | null = null;
+  private resolveStop: (() => void) | null = null;
+  private epoch = 0;
+  private committed: string[] = [];
+  private volatile = '';
+  private queued: DecodeTask[] = [];
+  private queuedSamples = 0;
+  private inFlight: DecodeTask | null = null;
+  private preview: DecodeTask | null = null;
+  private draining = false;
+  private audio = this.createAudio();
 
   constructor(
     private readonly handlers: SttHandlers,
@@ -180,22 +275,32 @@ export class StreamingStt {
   }
 
   push(pcm: Int16Array): void {
-    if (!this.isOpen || pcm.length === 0) return;
-    this.chunks.push(new Int16Array(pcm));
+    if (this.isOpen && pcm.length) this.audio.push(pcm);
   }
 
   stop(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
     if (!this.isOpen) return Promise.resolve();
+    this.stopPromise = new Promise(resolve => { this.resolveStop = resolve; });
     this.stopping = true;
     this.started = false;
-    this.stopPromise = this.transcribe();
+    this.audio.finish();
+    this.preview = null;
+    void this.drain();
     return this.stopPromise;
   }
 
   reset(): void {
     if (!this.isOpen) return;
-    this.chunks = [];
+    this.epoch++;
+    this.controller?.abort();
+    this.queued = [];
+    this.queuedSamples = 0;
+    this.preview = null;
+    this.committed = [];
+    this.volatile = '';
+    this.audio = this.createAudio();
+    this.publishPartial();
   }
 
   close(): void {
@@ -203,58 +308,123 @@ export class StreamingStt {
     this.disposed = true;
     this.started = false;
     this.controller?.abort();
-    this.chunks = [];
+    this.queued = [];
+    this.queuedSamples = 0;
+    this.preview = null;
+    this.audio = this.createAudio();
     this.emitClose();
   }
 
-  private async transcribe(): Promise<void> {
-    try {
-      const form = new FormData();
-      form.append('file', new Blob([encodeWav(this.chunks)], { type: 'audio/wav' }), 'recording.wav');
-      form.append('model', 'gigaam-v3');
-      form.append('language', 'ru');
-      form.append('response_format', 'text');
-      this.chunks = [];
-      this.controller = new AbortController();
-      const timer = setTimeout(() => this.controller?.abort(), STT_REQUEST_TIMEOUT_MS);
-      try {
-        const response = await fetch(`${this.baseUrl.replace(/\/+$/, '')}/v1/audio/transcriptions`, {
-          method: 'POST',
-          body: form,
-          signal: this.controller.signal,
-        });
-        if (!response.ok) {
-          const detail = (await response.text()).trim();
-          throw new Error(`Transcription API returned ${response.status}${detail ? `: ${detail}` : ''}`);
-        }
-        const text = (await response.text()).trim();
+  private createAudio(): PcmUtterances {
+    return new PcmUtterances(
+      phrase => {
         if (this.disposed) return;
+        const samples = phrase.chunks.reduce((n, block) => n + block.length, 0);
+        if (this.queuedSamples + samples > MAX_BACKLOG_SAMPLES) {
+          this.handlers.onError?.('Speech recognition fell too far behind. Recording stopped; only the text recognized so far was kept.');
+          this.close();
+          return;
+        }
+        this.queuedSamples += samples;
+        if (this.inFlight && !this.inFlight.final && this.inFlight.id === phrase.id) this.controller?.abort();
+        this.queued.push({ ...phrase, final: true, epoch: this.epoch });
+        this.preview = null;
+        void this.drain();
+      },
+      phrase => {
+        if (this.disposed) return;
+        this.preview = { ...phrase, final: false, epoch: this.epoch };
+        void this.drain();
+      },
+    );
+  }
+
+  private publishPartial(): void {
+    try {
+      this.handlers.onPartial?.({ committed: this.committed.join(' '), volatile: this.volatile });
+    } catch {
+      this.handlers.onError?.('Transcript handler failed while updating live text');
+    }
+  }
+
+  private async drain(): Promise<void> {
+    if (this.draining || this.disposed) return;
+    this.draining = true;
+    try {
+      while (!this.disposed) {
+        const task = this.queued.shift() ?? this.preview;
+        if (!task) break;
+        if (!task.final) this.preview = null;
+        else this.queuedSamples -= task.chunks.reduce((n, block) => n + block.length, 0);
+        this.inFlight = task;
+        let text: string;
+        try {
+          text = await this.transcribe(task.chunks);
+        } catch (error) {
+          if (this.disposed || task.epoch !== this.epoch) continue;
+          // A preview is disposable; a failed final must not silently omit audio.
+          if (!task.final) continue;
+          const message = error instanceof Error && error.name === 'AbortError'
+            ? 'Transcription API timed out'
+            : error instanceof Error ? error.message : 'Transcription API request failed';
+          this.handlers.onError?.(message);
+          this.close();
+          return;
+        }
+        if (this.disposed || task.epoch !== this.epoch) continue;
+        if (task.final) {
+          if (text) this.committed.push(text);
+          this.volatile = '';
+          this.publishPartial();
+        } else if (!this.stopping && task.id === this.audio.id) {
+          this.volatile = text;
+          this.publishPartial();
+        }
+      }
+      if (this.stopping && !this.disposed) {
         this.gotFinal = true;
         try {
-          this.handlers.onFinal?.(text);
+          this.handlers.onFinal?.(this.committed.join(' '));
         } catch (error) {
           const detail = error instanceof Error ? error.message : 'unknown callback error';
           this.handlers.onError?.(`Transcript handler failed: ${detail}`);
         }
-      } finally {
-        clearTimeout(timer);
-        this.controller = null;
-      }
-    } catch (error) {
-      if (!this.disposed) {
-        const message = error instanceof Error && error.name === 'AbortError'
-          ? 'Transcription API timed out'
-          : error instanceof Error ? error.message : 'Transcription API request failed';
-        this.handlers.onError?.(message);
+        this.emitClose();
       }
     } finally {
-      this.emitClose();
+      this.inFlight = null;
+      this.draining = false;
+    }
+  }
+
+  private async transcribe(chunks: Int16Array[]): Promise<string> {
+    const form = new FormData();
+    form.append('file', new Blob([encodeWav(chunks)], { type: 'audio/wav' }), 'recording.wav');
+    form.append('model', 'gigaam-v3');
+    form.append('language', 'ru');
+    form.append('response_format', 'text');
+    const controller = new AbortController();
+    this.controller = controller;
+    const timer = setTimeout(() => controller.abort(), STT_REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${this.baseUrl.replace(/\/+$/, '')}/v1/audio/transcriptions`, {
+        method: 'POST', body: form, signal: controller.signal,
+      });
+      if (!response.ok) {
+        const detail = (await response.text()).trim();
+        throw new Error(`Transcription API returned ${response.status}${detail ? `: ${detail}` : ''}`);
+      }
+      return (await response.text()).trim();
+    } finally {
+      clearTimeout(timer);
+      if (this.controller === controller) this.controller = null;
     }
   }
 
   private emitClose(): void {
     if (this.closedEmitted) return;
     this.closedEmitted = true;
+    this.resolveStop?.();
     this.handlers.onClose?.(this.gotFinal);
   }
 }

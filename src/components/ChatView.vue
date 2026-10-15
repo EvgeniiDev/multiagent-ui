@@ -755,7 +755,11 @@ async function handleSend() {
   try {
     // Stop requests a final transcript asynchronously. Snapshot only after
     // it has been committed, so a late voice final cannot refill the field.
-    if (voiceActive.value) await voiceInputRef.value?.finish();
+    if (voiceActive.value) {
+      await voiceInputRef.value?.finish();
+      // Keep a visibly incomplete dictation for review instead of sending it.
+      if (voiceError.value) return;
+    }
     text = inputText.value.trim();
     files = attachments.value;
     if (!text && files.length === 0) return;

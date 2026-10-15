@@ -11,7 +11,7 @@ const {promptRecorded,markPromptRecorded}=await import('data:text/javascript;bas
 const source=readFileSync(new URL('../src/components/ChatView.vue',import.meta.url),'utf8');
 function extract(name,content=source){const source=content;const start=source.indexOf('function '+name+'(');assert.ok(start>=0);let depth=0,body=source.indexOf('{',start),end=body;for(;end<source.length;end++){if(source[end]==='{')depth++;if(source[end]==='}'&&--depth===0)break;}return source.slice(start,end+1);}
 const js=ts.transpileModule('async '+extract('handleSend')+'\n'+extract('onVoiceFinal'),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
-function harness(){const calls=[];let finish;const env={insertDictation,promptRecorded,inputText:{value:'Typed'},attachments:{value:[]},attachError:{value:null},followBottom:{value:false},preparingSend:{value:false},voiceActive:{value:false},voiceAt:{value:5},composerEl:{value:null},nextTick:async fn=>fn?.(),isLoading:{value:false},rt:{sendPrompt:async(text,files)=>calls.push({text,files}),steer:async(text,files)=>calls.push({text,files})}};
+function harness(){const calls=[];let finish;const env={insertDictation,promptRecorded,inputText:{value:'Typed'},attachments:{value:[]},attachError:{value:null},followBottom:{value:false},preparingSend:{value:false},voiceActive:{value:false},voiceError:{value:null},voiceAt:{value:5},composerEl:{value:null},nextTick:async fn=>fn?.(),isLoading:{value:false},rt:{sendPrompt:async(text,files)=>calls.push({text,files}),steer:async(text,files)=>calls.push({text,files})}};
 const make=Function(...Object.keys(env),'voiceInputRef',js+';return {handleSend,onVoiceFinal};');
 const voiceInputRef={value:{stop:()=>{},finish:()=>new Promise(resolve=>{finish=resolve;})}};
 const handlers=make(...Object.values(env),voiceInputRef);return {env,calls,...handlers,finalize(text){handlers.onVoiceFinal(text);env.voiceActive.value=false;finish?.();}};}
@@ -30,3 +30,5 @@ test('VoiceInput finish resolves after the asynchronous final text has been emit
   const finish=Function('phase','watch','nextTick','stopListening',finishJs+';return finish;')(phase,watch,nextTick,stopListening);
   await finish();assert.equal(final,'Final spoken words');
 });
+
+test('a failed final chunk keeps recognized text for review instead of sending an incomplete dictation',async()=>{const h=harness();h.env.voiceActive.value=true;const sending=h.handleSend();h.env.voiceError.value='Transcription API returned 503';h.finalize('known partial');await sending;assert.equal(h.calls.length,0);assert.equal(h.env.inputText.value,'Typed known partial');assert.equal(h.env.preparingSend.value,false);});
