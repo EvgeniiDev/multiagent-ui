@@ -55,11 +55,26 @@ if(width<800){
   const readingHeight=()=>p.evaluate(()=>visualViewport.height-document.querySelector('.session-navigation').getBoundingClientRect().height-document.querySelector('.chat-view:not([style*="display: none"]) .input-container').getBoundingClientRect().height);
   const before=await readingHeight();
   const cdp=await c.newCDPSession(p);
-  async function swipe(from,to){const r=await feed.boundingBox();const x=r.x+r.width/2;await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y:from}]});for(let i=1;i<=6;i++){await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x,y:from+(to-from)*i/6}]});await p.waitForTimeout(25);}await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await p.waitForTimeout(250);}
+  async function swipe(from,to,expireActivation=false){const r=await feed.boundingBox();const x=r.x+r.width/2;if(expireActivation){await p.waitForTimeout(5200);const activation=await cdp.send('Runtime.evaluate',{expression:'navigator.userActivation.isActive',userGesture:false,returnByValue:true});assert.equal(activation.result.value,false,'fullscreen test must start without activation from Playwright evaluation');}await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y:from}]});for(let i=1;i<=6;i++){await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x,y:from+(to-from)*i/6}]});await p.waitForTimeout(25);}await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await p.waitForTimeout(250);}
   assert.equal(await p.evaluate(()=>!!document.fullscreenElement),false,'restored and programmatic scroll never enters fullscreen');
+  // These gestures must stay outside the fullscreen-entry drag, even with activation.
+  const gestureX=width/2;
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:gestureX,y:450}]});
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:gestureX+50,y:450}]});
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+  assert.equal(await p.evaluate(()=>!!document.fullscreenElement),false,'horizontal movement never enters fullscreen');
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:gestureX,y:450}]});
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:gestureX,y:430}]});
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+  assert.equal(await p.evaluate(()=>!!document.fullscreenElement),false,'short movement never enters fullscreen');
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:gestureX,y:550}]});
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:gestureX,y:450}]});
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});
+  assert.equal(await p.evaluate(()=>!!document.fullscreenElement),false,'cancelled movement never enters fullscreen');
+
   await swipe(350,500);
   assert.equal(await p.evaluate(()=>!!document.fullscreenElement),false,'scrolling toward older messages never enters fullscreen');
-  await swipe(550,350);
+  await swipe(550,350,true);
   await p.waitForFunction(()=>document.fullscreenElement===document.documentElement,{},{timeout:2000});
   assert.equal(await draft.inputValue(),'Draft preserved while the viewport changes','automatic fullscreen preserves draft');
   const autoComposer=await p.locator('.chat-view:visible .composer-box').boundingBox();

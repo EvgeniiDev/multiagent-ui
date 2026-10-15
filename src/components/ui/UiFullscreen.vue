@@ -10,7 +10,7 @@ import UiButton from './UiButton.vue';
 
 const browser = !isTauriHost();
 const control = ref<HTMLElement | null>(null);
-let swipeStart: { x: number; y: number } | null = null;
+let swipeStart: { x: number; y: number; lastY: number; claimed: boolean } | null = null;
 const supported = ref(false);
 const fullscreen = ref(false);
 const standalone = ref(false);
@@ -25,24 +25,51 @@ function syncFullscreen() {
   fullscreen.value = active;
 }
 function onTouchStart(event: TouchEvent) {
-  swipeStart = null;
+  cancelSwipe();
   if (!event.isTrusted || automaticFullscreenSuppressed || pending.value || fullscreen.value ||
       !supported.value || standalone.value || !window.matchMedia('(max-width: 800px)').matches ||
       !document.documentElement.classList.contains('document-chat') || event.touches.length !== 1 ||
       !(event.target instanceof Element)) return;
   const feed = event.target.closest('.messages-container');
-  if (!feed?.closest('.chat-view')?.contains(control.value)) return;
+  if (!feed?.closest('.chat-view')?.contains(control.value) ||
+      event.target.closest('a, button, input, textarea, select, [contenteditable="true"]')) return;
+  const scroller = document.scrollingElement;
+  if (!scroller || scroller.scrollHeight <= scroller.clientHeight + 32) return;
   const touch = event.touches[0]!;
-  swipeStart = { x: touch.clientX, y: touch.clientY };
+  swipeStart = { x: touch.clientX, y: touch.clientY, lastY: touch.clientY, claimed: false };
+  document.addEventListener('touchmove', onTouchMove, { passive: false });
 }
 function onTouchMove(event: TouchEvent) {
-  if (event.touches.length !== 1) swipeStart = null;
+  const start = swipeStart;
+  if (!start) return;
+  if (!event.isTrusted || event.touches.length !== 1 || !event.cancelable) {
+    cancelSwipe();
+    return;
+  }
+  const touch = event.touches[0]!;
+  if (!start.claimed) {
+    const down = start.y - touch.clientY;
+    if (down <= 0 || down < Math.abs(start.x - touch.clientX) * 2) {
+      // Older-history and horizontal gestures retain their native behavior.
+      cancelSwipe();
+      return;
+    }
+    start.claimed = true;
+  }
+  // A native scroll does not grant fullscreen activation. Claim only this first
+  // downward drag, move the document with it, then enter on its trusted release.
+  event.preventDefault();
+  window.scrollBy(0, start.lastY - touch.clientY);
+  start.lastY = touch.clientY;
 }
-function cancelSwipe() { swipeStart = null; }
+function cancelSwipe() {
+  swipeStart = null;
+  document.removeEventListener('touchmove', onTouchMove);
+}
 function onTouchEnd(event: TouchEvent) {
   const start = swipeStart;
-  swipeStart = null;
-  if (!event.isTrusted || !start || event.touches.length || automaticFullscreenSuppressed ||
+  cancelSwipe();
+  if (!event.isTrusted || !start?.claimed || event.touches.length || automaticFullscreenSuppressed ||
       pending.value || document.fullscreenElement || !navigator.userActivation?.isActive) return;
   const touch = event.changedTouches[0];
   if (!touch) return;
@@ -72,7 +99,6 @@ onMounted(() => {
   syncFullscreen();
   document.addEventListener('fullscreenchange', syncFullscreen);
   document.addEventListener('touchstart', onTouchStart, { passive: true });
-  document.addEventListener('touchmove', onTouchMove, { passive: true });
   document.addEventListener('touchend', onTouchEnd, { passive: true });
   document.addEventListener('touchcancel', cancelSwipe, { passive: true });
 });
