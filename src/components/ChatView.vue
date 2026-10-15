@@ -602,6 +602,9 @@ const voiceVolatile = ref('');
 const voiceError = ref<string | null>(null);
 
 const voiceActive = computed(() => voicePhase.value !== 'idle');
+const hasComposerDraft = computed(() => !!inputText.value.trim() || attachments.value.length > 0 || voiceActive.value);
+const composerStopsGeneration = computed(() => isLoading.value && !hasComposerDraft.value);
+const composerCanSend = computed(() => hasComposerDraft.value && !preparingSend.value && !isReconnecting.value && isConnected.value);
 const voicePre = computed(() => inputText.value.slice(0, voiceAt.value));
 const voicePost = computed(() => inputText.value.slice(voiceAt.value));
 // The overlay shows the same separator the final insert will add, so the
@@ -1216,14 +1219,6 @@ function planGlyph(status: string): string {
               accept="image/*,.txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.xml,.html,.css,.js,.mjs,.ts,.tsx,.vue,.py,.sh,.sql,.toml,.ini,.cfg,.conf,.diff,.patch"
               @change="handleFilesPicked"
             />
-            <VoiceInput
-              ref="voiceInputRef"
-              :disabled="isReconnecting || !isConnected"
-              @state="onVoiceState"
-              @partial="onVoicePartial"
-              @final="onVoiceFinal"
-              @error="onVoiceError"
-            />
             <UiComposerSettings>
               <ModelPicker
                 v-if="availableModels.length > 0"
@@ -1261,38 +1256,42 @@ function planGlyph(status: string): string {
               class="context-meter"
               :title="contextTitle"
             >{{ contextLabel }}</span>
-            <UiButton
-              v-if="isLoading"
-              class="stop-btn"
-              icon
-              aria-label="Stop"
-              title="Stop response"
-              @click="handleCancel"
-            >
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" /></svg>
-            </UiButton>
-            <button
-              class="icon-btn send-btn"
-              :disabled="preparingSend || (!inputText.trim() && attachments.length === 0 && !voiceCommitted && !voiceVolatile) || isReconnecting || !isConnected"
-              @click="handleSend"
-              title="Send"
-              aria-label="Send"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                width="16"
-                height="16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
+            <div class="composer-actions">
+              <VoiceInput
+                ref="voiceInputRef"
+                :disabled="isReconnecting || !isConnected"
+                @state="onVoiceState"
+                @partial="onVoicePartial"
+                @final="onVoiceFinal"
+                @error="onVoiceError"
+              />
+              <UiButton
+                v-if="isLoading && !composerStopsGeneration"
+                class="stop-btn"
+                icon
+                aria-label="Stop response"
+                title="Stop response"
+                @click="handleCancel"
               >
-                <path d="M22 2 11 13" />
-                <path d="M22 2 15 22l-4-9-9-4 20-7z" />
-              </svg>
-            </button>
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" /></svg>
+              </UiButton>
+              <UiButton
+                class="composer-primary"
+                :class="{ 'stop-btn': composerStopsGeneration, 'send-btn': !composerStopsGeneration }"
+                :variant="composerStopsGeneration || !composerCanSend ? 'secondary' : 'primary'"
+                icon
+                :disabled="!composerStopsGeneration && !composerCanSend"
+                :title="composerStopsGeneration ? 'Stop response' : voiceActive ? 'Finish dictation and send' : 'Send'"
+                :aria-label="composerStopsGeneration ? 'Stop response' : 'Send'"
+                @click="composerStopsGeneration ? handleCancel() : handleSend()"
+              >
+                <svg v-if="composerStopsGeneration" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" /></svg>
+                <svg v-else viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M22 2 11 13" />
+                  <path d="M22 2 15 22l-4-9-9-4 20-7z" />
+                </svg>
+              </UiButton>
+            </div>
           </div>
         </div>
       </div>
@@ -1712,8 +1711,8 @@ function planGlyph(status: string): string {
 }
 
 /* One framed card: the field on top, the bottom menu row beneath it —
- * attach + mic on the left, model/thinking pickers next, context meter and
- * send on the right. */
+ * attach/settings on the left, status/context in the middle and the
+ * microphone + contextual primary action on the right. */
 .composer-box {
   flex: 1;
   min-width: 0;
@@ -1732,6 +1731,13 @@ function planGlyph(status: string): string {
   align-items: center;
   gap: 0.125rem;
   flex-wrap: wrap;
+}
+
+.composer-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.125rem;
 }
 
 .composer-spacer {
@@ -2031,26 +2037,6 @@ function planGlyph(status: string): string {
   .voice-status.is-error {
     color: var(--text-accent, #f0a184);
   }
-}
-
-/* The only filled element in the row: accent when armed, a quiet hairline
- * when there is nothing to send — not a faded fill. */
-.send-btn {
-  background: var(--bg-primary, #c2532f);
-  color: var(--text-on-accent, #fbf8f3);
-  /* No colour transition: arming the button changes fill + ink, and any
-   * mid-flight frame reads sub-contrast (measured 2.18–3.32:1 at ~80 ms
-   * into a 150 ms fade). The state snaps like every other flat control. */
-}
-
-.send-btn:hover:not(:disabled) {
-  background: var(--bg-primary-hover, #a8431f);
-}
-
-.send-btn:disabled {
-  background: transparent;
-  border-color: var(--border-faint, rgba(43, 39, 35, 0.09));
-  color: var(--text-muted, #786d62);
 }
 
 /* ---------- Mobile / narrow-viewport tweaks ---------- */
