@@ -3,7 +3,8 @@ import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount, type Direct
 import { marked, Renderer, type Tokens } from 'marked';
 import { useSessionStore } from '../stores/session';
 import { useActivityStore } from '../stores/activity';
-import { isMobile } from '../lib/platform';
+import { useUiStore } from '../stores/ui';
+import { isMobile, isTauriHost } from '../lib/platform';
 import { loadKvStore, type KVStore } from '../lib/host';
 import { readAttachments, formatBytes, extractReplayedAttachments, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from '../lib/attachments';
 import ModePicker from './ModePicker.vue';
@@ -11,6 +12,7 @@ import ModelPicker from './ModelPicker.vue';
 import ToolCallChip from './ToolCallChip.vue';
 import MessageAttachment from './MessageAttachment.vue';
 import UiComposerSettings from './ui/UiComposerSettings.vue';
+import UiButton from './ui/UiButton.vue';
 import WorkflowPanel from './WorkflowPanel.vue';
 import { useWorkflowStore } from '../stores/workflow';
 import CommandPalette from './CommandPalette.vue';
@@ -32,6 +34,7 @@ const props = defineProps<{
 
 const sessionStore = useSessionStore();
 const wfStore = useWorkflowStore();
+const uiStore = useUiStore();
 
 // Composer run mode (chat vs workflow) — the workflow store owns it and
 // persists it in workflow.json; the side panel v-if's off it.
@@ -50,6 +53,8 @@ const attachError = ref<string | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
 const composerEl = ref<HTMLTextAreaElement | null>(null);
 const composerBox = ref<HTMLElement | null>(null);
+const inputContainer = ref<HTMLElement | null>(null);
+const inputHeight = ref(0);
 const voiceInputRef = ref<InstanceType<typeof VoiceInput> | null>(null);
 const voiceOverlayEl = ref<HTMLElement | null>(null);
 const rt = props.runtime;
@@ -67,6 +72,19 @@ const submitOnEnter = !isMobile();
 // sidebar-drawer breakpoint. Placeholder text and the desktop-only update
 // nag can't be swapped by CSS, so the flag lives here.
 const isNarrowLayout = ref(false);
+const useDocumentScroll = computed(() => isNarrowLayout.value && !isTauriHost() && sessionStore.activeTabId === rt.id && uiStore.activeView === 'chat');
+let savedDocumentTop = 0;
+function feedScroller(): HTMLElement | null {
+  return useDocumentScroll.value ? document.scrollingElement as HTMLElement | null : messagesContainer.value;
+}
+function onDocumentScroll() {
+  if (!useDocumentScroll.value) return;
+  savedDocumentTop = document.scrollingElement?.scrollTop ?? 0;
+  onFeedScroll();
+}
+function onViewportResize() {
+  if (useDocumentScroll.value && followBottom.value) void nextTick(pinFeedToBottom);
+}
 let narrowMql: MediaQueryList | null = null;
 function syncNarrowLayout() {
   if (narrowMql) isNarrowLayout.value = narrowMql.matches;
@@ -398,12 +416,29 @@ let programmaticScrollTop: number | null = null;
 // undo a mid-replay scroll-up the user just made.
 let lastSeenSessionId: string | null = null;
 
+watch(useDocumentScroll, (enabled) => {
+  if (enabled) {
+    const previousTop = messagesContainer.value?.scrollTop ?? 0;
+    if (previousTop > 0) savedDocumentTop = previousTop;
+    void nextTick(() => {
+      const feed = feedScroller();
+      if (followBottom.value) pinFeedToBottom();
+      else if (feed) feed.scrollTop = savedDocumentTop;
+    });
+  } else if (sessionStore.activeTabId === rt.id) {
+    void nextTick(() => {
+      if (followBottom.value) pinFeedToBottom();
+      else if (messagesContainer.value) messagesContainer.value.scrollTop = savedDocumentTop;
+    });
+  }
+});
+
 function distanceFromBottom(feed: HTMLElement): number {
   return feed.scrollHeight - feed.scrollTop - feed.clientHeight;
 }
 
 function pinFeedToBottom(): void {
-  const feed = messagesContainer.value;
+  const feed = feedScroller();
   if (!feed) return;
   feed.scrollTop = feed.scrollHeight;
   programmaticScrollTop = feed.scrollTop;
@@ -415,12 +450,14 @@ function pinFeedToBottom(): void {
 // restored by the height just added (which also keeps a bottom-pinned feed
 // pinned: scrollTop lands back on scrollHeight - clientHeight).
 function growFeedWindow(): void {
-  const feed = messagesContainer.value;
+  const feed = feedScroller();
   if (!feed || feed.clientHeight === 0) return;
   const top = feed.scrollTop;
   const height = feed.scrollHeight;
   feedWindow.value = Math.min(feedWindow.value + FEED_WINDOW_STEP, messages.value.length);
   void nextTick(() => {
+    // The document scrollport is shared: a tab switch must cancel this write.
+    if (feed !== feedScroller()) return;
     feed.scrollTop = top + (feed.scrollHeight - height);
     // A window too short to overflow the feed produces no scroll at all —
     // no event, no trigger, unreachable history. Grow until it can scroll.
@@ -431,7 +468,7 @@ function growFeedWindow(): void {
 }
 
 function onFeedScroll(): void {
-  const feed = messagesContainer.value;
+  const feed = feedScroller();
   if (!feed) return;
   if (programmaticScrollTop !== null && feed.scrollTop === programmaticScrollTop) {
     // Landed exactly where a pin put it — an at-bottom position is "follow"
@@ -484,7 +521,7 @@ watch(messages, async (list) => {
   // Same dead end as growFeedWindow's tail: hidden rows but a feed that
   // cannot scroll (tail window fits the viewport) means history is
   // unreachable — kick the growth chain started.
-  const feed = messagesContainer.value;
+  const feed = feedScroller();
   if (feed && feed.clientHeight > 0 && feed.scrollHeight <= feed.clientHeight && hiddenCount.value > 0) {
     growFeedWindow();
   }
@@ -519,7 +556,7 @@ const COMPOSER_MAX_PX = 200;
 function autosizeComposer() {
   const el = composerEl.value;
   if (!el) return;
-  const feed = messagesContainer.value;
+  const feed = feedScroller();
   const pinned = !!feed && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 4;
   const min = parseFloat(getComputedStyle(el).minHeight) || 0;
   el.style.height = 'auto';
@@ -573,13 +610,17 @@ const voiceSep = computed(() => transcriptSeparator(voicePre.value, voiceText.va
 const voiceTailSep = computed(() => transcriptSeparator(voiceCommitted.value, voiceVolatile.value));
 const voicePostSep = computed(() => transcriptSeparator(voiceText.value, voicePost.value));
 
+const voiceElapsedText = computed(() => {
+  const s = voiceElapsed.value;
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+});
+
 const voiceStatusText = computed(() => {
   switch (voicePhase.value) {
     case 'connecting':
       return 'Starting microphone…';
     case 'listening': {
-      const s = voiceElapsed.value;
-      return `Listening… ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+      return `Listening… ${voiceElapsedText.value}`;
     }
     case 'stopping':
       return 'Finishing…';
@@ -644,8 +685,11 @@ function syncVoiceOverlayScroll() {
 // height has to be recomputed. Height-only changes are ignored, which also
 // keeps the observer from feeding back into itself.
 let composerRo: ResizeObserver | null = null;
+let inputRo: ResizeObserver | null = null;
 let composerBoxWidth = 0;
 onMounted(() => {
+  window.addEventListener('scroll', onDocumentScroll, { passive: true });
+  window.visualViewport?.addEventListener('resize', onViewportResize);
   // Same MediaQueryList pattern as App.vue's sidebar breakpoint: correct
   // across orientation changes, no resize-throttling.
   if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
@@ -676,11 +720,24 @@ onMounted(() => {
     });
     composerRo.observe(composerBox.value);
   }
+  if (typeof ResizeObserver !== 'undefined' && inputContainer.value) {
+    inputRo = new ResizeObserver(() => {
+      const height = inputContainer.value?.getBoundingClientRect().height ?? 0;
+      if (height === inputHeight.value) return;
+      inputHeight.value = height;
+      if (followBottom.value) void nextTick(pinFeedToBottom);
+    });
+    inputRo.observe(inputContainer.value);
+  }
 });
 onBeforeUnmount(() => {
+  window.removeEventListener('scroll', onDocumentScroll);
+  window.visualViewport?.removeEventListener('resize', onViewportResize);
   stopTurnTimer();
   composerRo?.disconnect();
   composerRo = null;
+  inputRo?.disconnect();
+  inputRo = null;
   if (narrowMql) {
     narrowMql.removeEventListener('change', syncNarrowLayout);
     narrowMql = null;
@@ -913,7 +970,7 @@ function planGlyph(status: string): string {
 </script>
 
 <template>
-  <div class="chat-view">
+  <div class="chat-view" :class="{ 'document-chat-view': isNarrowLayout && !isTauriHost() }" :style="{ '--chat-input-height': `${inputHeight}px` }">
     <div class="chat-column">
       <div class="chat-header">
         <h2>{{ currentSession?.title || 'Chat' }}</h2>
@@ -1030,18 +1087,22 @@ function planGlyph(status: string): string {
         />
       </div>
 
-      <!-- Loading indicator: live status (active tool + elapsed time) so a
-           long silent turn reads as work in progress, not a stuck session. -->
-      <div v-if="isLoading" class="loading-indicator">
-        <span class="spinner"></span>
-        <span :title="turnStatusText">{{ turnStatusText }}</span>
-        <button class="cancel-btn" @click="handleCancel">Stop</button>
-      </div>
       </div>
     </div>
     
-    <div class="input-container">
+    <div ref="inputContainer" class="input-container">
       <div class="input-content">
+      <!-- Keep live turn progress next to the composer, even
+           while the user reads an older part of the transcript. -->
+      <div v-if="isLoading" class="loading-indicator">
+        <span class="spinner" aria-hidden="true"></span>
+        <span class="turn-status-text" :title="turnStatusText">{{ turnStatusText }}</span>
+        <span
+          v-if="contextLabel && isNarrowLayout"
+          class="context-meter"
+          :title="contextTitle"
+        >{{ contextLabel }}</span>
+      </div>
       <!-- Update nag: the agent's own npm update notice from stderr. Desktop
            only; the × persists the offered version, so this exact nag stays
            dismissed while a newer one re-arms the strip. -->
@@ -1088,11 +1149,10 @@ function planGlyph(status: string): string {
       <div v-if="attachError" class="attach-error">{{ attachError }}</div>
 
       <div
-        v-if="voiceStatusText"
-        class="voice-status"
-        :class="{ 'is-error': voicePhase === 'idle' && voiceError }"
+        v-if="voicePhase === 'idle' && voiceError"
+        class="voice-status is-error"
         role="status"
-      >{{ voiceStatusText }}</div>
+      >{{ voiceError }}</div>
 
       <div class="input-row">
         <!-- One framed card, Claude-Code style: the field on top, the bottom
@@ -1153,7 +1213,7 @@ function planGlyph(status: string): string {
             />
             <VoiceInput
               ref="voiceInputRef"
-              :disabled="isLoading || isReconnecting || !isConnected"
+              :disabled="isReconnecting || !isConnected"
               @state="onVoiceState"
               @partial="onVoicePartial"
               @final="onVoiceFinal"
@@ -1164,7 +1224,7 @@ function planGlyph(status: string): string {
                 v-if="availableModels.length > 0"
                 :models="availableModels"
                 :current-model-id="currentModelId"
-                :disabled="isLoading"
+                :disabled="isReconnecting || !isConnected"
                 compact
                 @change="handleModelChange"
               />
@@ -1172,7 +1232,7 @@ function planGlyph(status: string): string {
                 v-if="availableModes.length > 0"
                 :modes="availableModes"
                 :current-mode-id="currentModeId"
-                :disabled="isLoading"
+                :disabled="isReconnecting || !isConnected"
                 compact
                 @change="handleModeChange"
               />
@@ -1183,12 +1243,28 @@ function planGlyph(status: string): string {
                 @change="(id) => wfStore.setChatMode(id as 'chat' | 'workflow')"
               />
             </UiComposerSettings>
-            <span class="composer-spacer" aria-hidden="true"></span>
             <span
-              v-if="contextLabel"
+              v-if="voiceActive"
+              class="voice-status voice-status-inline"
+              role="status"
+              :title="voiceStatusText || undefined"
+            ><span v-if="voicePhase === 'listening'" class="voice-recording-label">Listening… </span><span>{{ voicePhase === 'listening' ? voiceElapsedText : voiceStatusText }}</span></span>
+            <span v-else class="composer-spacer" aria-hidden="true"></span>
+            <span
+              v-if="contextLabel && (!isNarrowLayout || !isLoading)"
               class="context-meter"
               :title="contextTitle"
             >{{ contextLabel }}</span>
+            <UiButton
+              v-if="isLoading"
+              class="stop-btn"
+              icon
+              aria-label="Stop"
+              title="Stop response"
+              @click="handleCancel"
+            >
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" /></svg>
+            </UiButton>
             <button
               class="icon-btn send-btn"
               :disabled="preparingSend || (!inputText.trim() && attachments.length === 0 && !voiceCommitted && !voiceVolatile) || isReconnecting || !isConnected"
@@ -1575,13 +1651,14 @@ function planGlyph(status: string): string {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.25rem 0.125rem 0.5rem;
+  padding: 0.25rem 0.5rem 0.5rem;
   font-size: 0.75rem;
   letter-spacing: 0.02em;
   color: var(--text-muted, #a39a8e);
 }
 
 .spinner {
+  flex-shrink: 0;
   width: 13px;
   height: 13px;
   border: 2px solid var(--border-color, #ccc);
@@ -1594,17 +1671,16 @@ function planGlyph(status: string): string {
   to { transform: rotate(360deg); }
 }
 
-.cancel-btn {
-  margin-left: auto;
-  height: 24px;
-  padding: 0 0.5rem;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  font-family: inherit;
-  font-size: 0.75rem;
-  color: var(--text-secondary, #6b6259);
-  cursor: pointer;
+.stop-btn {
+  flex-shrink: 0;
+}
+
+.turn-status-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .input-container {
@@ -1922,12 +1998,21 @@ function planGlyph(status: string): string {
   color: var(--text-muted, #786d62);
 }
 
-/* One quiet line above the row: timer while listening, the reason when a
- * take fails — same size register as .attach-error. */
+/* Recording status shares the toolbar; failures keep a full-width line
+ * so their reason stays readable on narrow screens. */
 .voice-status {
   padding: 0 0.125rem;
   font-size: 0.6875rem;
   color: var(--text-muted, #786d62);
+}
+
+.voice-status-inline {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .voice-status.is-error {
@@ -1978,6 +2063,7 @@ function planGlyph(status: string): string {
   /* Identity/title live in the drawer on phones. Keep only the OS safe
      area here, without an empty header row above the transcript. */
   .chat-header {
+    min-height: 0;
     padding: env(safe-area-inset-top, 0px) 0 0;
     border-bottom: 0;
   }
@@ -2000,11 +2086,13 @@ function planGlyph(status: string): string {
   }
 
   .input-container {
-    /* iOS home-indicator: keep Send button reachable above the gesture area. */
-    padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+    /* Edge-to-edge on phones; the shell reserves the home-indicator inset. */
+    padding: 0;
+    border-top: 0;
   }
 
   .input-content {
+    max-width: none;
     gap: 0.5rem;
   }
 
@@ -2016,6 +2104,10 @@ function planGlyph(status: string): string {
     padding-top: 11px;
     padding-bottom: 11px;
     min-height: 44px;
+  }
+
+  .voice-recording-label {
+    display: none;
   }
 
   .voice-overlay {
@@ -2039,6 +2131,8 @@ function planGlyph(status: string): string {
   .composer-box {
     flex: 1 1 auto;
     min-width: 0;
+    border-radius: 0;
+    border-width: 1px 0 0;
   }
 
   .icon-btn {
@@ -2060,6 +2154,26 @@ function planGlyph(status: string): string {
     width: 24px;
     z-index: 80;
     touch-action: pan-y pinch-zoom;
+  }
+
+  /* Native document scrolling lets the browser collapse its own chrome.
+     Fixed navigation/composer leave the history as the page's content. */
+  .document-chat-view {
+    min-height: var(--app-viewport-height, 100dvh);
+  }
+  .document-chat-view .messages-container {
+    overflow: visible;
+    padding-top: calc(0.875rem + var(--mobile-navigation-height, 0px) + env(safe-area-inset-top, 0px));
+    padding-bottom: calc(0.5rem + var(--chat-input-height, 0px) + max(0px, 100dvh - var(--app-viewport-height, 100dvh) - var(--app-viewport-top, 0px)));
+  }
+  .document-chat-view .input-container {
+    position: fixed;
+    top: calc(var(--app-viewport-top, 0px) + var(--app-viewport-height, 100dvh) - var(--chat-input-height, 0px));
+    left: 0;
+    right: 0;
+    z-index: 3;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    background: var(--bg-main);
   }
 
   /* Narrow screens: give the reading column the full width back. */

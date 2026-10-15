@@ -4,16 +4,18 @@
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const fs=require('node:fs');const path=require('node:path');const assert=require('node:assert/strict');
 (async()=>{
-const b=await chromium.launch({headless:true,args:['--no-sandbox']});
+const b=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH,args:['--no-sandbox','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream']});
 globalThis.qaBrowser=b;
-for (const width of [320,390,1440]) {
+for (const width of [320,390,430,780,1440]) {
 const c=await b.newContext({ignoreHTTPSErrors:true,hasTouch:width<800,isMobile:width<800,viewport:{width,height:844}});
-await c.grantPermissions(['local-network-access']);
+await c.grantPermissions(['local-network-access','microphone']);
 await c.addInitScript(()=>{localStorage.setItem('acp-ui:sessions.json',JSON.stringify({sessions:['e2e','other'].map(id=>({id,agentName:'E2E',sessionId:id,cwd:'/tmp',title:id,supportsLoadSession:true,lastUpdated:Date.now()})),openTabs:[{agentName:'E2E',sessionId:'e2e'},{agentName:'E2E',sessionId:'other'}]}));localStorage.setItem('acp-ui:agents',JSON.stringify({agents:{E2E:{transport:'websocket',url:'ws://127.0.0.1:25993/'}}}));localStorage.setItem('acp-ui:preferences.json',JSON.stringify({telemetryEnabled:false,lastCwd:'/tmp'}));});
-const p=await c.newPage();const errors=[];p.on('pageerror',e=>{errors.push(e.message);console.log('ERROR',e.message)});
+const p=await c.newPage();const errors=[],rpcCalls=[];p.on('pageerror',e=>{errors.push(e.message);console.log('ERROR',e.message)});
 if(process.env.BUILD) await p.route('**/*',r=>{const u=new URL(r.request().url());if(u.port==='25809' && (u.pathname==='/chat'||u.pathname==='/'||u.pathname.startsWith('/assets/'))){const file=path.join(process.env.BUILD,u.pathname.startsWith('/assets/')?u.pathname:'index.html');return r.fulfill({path:file,contentType:file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html'});}return r.continue();});
+await p.route('**/openapi.json',r=>r.fulfill({json:{paths:{'/v1/audio/transcriptions':{post:{}}}}}));
+await p.route('**/v1/audio/transcriptions',r=>r.fulfill({json:{text:'Dictated follow-up while the model works'}}));
 await p.route('**/api/**',r=>r.request().url().includes('/api/state/')?r.fulfill({json:{rev:1,updatedAt:Date.now(),data:r.request().url().includes('sessions.json')?{sessions:['e2e','other'].map(id=>({id,agentName:'E2E',sessionId:id,cwd:'/tmp',title:id,supportsLoadSession:true,lastUpdated:Date.now()})),openTabs:[{agentName:'E2E',sessionId:'e2e'},{agentName:'E2E',sessionId:'other'}]}:{}}}):r.fulfill({json:r.request().url().includes('/fs/root')?{root:'/tmp'}:r.request().url().includes('/fs/')?{path:'/tmp',root:'/tmp',dirs:[]}:{projects:[],sessions:[],cards:[]}}));
-await p.routeWebSocket(/wss?:\/\//,ws=>ws.onMessage(msg=>{for(const line of String(msg).split('\n')){let q;try{q=JSON.parse(line)}catch{continue}if(!q.method||q.id==null)continue;let result={};if(q.method==='initialize')result={protocolVersion:1,agentCapabilities:{loadSession:true},authMethods:[],agentInfo:{name:'E2E',version:'0'}};if(q.method==='session/list')result={sessions:[{sessionId:'e2e',cwd:'/tmp',title:'Layout check'}]};if(q.method==='session/load'||q.method==='session/new'){result={};ws.send(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:q.params.sessionId,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:Array.from({length:150},(_,i)=>`Scroll line ${i}\n\n`).join('')}}}}));ws.send(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:'e2e',update:{sessionUpdate:'usage_update',used:45000,size:200000}}}));}setTimeout(()=>ws.send(JSON.stringify({jsonrpc:'2.0',id:q.id,result})),50);if(q.method==='session/load'||q.method==='session/new')setTimeout(()=>ws.send(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:'e2e',update:{sessionUpdate:'usage_update',used:45000,size:200000}}})),300);}}));
+await p.routeWebSocket(/wss?:\/\//,ws=>ws.onMessage(msg=>{for(const line of String(msg).split('\n')){let q;try{q=JSON.parse(line)}catch{continue}if(q.method)rpcCalls.push(q);if(!q.method||q.id==null)continue;let result={};if(q.method==='initialize')result={protocolVersion:1,agentCapabilities:{loadSession:true},authMethods:[],agentInfo:{name:'E2E',version:'0'}};if(q.method==='session/list')result={sessions:[{sessionId:'e2e',cwd:'/tmp',title:'Layout check'}]};if(q.method==='session/load'||q.method==='session/new'){result={};ws.send(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:q.params.sessionId,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:Array.from({length:150},(_,i)=>`Scroll line ${i}\n\n`).join('')}}}}));ws.send(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:'e2e',update:{sessionUpdate:'usage_update',used:45000,size:200000}}}));}setTimeout(()=>ws.send(JSON.stringify({jsonrpc:'2.0',id:q.id,result})),50);if(q.method==='session/load'||q.method==='session/new')setTimeout(()=>ws.send(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:'e2e',update:{sessionUpdate:'usage_update',used:45000,size:200000}}})),300);}}));
 await p.goto(`${process.env.UI_TEST_URL || 'https://192.168.1.222:25809'}/chat?s=E2E%3A%3Ae2e`,{waitUntil:'domcontentloaded',timeout:15000});
 try{await p.waitForSelector('.chat-view:visible .context-meter',{state:'attached',timeout:20000});}catch(e){console.log('URL',p.url(),'TEXT',(await p.locator('body').textContent()).slice(-3500));await p.screenshot({path:'/tmp/acp-context-debug.png'});throw e;}
 console.log('CHECK',width);const nav=p.locator('.session-navigation');assert.equal(await nav.count(),1,'shared navigation row exists');
@@ -25,9 +27,12 @@ await p.waitForTimeout(100);
 assert((await p.locator('.chat-view[style*="display: none"] .message').count())<=30,'hidden history stays bounded to the latest 30 rows');
 await p.evaluate(()=>{qaHiddenOriginal.rt.messages=qaHiddenOriginal.messages;delete window.qaHiddenOriginal;});
 
-await feed.evaluate(e=>e.scrollTop=500);await p.waitForTimeout(250);
+await feed.evaluate(e=>{if(document.documentElement.classList.contains('document-chat'))window.scrollTo(0,500);else e.scrollTop=500;});await p.waitForTimeout(250);
 assert.equal(await p.locator('.tab-strip [role="tab"]').count(),2);
 if(width<800){
+  assert.equal(await p.evaluate(()=>document.documentElement.classList.contains('document-chat')),true,'mobile chat uses native page scrolling');
+  assert.equal(await feed.evaluate(e=>getComputedStyle(e).overflowY),'visible','history has no nested scrollport');
+  assert(await p.evaluate(()=>scrollY>0),'scrolling history moves the document');
   assert.equal(await p.locator('[aria-label="Open menu"]').isVisible(),true,'menu visible initially');
   assert.equal(await p.locator('.mobile-view-tabs button').count(),0,'only session tabs appear beside the menu');
   assert.equal(await nav.getAttribute('inert'),null);
@@ -39,23 +44,35 @@ if(width<800){
   let composer=await p.locator('.chat-view:visible .composer-box').boundingBox();
   assert(composer.y+composer.height<=available,'composer fits the visible viewport after browser chrome changes');
   assert.equal(await draft.inputValue(),'Draft preserved while the viewport changes');
+  assert.equal(composer.x,0,'mobile composer reaches the left screen edge');
+  assert.equal(composer.width,width,'mobile composer spans the full screen');
+  assert.equal(composer.y+composer.height,available,'mobile composer reaches the visible bottom');
+  await p.evaluate(()=>{Object.defineProperty(window.visualViewport,'offsetTop',{configurable:true,value:40});window.visualViewport.dispatchEvent(new Event('resize'));});await p.waitForTimeout(100);
+  composer=await p.locator('.chat-view:visible .composer-box').boundingBox();assert.equal(composer.y+composer.height,available+40,'composer follows the visual viewport when keyboard panning changes its top');
+  await p.evaluate(()=>{delete window.visualViewport.offsetTop;});
   await p.evaluate(()=>{delete window.visualViewport.height;window.visualViewport.dispatchEvent(new Event('resize'));});
   await p.waitForTimeout(100);
-  const before=(await feed.boundingBox()).height;
+  const readingHeight=()=>p.evaluate(()=>visualViewport.height-document.querySelector('.session-navigation').getBoundingClientRect().height-document.querySelector('.chat-view:not([style*="display: none"]) .input-container').getBoundingClientRect().height);
+  const before=await readingHeight();
   const cdp=await c.newCDPSession(p);
   async function swipe(from,to){const r=await feed.boundingBox();const x=r.x+r.width/2;await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y:from}]});for(let i=1;i<=6;i++){await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x,y:from+(to-from)*i/6}]});await p.waitForTimeout(25);}await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await p.waitForTimeout(250);}
   await swipe(550,350);console.log('SCROLL_DOWN',await nav.getAttribute('inert'));
   assert.equal(await nav.getAttribute('inert'),'','scroll down hides navigation');
-  assert.equal((await nav.boundingBox()).height,0,'fully collapsed');
-  assert((await feed.boundingBox()).height>before,'space returns to feed');
+  const hiddenNav=await nav.boundingBox();
+  console.log('HIDDEN_NAV',hiddenNav);
+  assert.equal(hiddenNav.height,0,'hidden session tabs leave no empty strip');
+  assert.equal(await feed.evaluate(e=>e.getBoundingClientRect().top+scrollY),0,'transcript has no empty header above it');
+  assert.equal(await feed.evaluate(e=>getComputedStyle(e).paddingTop),'14px','hidden tabs leave no content padding');
+  assert((await readingHeight())>before,'space returns to history');
   await swipe(350,550);console.log('SCROLL_UP',await nav.getAttribute('inert'));
   assert.equal(await nav.getAttribute('inert'),null,'scroll up shows navigation');
   assert.equal(await p.locator('[aria-label="Open menu"]').isVisible(),true);
-  await feed.evaluate(e=>e.scrollTop+=100);await p.waitForTimeout(250);
+  await feed.evaluate(e=>{if(document.documentElement.classList.contains('document-chat'))window.scrollBy(0,100);else e.scrollTop+=100;});await p.waitForTimeout(250);
   assert.equal(await nav.getAttribute('inert'),null,'automatic scrolling keeps navigation');
   await cdp.detach();
   for(const theme of ['light','dark']){
     await p.emulateMedia({colorScheme:theme});
+    const palette=await p.evaluate(()=>{const s=getComputedStyle(document.documentElement);return ['--bg-main','--bg-sidebar','--bg-primary'].map(k=>s.getPropertyValue(k).trim())});assert.deepEqual(palette,['#202020','#171717','#dedede'],'deployment preserves the established graphite palette');
     const menu=p.locator('[aria-label="Open menu"]');const r=await menu.boundingBox();
     assert(r.width>=44&&r.height>=44);assert(await menu.isEnabled());
     await menu.focus();
@@ -65,7 +82,63 @@ if(width<800){
     assert.equal(await p.evaluate(()=>window.__session.activeTabId),activeBefore,'menu opens the drawer without changing sessions');
     await p.locator('[aria-label="Collapse sidebar"]').click();
   }
+  await p.evaluate(()=>{window.__session.activeRuntime.isLoading=true;window.scrollTo(0,document.documentElement.scrollHeight/2);});await p.waitForTimeout(200);
+  const working=p.locator('.chat-view:visible .input-container .loading-indicator');
+  assert.equal(await working.count(),1,'live thinking status stays beside the composer rather than in history');
+  assert.equal(await p.locator('.chat-view:visible .messages-container .loading-indicator').count(),0);
+  assert(await working.isVisible());assert.match(await working.innerText(),/thinking/);
+  let statusBox=await working.boundingBox(),fieldBox=await p.locator('.chat-view:visible .composer-box').boundingBox();
+  assert(statusBox.y>=0&&statusBox.y+statusBox.height<=fieldBox.y,'working status remains visible above the fixed composer while reading older history');
+  assert.equal(await working.getByRole('button').count(),0,'the status line has no separate Stop action');
+  const stop=p.locator('.chat-view:visible .composer-menu .stop-btn');assert.equal(await stop.count(),1,'Stop is in the bottom toolbar');const stopBox=await stop.boundingBox(),sendBox=await p.locator('.chat-view:visible .send-btn').boundingBox();assert(stopBox.width>=44&&stopBox.height>=44,'Stop remains a reachable touch target');assert(Math.abs(stopBox.y-sendBox.y)<=4&&stopBox.x+stopBox.width<=sendBox.x,'Stop sits directly beside Send');assert.equal(await stop.innerText(),'','Stop is a square icon, without a text label');
+  await stop.focus();assert.equal(await stop.evaluate(e=>getComputedStyle(e).outlineWidth),'2px');assert(stopBox.x>=4&&stopBox.x+stopBox.width+4<=width,'Stop focus ring fits inside the screen');
+  assert(await p.locator('.chat-view:visible .voice-btn').isEnabled(),'voice recording stays enabled during model output');
+  const draftBeforeVoice=await draft.inputValue();
+  await p.evaluate(()=>{const rt=window.__session.activeRuntime;window.qaPickerOriginal={models:rt.availableModels,modes:rt.availableModes,model:rt.currentModelId,mode:rt.currentModeId};rt.availableModels=[{modelId:'qa-a',name:'QA Model A'},{modelId:'qa-b',name:'QA Model B'}];rt.currentModelId='qa-a';rt.availableModes=[{id:'qa-ask',name:'QA Ask'},{id:'qa-auto',name:'QA Auto'}];rt.currentModeId='qa-ask';});
+  const settings=p.locator('.chat-view:visible .settings-toggle');await settings.tap();
+  const model=p.locator('.chat-view:visible .model-button');assert(await model.isEnabled(),'model can change while busy');await model.click();await p.locator('.chat-view:visible .model-picker .dropdown-item').filter({hasText:'QA Model B'}).click();await p.waitForFunction(()=>window.__session.activeRuntime.currentModelId==='qa-b');
+  const mode=p.locator('.chat-view:visible .mode-picker .mode-button').first();assert(await mode.isEnabled(),'mode can change while busy');await mode.click();await p.locator('.chat-view:visible .mode-picker .dropdown-item').filter({hasText:'QA Auto'}).click();await p.waitForFunction(()=>window.__session.activeRuntime.currentModeId==='qa-auto');await settings.tap();
+  assert(await p.evaluate(()=>window.__session.activeRuntime.isLoading),'settings do not stop the current turn');
+  await p.locator('.chat-view:visible .voice-btn').click();await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) .voice-btn').getAttribute('aria-pressed')==='true');await p.waitForTimeout(300);
+  const liveDuration=p.locator('.chat-view:visible .voice-status-inline');assert(await liveDuration.isVisible());assert(await liveDuration.evaluate(e=>e.scrollWidth<=e.clientWidth),'timer fits beside Stop and Send while busy');
+  assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+  await p.locator('.chat-view:visible .voice-btn').click();await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) textarea').value.includes('Dictated follow-up while the model works'));
+  assert(await p.evaluate(()=>window.__session.activeRuntime.isLoading),'finishing voice input does not cancel model work');
+  const cancelBefore=rpcCalls.filter(q=>q.method==='session/cancel').length;await stop.click();await p.waitForTimeout(150);assert.equal(rpcCalls.filter(q=>q.method==='session/cancel').length,cancelBefore+1,'Stop dispatches one cancellation');assert.match(await draft.inputValue(),/Dictated follow-up/,'Stop preserves the next draft');
+  await draft.fill(draftBeforeVoice);
+  await p.evaluate(()=>{const rt=window.__session.activeRuntime,o=window.qaPickerOriginal;rt.availableModels=o.models;rt.availableModes=o.modes;rt.currentModelId=o.model;rt.currentModeId=o.mode;delete window.qaPickerOriginal;});
+  await p.evaluate(()=>window.__session.activeRuntime.messages.push({id:'status-tool',role:'assistant',content:'',timestamp:Date.now(),toolCalls:[{toolCallId:'status-tool-call',kind:'execute',title:'Long operation '+('details '.repeat(100)),status:'in_progress'}]}));await p.waitForTimeout(200);
+  assert.match(await working.innerText(),/Long operation/);
+  assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'long tool status cannot widen the mobile screen');
+  await p.screenshot({path:`/tmp/acp-working-inline-${width}.png`});
+  await p.evaluate(()=>{const rt=window.__session.activeRuntime;rt.messages=rt.messages.filter(m=>m.id!=='status-tool');rt.isLoading=false;});await p.waitForTimeout(200);
+  assert.equal(await p.locator('.chat-view:visible .loading-indicator').count(),0,'completed turn clears its status');
+  const composerRoot=p.locator('.chat-view:visible .input-container');
+  const restingHeight=(await composerRoot.boundingBox()).height;
+  async function voiceEvent(name,payload){await p.locator('.chat-view:visible .voice-btn').evaluate((e,{name,payload})=>{function find(node){if(!node||typeof node!=='object')return null;const v=node.component;if(v?.type.__name==='VoiceInput'&&v.subTree.el?.getClientRects().length)return v;const nested=find(v?.subTree);if(nested)return nested;for(const child of Array.isArray(node.children)?node.children:[]){const found=find(child);if(found)return found;}return null;}const v=find(document.querySelector('#app')._vnode);if(!v)throw new Error('VoiceInput instance missing');v.emit(name,payload);},{name,payload});await p.waitForTimeout(200);}
+  for(const phase of ['connecting','listening','stopping']){
+    await voiceEvent('state',{phase,elapsedS:83});
+    const status=p.locator('.chat-view:visible .voice-status-inline');
+    assert(await status.isVisible(),'recording status is in the bottom toolbar');
+    assert.equal(await status.evaluate(e=>!!e.closest('.composer-menu')),true);
+    const r=await status.boundingBox(),send=await p.locator('.chat-view:visible .send-btn').boundingBox(),settings=await p.locator('.chat-view:visible .settings-toggle').boundingBox();
+    assert(r.x>=settings.x+settings.width&&r.x+r.width<=send.x,'voice status sits between controls and send');
+    assert(r.y>=send.y&&r.y+r.height<=send.y+send.height,'status shares the button row');
+    assert.equal((await composerRoot.boundingBox()).height,restingHeight,'recording never adds a row above the field');
+    if(phase==='listening'){if(width===390)await p.screenshot({path:'/tmp/acp-voice-inline-390.png'});assert.match(await status.innerText(),/1:23/);assert(await status.evaluate(e=>e.scrollWidth<=e.clientWidth),'duration stays fully visible on a narrow phone');}
+    assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+  }
+  await voiceEvent('state',{phase:'idle',elapsedS:0});
+  await voiceEvent('error','Microphone permission denied — test fixture');
+  const voiceError=p.locator('.chat-view:visible .voice-status.is-error');
+  assert(await voiceError.isVisible(),'full microphone error remains readable');
+  assert.equal(await voiceError.evaluate(e=>!!e.closest('.composer-menu')),false,'long errors keep their own line');
+  await voiceEvent('state',{phase:'listening',elapsedS:1});
+  await voiceEvent('state',{phase:'idle',elapsedS:0});
+  assert.equal(await p.locator('.chat-view:visible .voice-status').count(),0);
   const tabs=p.locator('.tab-strip [role="tab"]');
+  await p.evaluate(()=>window.scrollTo(0, Math.max(700,document.documentElement.scrollHeight/2)));await p.waitForTimeout(250);
+  const savedTop=await p.evaluate(()=>scrollY);
   await tabs.nth(1).click();
   await p.waitForFunction(()=>window.__session.activeRuntime.descriptor.sessionId==='other');
   assert.equal(await tabs.nth(1).getAttribute('aria-selected'),'true');
@@ -74,13 +147,35 @@ if(width<800){
   await p.waitForFunction(()=>window.__session.activeRuntime.descriptor.sessionId==='e2e');
   assert.equal(await tabs.nth(0).getAttribute('aria-selected'),'true');
   assert.equal(await draft.inputValue(),'Draft preserved while the viewport changes','session switching preserves the chat draft');
+  await p.waitForTimeout(250);assert(Math.abs((await p.evaluate(()=>scrollY))-savedTop)<=2,'switching tabs restores the page position in history');
+  await tabs.nth(1).click();await p.waitForTimeout(200);await p.evaluate(()=>window.scrollTo(0,document.documentElement.scrollHeight));await p.waitForTimeout(200);
+  await p.evaluate(()=>window.__session.activeRuntime.messages.push({id:'follow-page-stream',role:'assistant',content:'New output at the bottom',timestamp:Date.now()}));await p.waitForTimeout(250);
+  assert(await p.evaluate(()=>document.documentElement.scrollHeight-scrollY-document.documentElement.clientHeight<=2),'a bottom-following chat stays pinned during new output');
+  await tabs.nth(0).click();await p.waitForTimeout(200);
+  await p.evaluate(()=>{const rt=window.__session.activeRuntime;window.qaActiveMessages=rt.messages;rt.messages=Array.from({length:150},(_,i)=>({id:'page-history-'+i,role:i%2?'assistant':'user',content:'Page history row '+i,timestamp:Date.now()}));});
+  await p.waitForTimeout(200);
+  await p.evaluate(()=>window.scrollTo(0,Math.min(500,(document.documentElement.scrollHeight-innerHeight)/2)));await p.waitForTimeout(150);
+  await p.evaluate(()=>window.scrollTo(0,0));await p.waitForTimeout(350);
+  assert((await p.locator('.chat-view:visible .message').count())>30,'page scrolling can reveal earlier history windows');
+  await p.evaluate(()=>window.scrollTo(0,document.documentElement.scrollHeight/2));await p.waitForTimeout(200);
+  const historyTop=await p.evaluate(()=>scrollY);
+  await p.evaluate(()=>window.__session.activeRuntime.messages.push({id:'page-stream',role:'assistant',content:'Streaming while reading history',timestamp:Date.now()}));await p.waitForTimeout(200);
+  assert(Math.abs((await p.evaluate(()=>scrollY))-historyTop)<=2,'new output does not pull a history reader to the bottom');
+  await p.locator('[aria-label="Open menu"]').tap();
+  await p.locator('.drawer-view-nav [aria-label="Projects"]').click();
+  assert.equal(await p.evaluate(()=>document.documentElement.classList.contains('document-chat')),false,'other views retain their own layout');
+  await p.locator('[aria-label="Open menu"]').tap();
+  await p.locator('.drawer-view-nav [aria-label="Chat"]').click();await p.waitForTimeout(250);
+  assert.equal(await p.evaluate(()=>document.documentElement.classList.contains('document-chat')),true);
+  assert(Math.abs((await p.evaluate(()=>scrollY))-historyTop)<=2,'returning from another view restores history position');
+  await p.evaluate(()=>{window.__session.activeRuntime.messages=window.qaActiveMessages;delete window.qaActiveMessages;});await p.waitForTimeout(200);
   await p.evaluate(()=>window.__session.closeTab(window.__session.openTabs.find(t=>t.id!==window.__session.activeTabId).id));
   assert.equal(await p.locator('.tab-strip [role="tab"]').count(),1,'single open chat still has a tab');
   await p.locator('.navigation-items').evaluate(e=>e.scrollLeft=e.scrollWidth);
   const tab=await p.locator('.tab-strip [role="tab"]').boundingBox();
   assert(tab.x+tab.width<=width,'session tab reachable by horizontal scrolling');
-}else{await feed.hover();await p.mouse.wheel(0,200);await p.waitForTimeout(250);assert.equal(await nav.getAttribute('inert'),null,'desktop tabs stay visible');}
+}else{await p.evaluate(()=>window.__session.activeRuntime.isLoading=true);await p.waitForTimeout(200);assert.equal(await p.locator('.chat-view:visible .input-container .loading-indicator').count(),1,'desktop live status also stays beside the composer');assert.equal(await p.locator('.chat-view:visible .messages-container .loading-indicator').count(),0);await p.evaluate(()=>window.__session.activeRuntime.isLoading=false);await feed.hover();await p.mouse.wheel(0,200);await p.waitForTimeout(250);assert.equal(await nav.getAttribute('inert'),null,'desktop tabs stay visible');}
 assert.deepEqual(errors,[]);await p.screenshot({path:`/tmp/acp-navigation-${width}.png`});await c.close();
 }
-await b.close();console.log('PASS scroll up shows menu/tabs, scroll down hides, composer fits visible viewport, desktop unchanged');
+await b.close();console.log('PASS native page scrolling, fixed composer, inline recording and thinking status, Stop beside Send, busy voice/settings, history/follow, saved positions, keyboard viewport, desktop unchanged');
 })().catch(async e=>{console.error(e);await globalThis.qaBrowser?.close();process.exit(1)});

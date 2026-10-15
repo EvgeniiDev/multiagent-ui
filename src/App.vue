@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue';
 import { loadKvStore, type KVStore } from './lib/host';
+import { isTauriHost } from './lib/platform';
 import { useConfigStore } from './stores/config';
 import { useSessionStore } from './stores/session';
 import { initTelemetry } from './lib/telemetry';
@@ -60,10 +61,16 @@ const isNarrowLayout = ref(false);
 // Browser bars and the soft keyboard change the visual viewport independently
 // of 100vh. Keep the entire composer inside the part the user can see.
 const viewportHeight = ref<number | null>(null);
+const viewportTop = ref(0);
+const documentChat = computed(() => !isTauriHost() && isNarrowLayout.value && uiStore.activeView === 'chat' && sessionStore.openTabs.length > 0);
+watch(documentChat, (enabled) => {
+  document.documentElement.classList.toggle('document-chat', enabled);
+}, { immediate: true });
 function syncViewportHeight() {
-  if (!isNarrowLayout.value) { viewportHeight.value = null; return; }
+  if (!isNarrowLayout.value) { viewportHeight.value = null; viewportTop.value = 0; return; }
   const viewport = window.visualViewport;
   if (viewport && Math.abs(viewport.scale - 1) > 0.01) return;
+  viewportTop.value = viewport?.offsetTop ?? 0;
   const height = viewport?.height ?? window.innerHeight;
   if (Number.isFinite(height) && height > 0) viewportHeight.value = height;
 }
@@ -81,7 +88,9 @@ watch([() => sessionStore.activeTabId, () => uiStore.activeView, isNarrowLayout,
 function navigationFeed(target: EventTarget | null): HTMLElement | null {
   if (!isNarrowLayout.value || showSidebar.value || !(target instanceof Element)) return null;
   const feed = target.closest<HTMLElement>('.messages-container');
-  return feed && feed.clientHeight > 0 && feed.scrollHeight > feed.clientHeight ? feed : null;
+  if (!feed) return null;
+  const scroller = documentChat.value ? document.scrollingElement as HTMLElement | null : feed;
+  return scroller && scroller.clientHeight > 0 && scroller.scrollHeight > scroller.clientHeight ? scroller : null;
 }
 function moveMobileNavigation(delta: number, feed: HTMLElement) {
   if (delta === 0) return;
@@ -204,6 +213,7 @@ onMounted(async () => {
   window.addEventListener('popstate', restoreSessionFromHistory);
   window.addEventListener('resize', syncViewportHeight);
   window.visualViewport?.addEventListener('resize', syncViewportHeight);
+  window.visualViewport?.addEventListener('scroll', syncViewportHeight);
   // Track viewport width so the sidebar can default-collapse into a drawer
   // on phones / narrow windows. We watch a MediaQueryList rather than
   // resize for correctness across orientation changes on iOS.
@@ -397,6 +407,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('popstate', restoreSessionFromHistory);
   window.removeEventListener('resize', syncViewportHeight);
   window.visualViewport?.removeEventListener('resize', syncViewportHeight);
+  window.visualViewport?.removeEventListener('scroll', syncViewportHeight);
+  document.documentElement.classList.remove('document-chat');
   if (narrowMql) {
     narrowMql.removeEventListener('change', syncNarrowLayout);
     narrowMql = null;
@@ -423,8 +435,8 @@ function clearError() {
 <template>
   <div
     class="app-container"
-    :class="{ 'narrow-layout': isNarrowLayout }"
-    :style="viewportHeight ? { '--app-viewport-height': `${viewportHeight}px` } : undefined"
+    :class="{ 'narrow-layout': isNarrowLayout, 'document-chat': documentChat }"
+    :style="viewportHeight ? { '--app-viewport-height': `${viewportHeight}px`, '--app-viewport-top': `${viewportTop}px` } : undefined"
     @pointerdown="drawerSwipe.start"
     @pointermove="drawerSwipe.move"
     @pointerup="drawerSwipe.end"
@@ -795,6 +807,19 @@ function clearError() {
 html, body, #app {
   height: 100%;
 }
+
+/* Let the mobile browser own scrolling and its address-bar gestures. */
+html.document-chat,
+html.document-chat body,
+html.document-chat #app {
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
+}
+html.document-chat {
+  overflow-x: clip;
+  overflow-anchor: none;
+}
 </style>
 
 <style scoped>
@@ -960,6 +985,17 @@ html, body, #app {
     overflow: hidden;
     transition: max-height 160ms ease;
   }
+  .document-chat .session-navigation {
+    position: fixed;
+    inset: var(--app-viewport-top, 0px) 0 auto;
+    z-index: 2;
+  }
+  .document-chat .reconnect-banner,
+  .document-chat .error-banner,
+  .document-chat .traffic-panel {
+    position: relative;
+    z-index: 3;
+  }
   .navigation-items {
     flex: 1;
     min-width: 0;
@@ -975,7 +1011,10 @@ html, body, #app {
     align-self: stretch;
   }
   .session-navigation.is-hidden {
+    min-height: 0;
     max-height: 0;
+    padding: 0;
+    border-bottom: 0;
     visibility: hidden;
   }
 }
@@ -1206,6 +1245,19 @@ html, body, #app {
      chrome strip higher. */
   .app-container.narrow-layout {
     flex-direction: column;
+  }
+
+  .app-container.document-chat {
+    height: auto;
+    min-height: var(--app-viewport-height, 100dvh);
+    overflow: visible;
+  }
+  .document-chat .main-area,
+  .document-chat .main-content {
+    overflow: visible;
+  }
+  .document-chat .main-area {
+    padding-bottom: 0;
   }
 
   .view-rail {
