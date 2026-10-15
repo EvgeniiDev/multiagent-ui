@@ -56,7 +56,18 @@ if(width<800){
   const before=await readingHeight();
   const cdp=await c.newCDPSession(p);
   async function swipe(from,to){const r=await feed.boundingBox();const x=r.x+r.width/2;await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y:from}]});for(let i=1;i<=6;i++){await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x,y:from+(to-from)*i/6}]});await p.waitForTimeout(25);}await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await p.waitForTimeout(250);}
-  await swipe(550,350);console.log('SCROLL_DOWN',await nav.getAttribute('inert'));
+  assert.equal(await p.evaluate(()=>!!document.fullscreenElement),false,'restored and programmatic scroll never enters fullscreen');
+  await swipe(350,500);
+  assert.equal(await p.evaluate(()=>!!document.fullscreenElement),false,'scrolling toward older messages never enters fullscreen');
+  await swipe(550,350);
+  await p.waitForFunction(()=>document.fullscreenElement===document.documentElement,{},{timeout:2000});
+  assert.equal(await draft.inputValue(),'Draft preserved while the viewport changes','automatic fullscreen preserves draft');
+  const autoComposer=await p.locator('.chat-view:visible .composer-box').boundingBox();
+  assert(autoComposer.y+autoComposer.height<=await p.evaluate(()=>visualViewport.offsetTop+visualViewport.height),'automatic fullscreen keeps composer visible');
+  await p.evaluate(()=>document.exitFullscreen());await p.waitForFunction(()=>!document.fullscreenElement);
+  await swipe(550,350);
+  assert.equal(await p.evaluate(()=>!!document.fullscreenElement),false,'a deliberate fullscreen exit suppresses automatic reentry');
+  console.log('SCROLL_DOWN',await nav.getAttribute('inert'));
   assert.equal(await nav.getAttribute('inert'),'','scroll down hides navigation');
   const hiddenNav=await nav.boundingBox();
   console.log('HIDDEN_NAV',hiddenNav);
