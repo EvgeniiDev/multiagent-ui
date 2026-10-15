@@ -57,5 +57,6 @@ and entry assets matched the build bytes. No service lifecycle action was needed
   rather than attempting to resize an OS fullscreen window.
 
 Evidence: `.agent-tmp/fullscreen-release/`. Physical phone browser chrome and
-soft keyboard behavior still need device confirmation. After reload, the user
-must tap Chat settings → Fullscreen; the browser requires a user gesture.
+soft keyboard behavior still need device confirmation. The initial release required Chat settings → Fullscreen after reload. The
+[follow-up](mobile-fullscreen-swipe-20261015.md) adds a downward touch gesture
+where the browser grants transient user activation.
