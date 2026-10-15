@@ -21,9 +21,24 @@ function canonical(value) {
   return value;
 }
 
+function normalizedCapabilities(capabilities = {}) {
+  const normalized = { ...capabilities };
+  // ACP's optional boolean capabilities default to false. Normalize only known
+  // fields so extension metadata and future capabilities remain distinguishable.
+  if (normalized.terminal === false) delete normalized.terminal;
+  if (normalized.fs && typeof normalized.fs === 'object' && !Array.isArray(normalized.fs)) {
+    normalized.fs = { ...normalized.fs };
+    for (const key of ['readTextFile', 'writeTextFile']) {
+      if (normalized.fs[key] === false) delete normalized.fs[key];
+    }
+    if (Object.keys(normalized.fs).length === 0) delete normalized.fs;
+  }
+  return normalized;
+}
+
 function handshakeContract(params) {
   return JSON.stringify(canonical({ protocolVersion: params.protocolVersion ?? null,
-    clientCapabilities: params.clientCapabilities ?? {} }));
+    clientCapabilities: normalizedCapabilities(params.clientCapabilities ?? {}) }));
 }
 
 function send(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); }

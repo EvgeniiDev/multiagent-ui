@@ -124,5 +124,36 @@ if (process.argv.includes('--mock')) {
     assert.deepEqual(await reordered.receive('order2'), { ...response, id: 'order2' },
       'equivalent capability objects match regardless of key order');
   } finally { reordered.child.kill(); await reordered.closed; }
+  // Both probe-first and browser-first handshakes must share one adapter.
+  for (const variants of [
+    [{}, { fs: {} }, { fs: { readTextFile: false, writeTextFile: false }, terminal: false }],
+    [{ fs: { readTextFile: false, writeTextFile: false } }, {}],
+  ]) {
+    const normalized = client();
+    try {
+      variants.forEach((clientCapabilities, id) => normalized.send({
+        jsonrpc: '2.0', id, method: 'initialize', params: { protocolVersion: 1, clientCapabilities },
+      }));
+      for (let id = 0; id < variants.length; id++) {
+        assert.ok((await normalized.receive(id)).result,
+          'omitted and explicitly disabled capabilities must share initialization');
+      }
+      normalized.send({ jsonrpc: '2.0', id: 'cached', method: 'initialize',
+        params: { protocolVersion: 1, clientCapabilities: {} } });
+      assert.ok((await normalized.receive('cached')).result, 'normalized cached handshake succeeds');
+      for (const [id, params] of [
+        ['version', { protocolVersion: 2, clientCapabilities: {} }],
+        ['fs', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: true } } }],
+        ['terminal', { protocolVersion: 1, clientCapabilities: { terminal: true } }],
+        ['extension', { protocolVersion: 1, clientCapabilities: { custom: false } }],
+      ]) {
+        normalized.send({ jsonrpc: '2.0', id, method: 'initialize', params });
+        assert.equal((await normalized.receive(id)).error?.code, -32602,
+          'different versions, enabled capabilities and unknown fields remain incompatible');
+      }
+      normalized.send({ jsonrpc: '2.0', id: 'stats', method: 'stats', params: {} });
+      assert.equal((await normalized.receive('stats')).result.calls, 1);
+    } finally { normalized.child.kill(); await normalized.closed; }
+  }
   console.log('PASS Codex initialize coalescing, cached ids, pass-through, failure retry and child exit');
 }
