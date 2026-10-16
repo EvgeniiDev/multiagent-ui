@@ -1,5 +1,6 @@
 <script lang="ts">
-// Shared by session tabs; exiting fullscreen opts out until the page reloads.
+// Shared by session tabs. Only our explicit Exit control opts out; a browser
+// exit or a transient denial must allow the next downward gesture to retry.
 let automaticFullscreenSuppressed = false;
 </script>
 
@@ -20,9 +21,7 @@ const iphone = getPlatform() === 'ios';
 
 function syncFullscreen() {
   supported.value = !!document.fullscreenEnabled && typeof document.documentElement.requestFullscreen === 'function';
-  const active = !!document.fullscreenElement;
-  if (fullscreen.value && !active) automaticFullscreenSuppressed = true;
-  fullscreen.value = active;
+  fullscreen.value = !!document.fullscreenElement;
 }
 function onTouchStart(event: TouchEvent) {
   cancelSwipe();
@@ -32,7 +31,7 @@ function onTouchStart(event: TouchEvent) {
       !(event.target instanceof Element)) return;
   const feed = event.target.closest('.messages-container');
   if (!feed?.closest('.chat-view')?.contains(control.value) ||
-      event.target.closest('button, input, textarea, select, [contenteditable="true"]')) return;
+      event.target.closest('input, textarea, select, [contenteditable="true"]')) return;
   const scroller = document.scrollingElement;
   if (!scroller || scroller.scrollHeight <= scroller.clientHeight + 32) return;
   const touch = event.touches[0]!;
@@ -82,12 +81,14 @@ async function toggleFullscreen(automatic = false) {
   if (pending.value) return;
   pending.value = true;
   error.value = '';
+  const previousOptOut = automaticFullscreenSuppressed;
+  if (!automatic) automaticFullscreenSuppressed = !!document.fullscreenElement;
   try {
     if (document.fullscreenElement) await document.exitFullscreen();
     else await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
   } catch {
-    if (automatic) automaticFullscreenSuppressed = true;
-    else error.value = 'Could not change fullscreen mode. Try again.';
+    if (!automatic) automaticFullscreenSuppressed = previousOptOut;
+    error.value = 'Could not change fullscreen mode. Try again.';
   } finally {
     syncFullscreen();
     pending.value = false;

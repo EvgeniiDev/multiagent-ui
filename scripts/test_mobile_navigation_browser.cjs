@@ -4,7 +4,7 @@
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const fs=require('node:fs');const path=require('node:path');const assert=require('node:assert/strict');
 (async()=>{
-const b=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH,args:['--no-sandbox','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream']});
+const b=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH,args:['--no-sandbox','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream',...(process.env.VOICE_WAV?['--use-file-for-fake-audio-capture='+process.env.VOICE_WAV]:[])]});
 globalThis.qaBrowser=b;
 for (const width of [320,390,430,780,1440]) {
 const c=await b.newContext({ignoreHTTPSErrors:true,hasTouch:width<800,isMobile:width<800,userAgent:width===430?'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1':undefined,viewport:{width,height:844}});
@@ -83,7 +83,7 @@ if(width<800){
   assert.equal(await draft.inputValue(),'Draft preserved while the viewport changes','automatic fullscreen preserves draft');
   const autoComposer=await p.locator('.chat-view:visible .composer-box').boundingBox();
   assert(autoComposer.y+autoComposer.height<=await p.evaluate(()=>visualViewport.offsetTop+visualViewport.height),'automatic fullscreen keeps composer visible');
-  await p.evaluate(()=>document.exitFullscreen());await p.waitForFunction(()=>!document.fullscreenElement);
+  await p.locator('.chat-view:visible .settings-toggle').tap();await p.locator('.chat-view:visible .fullscreen-toggle').click();await p.waitForFunction(()=>!document.fullscreenElement);await p.locator('.chat-view:visible .settings-toggle').tap();
   await swipe(550,350);
   assert.equal(await p.evaluate(()=>!!document.fullscreenElement),false,'a deliberate fullscreen exit suppresses automatic reentry');
   console.log('SCROLL_DOWN',await nav.getAttribute('inert'));
@@ -105,7 +105,7 @@ if(width<800){
     const palette=await p.evaluate(()=>{const s=getComputedStyle(document.documentElement);return ['--bg-main','--bg-sidebar','--bg-primary'].map(k=>s.getPropertyValue(k).trim())});assert.deepEqual(palette,['#202020','#171717','#dedede'],'deployment preserves the established graphite palette');
     const menu=p.locator('[aria-label="Open menu"]');const r=await menu.boundingBox();
     assert(r.width>=44&&r.height>=44);assert(await menu.isEnabled());
-    await menu.focus();
+    await p.keyboard.press('Tab');await menu.focus();
     assert.equal(await menu.evaluate(e=>getComputedStyle(e).outlineWidth),'2px','menu has visible keyboard focus');
     const activeBefore=await p.evaluate(()=>window.__session.activeTabId);
     await menu.tap();await p.waitForSelector('.drawer-backdrop');
@@ -147,7 +147,7 @@ if(width<800){
   const model=p.locator('.chat-view:visible .model-button');assert(await model.isEnabled(),'model can change while busy');await model.click();await p.locator('.chat-view:visible .model-picker .dropdown-item').filter({hasText:'QA Model B'}).click();await p.waitForFunction(()=>window.__session.activeRuntime.currentModelId==='qa-b');
   const mode=p.locator('.chat-view:visible .mode-picker .mode-button').first();assert(await mode.isEnabled(),'mode can change while busy');await mode.click();await p.locator('.chat-view:visible .mode-picker .dropdown-item').filter({hasText:'QA Auto'}).click();await p.waitForFunction(()=>window.__session.activeRuntime.currentModeId==='qa-auto');await settings.tap();
   assert(await p.evaluate(()=>window.__session.activeRuntime.isLoading),'settings do not stop the current turn');
-  await p.locator('.chat-view:visible .voice-btn').click();await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) .voice-btn').getAttribute('aria-pressed')==='true');await p.waitForTimeout(300);
+  await p.locator('.chat-view:visible .voice-btn').click();await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) .voice-btn').getAttribute('aria-pressed')==='true');await p.waitForTimeout(process.env.VOICE_WAV?1400:300);
   const liveDuration=p.locator('.chat-view:visible .voice-status-inline');assert(await liveDuration.isVisible());assert(await liveDuration.evaluate(e=>e.scrollWidth<=e.clientWidth),'timer fits beside Stop and Send while busy');
   assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
   await p.locator('.chat-view:visible .voice-btn').click();await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) textarea').value.includes('Dictated follow-up while the model works'));
