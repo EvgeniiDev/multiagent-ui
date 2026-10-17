@@ -10,6 +10,7 @@ import SessionList from './components/SessionList.vue';
 import SessionTabs from './components/SessionTabs.vue';
 import ChatView from './components/ChatView.vue';
 import UiButton from './components/ui/UiButton.vue';
+import UiSidebarResize from './components/ui/UiSidebarResize.vue';
 import { createDrawerSwipe } from './lib/drawerSwipe';
 import PermissionDialog from './components/PermissionDialog.vue';
 import SettingsView from './components/SettingsView.vue';
@@ -42,6 +43,7 @@ const projectsStore = useProjectsStore();
 // (the tab strip's "+" menu owns the pref itself).
 const lastCwd = ref('');
 const showSidebar = ref(true);
+const sidebarWidth = ref(280);
 const showSettings = ref(false);
 const showTrafficMonitor = ref(false);
 const showStartupDetails = ref(false);
@@ -492,6 +494,7 @@ function clearError() {
       id="app-sidebar"
       class="sidebar"
       :class="{ 'is-drawer': isNarrowLayout }"
+      :style="isNarrowLayout ? undefined : { '--sidebar-width': `${sidebarWidth}px` }"
     >
       <div class="sidebar-header">
         <h1>ACP UI</h1>
@@ -583,7 +586,7 @@ function clearError() {
         </div>
 
         <!-- Session List -->
-        <div class="section">
+        <div class="section session-section">
           <SessionList
             @resume="handleResumeSession"
             @delete="handleDeleteSession"
@@ -591,6 +594,7 @@ function clearError() {
           />
         </div>
       </div>
+      <UiSidebarResize v-if="!isNarrowLayout" v-model="sidebarWidth" />
     </aside>
     
     <!-- Backdrop behind the drawer on narrow viewports. Only intercepts
@@ -831,8 +835,9 @@ html.document-chat {
 }
 
 .sidebar {
-  width: var(--sidebar-w);
-  min-width: var(--sidebar-w);
+  position: relative;
+  width: var(--sidebar-width, var(--sidebar-w));
+  min-width: var(--sidebar-width, var(--sidebar-w));
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border-faint);
   display: flex;
@@ -869,6 +874,10 @@ html.document-chat {
   border-bottom: 1px solid var(--border-faint);
 }
 
+.session-section {
+  padding: 0.75rem 0.375rem;
+}
+
 .cwd-picker {
   margin-top: 0.75rem;
 }
@@ -887,7 +896,7 @@ html.document-chat {
    layouts — on narrow it's the same drawer block). Shares the AGENT /
    WORKING DIRECTORY label language, and the selector's internal narrow
    media query already stretches its select, so just force full width. */
-.drawer-project-scope label {
+.drawer-project-scope > label:not(.scope-selector) {
   display: block;
   font-size: 0.6875rem;
   font-weight: 600;
