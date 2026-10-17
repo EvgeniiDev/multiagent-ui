@@ -38,70 +38,18 @@ watch(
 
 <template>
   <label class="scope-selector">
-    <svg
-      class="scope-icon" viewBox="0 0 24 24" width="13" height="13" fill="none"
-      stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
-      stroke-linejoin="round" aria-hidden="true"
+    <svg class="scope-icon" viewBox="0 0 24 24" width="18" height="18" fill="none"
+      stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
     ><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg>
-    <span class="scope-label">Project</span>
-    <select v-model="value" class="scope-select" aria-label="Project scope">
-      <option value="all">All</option>
+    <select v-model="value" class="ui-input scope-select" aria-label="Project scope">
+      <option value="all">All projects</option>
       <option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</option>
     </select>
   </label>
 </template>
 
 <style scoped>
-.scope-selector {
-  display: flex;
-  align-items: center;
-  gap: 0.375rem;
-  min-width: 0;
-}
-
-.scope-icon {
-  flex: 0 0 auto;
-  color: var(--text-muted, #a39a8e);
-}
-
-.scope-label {
-  flex: 0 0 auto;
-  font-size: 0.625rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-muted, #a39a8e);
-}
-
-.scope-select {
-  flex: 0 1 auto;
-  min-width: 8rem;
-  max-width: 16rem;
-  height: 26px;
-  padding: 0 0.375rem;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-main, #fbf8f3);
-  color: var(--text-primary, #2b2723);
-  font-family: inherit;
-  font-size: 0.75rem;
-}
-
-.scope-select:focus-visible {
-  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
-  outline-offset: 1px;
-}
-
-@media (max-width: 800px) {
-  .scope-selector {
-    flex: 1;
-  }
-
-  .scope-select {
-    flex: 1;
-    max-width: none;
-    min-height: 44px;
-    font-size: 0.875rem;
-  }
-}
+.scope-selector { position: relative; display: block; min-width: 0; width: 100%; }
+.scope-icon { position: absolute; left: 0.75rem; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none; }
+.scope-select { width: 100%; min-width: 0; min-height: 44px; padding-left: 2.375rem; font-size: 0.8125rem; background-color: var(--bg-main); }
 </style>

@@ -21,6 +21,8 @@ import ProjectsView from './components/ProjectsView.vue';
 import BoardView from './components/BoardView.vue';
 import DashboardView from './components/DashboardView.vue';
 import ProjectScopeSelector from './components/ProjectScopeSelector.vue';
+import SidebarHeader from './components/SidebarHeader.vue';
+import SidebarNavigation from './components/SidebarNavigation.vue';
 import NewSessionDialog from './features/projects/NewSessionDialog.vue';
 import { useUiStore, VIEWS } from './stores/ui';
 import { useActivityStore } from './stores/activity';
@@ -410,11 +412,6 @@ function handleBackdropClick() {
   if (isNarrowLayout.value) showSidebar.value = false;
 }
 
-/** Current view name for the drawer's view-switcher label (narrow only). */
-const drawerViewLabel = computed(
-  () => uiStore.ready ? (VIEWS.find((v) => v.id === uiStore.activeView)?.label ?? 'Chat') : 'Loading…'
-);
-
 /** Pick a view from the drawer's view row (narrow only): switch, then close
  *  the drawer so the chosen view fills the screen. */
 function handleDrawerViewClick(view: ViewId) {
@@ -514,78 +511,29 @@ function clearError() {
       :class="{ 'is-drawer': isNarrowLayout }"
       :style="isNarrowLayout ? undefined : { '--sidebar-width': `${sidebarWidth}px` }"
     >
-      <div class="sidebar-header">
-        <h1>ACP UI</h1>
-        <div class="header-actions">
-          <button
-            class="scope-icon-btn"
-            :class="{ active: showTrafficMonitor }"
-            type="button"
-            title="ACP Traffic Monitor"
-            aria-label="ACP Traffic Monitor"
-            @click="showTrafficMonitor = !showTrafficMonitor"
-          ><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.9 19.1a10 10 0 0 1 0-14.2M7.8 16.2a5.5 5.5 0 0 1 0-8.4M12 12h.01M16.7 10.3a3 3 0 0 1 0 4.4M19.6 7.4a7 7 0 0 1 0 10.2"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg></button>
-          <button
-            class="scope-icon-btn"
-            type="button"
-            title="Settings"
-            aria-label="Settings"
-            @click="showSettings = true"
-          ><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1a1.7 1.7 0 0 0 1.9.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1a1.7 1.7 0 0 0-.3 1.9v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.4 1z"/></svg></button>
-          <UiButton variant="ghost" icon aria-label="Collapse sidebar" aria-controls="app-sidebar" @click="toggleSidebar"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 6l-6 6 6 6"/></svg></UiButton>
-        </div>
-      </div>
-      
+      <SidebarHeader
+        :traffic-active="showTrafficMonitor"
+        @traffic="showTrafficMonitor = !showTrafficMonitor"
+        @settings="showSettings = true"
+        @collapse="toggleSidebar"
+      />
+
       <div class="sidebar-content">
         <!-- Narrow layout only: view switching. Since the narrow layout hides
              the view rail, its four buttons are mirrored here as the drawer's
              first row — same labels, icons, aria/title; picking a view closes
              the drawer. -->
-        <nav v-if="isNarrowLayout" class="drawer-view-nav" aria-label="Main views">
-          <button
-            v-for="view in VIEWS"
-            :key="view.id"
-            class="rail-btn"
-            :class="{ active: uiStore.ready && uiStore.activeView === view.id }"
-            :title="`${view.label} (${view.key})`"
-            :aria-label="view.label"
-            :aria-current="uiStore.ready && uiStore.activeView === view.id ? 'page' : undefined"
-            @click="handleDrawerViewClick(view.id)"
-          >
-            <svg
-              v-if="view.id === 'chat'"
-              viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
-              stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
-            ><path d="M21 11.5a8.4 8.4 0 01-9 8.4 8.9 8.9 0 01-3.8-.9L3 20l1.1-3.3A8.4 8.4 0 013 11.5 8.4 8.4 0 0112 3a8.4 8.4 0 019 8.5z" /></svg>
-            <svg
-              v-else-if="view.id === 'projects'"
-              viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
-              stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
-            ><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg>
-            <svg
-              v-else-if="view.id === 'board'"
-              viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
-              stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
-            ><path d="M4 4h4v16H4zM10 4h4v10h-4zM16 4h4v6h-4z" /></svg>
-            <svg
-              v-else-if="view.id === 'dashboard'"
-              viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
-              stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
-            ><path d="M12 20a8 8 0 110-16 8 8 0 010 16zM12 15.5l3-4.5M12 8.5v4" /></svg>
-            <svg
-              v-else
-              viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
-              stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
-            ><circle cx="6" cy="6" r="2.4" /><circle cx="6" cy="18" r="2.4" /><circle cx="18" cy="12" r="2.4" /><path d="M8.4 6H12a3 3 0 0 1 3 3v.6M8.4 18H12a3 3 0 0 0 3-3v-.6" /></svg>
-            </button>
-          <span class="drawer-view-label">{{ drawerViewLabel }}</span>
-        </nav>
+        <SidebarNavigation
+          v-if="isNarrowLayout"
+          :active-view="uiStore.activeView"
+          :ready="uiStore.ready"
+          @navigate="handleDrawerViewClick"
+        />
         <!-- Project scope next to the session list it filters. Was the
               scope-bar's global selector; the sidebar is chat-only on
               desktop, so the board keeps its own filter row instead of this
               hidden global one. One instance for both layouts. -->
         <div class="section drawer-project-scope">
-          <label>Project:</label>
           <ProjectScopeSelector />
         </div>
         <!-- Startup progress while a session is being created/resumed.
@@ -862,26 +810,6 @@ html.document-chat {
   flex-direction: column;
 }
 
-.sidebar-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid var(--border-faint);
-}
-
-.sidebar-header h1 {
-  font-size: 0.875rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  margin: 0;
-}
-
-.header-actions {
-  display: flex;
-  gap: 0.25rem;
-}
-
 .sidebar-content {
   flex: 1;
   overflow-y: auto;
@@ -910,22 +838,8 @@ html.document-chat {
   margin-bottom: 0.25rem;
 }
 
-/* Project scope in the sidebar, above the session list it filters (all
-   layouts — on narrow it's the same drawer block). Shares the AGENT /
-   WORKING DIRECTORY label language, and the selector's internal narrow
-   media query already stretches its select, so just force full width. */
-.drawer-project-scope > label:not(.scope-selector) {
-  display: block;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  margin-bottom: 0.25rem;
-}
-
-.drawer-project-scope .scope-selector {
-  width: 100%;
+.drawer-project-scope {
+  padding: 0.75rem;
 }
 
 .sidebar-toggle-collapsed {
@@ -955,38 +869,6 @@ html.document-chat {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-
-/* Sidebar-header icon buttons (Traffic + Settings). Same geometry as the
- * view rail (34×34, radius-md, hairline/ghost) so the header reads as one
- * chrome row. */
-.scope-icon-btn {
-  width: 34px;
-  height: 34px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-muted, #a39a8e);
-  cursor: pointer;
-}
-
-.scope-icon-btn:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-primary, #2b2723);
-}
-
-.scope-icon-btn.active {
-  color: var(--text-accent, #c2532f);
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-}
-
-.scope-icon-btn:focus-visible {
-  outline: 2px solid var(--text-accent, #c2532f);
-  outline-offset: 2px;
 }
 
 /* The tab bar: "+" menu + scrollable session tabs. Carries the strip chrome
@@ -1336,39 +1218,6 @@ html.document-chat {
   /* Mobile navigation uses the edge gesture instead of the desktop handle. */
   .sidebar-toggle-collapsed {
     display: none;
-  }
-
-  /* Drawer's first row: the view switcher that replaced the hidden rail.
-     Same icon buttons as the rail (44px tap targets), current view accented,
-     followed by the view's name. */
-  .drawer-view-nav {
-    display: flex;
-    align-items: center;
-    gap: 0.375rem;
-    flex: 0 0 auto;
-    padding: 0.375rem 0.5rem;
-    border-bottom: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-    background: var(--bg-sidebar, #f6f2ec);
-  }
-
-  .drawer-view-nav .rail-btn {
-    width: 44px;
-    height: 44px;
-    border-radius: var(--radius-md, 6px);
-  }
-
-  .drawer-view-label {
-    margin-left: auto;
-    font-size: 0.8125rem;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-    color: var(--text-secondary, #6b6259);
-    white-space: nowrap;
-  }
-
-  .scope-icon-btn {
-    width: 44px;
-    height: 44px;
   }
 
   /* Honour the iOS home indicator at the bottom of the main area. */

@@ -34,6 +34,7 @@ import UiButton from '../../components/ui/UiButton.vue';
 |---|---|---|
 | variant | secondary (по умолчанию), primary, danger, ghost, image | Обычное действие, основное, опасное, второстепенное/вкладка |
 | size | sm (по умолчанию), xs | Высота 28 или 24 px; компактные кнопки для вкладок |
+| layout | inline (по умолчанию), stacked | Иконка и подпись в строку или друг над другом для навигации |
 | icon | boolean | Квадратная кнопка; обязательна доступная подпись aria-label |
 | type | button (по умолчанию), submit, reset | Нативное поведение в форме |
 
@@ -44,7 +45,7 @@ import UiButton from '../../components/ui/UiButton.vue';
 Все нативные атрибуты и события передаются на настоящий button: disabled,
 aria-busy, title, data-testid, click и т.д. Текст передаётся через default slot.
 Компонент определяет hover, видимый клавиатурный фокус, disabled и выбранную
-вкладку по aria-selected/aria-pressed. Для узких экранов и touch-устройств
+вкладку по aria-selected/aria-pressed; текущую страницу — по aria-current="page". Для узких экранов и touch-устройств
 минимальная высота и ширина кнопки с иконкой — 44 px.
 
 ## Правила использования
