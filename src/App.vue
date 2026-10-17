@@ -676,10 +676,8 @@ function clearError() {
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
           </UiButton>
           <span v-if="isNarrowLayout" class="mobile-session-title">{{ uiStore.activeView === 'chat' ? sessionStore.currentSession?.title || 'Chat' : VIEWS.find(view => view.id === uiStore.activeView)?.label }}</span>
-          <!-- "+" starts a session: agent + working directory dropdown. It
-               sits before the tabs and stays fixed on narrow layouts, where
-               the tab strip itself scrolls horizontally. -->
-          <NewSessionMenu v-if="uiStore.ready && uiStore.activeView === 'chat'" />
+          <!-- Desktop creates sessions from the tab bar; mobile uses the list. -->
+          <NewSessionMenu v-if="!isNarrowLayout && uiStore.ready && uiStore.activeView === 'chat'" />
           <div class="navigation-items">
             <SessionTabs v-if="!isNarrowLayout && uiStore.activeView === 'chat' && sessionStore.openTabs.length > 0" />
           </div>
@@ -706,6 +704,7 @@ function clearError() {
           <h2>Welcome to ACP UI</h2>
           <p>Select an agent and create a new session to get started.</p>
           <button
+            v-if="!isNarrowLayout"
             class="welcome-new-session"
             type="button"
             @click="showWelcomeNewSession = true"

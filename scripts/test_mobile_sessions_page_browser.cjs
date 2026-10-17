@@ -63,6 +63,7 @@ const assert = require('node:assert/strict');
       const menu = page.getByRole('button', { name: 'Open menu', exact: true });
       if (width < 800) {
         assert.equal(await page.locator('.tab-strip').count(), 0, 'mobile has no top session tabs');
+        assert.equal(await page.locator('.session-navigation [aria-label="New session"]').count(), 0, 'mobile creation is available through the session list');
         await menu.click();
         const sidebar = page.locator('#app-sidebar');
         await sidebar.waitFor();
@@ -156,12 +157,15 @@ const assert = require('node:assert/strict');
           await page.waitForTimeout(250);
           assert(!await page.locator('#app-sidebar').isVisible(), 'direct Projects load is not covered by an empty sessions page');
           await page.goto(`${base}/chat`, { waitUntil: 'domcontentloaded' });
+          await page.getByRole('button', { name: 'Open menu', exact: true }).waitFor();
+          assert.equal(await page.locator('.welcome-new-session').count(), 0, 'empty mobile chat uses the sessions list for creation');
           await page.getByRole('button', { name: 'Open menu', exact: true }).click();
           await page.locator('#app-sidebar').waitFor();
           assert(await page.getByRole('button', { name: 'New session', exact: true }).isVisible(), 'empty sessions page offers creation');
         }
       } else {
         assert.equal(await page.locator('.tab-strip [role="tab"]').count(), 2, 'desktop tabs retained');
+        assert.equal(await page.locator('.session-navigation [aria-label="New session"]').count(), 1, 'desktop creation stays in its tab bar');
         assert((await page.locator('#app-sidebar').boundingBox()).width < 600);
       }
       assert.deepEqual(errors, []);
