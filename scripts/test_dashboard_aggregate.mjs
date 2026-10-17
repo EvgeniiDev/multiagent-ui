@@ -22,7 +22,7 @@ test('provider and local date boundaries have separate buckets and absent costs 
   const first=new Date(2026,9,7,23,59).getTime(),second=new Date(2026,9,8,0,1).getTime();
   const r=aggregateUsage([row(100,{at:first}),row(200,{at:second,provider:'P2'})],[]);
   assert.equal(r.models.length,2);assert.equal(r.days.length,2);
-  assert.equal(r.days[1].key,localDayKey(second));assert.deepEqual(r.total.costs,[]);
+  assert.equal(r.days[1].key,localDayKey(second));assert.deepEqual(r.total.costs,[]);assert.equal(r.total.hasMissingCosts,true);
 });
 const { toCsv } = await import('../src/features/dashboard/exportData.ts');
 test('CSV preserves separate currencies and distinguishes unavailable cost from reported zero', () => {
@@ -41,6 +41,7 @@ test('token mix buckets aggregate per group and total', () => {
 test('API token prices replace missing or subscription-zero costs in every breakdown', () => {
   const r = aggregateUsage([row(117000, {model:'gpt-6.1-sol',provider:'openai-codex',input:100000,output:7000,cacheRead:10000,cost:0,currency:'USD'})], []);
   assert.deepEqual(r.total.costs, [{currency:'USD',amount:0.271}]);
+  assert.equal(r.total.hasMissingCosts,false);
   for (const key of ['models','projects','agents','sessions','days']) assert.deepEqual(r[key][0].costs,r.total.costs,key);
 });
 const { apiCost } = await import('../src/features/dashboard/pricing.ts');

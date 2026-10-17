@@ -46,6 +46,7 @@ export function aggregateUsage(rows: SpendRow[], entries: ActivityEntry[], sourc
   const maps = { models: new Map<string, Accumulator>(), projects: new Map<string, Accumulator>(),
     agents: new Map<string, Accumulator>(), sessions: new Map<string, Accumulator>(), days: new Map<string, Accumulator>() };
   const total = bucket('total', 'Total');
+  let hasMissingCosts = false;
   const sessionModels = new Map<string, string>();
   for (const source of sources) {
     if (source.status !== 'unavailable') maps.agents.set(source.agentName, bucket(source.agentName, source.agentName, source.status));
@@ -55,6 +56,7 @@ export function aggregateUsage(rows: SpendRow[], entries: ActivityEntry[], sourc
   };
   for (const rawRow of rows) {
     const row = priceUsage(rawRow);
+    if (typeof row.cost !== 'number' || !Number.isFinite(row.cost)) hasMissingCosts = true;
     const sessionKey = `${row.agentName}::${row.sessionId}`;
     const modelKey = `${row.provider}::${row.model}`;
     const project = projectName(row.cwd);
@@ -92,7 +94,7 @@ export function aggregateUsage(rows: SpendRow[], entries: ActivityEntry[], sourc
     if (session) session.turns++;
   }
   const ranked = (map: Map<string, Accumulator>) => [...map.values()].map(finish).sort((a, b) => b.tokens - a.tokens);
-  return { total: { ...finish(total), sessions: maps.sessions.size, toolCalls },
+  return { total: { ...finish(total), hasMissingCosts, sessions: maps.sessions.size, toolCalls },
     models: ranked(maps.models), projects: ranked(maps.projects), agents: ranked(maps.agents),
     sessions: ranked(maps.sessions), days: [...maps.days.values()].map(finish).sort((a, b) => a.key.localeCompare(b.key)) };
 }

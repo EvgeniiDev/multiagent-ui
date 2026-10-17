@@ -9,7 +9,6 @@ import { useUiStore } from '../stores/ui';
 import { loadKvStore, type KVStore } from '../lib/host/storage';
 import { RANGES, rangeBounds, rangeLabel, type RangeId } from '../features/dashboard/range';
 import { fmtInt, fmtCompact, fmtCostGroups, fmtTokensWithEst, shortDate, fmtStamp, fmtAgo } from '../features/dashboard/format';
-import { priceUsage } from '../features/dashboard/pricing';
 import { aggregateUsage, localDayKey, type UsageGroup } from '../features/dashboard/aggregate';
 import { exportFileName, toJson, toCsv, downloadFile, type ExportPayload } from '../features/dashboard/exportData';
 
@@ -92,7 +91,7 @@ const selectionStats = computed(() => {
 });
 const summary = computed(() => selectionStats.value.total);
 const initialLoading = computed(() => activity.usageLoading && !activity.usageSources.length);
-const hasMissingCosts = computed(() => selectedSpendRows.value.some(raw => { const r = priceUsage(raw); return typeof r.cost !== 'number' || !Number.isFinite(r.cost); }));
+const hasMissingCosts = computed(() => summary.value.hasMissingCosts);
 const availableHistories = computed(() => activity.usageSources.filter(s => s.status !== 'unavailable').length);
 const chartBucketLabel = computed(() => dayPoints.value[0]?.step === 7 ? 'Weekly totals' : 'Daily totals');
 const peakPoint = computed(() => dayPoints.value.reduce<DayPoint | null>((peak, d) => !peak || d.tokens > peak.tokens ? d : peak, null));
