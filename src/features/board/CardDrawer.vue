@@ -340,31 +340,31 @@ onBeforeUnmount(() => {
       <span class="drawer-title">Card</span>
       <span class="drawer-id mono">{{ card.id.slice(0, 8) }}</span>
       <span class="drawer-stage mono">{{ stageLabel(card.stage) }}<template v-if="card.status"> · {{ card.status }}</template></span>
-      <button class="drawer-close" aria-label="Close card editor" title="Close (Esc)" @click="emit('close')">
+      <UiButton variant="ghost" icon class="drawer-close" aria-label="Close card editor" title="Close (Esc)" @click="emit('close')">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
           stroke-width="2" stroke-linecap="round" aria-hidden="true">
           <path d="M6 6l12 12M18 6L6 18" />
         </svg>
-      </button>
+      </UiButton>
     </header>
 
     <div class="drawer-body">
       <label class="field">
         <span class="field-label">Title</span>
-        <input v-model="draft.title" data-field="title" class="f-input" type="text"
+        <input v-model="draft.title" data-field="title" class="ui-input f-input" type="text"
           placeholder="Card title" @input="markDirty('title')" />
       </label>
 
       <label class="field">
         <span class="field-label">Description</span>
-        <textarea v-model="draft.description" data-field="description" class="f-input" rows="3"
+        <textarea v-model="draft.description" data-field="description" class="ui-input f-input" rows="3"
           placeholder="What needs doing" @input="markDirty('description')" />
       </label>
 
       <div class="field-row">
         <label class="field">
           <span class="field-label">Project<template v-if="isManaged"> · managed</template></span>
-          <input v-model="draft.project" data-field="project" class="f-input mono" type="text"
+          <input v-model="draft.project" data-field="project" class="ui-input f-input mono" type="text"
             list="board-project-list" placeholder="project" :disabled="isManaged"
             :title="isManaged ? managedReason : ''" @input="markDirty('project')" />
           <datalist id="board-project-list">
@@ -374,7 +374,7 @@ onBeforeUnmount(() => {
 
         <label class="field">
           <span class="field-label">Agent</span>
-          <select v-model="draft.agent" data-field="agent" class="f-input" @change="markDirty('agent')">
+          <select v-model="draft.agent" data-field="agent" class="ui-input f-input" @change="markDirty('agent')">
             <option value="">Unassigned</option>
             <option v-for="a in agents" :key="a" :value="a">{{ a }}</option>
           </select>
@@ -384,22 +384,21 @@ onBeforeUnmount(() => {
       <div class="field">
         <span class="field-label">Priority</span>
         <div class="prio-seg" role="radiogroup" aria-label="Priority">
-          <button
+          <UiButton variant="tab"
             v-for="p in PRIORITIES"
             :key="p.id"
             class="seg-btn"
-            :class="{ active: draft.priority === p.id }"
             role="radio"
             :aria-checked="draft.priority === p.id"
             @click="draft.priority = p.id; markDirty('priority')"
-          >{{ p.label }}</button>
+          >{{ p.label }}</UiButton>
         </div>
       </div>
 
       <div class="field-row">
         <label class="field">
           <span class="field-label">Stage<template v-if="isManaged"> · managed</template></span>
-          <select v-model="draft.stage" data-field="stage" class="f-input" :disabled="isManaged"
+          <select v-model="draft.stage" data-field="stage" class="ui-input f-input" :disabled="isManaged"
             :title="isManaged ? managedReason : ''" @change="onStagePicked">
             <option v-for="c in BOARD_STAGES" :key="c.id" :value="c.id">{{ c.label }}</option>
           </select>
@@ -407,7 +406,7 @@ onBeforeUnmount(() => {
 
         <label class="field">
           <span class="field-label">Status<template v-if="isManaged"> · managed</template></span>
-          <select v-model="draft.status" data-field="status" class="f-input"
+          <select v-model="draft.status" data-field="status" class="ui-input f-input"
             :disabled="!statusesForStage(draft.stage).length || isManaged"
             :title="isManaged ? managedReason : ''" @change="markDirty('status')">
             <option v-if="!statusesForStage(draft.stage).length" :value="null">—</option>
@@ -419,70 +418,67 @@ onBeforeUnmount(() => {
       <div class="field">
         <span class="field-label">Flags<template v-if="isManaged"> · managed</template></span>
         <div class="prio-seg" role="group" aria-label="Card flags">
-          <button
+          <UiButton variant="tab"
             class="seg-btn flag-btn"
-            :class="{ active: draft.blocked }"
             :aria-pressed="draft.blocked"
             :disabled="isManaged"
             :title="isManaged ? managedReason : ''"
             data-field="blocked"
             @click="draft.blocked = !draft.blocked; markDirty('blocked')"
-          >blocked</button>
-          <button
+          >blocked</UiButton>
+          <UiButton variant="tab"
             class="seg-btn flag-btn"
-            :class="{ active: draft.cancelled }"
             :aria-pressed="draft.cancelled"
             :disabled="isManaged"
             :title="isManaged ? managedReason : ''"
             data-field="cancelled"
             @click="draft.cancelled = !draft.cancelled; markDirty('cancelled')"
-          >cancelled</button>
+          >cancelled</UiButton>
         </div>
       </div>
 
       <label v-if="draft.blocked" class="field">
         <span class="field-label">Blocked reason</span>
-        <input v-model="draft.blockedReason" data-field="blockedReason" class="f-input" type="text"
+        <input v-model="draft.blockedReason" data-field="blockedReason" class="ui-input f-input" type="text"
           placeholder="what blocks it (optional card ref)" :disabled="isManaged"
           :title="isManaged ? managedReason : ''" @input="markDirty('blockedReason')" />
       </label>
 
       <label class="field">
         <span class="field-label">Acceptance criteria</span>
-        <textarea v-model="draft.acceptance" data-field="acceptance" class="f-input" rows="4"
+        <textarea v-model="draft.acceptance" data-field="acceptance" class="ui-input f-input" rows="4"
           placeholder="One per line" @input="markDirty('acceptance')" />
       </label>
 
       <label class="field">
         <span class="field-label">Verification steps</span>
-        <textarea v-model="draft.verification" data-field="verification" class="f-input" rows="4"
+        <textarea v-model="draft.verification" data-field="verification" class="ui-input f-input" rows="4"
           placeholder="How to prove it works" @input="markDirty('verification')" />
       </label>
 
       <div class="field">
         <span class="field-label">Links</span>
         <div v-for="(link, i) in draft.links" :key="i" class="link-row">
-          <input v-model="link.label" class="f-input link-label" type="text" placeholder="label"
+          <input v-model="link.label" class="ui-input f-input link-label" type="text" placeholder="label"
             aria-label="Link label" @input="markDirty('links')" />
-          <input v-model="link.url" class="f-input mono link-url" type="text" placeholder="https://…"
+          <input v-model="link.url" class="ui-input f-input mono link-url" type="text" placeholder="https://…"
             aria-label="Link URL" @input="markDirty('links')" />
-          <button class="link-del" aria-label="Remove link" @click="removeLink(i)">×</button>
+          <UiButton variant="ghost" icon class="link-del" aria-label="Remove link" @click="removeLink(i)">×</UiButton>
         </div>
-        <button class="link-add" @click="addLink">+ Add link</button>
+        <UiButton variant="ghost" class="link-add" @click="addLink">+ Add link</UiButton>
       </div>
 
       <div v-if="relGroups.length || pmBlocked" class="field" data-testid="card-relations">
         <span class="field-label">Relations</span>
         <div v-for="g in relGroups" :key="g.key" class="rel-row">
           <span class="rel-kind mono">{{ g.label }}</span>
-          <button
+          <UiButton variant="chip"
             v-for="rid in g.ids"
             :key="rid"
-            class="rel-chip mono"
-            :class="{ gone: !relCard(rid) }"
+            class="rel-chip"
             :title="relLabel(rid)"
             @click="emit('open-card', rid)"
-          >{{ rid.slice(0, 8) }}</button>
+          >{{ rid.slice(0, 8) }}</UiButton>
         </div>
         <div v-if="pmBlocked" class="rel-row">
           <span class="rel-kind mono">mark</span>
@@ -493,7 +489,7 @@ onBeforeUnmount(() => {
 
       <label class="field">
         <span class="field-label">Attached session<template v-if="isManaged"> · managed</template></span>
-        <select v-model="draft.sessionKey" data-field="session" class="f-input" :disabled="isManaged"
+        <select v-model="draft.sessionKey" data-field="session" class="ui-input f-input" :disabled="isManaged"
           :title="isManaged ? managedReason : ''" @change="onSessionPicked">
           <option value="">None</option>
           <option
@@ -568,13 +564,13 @@ onBeforeUnmount(() => {
             data-testid="status-token"
             :title="tokenArtifact ? `STATUS token from ${tokenArtifact.name}` : 'No STATUS token in the card artifacts'"
           >STATUS: {{ tokenArtifact?.token ?? '—' }}</span>
-          <button
+          <UiButton variant="secondary"
             class="art-refresh"
             data-testid="artifacts-refresh"
             title="Re-read artifacts and board state"
             :disabled="!cardProjectPath || artState.phase === 'loading'"
             @click="onRefreshArtifacts"
-          >↻ Refresh</button>
+          >↻ Refresh</UiButton>
         </div>
 
         <p v-if="!cardProjectPath" class="art-note" data-testid="artifacts-noproject">
@@ -594,9 +590,9 @@ onBeforeUnmount(() => {
 
           <ul v-if="artState.artifacts.length" class="art-list" data-testid="artifacts-list">
             <li v-for="a in artState.artifacts" :key="a.name">
-              <button
-                class="art-row mono"
-                :class="{ open: openArtifact?.name === a.name }"
+              <UiButton variant="row"
+                class="art-row"
+                :aria-pressed="openArtifact?.name === a.name"
                 :title="a.path"
                 @click="onOpenArtifact(a)"
               >
@@ -604,7 +600,7 @@ onBeforeUnmount(() => {
                 <span class="art-size">{{ a.mtime ? fmtStamp(a.mtime) + ' · ' : '' }}{{ fmtBytes(a.bytes) }}</span>
                 <span v-if="a.token" class="art-tok" :class="`tok-${a.token.toLowerCase()}`">{{ a.token }}</span>
                 <span v-if="a.error" class="art-tok tok-err" :title="a.error">error</span>
-              </button>
+              </UiButton>
             </li>
           </ul>
 
@@ -625,7 +621,7 @@ onBeforeUnmount(() => {
                 :class="{ done: item.done }"
               >
                 <input
-                  class="check-box"
+                  class="ui-checkbox check-box"
                   type="checkbox"
                   :checked="item.done"
                   disabled
@@ -703,9 +699,7 @@ onBeforeUnmount(() => {
   color: var(--text-secondary, #6b6259);
 }
 
-.mono {
-  font-family: var(--font-mono, monospace);
-}
+
 
 .drawer-id {
   font-size: 0.6875rem;
@@ -719,22 +713,9 @@ onBeforeUnmount(() => {
 
 .drawer-close {
   margin-left: auto;
-  width: 26px;
-  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm, 4px);
-  background: transparent;
-  color: var(--text-muted, #a39a8e);
-  cursor: pointer;
-}
-
-.drawer-close:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-primary, #2b2723);
 }
 
 .drawer-body {
@@ -770,63 +751,20 @@ onBeforeUnmount(() => {
 
 .f-input {
   width: 100%;
-  min-height: 28px;
-  padding: 0.25rem 0.5rem;
-  border: 1px solid var(--border-color, #e3dbcf);
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-sidebar, #f6f2ec);
-  color: var(--text-primary, #2b2723);
-  font-family: inherit;
-  font-size: 0.8125rem;
 }
 
 textarea.f-input {
   resize: vertical;
-  line-height: 1.4;
-}
-
-.f-input:focus-visible {
-  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
-  outline-offset: 1px;
-  border-color: var(--text-accent, #c2532f);
 }
 
 .prio-seg {
   display: flex;
-  border: 1px solid var(--border-color, #e3dbcf);
-  border-radius: var(--radius-md, 6px);
-  overflow: hidden;
+  gap: 0.25rem;
+  flex-wrap: wrap;
 }
 
 .seg-btn {
   flex: 1;
-  min-height: 28px;
-  border: none;
-  border-right: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  background: transparent;
-  color: var(--text-secondary, #6b6259);
-  font-family: var(--font-mono, monospace);
-  font-size: 0.6875rem;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-  cursor: pointer;
-}
-
-.seg-btn:last-child {
-  border-right: none;
-}
-
-.seg-btn:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-}
-
-.seg-btn.active {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-  color: var(--text-accent, #c2532f);
-}
-
-.seg-btn.flag-btn.active {
-  color: var(--bg-danger, #b3402e);
 }
 
 .link-row {
@@ -845,35 +783,6 @@ textarea.f-input {
 
 .link-del {
   flex: 0 0 auto;
-  width: 28px;
-  border: 1px solid var(--border-color, #e3dbcf);
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-muted, #a39a8e);
-  font-size: 0.875rem;
-  cursor: pointer;
-}
-
-.link-del:hover {
-  color: var(--bg-danger, #b3402e);
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-}
-
-.link-add {
-  min-height: 26px;
-  padding: 0 0.5rem;
-  border: 1px dashed var(--border-color, #e3dbcf);
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-secondary, #6b6259);
-  font-family: inherit;
-  font-size: 0.75rem;
-  cursor: pointer;
-}
-
-.link-add:hover {
-  color: var(--text-accent, #c2532f);
-  border-color: var(--text-accent, #c2532f);
 }
 
 .rel-row {
@@ -889,25 +798,6 @@ textarea.f-input {
   font-size: 0.625rem;
   letter-spacing: 0.03em;
   color: var(--text-muted, #a39a8e);
-}
-
-.rel-chip {
-  font-size: 0.625rem;
-  padding: 0.0625rem 0.3rem;
-  border: 1px solid var(--border-color, #e3dbcf);
-  border-radius: var(--radius-sm, 4px);
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-accent, #c2532f);
-  cursor: pointer;
-}
-
-.rel-chip:hover {
-  border-color: var(--text-accent, #c2532f);
-}
-
-.rel-chip.gone {
-  color: var(--text-muted, #a39a8e);
-  text-decoration: line-through;
 }
 
 .rel-pm {
@@ -950,17 +840,6 @@ textarea.f-input {
   margin-right: auto;
 }
 
-.seg-btn:focus-visible,
-.link-add:focus-visible,
-.link-del:focus-visible,
-.rel-chip:focus-visible,
-.drawer-close:focus-visible,
-.art-refresh:focus-visible,
-.art-row:focus-visible {
-  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
-  outline-offset: 1px;
-}
-
 /* Artifacts — the card-as-pipeline block. */
 
 .artifacts {
@@ -976,25 +855,6 @@ textarea.f-input {
 
 .art-refresh {
   margin-left: auto;
-  min-height: 24px;
-  padding: 0 0.5rem;
-  border: 1px solid var(--border-color, #e3dbcf);
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-secondary, #6b6259);
-  font-family: inherit;
-  font-size: 0.6875rem;
-  cursor: pointer;
-}
-
-.art-refresh:hover {
-  color: var(--text-accent, #c2532f);
-  border-color: var(--text-accent, #c2532f);
-}
-
-.art-refresh:disabled {
-  opacity: 0.5;
-  cursor: default;
 }
 
 .status-token {
@@ -1136,23 +996,6 @@ textarea.f-input {
   align-items: center;
   gap: 0.5rem;
   width: 100%;
-  min-height: 26px;
-  padding: 0 0.375rem;
-  border: none;
-  border-radius: var(--radius-sm, 4px);
-  background: transparent;
-  color: var(--text-primary, #2b2723);
-  font-size: 0.6875rem;
-  text-align: left;
-  cursor: pointer;
-}
-
-.art-row:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-}
-
-.art-row.open {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
 }
 
 .art-name {
@@ -1222,11 +1065,6 @@ textarea.f-input {
 .check-box {
   flex: 0 0 auto;
   margin: 0;
-  accent-color: var(--text-accent, #c2532f);
-}
-
-.check-box:disabled {
-  cursor: default;
 }
 
 .check-row.done .check-text {
@@ -1272,30 +1110,9 @@ textarea.f-input {
 }
 
 @media (max-width: 800px) {
-  .art-refresh,
-  .art-row,
-  .art-proposal .btn,
-  :deep(.art-proposal .btn) {
-    min-height: 44px;
-  }
-}
-
-@media (max-width: 800px) {
   .card-drawer {
     width: 100%;
     border-left: none;
-  }
-
-  .seg-btn,
-  .f-input,
-  .link-add,
-  .link-del {
-    min-height: 44px;
-  }
-
-  .drawer-close {
-    width: 44px;
-    height: 44px;
   }
 }
 </style>

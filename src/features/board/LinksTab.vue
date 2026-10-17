@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from '../../components/ui/UiButton.vue';
 // Links tab (F10.6): the pm role's verdict surface.
 //
 // Everything here derives from the two stores the panel already keeps —
@@ -215,13 +216,13 @@ watch(proposalsPath, () => void loadProposals(), { immediate: true });
       <h3>Card graph</h3>
       <ul v-if="relRows.length" class="lnk-list">
         <li v-for="r in relRows" :key="r.key" class="lnk-row rel" :class="{ done: !r.live }">
-          <button class="lnk-chip" :title="cardLabel(r.from)" @click="emit('open-card', r.from)">
+          <UiButton variant="chip" class="lnk-chip" :title="cardLabel(r.from)" @click="emit('open-card', r.from)">
             {{ id8(r.from) }}
-          </button>
+          </UiButton>
           <span class="lnk-rel mono">{{ r.kind === 'dependsOn' ? 'depends on' : 'conflicts' }}</span>
-          <button class="lnk-chip" :title="cardLabel(r.to)" @click="emit('open-card', r.to)">
+          <UiButton variant="chip" class="lnk-chip" :title="cardLabel(r.to)" @click="emit('open-card', r.to)">
             {{ id8(r.to) }}
-          </button>
+          </UiButton>
           <span class="lnk-title" :title="cardLabel(r.to)">{{ cardById(r.to)?.title || '' }}</span>
         </li>
       </ul>
@@ -232,9 +233,9 @@ watch(proposalsPath, () => void loadProposals(), { immediate: true });
       <h3>Blocked cards</h3>
       <ul v-if="blockedCards.length" class="lnk-list">
         <li v-for="c in blockedCards" :key="c.id" class="lnk-row">
-          <button class="lnk-chip" :title="cardLabel(c.id)" @click="emit('open-card', c.id)">
+          <UiButton variant="chip" class="lnk-chip" :title="cardLabel(c.id)" @click="emit('open-card', c.id)">
             {{ id8(c.id) }}
-          </button>
+          </UiButton>
           <span class="lnk-title">{{ c.title }}</span>
           <span class="lnk-detail" :title="c.blockedReason">{{ c.blockedReason || 'no reason' }}</span>
         </li>
@@ -345,18 +346,6 @@ watch(proposalsPath, () => void loadProposals(), { immediate: true });
 
 .lnk-chip {
   flex: 0 0 auto;
-  font-family: var(--font-mono, monospace);
-  font-size: 0.625rem;
-  padding: 0.0625rem 0.3rem;
-  border: 1px solid var(--border-color, #e3dbcf);
-  border-radius: var(--radius-sm, 4px);
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-accent, #c2532f);
-  cursor: pointer;
-}
-
-.lnk-chip:hover {
-  border-color: var(--text-accent, #c2532f);
 }
 
 .lnk-rel {

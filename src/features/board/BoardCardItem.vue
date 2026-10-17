@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from '../../components/ui/UiButton.vue';
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
 import type { BoardCard, BoardStageId, CardStatus } from '../../stores/board';
 import { useBoardStore } from '../../stores/board';
@@ -293,7 +294,7 @@ onBeforeUnmount(() => {
   >
     <div class="card-top">
       <span class="card-title">{{ card.title || 'Untitled card' }}</span>
-      <button
+      <UiButton variant="ghost" icon
         class="card-menu-btn"
         aria-label="Card actions"
         :aria-expanded="menuOpen"
@@ -305,13 +306,13 @@ onBeforeUnmount(() => {
           stroke-width="2" stroke-linecap="round" aria-hidden="true">
           <circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" />
         </svg>
-      </button>
+      </UiButton>
     </div>
 
     <div class="card-meta">
       <!-- In-stage status chip: click opens the stage's status picker.
            backlog/done have no status, so no chip renders there. -->
-      <button
+      <UiButton variant="chip"
         v-if="stageStatuses.length"
         class="status-chip"
         :class="`st-${card.status}`"
@@ -320,7 +321,7 @@ onBeforeUnmount(() => {
         :title="`Status in ${stageLabel(card.stage)}: ${card.status} — click to change`"
         @click="toggleStatusMenu"
         @keydown.stop
-      >{{ card.status }}</button>
+      >{{ card.status }}</UiButton>
       <span v-if="statusToken" class="meta-chip st-token" :class="`tok-${statusToken.toLowerCase()}`"
         data-testid="card-status-token"
         :title="`STATUS: ${statusToken} — from .acp/cards artifacts`">{{ statusToken }}</span>
@@ -386,35 +387,35 @@ onBeforeUnmount(() => {
          the chip, pick one of this stage's statuses, no modal. -->
     <div v-if="statusOpen" class="card-menu status-menu" role="menu" @click.stop>
       <div class="menu-label">Status in {{ stageLabel(card.stage) }}</div>
-      <button
+      <UiButton variant="row"
         v-for="s in stageStatuses"
         :key="s"
         class="menu-item"
-        :class="{ current: card.status === s }"
+        :aria-pressed="card.status === s"
         role="menuitem"
         @click="pickStatus(s)"
-      >{{ s }}</button>
+      >{{ s }}</UiButton>
     </div>
 
     <div v-if="menuOpen" class="card-menu" role="menu" @click.stop>
       <div class="menu-label">Move to</div>
-      <button
+      <UiButton variant="row"
         v-for="col in otherStages"
         :key="col.id"
         class="menu-item"
         role="menuitem"
         @click="moveTo(col.id)"
-      >{{ col.label }}</button>
+      >{{ col.label }}</UiButton>
       <div class="menu-sep" />
-      <button class="menu-item" role="menuitem" @click="toggleFlag('blocked')">
+      <UiButton variant="row" class="menu-item" role="menuitem" @click="toggleFlag('blocked')">
         {{ card.blocked ? 'Clear blocked flag' : 'Flag blocked' }}
-      </button>
-      <button class="menu-item" role="menuitem" @click="toggleFlag('cancelled')">
+      </UiButton>
+      <UiButton variant="row" class="menu-item" role="menuitem" @click="toggleFlag('cancelled')">
         {{ card.cancelled ? 'Clear cancelled flag' : 'Flag cancelled' }}
-      </button>
+      </UiButton>
       <div class="menu-sep" />
-      <button class="menu-item" role="menuitem" @click="onDuplicate">Duplicate</button>
-      <button class="menu-item danger" role="menuitem" @click="onRemove">Delete…</button>
+      <UiButton variant="row" class="menu-item" role="menuitem" @click="onDuplicate">Duplicate</UiButton>
+      <UiButton variant="row" tone="danger" class="menu-item" role="menuitem" @click="onRemove">Delete…</UiButton>
     </div>
   </article>
 </template>
@@ -475,29 +476,9 @@ onBeforeUnmount(() => {
 
 .card-menu-btn {
   flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm, 4px);
-  background: transparent;
-  color: var(--text-muted, #a39a8e);
-  cursor: pointer;
-  opacity: 0;
-}
-
-.board-card:hover .card-menu-btn,
-.board-card:focus-within .card-menu-btn,
-.board-card.has-menu .card-menu-btn {
-  opacity: 1;
-}
-
-.card-menu-btn:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-primary, #2b2723);
 }
 
 .card-meta {
@@ -511,33 +492,10 @@ onBeforeUnmount(() => {
 /* The in-stage status chip doubles as the status picker's trigger, so it
    is a real button — sized like a meta chip, touch-sized on phones. */
 .status-chip {
-  font-family: var(--font-mono, monospace);
-  font-size: 0.625rem;
-  letter-spacing: 0.02em;
-  padding: 0.0625rem 0.3rem;
-  border: 1px solid var(--border-color, #e3dbcf);
-  border-radius: var(--radius-sm, 4px);
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-accent, #c2532f);
-  cursor: pointer;
   max-width: 9rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.status-chip:hover {
-  border-color: var(--text-accent, #c2532f);
-}
-
-.status-chip:focus-visible {
-  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
-  outline-offset: 1px;
-}
-
-.status-chip.st-done,
-.status-chip.st-accepted {
-  color: var(--text-secondary, #6b6259);
 }
 
 .meta-chip {
@@ -757,58 +715,10 @@ onBeforeUnmount(() => {
   color: var(--text-muted, #a39a8e);
 }
 
-.menu-item {
-  display: block;
-  width: 100%;
-  min-height: 26px;
-  padding: 0 0.5rem;
-  border: none;
-  border-radius: var(--radius-sm, 4px);
-  background: transparent;
-  font-family: inherit;
-  font-size: 0.75rem;
-  text-align: left;
-  color: var(--text-primary, #2b2723);
-  cursor: pointer;
-}
-
-.menu-item:hover,
-.menu-item:focus-visible {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  outline: none;
-}
-
-.menu-item.current {
-  color: var(--text-accent, #c2532f);
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-}
-
-.menu-item.danger {
-  color: var(--bg-danger, #b3402e);
-}
-
 .menu-sep {
   height: 1px;
   margin: 0.25rem 0.375rem;
   background: var(--border-faint, rgba(43, 39, 35, 0.09));
 }
 
-@media (max-width: 800px) {
-  .card-menu-btn {
-    opacity: 1;
-    width: 44px;
-    height: 44px;
-  }
-
-  .status-chip {
-    min-height: 44px;
-    padding: 0 0.5rem;
-  }
-
-  .menu-item {
-    min-height: 44px;
-    display: flex;
-    align-items: center;
-  }
-}
 </style>

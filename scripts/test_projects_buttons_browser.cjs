@@ -55,7 +55,7 @@ const assert = require('node:assert/strict');
       await page.goto(base + '/', { waitUntil: 'domcontentloaded' });
       await page.locator('.rail-btn[aria-label="Projects"]').click();
       await page.setViewportSize({ width, height: 844 });
-      if (width < 800) await page.locator('.drawer-backdrop').click({ position: { x: width - 2, y: 500 } });
+      if (width < 800 && await page.locator('#app-sidebar').isVisible()) await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click();
       const row = page.locator('.project-row').filter({ hasText: 'Button QA' });
       await row.click();
       const newProject = page.getByRole('button', { name: 'New project', exact: true });

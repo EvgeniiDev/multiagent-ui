@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from '../../components/ui/UiButton.vue';
 // Agents tab (F9.9): who is holding what, right now — per executor (the
 // CLI a role runs on), which roles it serves, how many of their
 // maxConcurrent slots are busy, the card titles held, and the last ledger
@@ -340,13 +341,13 @@ function heldTitle(h: HeldCard): string {
         >via {{ rid }}</span>
         <span v-if="!ex.hasRunner" class="chip warn" title="No configured agent runs this CLI">no runner</span>
         <span class="spacer" />
-        <button
+        <UiButton variant="secondary"
           class="ctl-btn"
           data-testid="stop-exec"
           :disabled="ex.busy === 0 || pending"
           :title="`Release every live claim of ${ex.cli || 'this group'} — the panel cannot kill processes it does not own`"
           @click="stopExecutor(ex)"
-        >Stop all</button>
+        >Stop all</UiButton>
       </div>
 
       <ul v-if="ex.roles.length" class="role-list">
@@ -386,13 +387,13 @@ function heldTitle(h: HeldCard): string {
             >
               <span class="held-title">{{ h.title }}</span>
               <span class="chip mono lease">{{ leaseLeft(h.claim) }}</span>
-              <button
+              <UiButton variant="secondary"
                 class="ctl-btn release"
                 data-testid="release-btn"
                 :disabled="pending"
                 :title="`Drop the claim on ${h.cardId} — the process, if any, is not signalled`"
                 @click="releaseHeld(ex, h)"
-              >Release</button>
+              >Release</UiButton>
             </li>
           </ul>
 
@@ -424,13 +425,13 @@ function heldTitle(h: HeldCard): string {
           <span class="held-title">{{ h.title }}</span>
           <span class="chip mono">{{ h.claim.agentName }}</span>
           <span class="chip mono lease">{{ leaseLeft(h.claim) }}</span>
-          <button
+          <UiButton variant="secondary"
             class="ctl-btn release"
             data-testid="release-btn"
             :disabled="pending"
             :title="`Drop the claim on ${h.cardId} — the process, if any, is not signalled`"
             @click="releaseHeld(ex, h)"
-          >Release</button>
+          >Release</UiButton>
         </li>
       </ul>
 
@@ -529,31 +530,7 @@ function heldTitle(h: HeldCard): string {
 }
 
 .ctl-btn {
-  min-height: 24px;
-  padding: 0 0.625rem;
-  border: 1px solid var(--border-color, #e3dbcf);
-  border-radius: var(--radius-sm, 4px);
-  background: var(--bg-main, #fbf8f3);
-  color: var(--text-primary, #2b2723);
-  font-family: inherit;
-  font-size: 0.6875rem;
-  cursor: pointer;
   white-space: nowrap;
-}
-
-.ctl-btn:hover:not(:disabled) {
-  border-color: var(--text-accent, #c2532f);
-  color: var(--text-accent, #c2532f);
-}
-
-.ctl-btn:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.ctl-btn:focus-visible {
-  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
-  outline-offset: 1px;
 }
 
 .role-list {
@@ -663,11 +640,6 @@ function heldTitle(h: HeldCard): string {
   .role-line,
   .held {
     row-gap: 0.25rem;
-  }
-
-  .ctl-btn {
-    min-height: 44px;
-    padding: 0 0.875rem;
   }
 
   .held .release {

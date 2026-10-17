@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from './ui/UiButton.vue';
 // Board view (F3 kanban + F4 secondary tabs). Owns the tab bar, the header
 // summary line, and hosts the card-edit drawer. Data lives in
 // src/stores/board.ts (cards) and src/stores/activity.ts (ledger).
@@ -119,7 +120,7 @@ function onOpenWorkflow(target: { cardId: string; runId: string }) {
     </header>
 
     <nav class="tab-bar" aria-label="Board sections">
-      <button
+      <UiButton variant="tab"
         v-for="tab in TABS"
         :key="tab.id"
         class="tab-btn"
@@ -129,7 +130,7 @@ function onOpenWorkflow(target: { cardId: string; runId: string }) {
         @click="activeTab = tab.id"
       >
         {{ tab.label }}<span v-if="tabNote(tab.id)" class="tab-count mono">{{ tabNote(tab.id) }}</span>
-      </button>
+      </UiButton>
     </nav>
 
     <div class="pane-body">
@@ -194,36 +195,7 @@ function onOpenWorkflow(target: { cardId: string; runId: string }) {
   border-bottom: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
   overflow-x: auto;
 }
-
-.tab-btn {
-  display: flex;
-  align-items: center;
-  gap: 0.3rem;
-  min-height: 30px;
-  padding: 0 0.625rem;
-  border: none;
-  border-bottom: 2px solid transparent;
-  background: transparent;
-  color: var(--text-secondary, #6b6259);
-  font-family: inherit;
-  font-size: 0.75rem;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.tab-btn:hover {
-  color: var(--text-primary, #2b2723);
-}
-
-.tab-btn.active {
-  color: var(--text-accent, #c2532f);
-  border-bottom-color: var(--text-accent, #c2532f);
-}
-
-.tab-btn:focus-visible {
-  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
-  outline-offset: -2px;
-}
+.tab-btn { display: flex; align-items: center; gap: 0.3rem; white-space: nowrap; }
 
 .tab-count {
   font-size: 0.625rem;
@@ -254,10 +226,6 @@ function onOpenWorkflow(target: { cardId: string; runId: string }) {
 }
 
 @media (max-width: 800px) {
-  .tab-btn {
-    min-height: 44px;
-    flex: 1;
-    justify-content: center;
-  }
+.tab-btn { flex: 1; justify-content: center; }
 }
 </style>

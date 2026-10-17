@@ -96,10 +96,16 @@ if(width===390){
   assert.equal(rpcCalls.filter(q=>q.method==='session/prompt').length,sentBeforeEdges,'pointer cancellation never sends');
   await field.fill('Original tab draft');await voicePress(p,mic);await p.waitForTimeout(1200);
   if(process.env.ARTIFACT_DIR)await p.screenshot({path:path.join(process.env.ARTIFACT_DIR,'voice-locked-390.png')});
-  await p.locator('.tab-strip [role="tab"]').nth(1).click();
+  async function selectSession(id, index) {
+    if (width < 800) {
+      await p.getByRole('button', { name: 'Open menu', exact: true }).click();
+      await p.locator(`.session-row[data-session-id="${id}"] .session-open`).click();
+    } else await p.locator('.tab-strip [role="tab"]').nth(index).click();
+  }
+  await selectSession('other', 1);
   await p.waitForFunction(()=>!document.querySelector('.voice-overlay'));
   assert.equal(await field.inputValue(),'','switching tabs does not copy the voice draft');
-  await p.locator('.tab-strip [role="tab"]').first().click();
+  await selectSession('e2e', 0);
   assert((await field.inputValue()).startsWith('Original tab draft'),'recording stays with the original tab');
   assert.equal(rpcCalls.filter(q=>q.method==='session/prompt').length,sentBeforeEdges,'switching an active recording sends nothing');
   console.log('PASS quick flick, pending permission, stale grant cleanup, mic denial, pointercancel, and tab isolation');

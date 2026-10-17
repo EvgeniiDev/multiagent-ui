@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from '../../components/ui/UiButton.vue';
 // "New project" dialog — launched from the Projects view header.
 //
 // Two modes: (a) create a new folder on the agent host at the given path,
@@ -106,7 +107,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
     <div class="np-dialog" role="dialog" aria-modal="true" aria-label="New project">
       <header class="np-head">
         <h3>New project</h3>
-        <button
+        <UiButton variant="ghost" icon
           class="np-close"
           type="button"
           aria-label="Close"
@@ -114,34 +115,34 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
           @click="emit('close')"
         >
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-        </button>
+        </UiButton>
       </header>
 
       <div class="np-body">
         <div class="np-modes" role="group" aria-label="Creation mode">
-          <button
+          <UiButton variant="ghost"
             type="button"
-            :class="{ active: mode === 'new' }"
+            :aria-pressed="mode === 'new'"
             :disabled="busy"
             @click="mode = 'new'"
           >
             New folder
-          </button>
-          <button
+          </UiButton>
+          <UiButton variant="ghost"
             type="button"
-            :class="{ active: mode === 'existing' }"
+            :aria-pressed="mode === 'existing'"
             :disabled="busy"
             @click="mode = 'existing'"
           >
             Existing folder
-          </button>
+          </UiButton>
         </div>
 
         <label class="np-label" for="np-name">Name</label>
         <input
           id="np-name"
           v-model="name"
-          class="np-input"
+          class="ui-input np-input"
           type="text"
           placeholder="My project"
           :disabled="busy"
@@ -165,10 +166,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
       </div>
 
       <footer class="np-foot">
-        <button class="np-cancel" type="button" :disabled="busy" @click="emit('close')">
+        <UiButton variant="secondary" class="np-cancel" type="button" :disabled="busy" @click="emit('close')">
           Cancel
-        </button>
-        <button
+        </UiButton>
+        <UiButton variant="primary"
           class="np-confirm"
           type="button"
           :disabled="busy"
@@ -176,7 +177,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
           @click="confirm"
         >
           {{ busy ? 'Creating…' : 'Create project' }}
-        </button>
+        </UiButton>
       </footer>
     </div>
   </div>
@@ -226,17 +227,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-secondary, #6b6259);
-  cursor: pointer;
-}
-
-.np-close:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-primary, #2b2723);
 }
 
 .np-body {
@@ -258,19 +248,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
 .np-modes button {
   flex: 1;
   height: 30px;
-  padding: 0 0.5rem;
-  border: none;
-  background: transparent;
-  color: var(--text-muted, #a39a8e);
-  font-family: inherit;
-  font-size: 0.75rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.np-modes button.active {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-  color: var(--text-accent, #c2532f);
 }
 
 .np-label {
@@ -287,13 +264,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
 
 .np-input {
   height: 30px;
-  padding: 0 0.5rem;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-main, #fbf8f3);
-  color: var(--text-primary, #2b2723);
-  font-family: inherit;
-  font-size: 0.8125rem;
 }
 
 .np-hint {
@@ -318,41 +288,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
 
 .np-cancel {
   height: 30px;
-  padding: 0 0.875rem;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-secondary, #6b6259);
-  font-family: inherit;
-  font-size: 0.8125rem;
-  cursor: pointer;
-}
-
-.np-cancel:hover:not(:disabled) {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
 }
 
 .np-confirm {
   height: 30px;
-  padding: 0 0.875rem;
-  border: none;
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-primary, #c2532f);
-  color: var(--text-on-accent, #fbf8f3);
-  font-family: inherit;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.np-confirm:hover:not(:disabled) {
-  background: var(--bg-primary-hover, #a8431f);
-}
-
-.np-confirm:disabled,
-.np-cancel:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 @media (max-width: 800px) {

@@ -73,7 +73,7 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
     
     <Transition name="dropdown">
       <div v-if="isOpen" class="dropdown-menu" @click.stop>
-        <div 
+        <UiButton variant="option" :aria-pressed="mode.id === currentModeId"
           v-for="mode in modes"
           :key="mode.id"
           :class="['dropdown-item', { selected: mode.id === currentModeId }]"
@@ -86,7 +86,7 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
             </span>
           </div>
           <span v-if="mode.id === currentModeId" class="check-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg></span>
-        </div>
+        </UiButton>
       </div>
     </Transition>
   </div>
@@ -168,29 +168,8 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
     max-height: calc(100dvh - 6rem);
     overflow-y: auto;
   }
-  .dropdown-item { min-height: 44px; }
 }
-
-.dropdown-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-  padding: 0.625rem 0.75rem;
-  cursor: pointer;
-  transition: background 0.1s ease;
-}
-
-.dropdown-item:hover {
-  background: var(--bg-hover);
-}
-
-.dropdown-item.selected {
-  background: var(--bg-user);
-}
-
-.dropdown-item + .dropdown-item {
-  border-top: 1px solid var(--border-color);
-}
+.dropdown-item { display: flex; align-items: flex-start; gap: 0.5rem; }
 
 .item-icon {
   font-size: 1rem;

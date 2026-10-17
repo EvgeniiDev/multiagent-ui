@@ -102,7 +102,7 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
           />
         </div>
         <div class="dropdown-list">
-          <div
+          <UiButton variant="option" :aria-pressed="model.modelId === currentModelId"
             v-for="model in filteredModels"
             :key="model.modelId"
             :class="['dropdown-item', { selected: model.modelId === currentModelId }]"
@@ -115,7 +115,7 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
               </span>
             </div>
             <span v-if="model.modelId === currentModelId" class="check-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg></span>
-          </div>
+          </UiButton>
           <div v-if="filteredModels.length === 0" class="dropdown-empty">No models match</div>
         </div>
       </div>
@@ -133,8 +133,6 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
   opacity: 0.6;
   pointer-events: none;
 }
-
-/* Composer chip: text-like dropdown, no frame until hovered. */
 .model-picker.compact .model-button { max-width: 220px; }
 
 .model-spark {
@@ -147,7 +145,6 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
   top: auto;
   bottom: calc(100% + 6px);
 }
-
 .model-button { max-width: 200px; }
 
 .model-icon {
@@ -189,7 +186,6 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
 }
-
 .search-input { width: 100%; }
 
 .dropdown-list {
@@ -224,29 +220,8 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
     max-height: calc(100dvh - 6rem);
     overflow-y: auto;
   }
-  .dropdown-item { min-height: 44px; }
 }
-
-.dropdown-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-  padding: 0.625rem 0.75rem;
-  cursor: pointer;
-  transition: background 0.1s ease;
-}
-
-.dropdown-item:hover {
-  background: var(--bg-hover);
-}
-
-.dropdown-item.selected {
-  background: var(--bg-user);
-}
-
-.dropdown-item + .dropdown-item {
-  border-top: 1px solid var(--border-color);
-}
+.dropdown-item { display: flex; align-items: flex-start; gap: 0.5rem; }
 
 .item-icon {
   font-size: 1rem;

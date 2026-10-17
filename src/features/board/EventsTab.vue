@@ -36,11 +36,11 @@ const BAD_KINDS = new Set<ActivityKind>(['error', 'lock']);
 <template>
   <div class="events-tab">
     <div class="events-bar">
-      <select v-model="kindFilter" class="ev-select" aria-label="Filter events by kind">
+      <select v-model="kindFilter" class="ui-input ev-select" aria-label="Filter events by kind">
         <option value="">All kinds</option>
         <option v-for="k in kindOptions" :key="k" :value="k">{{ k }}</option>
       </select>
-      <select v-model="agentFilter" class="ev-select" aria-label="Filter events by agent">
+      <select v-model="agentFilter" class="ui-input ev-select" aria-label="Filter events by agent">
         <option value="">All agents</option>
         <option v-for="a in agentOptions" :key="a" :value="a">{{ a }}</option>
       </select>
@@ -81,21 +81,7 @@ const BAD_KINDS = new Set<ActivityKind>(['error', 'lock']);
 }
 
 .ev-select {
-  height: 28px;
-  padding: 0 0.375rem;
-  border: 1px solid var(--border-color, #e3dbcf);
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-main, #fbf8f3);
-  color: var(--text-primary, #2b2723);
-  font-family: inherit;
-  font-size: 0.75rem;
   max-width: 12rem;
-}
-
-.ev-select:focus-visible {
-  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
-  outline-offset: 1px;
-  border-color: var(--text-accent, #c2532f);
 }
 
 .ev-count {
@@ -182,9 +168,6 @@ const BAD_KINDS = new Set<ActivityKind>(['error', 'lock']);
 }
 
 @media (max-width: 800px) {
-  .ev-select {
-    height: 44px;
-  }
 
   .event-row {
     flex-wrap: wrap;

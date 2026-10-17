@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "check:ui": "node scripts/check_ui_library.mjs",
+    "build": "npm run check:ui && vue-tsc --noEmit && vite build",
     "dev:web": "vite --mode web",
-    "build:web": "vue-tsc --noEmit && vite build --mode web",
+    "build:web": "npm run check:ui && vue-tsc --noEmit && vite build --mode web",
     "preview:web": "vite preview --mode web --outDir dist-web",
     "preview": "vite preview",
     "tauri": "tauri"

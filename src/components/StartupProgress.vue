@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from './ui/UiButton.vue';
 import { computed } from 'vue';
 
 const props = defineProps<{
@@ -74,18 +75,18 @@ const isLongWait = computed(() => props.elapsedSeconds > 10);
     </div>
     
     <div class="progress-actions">
-      <button 
+      <UiButton variant="ghost" :aria-expanded="showDetails"
         class="details-btn"
         @click="emit('toggleDetails')"
       >
         {{ showDetails ? 'Hide Details ▲' : 'Show Details ▼' }}
-      </button>
-      <button 
+      </UiButton>
+      <UiButton variant="secondary"
         class="cancel-btn"
         @click="emit('cancel')"
       >
         Cancel
-      </button>
+      </UiButton>
     </div>
     
     <div v-if="showDetails" class="logs-container">
@@ -166,36 +167,6 @@ const isLongWait = computed(() => props.elapsedSeconds > 10);
   display: flex;
   gap: 0.5rem;
   justify-content: space-between;
-}
-
-.details-btn {
-  padding: 0.375rem 0.75rem;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 0.8rem;
-  cursor: pointer;
-}
-
-.details-btn:hover {
-  background: var(--bg-hover);
-}
-
-.cancel-btn {
-  padding: 0.375rem 0.75rem;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 0.8rem;
-  cursor: pointer;
-}
-
-.cancel-btn:hover {
-  background: var(--bg-hover);
-  border-color: var(--bg-danger);
-  color: var(--bg-danger);
 }
 
 .logs-container {

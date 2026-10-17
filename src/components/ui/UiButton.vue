@@ -1,16 +1,17 @@
 <script setup lang="ts">
 /** Shared native button: attributes, listeners, aria state and focus stay on the button. */
 withDefaults(defineProps<{
-  variant?: 'secondary' | 'primary' | 'danger' | 'ghost' | 'image' | 'select' | 'option';
+  variant?: 'secondary' | 'primary' | 'danger' | 'ghost' | 'image' | 'select' | 'option' | 'row' | 'tab' | 'chip';
+  tone?: 'default' | 'danger' | 'success' | 'warning';
   size?: 'sm' | 'xs';
   icon?: boolean;
   layout?: 'inline' | 'stacked';
   type?: 'button' | 'submit' | 'reset';
-}>(), { variant: 'secondary', size: 'sm', icon: false, layout: 'inline', type: 'button' });
+}>(), { tone: 'default', variant: 'secondary', size: 'sm', icon: false, layout: 'inline', type: 'button' });
 </script>
 
 <template>
-  <button :type="type" class="ds-button" :class="[`ds-button--${variant}`, `ds-button--${size}`, `ds-button--${layout}`, { 'ds-button--icon': icon }]">
+  <button :type="type" class="ds-button" :class="[`ds-button--${variant}`, `ds-button--${size}`, `ds-button--tone-${tone}`, `ds-button--${layout}`, { 'ds-button--icon': icon }]">
     <slot />
   </button>
 </template>
@@ -36,6 +37,7 @@ withDefaults(defineProps<{
   text-decoration: none;
   cursor: pointer;
   max-width: 100%;
+  white-space: nowrap;
 }
 .ds-button:hover:not(:disabled) { background: var(--tint-hover, rgba(43,39,35,0.045)); }
 .ds-button--primary {
@@ -49,15 +51,15 @@ withDefaults(defineProps<{
 .ds-button--ghost { border-color: transparent; color: var(--text-secondary, #6b6259); }
 .ds-button--image { padding: 0; border-color: transparent; overflow: hidden; cursor: zoom-in; }
 .ds-button--image:hover:not(:disabled) { border-color: var(--text-accent, #b04a28); }
-.ds-button[aria-selected='true'], .ds-button[aria-pressed='true'] {
+.ds-button[aria-selected='true'], .ds-button[aria-pressed='true'], .ds-button[aria-checked='true'] {
   background: var(--accent-soft, rgba(194,83,47,0.14));
   border-color: var(--text-accent, #b04a28);
   color: var(--text-accent, #b04a28);
 }
-.ds-button[aria-current='page'] { background: var(--bg-hover); border-color: transparent; color: var(--text-primary); }
+.ds-button[aria-current='step'], .ds-button[aria-current='page'] { background: var(--bg-hover); border-color: transparent; color: var(--text-primary); }
 .ds-button.ds-button--stacked { flex-direction: column; gap: 0.375rem; min-height: 60px; padding: 0.5rem 0.25rem; font-size: 0.6875rem; border-radius: var(--radius-lg); }
 .ds-button--select, .ds-button--option {
-  width: 100%; min-height: 44px; justify-content: flex-start;
+  white-space: normal; width: 100%; min-height: 44px; justify-content: flex-start;
   padding: 0.625rem 0.75rem; font-size: 0.8125rem; text-align: left;
 }
 .ds-button--select { background: var(--bg-main); }
@@ -65,6 +67,13 @@ withDefaults(defineProps<{
 .ds-button--option { border-color: transparent; }
 .ds-button--option[aria-selected='true'] { border-color: transparent; }
 .ds-button--option:focus-visible { outline-offset: -2px; }
+.ds-button--row { white-space: normal; width: 100%; justify-content: flex-start; text-align: left; border-color: transparent; }
+.ds-button--tab { border-color: transparent; color: var(--text-secondary); }
+.ds-button--chip { border-radius: var(--radius-sm); white-space: normal; overflow-wrap: anywhere; }
+.ds-button--tone-danger { color: var(--bg-danger); }
+.ds-button--tone-success { color: var(--bg-success); }
+.ds-button--tone-warning { color: var(--text-warning); }
+.ds-button--tone-danger:hover:not(:disabled) { background: var(--accent-danger-soft, var(--tint-hover)); color: var(--bg-danger); }
 .ds-button--xs { min-height: 24px; padding: 0.125rem 0.375rem; font-size: 0.6875rem; }
 .ds-button--icon { width: 28px; padding: 0; flex-shrink: 0; }
 .ds-button--icon.ds-button--xs { width: 24px; }

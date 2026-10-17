@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from '../../components/ui/UiButton.vue';
 import { ref, computed } from 'vue';
 import type { BoardCard, BoardStageId, CardStatus } from '../../stores/board';
 import { useRolesStore } from '../../stores/roles';
@@ -114,8 +115,8 @@ function onDragEnd() {
         :title="`${blockedCount} card(s) flagged blocked`"
       >{{ blockedCount }} blocked</span>
       <select
-        class="col-role"
-        :class="{ 'no-runner': stageRoleNoRunner }"
+        class="ui-input col-role"
+        :aria-invalid="stageRoleNoRunner || undefined"
         :value="stageRole?.id ?? ''"
         data-testid="col-role-select"
         :aria-label="`Role for ${col.label} stage`"
@@ -128,7 +129,7 @@ function onDragEnd() {
         <option value="">any runner</option>
         <option v-for="r in rolesStore.roles" :key="r.id" :value="r.id">{{ r.label }}</option>
       </select>
-      <button
+      <UiButton variant="ghost" icon
         class="col-add"
         :aria-label="`Add card (lands in Backlog)`"
         :title="`Add card — lands in Backlog`"
@@ -138,7 +139,7 @@ function onDragEnd() {
           stroke-width="2" stroke-linecap="round" aria-hidden="true">
           <path d="M12 5v14M5 12h14" />
         </svg>
-      </button>
+      </UiButton>
     </header>
 
     <div
@@ -231,61 +232,13 @@ function onDragEnd() {
   flex: 0 1 auto;
   min-width: 0;
   max-width: 7.5rem;
-  padding: 0.0625rem 0.125rem;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-sm, 4px);
-  background: transparent;
-  color: var(--text-secondary, #6b6259);
-  font-family: var(--font-mono, monospace);
-  font-size: 0.625rem;
-  cursor: pointer;
-}
-
-.col-role.no-runner {
-  color: var(--bg-danger, #b3402e);
-  border-color: var(--bg-danger, #b3402e);
-}
-
-.col-role:focus-visible {
-  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
-  outline-offset: 1px;
-}
-
-/* Phone: the select itself grows to a real touch target (min-height 44px).
-   A ::after hit-area extension was tried first, but a pseudo-element does
-   not enlarge a <select> reliably — the probe (and the popup anchoring)
-   still read the 17px element box. */
-@media (max-width: 799px) {
-  .col-role {
-    min-height: 44px;
-    padding: 0.5rem 0.5rem;
-    font-size: 0.6875rem;
-  }
 }
 
 .col-add {
   margin-left: auto;
-  width: 22px;
-  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm, 4px);
-  background: transparent;
-  color: var(--text-muted, #a39a8e);
-  cursor: pointer;
-}
-
-.col-add:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-accent, #c2532f);
-}
-
-.col-add:focus-visible {
-  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
-  outline-offset: 1px;
 }
 
 .col-body {
@@ -326,11 +279,4 @@ function onDragEnd() {
   color: var(--text-muted, #a39a8e);
 }
 
-@media (max-width: 800px) {
-  /* Hit area grows, the 13px icon stays the same. */
-  .col-add {
-    width: 44px;
-    height: 44px;
-  }
-}
 </style>

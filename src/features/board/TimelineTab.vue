@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from '../../components/ui/UiButton.vue';
 import { computed, ref } from 'vue';
 import { useActivityStore, type ActivityEntry } from '../../stores/activity';
 import { dayKey, fmtCost, fmtNum, fmtTime } from './format';
@@ -70,7 +71,7 @@ function isOpen(day: string): boolean {
 
     <ul v-else class="day-list">
       <li v-for="row in rows" :key="row.day" class="day-item">
-        <button
+        <UiButton variant="row"
           class="day-row"
           :aria-expanded="isOpen(row.day)"
           @click="toggle(row.day)"
@@ -86,7 +87,7 @@ function isOpen(day: string): boolean {
           <span class="num mono" :title="`${row.tokens} tokens`">{{ fmtNum(row.tokens) }}tok</span>
           <span class="num mono" :title="`cost ${row.cost}`">{{ fmtCost(row.cost) }}</span>
           <span class="num mono" :title="`${row.sessions} sessions touched`">{{ row.sessions }}sess</span>
-        </button>
+        </UiButton>
 
         <ul v-if="isOpen(row.day)" class="day-events">
           <li v-for="e in row.events" :key="e.id" class="event-row">
@@ -135,23 +136,6 @@ function isOpen(day: string): boolean {
   align-items: center;
   gap: 0.5rem;
   width: 100%;
-  min-height: 28px;
-  padding: 0 0.75rem;
-  border: none;
-  background: transparent;
-  font-family: inherit;
-  text-align: left;
-  cursor: pointer;
-  color: var(--text-primary, #2b2723);
-}
-
-.day-row:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-}
-
-.day-row:focus-visible {
-  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
-  outline-offset: -2px;
 }
 
 .chev {
@@ -234,9 +218,6 @@ function isOpen(day: string): boolean {
 }
 
 @media (max-width: 800px) {
-  .day-row {
-    min-height: 44px;
-  }
 
   .num {
     min-width: 0;

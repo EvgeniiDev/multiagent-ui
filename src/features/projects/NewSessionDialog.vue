@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from '../../components/ui/UiButton.vue';
 // "New session" dialog — one implementation, two entry points (Projects
 // header, Chat header). Starts a session independent of any project: an
 // agent picker fed by the configured agents plus an optional working
@@ -103,7 +104,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
     <div class="ns-dialog" role="dialog" aria-modal="true" aria-label="New session">
       <header class="ns-head">
         <h3>New session</h3>
-        <button
+        <UiButton variant="ghost" icon
           class="ns-close"
           type="button"
           aria-label="Close"
@@ -111,7 +112,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
           @click="emit('close')"
         >
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-        </button>
+        </UiButton>
       </header>
 
       <div class="ns-body">
@@ -119,7 +120,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
         <select
           id="ns-agent"
           v-model="agent"
-          class="ns-select"
+          class="ui-input ns-select"
           :disabled="busy || agents.length === 0"
           aria-label="Agent"
         >
@@ -145,17 +146,17 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
       </div>
 
       <footer class="ns-foot">
-        <button class="ns-cancel" type="button" :disabled="busy" @click="emit('close')">
+        <UiButton variant="secondary" class="ns-cancel" type="button" :disabled="busy" @click="emit('close')">
           Cancel
-        </button>
-        <button
+        </UiButton>
+        <UiButton variant="primary"
           class="ns-confirm"
           type="button"
           :disabled="!agent || busy"
           @click="confirm"
         >
           {{ busy ? 'Starting…' : 'Start session' }}
-        </button>
+        </UiButton>
       </footer>
     </div>
   </div>
@@ -205,17 +206,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-secondary, #6b6259);
-  cursor: pointer;
-}
-
-.ns-close:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-primary, #2b2723);
 }
 
 .ns-body {
@@ -246,13 +236,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
 
 .ns-select {
   height: 30px;
-  padding: 0 0.5rem;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-main, #fbf8f3);
-  color: var(--text-primary, #2b2723);
-  font-family: inherit;
-  font-size: 0.8125rem;
 }
 
 .ns-hint {
@@ -277,41 +260,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
 
 .ns-cancel {
   height: 30px;
-  padding: 0 0.875rem;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-secondary, #6b6259);
-  font-family: inherit;
-  font-size: 0.8125rem;
-  cursor: pointer;
-}
-
-.ns-cancel:hover:not(:disabled) {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
 }
 
 .ns-confirm {
   height: 30px;
-  padding: 0 0.875rem;
-  border: none;
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-primary, #c2532f);
-  color: var(--text-on-accent, #fbf8f3);
-  font-family: inherit;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.ns-confirm:hover:not(:disabled) {
-  background: var(--bg-primary-hover, #a8431f);
-}
-
-.ns-confirm:disabled,
-.ns-cancel:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 @media (max-width: 800px) {

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from './ui/UiButton.vue';
 // One tool call inside a transcript message — a dense chip whose dot carries
 // status; calls with arguments or output expand behind a quiet disclosure.
 // Appearance is self-contained: nothing here may rely on a parent's styles.
@@ -59,7 +60,7 @@ function getToolKind(kind: string): string {
 
 <template>
   <div class="tool-call-wrap">
-    <button
+    <UiButton variant="row"
       v-if="tc.rawInput != null || tc.rawOutput"
       :class="['tool-call-inline', 'is-expandable', `tool-${tc.status}`]"
       :aria-expanded="expanded"
@@ -72,7 +73,7 @@ function getToolKind(kind: string): string {
         {{ tc.locations[0].path }}
       </span>
       <span class="tool-chevron">{{ expanded ? '▾' : '▸' }}</span>
-    </button>
+    </UiButton>
     <div v-else :class="['tool-call-inline', `tool-${tc.status}`]">
       <span class="tool-dot" aria-hidden="true"></span>
       <span class="tool-kind">{{ getToolKind(tc.kind) }}</span>
@@ -93,7 +94,7 @@ function getToolKind(kind: string): string {
   min-width: 0;
 }
 
-.tool-call-inline {
+.tool-call-inline:not(.ds-button) {
   display: flex;
   align-items: center;
   gap: 0.4375rem;
@@ -104,20 +105,7 @@ function getToolKind(kind: string): string {
   font-family: var(--font-mono, monospace);
   font-size: 0.6875rem;
 }
-
-/* Expandable chips are buttons: same quiet pill, with a pointer affordance. */
-.tool-call-inline.is-expandable {
-  width: 100%;
-  border: none;
-  font: inherit;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.tool-call-inline.is-expandable:hover {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-}
+.tool-call-inline.is-expandable { width: 100%; }
 
 .tool-chevron {
   flex: 0 0 auto;
@@ -140,14 +128,6 @@ function getToolKind(kind: string): string {
   color: var(--text-secondary, #6b6259);
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-.tool-in_progress {
-  background: rgba(59, 130, 246, 0.07);
-}
-
-.tool-failed {
-  background: rgba(179, 64, 46, 0.09);
 }
 
 .tool-dot {

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from './ui/UiButton.vue';
 // Permission gate: one focused question, one primary action. Styled with the
 // app's own tokens (warm paper, terracotta accent, hairline borders) — the
 // upstream dialog shipped gray bands, emoji and bootstrap green/red that had
@@ -19,6 +20,9 @@ const emit = defineEmits<{
 }>();
 
 const primaryRef = ref<HTMLButtonElement | null>(null);
+function capturePrimary(candidate: unknown, index: number) {
+  if (index === 0) primaryRef.value = (candidate as { $el?: HTMLButtonElement } | null)?.$el ?? null;
+}
 
 /** Allow before reject, and reject before a plain cancel. */
 const OPTION_ORDER: Record<string, number> = {
@@ -103,19 +107,16 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="dialog-actions">
-        <button
+        <UiButton
           v-for="(option, index) in options"
           :key="option.optionId"
-          :ref="(el) => { if (index === 0) primaryRef = el as HTMLButtonElement | null; }"
-          :class="[
-            'option-btn',
-            isAllow(option.kind) ? 'option-allow' : (isReject(option.kind) ? 'option-reject' : ''),
-          ]"
+          :ref="(el) => capturePrimary(el, index)"
+          :variant="isAllow(option.kind) ? 'primary' : (isReject(option.kind) ? 'danger' : 'secondary')"
           @click="handleSelect(option.optionId)"
         >
           {{ option.name }}
-        </button>
-        <button class="cancel-btn" @click="handleCancel">Cancel</button>
+        </UiButton>
+        <UiButton variant="secondary" class="cancel-btn" @click="handleCancel">Cancel</UiButton>
       </div>
     </div>
   </div>
@@ -210,56 +211,5 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
   gap: 0.375rem;
   padding: 0.625rem 0.875rem 0.75rem;
-}
-
-.option-btn,
-.cancel-btn {
-  height: 30px;
-  padding: 0 0.75rem;
-  border-radius: var(--radius-md, 6px);
-  font-family: inherit;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.option-btn:focus-visible,
-.cancel-btn:focus-visible {
-  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
-  outline-offset: 2px;
-}
-
-/* Allow is the one filled control on screen. */
-.option-allow {
-  background: var(--bg-primary, #c2532f);
-  color: var(--text-on-accent, #fbf8f3);
-  border: 1px solid var(--bg-primary, #c2532f);
-}
-
-.option-allow:hover {
-  background: var(--bg-primary-hover, #a8431f);
-  border-color: var(--bg-primary-hover, #a8431f);
-}
-
-/* Reject reads as a warning without a second filled colour competing. */
-.option-reject {
-  background: transparent;
-  color: var(--bg-danger, #b3402e);
-  border: 1px solid rgba(179, 64, 46, 0.45);
-}
-
-.option-reject:hover {
-  background: rgba(179, 64, 46, 0.08);
-}
-
-.cancel-btn {
-  background: transparent;
-  color: var(--text-secondary, #6b6259);
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-}
-
-.cancel-btn:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-primary, #2b2723);
 }
 </style>

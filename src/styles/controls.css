@@ -18,7 +18,7 @@ textarea.ui-input { resize: vertical; }
 .ui-input:disabled { opacity: 0.5; cursor: not-allowed; }
 .ui-note { margin: 0; font-size: 0.75rem; line-height: 1.5; color: var(--text-secondary, #6b6259); }
 .ui-label { font-size: 0.625rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted, #786d62); }
-@media (max-width: 800px), (pointer: coarse) { .ui-input { min-height: 44px; } }
+@media (max-width: 800px), (pointer: coarse) { .ui-input { min-height: 44px; font-size: 1rem; } }
 
 /* Group related content separately from neighboring sections. */
 .ui-surface {
@@ -31,3 +31,25 @@ textarea.ui-input { resize: vertical; }
   border-left: 3px solid var(--text-accent);
   background: var(--bg-assistant);
 }
+
+/* Native semantics with shared appearance for specialized input types. */
+.ui-checkbox { width: 16px; height: 16px; flex: 0 0 auto; accent-color: var(--bg-primary); cursor: pointer; }
+.ui-range { min-width: 0; accent-color: var(--bg-primary); }
+.ui-file { max-width: 100%; font: inherit; color: var(--text-primary); }
+.ui-checkbox:focus-visible, .ui-range:focus-visible, .ui-file:focus-visible { outline: 2px solid var(--text-accent); outline-offset: 2px; }
+.ui-checkbox:disabled, .ui-range:disabled, .ui-file:disabled { opacity: 0.5; cursor: not-allowed; }
+.ui-input[aria-invalid='true'] { border-color: var(--bg-danger); }
+.ui-input--composer {
+  min-height: 34px; height: 34px; padding: 7px 0.125rem;
+  border: none; border-radius: 0; background: transparent;
+  font-size: 0.875rem; line-height: 20px; resize: none;
+}
+.ui-input--composer:focus-visible { outline-offset: -2px; }
+.ui-input--composer::placeholder { color: var(--text-muted); opacity: 1; }
+.ui-input--composer:disabled { color: var(--text-muted); }
+.ui-input--composer.voice-ghost, .ui-input--composer.voice-ghost::placeholder { color: transparent; caret-color: var(--text-primary); }
+@media (max-width: 800px), (pointer: coarse) {
+  .ui-input--composer { min-height: 44px; font-size: 16px; line-height: 22px; padding-top: 11px; padding-bottom: 11px; }
+}
+
+.ui-input.mono { font-family: var(--font-mono); }

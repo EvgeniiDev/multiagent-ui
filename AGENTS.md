@@ -25,14 +25,28 @@ they do not require rebuilding or restarting runtime services.
 Follow the deployment rules below and verify the deployed artifacts and
 affected user flow according to `TESTING.md` before reporting success.
 
-## UI design system
+## UI library is mandatory
 
-Read and follow [docs/design-system.md](docs/design-system.md) for UI changes.
-Use `src/components/ui/UiButton.vue` for new or modified action buttons and
-shared theme tokens/field primitives. Component appearance must not depend on
-parent scoped CSS. Keep page CSS for layout; extend shared primitives when a
-new variant is needed. Verify actual browser styles, theme, focus, disabled,
-and touch sizing as required by TESTING.md.
+Read and follow [docs/design-system.md](docs/design-system.md) for every UI change.
+All frontend controls must use the shared library in `src/components/ui/` and
+`src/styles/controls.css`. This applies to existing screens as well as new code.
+
+- Use `UiButton` for every action, tab, menu option, disclosure, and clickable
+  row. Native `<button>` is allowed only inside `UiButton.vue`. Preserve native
+  semantics, keyboard behavior, focus, disabled state, and accessible names.
+- Use `ui-input` for text/number/search fields, native selects, and textareas;
+  `ui-checkbox` for checkbox/radio inputs, `ui-range` for ranges, and `ui-file`
+  for file inputs. Use `UiSelect` where the in-panel popover is required.
+- Keep control appearance in the shared library. Consumer CSS may arrange or
+  size controls but must not override their colors, borders, fonts, padding,
+  hover, focus, or disabled styles. Use theme tokens in shared primitives.
+- If a control needs a new appearance or behavior, extend or add a shared
+  primitive first. Do not introduce page-local copies or exempt an old control
+  from this rule. Keep specialized gesture, chart/SVG, drag, and document
+  semantics intact; share their actual action buttons and editable fields.
+- Run `npm run check:ui` and affected browser checks before committing. Both
+  frontend builds run this policy check automatically. Do not weaken the check
+  or add per-screen exceptions to make a build pass.
 
 ## Runtime: explicit mode for five ACP bridges; other services unchanged
 

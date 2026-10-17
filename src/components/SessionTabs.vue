@@ -72,47 +72,50 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
     <div
       v-for="rt in tabs"
       :key="rt.id"
-      class="tab"
-      :class="{
-        active: rt.id === activeId,
-        disconnected: !rt.isConnected && !rt.isConnecting,
-      }"
-      role="tab"
-      :aria-selected="rt.id === activeId"
-      :title="tooltip(rt)"
-      @click="activate(rt)"
-      @mousedown="onMiddleClick(rt, $event)"
+      class="session-tab"
     >
-      <!-- status: working > permission > error > unread -->
-      <span
-        v-if="rt.isConnecting || (rt.isLoading && rt.isConnected)"
-        class="tab-spin"
-        aria-hidden="true"
-      ></span>
-      <span
-        v-else-if="rt.pendingPermission"
-        class="tab-badge perm"
-        title="Waiting for permission"
-      >!</span>
-      <span
-        v-else-if="rt.error"
-        class="tab-badge err"
-        title="Error"
-      >!</span>
-      <span
-        v-else-if="rt.unread"
-        class="tab-dot"
-        aria-hidden="true"
-      ></span>
-      <span
-        v-else-if="!rt.isConnected && !rt.isConnecting"
-        class="tab-dot dead"
-        title="Disconnected"
-      ></span>
+      <UiButton variant="tab" class="tab"
+        :class="{
+          active: rt.id === activeId,
+          disconnected: !rt.isConnected && !rt.isConnecting,
+        }"
+        role="tab"
+        :aria-selected="rt.id === activeId"
+        :title="tooltip(rt)"
+        @click="activate(rt)"
+        @mousedown="onMiddleClick(rt, $event)"
+      >
+        <!-- status: working > permission > error > unread -->
+        <span
+          v-if="rt.isConnecting || (rt.isLoading && rt.isConnected)"
+          class="tab-spin"
+          aria-hidden="true"
+        ></span>
+        <span
+          v-else-if="rt.pendingPermission"
+          class="tab-badge perm"
+          title="Waiting for permission"
+        >!</span>
+        <span
+          v-else-if="rt.error"
+          class="tab-badge err"
+          title="Error"
+        >!</span>
+        <span
+          v-else-if="rt.unread"
+          class="tab-dot"
+          aria-hidden="true"
+        ></span>
+        <span
+          v-else-if="!rt.isConnected && !rt.isConnecting"
+          class="tab-dot dead"
+          title="Disconnected"
+        ></span>
 
-      <span class="tab-title">{{ title(rt) }}</span>
-      <span v-if="severalAgents" class="tab-agent">{{ agent(rt) }}</span>
+        <span class="tab-title">{{ title(rt) }}</span>
+        <span v-if="severalAgents" class="tab-agent">{{ agent(rt) }}</span>
 
+      </UiButton>
       <UiButton
         class="tab-close"
         variant="ghost"
@@ -131,6 +134,7 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
 </template>
 
 <style scoped>
+.session-tab { display: flex; align-items: center; flex: 0 0 auto; min-width: 0; }
 /* Pure scroll container: the bar chrome (background, border, padding) lives
  * on .session-navigation in App.vue so the "+" menu and the tabs share one
  * strip. */
@@ -144,38 +148,8 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
   overflow-y: hidden;
   scrollbar-width: thin;
 }
-
-.tab {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  max-width: 220px;
-  padding: 4px 6px 4px 10px;
-  border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
-  color: var(--text-muted);
-  font-size: 0.75rem;
-  line-height: 1.3;
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
-}
-
-.tab:hover {
-  background: var(--tint-hover);
-  color: var(--text-primary);
-}
-
-.tab.active {
-  background: var(--bg-main);
-  border-color: var(--border-faint);
-  color: var(--text-primary);
-  /* The open "file" merges into the content area below the strip. */
-  margin-bottom: -1px;
-  padding-bottom: 5px;
-}
+.tab { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 220px; user-select: none; white-space: nowrap; }
+.tab.active { margin-bottom: -1px; }
 
 .tab.disconnected:not(.active) .tab-title {
   opacity: 0.7;
@@ -247,17 +221,7 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
   background: var(--bg-danger);
   color: var(--text-on-accent);
 }
-
-.tab-close {
-  flex: 0 0 auto;
-  opacity: 0;
-}
-
-.tab:hover .tab-close,
-.tab:focus-within .tab-close,
-.tab.active .tab-close {
-  opacity: 1;
-}
+.tab-close { flex: 0 0 auto; }
 
 .tab-close-icon {
   width: 14px;
@@ -265,9 +229,6 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
 }
 
 @media (max-width: 800px), (pointer: coarse) {
-  .tab-close {
-    opacity: 1;
-  }
 
   .tab-close-icon {
     width: 20px;

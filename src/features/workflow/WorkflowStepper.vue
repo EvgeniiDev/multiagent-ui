@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from '../../components/ui/UiButton.vue';
 // The stepper: one row per NODE_DEFS[direction] node, expandable to the
 // blocks its events project to.
 //
@@ -36,9 +37,9 @@ function statusOf(index: number): 'idle' | 'active' | 'done' {
       class="wf-node"
       :data-node="node.id"
     >
-      <button
+      <UiButton variant="row"
         class="wf-node-row"
-        :class="statusOf(i)"
+        :aria-current="statusOf(i) === 'active' ? 'step' : undefined"
         type="button"
         :aria-expanded="props.expandedNodeId === node.id"
         @click="emit('toggle', node.id)"
@@ -48,7 +49,7 @@ function statusOf(index: number): 'idle' | 'active' | 'done' {
         <span v-if="props.counts[node.id]" class="wf-node-count mono">{{ props.counts[node.id] }}</span>
         <span v-if="statusOf(i) === 'active'" class="wf-node-live" aria-label="active">●</span>
         <span v-else-if="statusOf(i) === 'done'" class="wf-node-done" aria-label="done">✓</span>
-      </button>
+      </UiButton>
       <div v-if="props.expandedNodeId === node.id" class="wf-node-body">
         <div v-if="props.expandedBlocks.length === 0" class="wf-node-empty">—</div>
         <div v-else class="wf-node-scroll">
@@ -78,22 +79,7 @@ function statusOf(index: number): 'idle' | 'active' | 'done' {
   gap: 0.5rem;
   width: 100%;
   min-height: 32px;
-  padding: 0.25rem 1rem;
-  border: none;
-  background: transparent;
-  font: inherit;
   text-align: left;
-  cursor: pointer;
-}
-.wf-node-row:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-}
-.wf-node-row:focus-visible {
-  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
-  outline-offset: -2px;
-}
-.wf-node-row.active {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
 }
 
 .mono {

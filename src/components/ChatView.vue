@@ -1095,10 +1095,10 @@ function planGlyph(status: string): string {
 
         <!-- Collapsed reasoning: a quiet inline disclosure, closed by default. -->
         <div v-if="message.thought && message.role === 'assistant'" class="thought-section">
-          <button class="thought-toggle" @click="toggleThought(message.id)">
+          <UiButton variant="ghost" class="thought-toggle" @click="toggleThought(message.id)">
             <span class="thought-chevron">{{ isThoughtExpanded(message.id) ? '▾' : '▸' }}</span>
             <span class="thought-label">{{ isThoughtExpanded(message.id) ? 'Hide thinking' : 'Thinking' }}</span>
-          </button>
+          </UiButton>
           <div v-if="isThoughtExpanded(message.id)" class="thought-content">
             <div v-mermaid v-html="renderMarkdown(message.thought)" />
           </div>
@@ -1172,12 +1172,12 @@ function planGlyph(status: string): string {
            dismissed while a newer one re-arms the strip. -->
       <div v-if="showUpdateNag && updateNag" class="update-nag" role="status">
         <span class="update-nag-text" :title="updateNag.text">{{ updateNag.text }}</span>
-        <button
+        <UiButton variant="ghost" icon
           class="update-nag-close"
           @click="dismissUpdateNag"
           title="Dismiss"
           aria-label="Dismiss update notice"
-        >×</button>
+        >×</UiButton>
       </div>
 
       <CommandPalette
@@ -1205,12 +1205,12 @@ function planGlyph(status: string): string {
           <span v-else class="attach-glyph" aria-hidden="true">▤</span>
           <span class="attach-name" :title="att.name">{{ att.name }}</span>
           <span class="attach-size">{{ formatBytes(att.size) }}</span>
-          <button
+          <UiButton variant="ghost" icon tone="danger"
             class="attach-remove"
             @click="removeAttachment(att.id)"
             title="Remove attachment"
             aria-label="Remove attachment"
-          >×</button>
+          >×</UiButton>
         </div>
       </div>
 
@@ -1228,7 +1228,7 @@ function planGlyph(status: string): string {
              then the context meter and send on the right. -->
         <div ref="composerBox" class="composer-box" @paste="handlePaste">
           <div class="composer-field">
-            <textarea
+            <textarea class="ui-input ui-input--composer"
               ref="composerEl"
               v-model="inputText"
               :class="{ 'voice-ghost': voiceActive }"
@@ -1275,7 +1275,7 @@ function planGlyph(status: string): string {
             </UiButton>
             <input
               ref="fileInput"
-              class="file-input"
+              class="ui-file file-input"
               type="file"
               multiple
               accept="image/*,.txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.xml,.html,.css,.js,.mjs,.ts,.tsx,.vue,.py,.sh,.sql,.toml,.ini,.cfg,.conf,.diff,.patch"
@@ -1910,19 +1910,6 @@ function planGlyph(status: string): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm, 4px);
-  background: transparent;
-  color: var(--text-muted, #a39a8e);
-  font-size: 1rem;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.attach-remove:hover {
-  background: var(--bg-danger-hover, #9c3524);
-  color: var(--text-on-accent, #fbf8f3);
 }
 
 .attach-error {
@@ -1960,19 +1947,6 @@ function planGlyph(status: string): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm, 4px);
-  background: transparent;
-  color: var(--text-secondary, #6b6259);
-  font-size: 1rem;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.update-nag-close:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-primary, #2b2723);
 }
 
 /* Sent attachments in the transcript: one bordered block per file, stacked,
@@ -1993,28 +1967,8 @@ function planGlyph(status: string): string {
   min-width: 0;
   min-height: 34px;
   height: 34px;
-  padding: 7px 0.125rem;
-  border: none;
-  background: transparent;
-  font-size: 0.875rem;
-  font-family: inherit;
-  line-height: 20px;
-  color: var(--text-primary, #2b2723);
   resize: none;
   overflow-y: hidden;
-}
-
-.composer-box textarea:focus {
-  outline: none;
-}
-
-.composer-box textarea::placeholder {
-  color: var(--text-muted, #786d62);
-  opacity: 1;
-}
-
-.composer-box textarea:disabled {
-  color: var(--text-muted, #786d62);
 }
 
 /* Wrapper keeps the dictation overlay pinned exactly over the textarea. */
@@ -2030,16 +1984,12 @@ function planGlyph(status: string): string {
  * committed words in the field's normal colour, the volatile hypothesis in
  * muted. Metrics mirror the textarea's so the two layers sit pixel-aligned. */
 .composer-box textarea.voice-ghost {
-  color: transparent;
   caret-color: var(--text-primary, #2b2723);
 }
 
 /* An empty field still matches :placeholder-shown while dictating (the
  * voice text lives in the overlay, not the value), so the hint would print
  * under the first dictated words — hide it for the take. */
-.composer-box textarea.voice-ghost::placeholder {
-  color: transparent;
-}
 
 .voice-overlay {
   position: absolute;
@@ -2140,10 +2090,6 @@ function planGlyph(status: string): string {
   .composer-box textarea {
     /* Avoid iOS auto-zoom on focus when font-size < 16px. Rest height
      * stays level with the 44px touch buttons: 22px line + 22px padding. */
-    font-size: 16px;
-    line-height: 22px;
-    padding-top: 11px;
-    padding-bottom: 11px;
     min-height: 44px;
   }
 
@@ -2245,17 +2191,6 @@ function planGlyph(status: string): string {
   align-items: center;
   gap: 0.3125rem;
   align-self: flex-start;
-  padding: 0;
-  border: none;
-  background: none;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 0.75rem;
-  color: var(--text-muted, #a39a8e);
-}
-
-.thought-toggle:hover {
-  color: var(--text-secondary, #6b6259);
 }
 
 .thought-label {

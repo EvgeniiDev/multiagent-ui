@@ -1294,7 +1294,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
                 <input v-model="row.run" class="f-input ui-input mono" placeholder="npm run test" aria-label="check command" :disabled="busy" />
                 <input v-model="row.cwd" class="f-input ui-input mono check-cwd" placeholder="cwd" aria-label="check cwd" :disabled="busy" />
                 <input v-model="row.timeoutSec" class="f-input ui-input check-tmo" placeholder="sec" aria-label="check timeout" :disabled="busy" />
-                <label class="check-setup"><input v-model="row.setup" type="checkbox" :disabled="busy" /> setup</label>
+                <label class="check-setup"><input class="ui-checkbox" v-model="row.setup" type="checkbox" :disabled="busy" /> setup</label>
                 <UiButton icon class="link-del" aria-label="remove check" :disabled="busy" @click="planCheckRows!.splice(i, 1)">×</UiButton>
               </div>
               <UiButton class="link-add" data-testid="add-check" :disabled="busy" @click="addCheckRow">+ Add check</UiButton>
@@ -1433,7 +1433,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
                 <option value="implementation">implementation — integrate + gates</option>
               </select>
               <label class="check-setup">
-                <input v-model="fusionSearch" type="checkbox" data-testid="fusion-search" /> web search
+                <input class="ui-checkbox" v-model="fusionSearch" type="checkbox" data-testid="fusion-search" /> web search
               </label>
               <input v-model="fusionBaseRef" class="f-input ui-input mono exec-grow" placeholder="base ref (default HEAD)" data-testid="fusion-baseref" />
             </div>
@@ -1597,7 +1597,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
             <div class="exec-btnrow">
               <input v-model="orchBaseRef" class="f-input ui-input mono exec-grow" placeholder="base ref (default HEAD)" data-testid="orch-baseref" />
               <label class="check-setup">
-                <input v-model="orchSpecApproval" type="checkbox" data-testid="orch-spec-approval" /> require spec approval
+                <input class="ui-checkbox" v-model="orchSpecApproval" type="checkbox" data-testid="orch-spec-approval" /> require spec approval
               </label>
             </div>
             <div class="exec-limits">
@@ -1662,7 +1662,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
             <div class="exec-btnrow">
               <input v-model="swarmBaseRef" class="f-input ui-input mono exec-grow" placeholder="base ref (default HEAD)" data-testid="swarm-baseref" />
               <label class="check-setup">
-                <input v-model="swarmVerify" type="checkbox" data-testid="swarm-verify" /> verify required
+                <input class="ui-checkbox" v-model="swarmVerify" type="checkbox" data-testid="swarm-verify" /> verify required
               </label>
             </div>
             <div class="exec-limits">
@@ -1746,7 +1746,7 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
         <div class="exec-startrow">
           <input v-model="startBaseRef" class="f-input ui-input mono" placeholder="base ref (default HEAD)" data-testid="start-baseref" />
           <label class="check-setup">
-            <input v-model="startFreshWorkspace" type="checkbox" /> fresh workspace
+            <input class="ui-checkbox" v-model="startFreshWorkspace" type="checkbox" /> fresh workspace
           </label>
         </div>
         <input
@@ -2315,10 +2315,10 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
           </div>
 
           <div v-if="runArtifacts.length" class="exec-artifacts" data-testid="run-artifacts">
-            <UiButton
+            <UiButton variant="row"
               v-for="a in runArtifacts"
               :key="a.id"
-              class="art-row mono"
+              class="art-row"
               :title="a.file ?? a.id"
               @click="onOpenArtifact(a.id)"
             >
@@ -2347,22 +2347,19 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
 
         <!-- run history -->
         <div v-if="view.runs.length" class="exec-history" data-testid="run-history">
-          <div
+          <UiButton variant="row"
             v-for="r in [...view.runs].reverse()"
             :key="r.id"
-            class="exec-histrow mono"
-            :class="{ sel: st.selectedRunId === r.id }"
-            role="button"
-            tabindex="0"
+            class="exec-histrow"
+            :aria-pressed="st.selectedRunId === r.id"
             @click="exec.selectRun(props.cardId, r.id)"
-            @keydown.enter="exec.selectRun(props.cardId, r.id)"
           >
             {{ shortId(r.id) }} · {{ runStatusLabel(r.status) }}
             <span v-if="r.mode && r.mode !== 'solo'" class="exec-mode" :title="`${r.mode} run`">{{ r.mode }}</span>
             <span v-if="r.pending" class="exec-pending-badge" title="this run is waiting on a user decision">needs you</span>
             <span v-if="r.reserved" class="exec-warn" title="a live attempt or unproven validation still reserves this run">reserved</span>
             <span v-if="r.id === view.currentRunId" class="exec-current">current</span>
-          </div>
+          </UiButton>
         </div>
       </div>
     </template>
@@ -2377,7 +2374,9 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
   padding-top: 0.625rem;
 }
 .art-head { display: flex; align-items: center; gap: 0.5rem; }
-.art-refresh { margin-left: auto; }
+.art-refresh {
+  margin-left: auto;
+}
 .status-token { font-size: 0.625rem; padding: 0.0625rem 0.3rem; border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: var(--text-secondary); }
 .tok-blocked { color: var(--bg-danger); border-color: var(--bg-danger); }
 .art-error { margin: 0; font-size: 0.75rem; color: var(--bg-danger); }
@@ -2451,9 +2450,6 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
   gap: 0.25rem;
   align-items: center;
 }
-.check-editrow .f-input {
-  font-size: 0.6875rem;
-}
 .check-cwd {
   width: 5.5rem;
 }
@@ -2475,7 +2471,6 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
   align-items: center;
 }
 .exec-member .f-input {
-  font-size: 0.6875rem;
   min-width: 0;
 }
 .exec-member .f-input[aria-label$="params"] {
@@ -2499,7 +2494,6 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
 }
 .exec-num {
   width: 3.5rem;
-  font-size: 0.6875rem;
 }
 .exec-startrow {
   display: flex;
@@ -2508,7 +2502,6 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
 }
 .exec-startrow .f-input {
   flex: 1;
-  font-size: 0.6875rem;
 }
 .exec-detail {
   display: flex;
@@ -2599,20 +2592,9 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
   gap: 0.125rem;
 }
 .exec-histrow {
-  font-size: 0.625rem;
-  color: var(--text-secondary, #6b6259);
-  padding: 0.125rem 0.25rem;
-  border-radius: var(--radius-sm, 4px);
-  cursor: pointer;
   display: flex;
   gap: 0.5rem;
   align-items: baseline;
-}
-.exec-histrow:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-}
-.exec-histrow.sel {
-  background: var(--accent-soft, rgba(194, 83, 47, 0.14));
 }
 .exec-current {
   color: var(--text-accent, #c2532f);
@@ -2648,9 +2630,6 @@ async function onSwarmDecide(decisionId: string, outcome: 'approve' | 'reject') 
 }
 .exec-member-swarm {
   grid-template-columns: 2.5rem 4rem 1fr 1fr auto;
-}
-.exec-cs {
-  text-align: center;
 }
 .exec-participant {
   display: flex;

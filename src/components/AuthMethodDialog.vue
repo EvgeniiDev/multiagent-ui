@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from './ui/UiButton.vue';
 import type { AuthMethod } from '@agentclientprotocol/sdk';
 
 defineProps<{
@@ -24,7 +25,7 @@ function handleSelect(methodId: string) {
     <div class="auth-dialog">
       <div class="dialog-header">
         <h3>Authentication Required</h3>
-        <button class="close-btn" aria-label="Close" @click="emit('cancel')"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+        <UiButton variant="ghost" icon class="close-btn" aria-label="Close" @click="emit('cancel')"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></UiButton>
       </div>
       
       <div class="dialog-content">
@@ -34,7 +35,7 @@ function handleSelect(methodId: string) {
         </p>
         
         <div class="auth-methods">
-          <button
+          <UiButton variant="row"
             v-for="method in authMethods"
             :key="method.id"
             class="auth-method-btn"
@@ -47,7 +48,7 @@ function handleSelect(methodId: string) {
               </span>
             </div>
             <span class="arrow">→</span>
-          </button>
+          </UiButton>
         </div>
 
         <p class="auth-escape">
@@ -56,12 +57,12 @@ function handleSelect(methodId: string) {
       </div>
 
       <div class="dialog-footer">
-        <button class="new-session-btn" @click="emit('newSession')">
+        <UiButton variant="primary" class="new-session-btn" @click="emit('newSession')">
           New session
-        </button>
-        <button class="cancel-btn" @click="emit('cancel')">
+        </UiButton>
+        <UiButton variant="secondary" class="cancel-btn" @click="emit('cancel')">
           Cancel
-        </button>
+        </UiButton>
       </div>
     </div>
   </div>
@@ -101,19 +102,6 @@ function handleSelect(methodId: string) {
   font-weight: 600;
 }
 
-.close-btn {
-  border: none;
-  background: transparent;
-  font-size: 1.25rem;
-  cursor: pointer;
-  color: var(--text-secondary);
-  padding: 0.25rem;
-}
-
-.close-btn:hover {
-  color: var(--text-primary);
-}
-
 .dialog-content {
   padding: 1.25rem;
 }
@@ -137,24 +125,7 @@ function handleSelect(methodId: string) {
   color: var(--text-muted);
   font-size: 0.8rem;
 }
-
-.auth-method-btn {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.875rem 1rem;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: var(--bg-sidebar);
-  cursor: pointer;
-  text-align: left;
-  transition: all 0.15s ease;
-}
-
-.auth-method-btn:hover {
-  border-color: var(--bg-primary);
-  background: var(--bg-hover);
-}
+.auth-method-btn { display: flex; align-items: center; justify-content: space-between; }
 
 .method-info {
   display: flex;
@@ -188,37 +159,5 @@ function handleSelect(methodId: string) {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-}
-
-/* Accent CTA, same language as the welcome screen's .welcome-new-session —
- * the button reads as the primary way out of this prompt. */
-.new-session-btn {
-  padding: 0.5rem 1rem;
-  border: none;
-  border-radius: 4px;
-  background: var(--bg-primary);
-  color: var(--text-on-accent, #fbf8f3);
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 0.9rem;
-  font-weight: 600;
-}
-
-.new-session-btn:hover {
-  background: var(--bg-primary-hover);
-}
-
-.cancel-btn {
-  padding: 0.5rem 1rem;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 0.9rem;
-}
-
-.cancel-btn:hover {
-  background: var(--bg-hover);
 }
 </style>

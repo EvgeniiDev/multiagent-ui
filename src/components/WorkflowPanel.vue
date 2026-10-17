@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from './ui/UiButton.vue';
 // Workflow side panel — the porch-run stepper docked next to the chat feed
 // (composer's run-mode = "workflow"). Same store and stepper as the former
 // top-level Workflow view, minus the run-list strip: in a narrow column the
@@ -219,7 +220,7 @@ async function onManagedApproveWo(versionId: string) {
     </header>
 
     <nav class="tab-bar" aria-label="Workflow direction">
-      <button
+      <UiButton variant="tab"
         v-for="d in DIRECTIONS"
         :key="d"
         class="tab-btn"
@@ -230,7 +231,7 @@ async function onManagedApproveWo(versionId: string) {
         @click="wf.setDirection(d)"
       >
         {{ DIR_LABELS[d] }}
-      </button>
+      </UiButton>
     </nav>
 
     <div v-if="wf.staleText" class="wf-banner" role="status">{{ wf.staleText }}</div>
@@ -246,7 +247,7 @@ async function onManagedApproveWo(versionId: string) {
           <span class="managed-title">Managed runs</span>
           <span v-if="exec.indexError" class="managed-err">{{ exec.indexError }}</span>
         </div>
-        <div
+        <UiButton variant="row" :aria-pressed="exec.focused?.cardId === mc.cardId"
           v-for="mc in exec.managedIndex"
           :key="mc.cardId"
           class="managed-row mono"
@@ -257,7 +258,7 @@ async function onManagedApproveWo(versionId: string) {
           <span v-if="mc.currentRun?.mode === 'fusion'" class="managed-mode" title="fusion panel run">fusion</span>
           <span v-if="mc.currentRun?.pending" class="managed-pending" :data-testid="`managed-pending-${mc.cardId}`" title="this run is waiting on a user decision">needs you</span>
           <span class="managed-run">{{ mc.currentRunId ? execShortId(mc.currentRunId) : 'no run' }}</span>
-        </div>
+        </UiButton>
 
         <div v-if="exec.focused" class="managed-detail" data-testid="managed-detail">
           <div class="managed-detailhead mono">
@@ -272,7 +273,7 @@ async function onManagedApproveWo(versionId: string) {
           <div v-if="focusedRuns.length" class="managed-runsel">
             <label class="managed-sub mono">run
               <select
-                class="f-input managed-sel"
+                class="ui-input managed-sel"
                 :value="focusedState?.selectedRunId ?? ''"
                 data-testid="managed-run-select"
                 @change="onSelectManagedRun"
@@ -285,7 +286,7 @@ async function onManagedApproveWo(versionId: string) {
           </div>
           <p v-if="focusedState?.runError" class="managed-err mono" data-testid="managed-run-error">
             {{ focusedState.runError }}
-            <button class="btn" data-testid="managed-run-retry" @click="exec.focused && void exec.refreshRun(exec.focused.cardId)">retry</button>
+            <UiButton variant="secondary" data-testid="managed-run-retry" @click="exec.focused && void exec.refreshRun(exec.focused.cardId)">retry</UiButton>
           </p>
           <p v-else-if="!focusedRun" class="managed-sub mono">
             {{ focusedState?.runInflight ? 'loading run detail…' : 'no detail loaded' }}
@@ -312,29 +313,26 @@ async function onManagedApproveWo(versionId: string) {
               >
                 <span class="managed-warn">{{ pendingActionText(a, focusedRun) }}</span>
                 <template v-if="a.type === 'participant_decision'">
-                  <button
-                    class="btn managed-actionbtn"
+                  <UiButton variant="secondary"
                     :data-testid="`managed-retry-${a.participantId}`"
                     :disabled="fusionGate(canRetryParticipant(focusedRun, a.participantId)).disabled"
                     :title="fusionGate(canRetryParticipant(focusedRun, a.participantId)).title"
                     @click="onManagedRetry(a.participantId)"
-                  >retry</button>
-                  <button
-                    class="btn managed-actionbtn"
+                  >retry</UiButton>
+                  <UiButton variant="secondary"
                     :data-testid="`managed-exclude-${a.participantId}`"
                     :disabled="fusionGate(canExcludePanelist(focusedRun, a.participantId)).disabled"
                     :title="fusionGate(canExcludePanelist(focusedRun, a.participantId)).title"
                     @click="onManagedExclude(a.participantId)"
-                  >exclude</button>
+                  >exclude</UiButton>
                 </template>
-                <button
+                <UiButton variant="secondary"
                   v-else-if="a.type === 'work_order_approval'"
-                  class="btn managed-actionbtn"
                   :data-testid="`managed-approve-${a.versionId}`"
                   :disabled="fusionGate(canApproveWorkOrder(focusedRun, a.versionId)).disabled"
                   :title="fusionGate(canApproveWorkOrder(focusedRun, a.versionId)).title"
                   @click="onManagedApproveWo(a.versionId)"
-                >approve work order</button>
+                >approve work order</UiButton>
               </div>
             </div>
 
@@ -419,36 +417,7 @@ async function onManagedApproveWo(versionId: string) {
   border-bottom: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
   overflow-x: auto;
 }
-
-.tab-btn {
-  display: flex;
-  align-items: center;
-  gap: 0.3rem;
-  min-height: 28px;
-  padding: 0 0.5rem;
-  border: none;
-  border-bottom: 2px solid transparent;
-  background: transparent;
-  color: var(--text-secondary, #6b6259);
-  font-family: inherit;
-  font-size: 0.71875rem;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.tab-btn:hover {
-  color: var(--text-primary, #2b2723);
-}
-
-.tab-btn.active {
-  color: var(--text-accent, #c2532f);
-  border-bottom-color: var(--text-accent, #c2532f);
-}
-
-.tab-btn:focus-visible {
-  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
-  outline-offset: -2px;
-}
+.tab-btn { display: flex; align-items: center; gap: 0.3rem; white-space: nowrap; }
 
 .wf-banner {
   padding: 0.3125rem 0.875rem;
@@ -522,21 +491,7 @@ async function onManagedApproveWo(versionId: string) {
   font-size: 0.625rem;
   color: var(--text-accent, #c2532f);
 }
-.managed-row {
-  display: flex;
-  gap: 0.5rem;
-  font-size: 0.625rem;
-  padding: 0.1875rem 0.25rem;
-  border-radius: var(--radius-sm, 4px);
-  cursor: pointer;
-  color: var(--text-secondary, #6b6259);
-}
-.managed-row:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-}
-.managed-row.sel {
-  background: var(--accent-soft, rgba(194, 83, 47, 0.14));
-}
+.managed-row { display: flex; gap: 0.5rem; }
 .managed-card {
   min-width: 0;
   overflow: hidden;
@@ -571,10 +526,7 @@ async function onManagedApproveWo(versionId: string) {
   align-items: center;
   gap: 0.375rem;
 }
-.managed-sel {
-  font-size: 0.625rem;
-  max-width: 100%;
-}
+.managed-sel { max-width: 100%; }
 /* F4 fusion badges + pending actions */
 .managed-mode {
   color: var(--text-accent, #c2532f);
@@ -608,10 +560,5 @@ async function onManagedApproveWo(versionId: string) {
   font-size: 0.625rem;
   flex: 1;
   min-width: 10rem;
-}
-.managed-actionbtn {
-  font-size: 0.625rem;
-  min-height: 22px;
-  padding: 0 0.5rem;
 }
 </style>

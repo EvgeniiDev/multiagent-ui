@@ -70,8 +70,13 @@ const assert = require('node:assert/strict');
       await page.goto(`${base}/chat?s=E2E%3A%3Ae2e`, { waitUntil: 'domcontentloaded' });
       await page.locator('.chat-view:visible .messages').getByText('Background transcript', { exact: false }).first().waitFor();
       await page.waitForTimeout(300);
-      await page.getByRole('button', { name: 'New session', exact: true }).click();
-      const menu = page.locator('.nsm-menu');
+      async function openNewSession() {
+        const action = page.getByRole('button', { name: 'New session', exact: true });
+        if (width < 800 && !await action.isVisible()) await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+        await action.click();
+      }
+      await openNewSession();
+      const menu = page.locator(width < 800 ? '.ns-dialog' : '.nsm-menu');
       await menu.getByRole('button', { name: 'Browse directories' }).click();
       await menu.locator('.dir-row').filter({ hasText: 'projects' }).click();
       await page.waitForFunction(() => document.querySelector('.selected-path')?.textContent === '/tmp/projects');
@@ -85,14 +90,15 @@ const assert = require('node:assert/strict');
       });
       for (let i = 0; i < 3; i++) {
         update({ sessionUpdate: 'tool_call', toolCallId: `picker-${i}`, title: `Background tool ${i}`, kind: 'execute', status: 'in_progress' });
-        await page.getByText(`Background tool ${i}`, { exact: false }).first().waitFor();
+        await page.getByText(`Background tool ${i}`, { exact: false }).first().waitFor({ state: 'attached' });
         await page.waitForTimeout(100);
         assert(await menu.isVisible(), 'background tool auto-scroll must not dismiss New session');
         assert(await menu.locator('.tree-overlay').isVisible(), 'folder browser stays open');
         assert.equal(await menu.locator('.selected-path').textContent(), '/tmp/projects', 'browsed folder survives background tools');
         assert(await menu.locator('.hidden-toggle input').isChecked(), 'picker options survive');
       }
-      assert(await page.evaluate(() => window.pickerScrolls > 0), 'fixture must trigger actual chat auto-scroll');
+      if (width < 800) assert.equal(await page.evaluate(() => window.pickerScrolls), 0, 'covered mobile chat must stay still while the session page owns the screen');
+      else assert(await page.evaluate(() => window.pickerScrolls > 0), 'desktop fixture must trigger actual chat auto-scroll');
       await menu.getByRole('button', { name: 'Use this directory', exact: true }).click();
       assert.equal(await menu.locator('.cwd-input').inputValue(), '/tmp/projects');
       await menu.locator('.cwd-input').fill('/tmp/manual-draft');
@@ -101,9 +107,13 @@ const assert = require('node:assert/strict');
       assert.equal(await menu.locator('.cwd-input').inputValue(), '/tmp/manual-draft', 'typed path survives streamed text');
       await page.keyboard.press('Escape');
       assert(!await menu.isVisible(), 'Escape still closes the menu');
-      await page.getByRole('button', { name: 'New session', exact: true }).click();
+      await openNewSession();
       await page.mouse.click(width - 8, 500);
       assert(!await menu.isVisible(), 'outside click still closes the menu');
+      if (width < 800) {
+        await page.locator('.session-row[data-session-id="e2e"] .session-open').click();
+        await page.getByText('Background tool 2', { exact: false }).first().waitFor();
+      }
       assert.deepEqual(errors, []);
       assert.deepEqual(failedHttp, []);
       console.log(`PASS ${width}px: background tool calls, real auto-scroll, preserved folder/options/draft, Escape, outside click`);

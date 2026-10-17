@@ -495,7 +495,7 @@ function clearError() {
   >
     <!-- View rail: the shell's top-level navigation (Chat · Projects · Board · Dashboard) -->
     <nav class="view-rail" aria-label="Main views">
-      <button
+      <UiButton variant="ghost" icon
         v-for="view in VIEWS"
         :key="view.id"
         class="rail-btn"
@@ -530,7 +530,7 @@ function clearError() {
           viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
         ><circle cx="6" cy="6" r="2.4" /><circle cx="6" cy="18" r="2.4" /><circle cx="18" cy="12" r="2.4" /><path d="M8.4 6H12a3 3 0 0 1 3 3v.6M8.4 18H12a3 3 0 0 0 3-3v-.6" /></svg>
-      </button>
+      </UiButton>
     </nav>
 
     <!-- Sidebar (slides in as a drawer on narrow viewports). Global on
@@ -608,14 +608,14 @@ function clearError() {
     />
 
     <!-- Collapsed sidebar toggle -->
-    <button 
+    <UiButton variant="ghost" icon
       v-if="!showSidebar" 
       class="sidebar-toggle-collapsed"
       aria-label="Expand sidebar"
       @click="toggleSidebar"
     >
       <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 6l6 6-6 6"/></svg>
-    </button>
+    </UiButton>
     
     <!-- Main Content Area -->
     <div class="main-area" :inert="mobileSessionPage" :aria-hidden="mobileSessionPage || undefined" :style="{ '--mobile-navigation-height': isNarrowLayout && !mobileNavigationHidden ? '52px' : '0px' }">
@@ -646,13 +646,13 @@ function clearError() {
         <div v-else-if="error" class="error-banner">
           <span class="error-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2.5 20h19zM12 10v4.5M12 17.5h.01"/></svg></span>
           <span class="error-text">{{ error }}</span>
-          <button
+          <UiButton variant="ghost" tone="danger"
             v-if="canManuallyReconnect"
             class="error-action"
             @click="handleManualReconnect"
             title="Reconnect"
-          >Reconnect</button>
-          <button class="error-close" @click="clearError" title="Dismiss">×</button>
+          >Reconnect</UiButton>
+          <UiButton variant="ghost" icon tone="danger" aria-label="Dismiss error" class="error-close" @click="clearError" title="Dismiss">×</UiButton>
         </div>
         
         <div v-if="!uiStore.ready" class="welcome-screen" role="status" data-testid="view-loading">
@@ -706,14 +706,14 @@ function clearError() {
         <div v-if="uiStore.activeView === 'chat' && sessionStore.openTabs.length === 0" class="welcome-screen">
           <h2>Welcome to ACP UI</h2>
           <p>Select an agent and create a new session to get started.</p>
-          <button
+          <UiButton variant="primary"
             v-if="!isNarrowLayout"
             class="welcome-new-session"
             type="button"
             @click="showWelcomeNewSession = true"
           >
             New session
-          </button>
+          </UiButton>
           <p v-if="!hasAgents" class="hint">
             Configure agents in your config file to begin.
           </p>
@@ -893,17 +893,6 @@ html.sessions-page { overflow: hidden; }
    * this the expand handle is unreachable and the sidebar can never come
    * back once collapsed. */
   z-index: 96;
-  padding: 0.75rem 0.375rem;
-  border: 1px solid var(--border-color);
-  border-left: none;
-  border-radius: 0 4px 4px 0;
-  background: var(--bg-sidebar);
-  cursor: pointer;
-}
-
-.sidebar-toggle-collapsed:hover {
-  color: var(--text-primary);
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
 }
 
 .main-area {
@@ -1001,9 +990,9 @@ html.sessions-page { overflow: hidden; }
   align-items: center;
   gap: 0.5rem;
   padding: 0.75rem 1rem;
-  background: #fee;
-  color: #c00;
-  border-bottom: 1px solid #fcc;
+  background: var(--surface-danger);
+  color: var(--bg-danger);
+  border-bottom: 1px solid var(--bg-danger);
 }
 
 .error-icon {
@@ -1016,39 +1005,13 @@ html.sessions-page { overflow: hidden; }
 
 .error-close {
   flex-shrink: 0;
-  padding: 0.25rem 0.5rem;
-  border: none;
-  background: transparent;
-  color: #c00;
-  font-size: 1.25rem;
-  line-height: 1;
-  cursor: pointer;
-  opacity: 0.6;
-  border-radius: 4px;
-}
-
-.error-close:hover {
-  opacity: 1;
-  background: rgba(204, 0, 0, 0.1);
 }
 
 /* Inline "Reconnect" affordance shown next to a stale error when we have a
    saved session we could reattach to. */
 .error-action {
   flex-shrink: 0;
-  padding: 0.25rem 0.6rem;
   margin-right: 0.25rem;
-  border: 1px solid #c00;
-  border-radius: 4px;
-  background: transparent;
-  color: #c00;
-  font-size: 0.8rem;
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.error-action:hover {
-  background: rgba(204, 0, 0, 0.1);
 }
 
 /* Foreground-reconnect banner. Distinct visual style from the red error
@@ -1058,9 +1021,9 @@ html.sessions-page { overflow: hidden; }
   align-items: center;
   gap: 0.6rem;
   padding: 0.75rem 1rem;
-  background: #e0f2fe;
-  color: #0369a1;
-  border-bottom: 1px solid #bae6fd;
+  background: var(--surface-info);
+  color: var(--text-info);
+  border-bottom: 1px solid var(--border-info);
 }
 
 .reconnect-text {
@@ -1088,9 +1051,9 @@ html.sessions-page { overflow: hidden; }
 
 @media (prefers-color-scheme: dark) {
   .reconnect-banner {
-    background: #082f49;
-    color: #7dd3fc;
-    border-bottom-color: #0c4a6e;
+    background: var(--surface-info);
+    color: var(--text-info);
+    border-bottom-color: var(--border-info);
   }
 }
 
@@ -1120,19 +1083,6 @@ html.sessions-page { overflow: hidden; }
 .welcome-new-session {
   margin-top: 1.25rem;
   height: 34px;
-  padding: 0 1.25rem;
-  border: none;
-  border-radius: var(--radius-md);
-  background: var(--bg-primary);
-  color: var(--text-on-accent, #fbf8f3);
-  font-family: inherit;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.welcome-new-session:hover {
-  background: var(--bg-primary-hover);
 }
 
 @media (max-width: 800px) {
@@ -1167,27 +1117,6 @@ html.sessions-page { overflow: hidden; }
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-muted, #a39a8e);
-  cursor: pointer;
-}
-
-.rail-btn:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-primary, #2b2723);
-}
-
-.rail-btn.active {
-  color: var(--text-accent, #c2532f);
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-}
-
-.rail-btn:focus-visible {
-  outline: 2px solid var(--accent-soft, rgba(194, 83, 47, 0.14));
-  outline-offset: 2px;
 }
 
 @media (max-width: 800px) {

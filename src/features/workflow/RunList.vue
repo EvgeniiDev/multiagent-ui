@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from '../../components/ui/UiButton.vue';
 // Run picker: the newest ~20 porch runs as a dense table. Clicking a row
 // pins it (disables follow-latest); the header's "latest" control resumes
 // following — the mode picks up a new run the moment porch registers one.
@@ -50,13 +51,13 @@ function rowTitle(run: PorchRunSummary): string {
   <section class="run-list" aria-label="Porch runs">
     <div class="run-list-head">
       <span class="run-list-title">runs <span class="mono">{{ props.runs.length }}</span></span>
-      <button
+      <UiButton variant="ghost"
         v-if="!props.following"
         class="follow-btn"
         type="button"
         title="Resume following the newest run — a new porch run opens itself here"
         @click="emit('follow')"
-      >follow latest</button>
+      >follow latest</UiButton>
       <span v-else class="follow-note" title="Newest running run is opened automatically">following latest</span>
     </div>
     <table class="run-table">
@@ -111,16 +112,6 @@ function rowTitle(run: PorchRunSummary): string {
 }
 .follow-btn {
   margin-left: auto;
-  border: 1px solid var(--border-color, #e3dbcf);
-  background: transparent;
-  padding: 0.125rem 0.5rem;
-  font: inherit;
-  font-size: 0.6875rem;
-  color: var(--text-accent, #c2532f);
-  cursor: pointer;
-}
-.follow-btn:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
 }
 .follow-note {
   margin-left: auto;

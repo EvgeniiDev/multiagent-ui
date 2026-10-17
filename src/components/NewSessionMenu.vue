@@ -190,7 +190,7 @@ onBeforeUnmount(close);
         <select
           id="nsm-agent"
           v-model="agent"
-          class="nsm-select"
+          class="ui-input nsm-select"
           :disabled="busy || agents.length === 0"
           aria-label="Agent"
         >
@@ -210,7 +210,7 @@ onBeforeUnmount(close);
           <span class="nsm-cwd-path" :title="cwd || 'Agent’s default directory'">
             {{ cwd ? cwd.split(/[\\/]/).pop() : '.' }}
           </span>
-          <button
+          <UiButton variant="ghost" icon
             class="nsm-cwd-btn"
             type="button"
             title="Select folder"
@@ -219,7 +219,7 @@ onBeforeUnmount(close);
             @click="pickNative"
           >
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-          </button>
+          </UiButton>
         </div>
         <!-- Web / mobile: bridge fs tree browser + editable path. The path is
              interpreted on the agent's host. -->
@@ -300,13 +300,6 @@ onBeforeUnmount(close);
 
 .nsm-select {
   height: 30px;
-  padding: 0 0.5rem;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-main, #fbf8f3);
-  color: var(--text-primary, #2b2723);
-  font-family: inherit;
-  font-size: 0.8125rem;
 }
 
 .nsm-cwd-row {
@@ -340,12 +333,6 @@ onBeforeUnmount(close);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-main, #fbf8f3);
-  color: var(--text-secondary, #6b6259);
-  cursor: pointer;
 }
 
 .nsm-hint {

@@ -10,6 +10,12 @@
   --bg-code: #141414;
   --bg-success: #81c99b;
   --bg-danger: #f091a5;
+  --surface-danger: #34262a;
+  --accent-danger-soft: rgba(240,145,165,.12);
+  --surface-info: #242c34;
+  --text-info: #a8c7ed;
+  --border-info: #46596d;
+  --text-warning: #e5c87d;
   --bg-danger-hover: #ffb0bf;
   --bg-warning: #303038;
   --text-primary: #eeeeee;

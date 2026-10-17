@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from '../../components/ui/UiButton.vue';
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
 import {
   useBoardStore,
@@ -121,22 +122,21 @@ function onReorder(cardId: string, delta: -1 | 1) {
 
     <p v-if="board.ready && board.isFiltering && !hasVisible" class="filter-empty">
       No cards match the filter.
-      <button class="filter-clear" @click="board.clearFilters()">Clear filter</button>
+      <UiButton variant="ghost" class="filter-clear" @click="board.clearFilters()">Clear filter</UiButton>
     </p>
 
     <div class="kanban-area">
       <!-- Phone: column switcher + one stacked column. -->
       <template v-if="board.ready && isPhone">
         <div class="col-switcher" role="tablist" aria-label="Board stages">
-          <button
+          <UiButton variant="tab"
             v-for="col in BOARD_STAGES"
             :key="col.id"
             class="switch-btn"
-            :class="{ active: activeCol === col.id }"
             role="tab"
             :aria-selected="activeCol === col.id"
             @click="activeCol = col.id"
-          >{{ col.label }} <span class="switch-count">{{ board.cardsInStage(col.id).length }}</span></button>
+          >{{ col.label }} <span class="switch-count">{{ board.cardsInStage(col.id).length }}</span></UiButton>
         </div>
         <div class="col-single">
           <BoardColumn
@@ -191,8 +191,8 @@ function onReorder(cardId: string, delta: -1 | 1) {
             fill in the brief, acceptance criteria and verification steps.
           </p>
           <div class="empty-actions">
-            <button class="empty-btn primary" @click="onAdd">New card</button>
-            <button class="empty-btn" @click="onExample">Add example card</button>
+            <UiButton variant="primary" class="empty-btn primary" @click="onAdd">New card</UiButton>
+            <UiButton variant="secondary" class="empty-btn" @click="onExample">Add example card</UiButton>
           </div>
         </div>
       </div>
@@ -314,48 +314,12 @@ function onReorder(cardId: string, delta: -1 | 1) {
   margin-top: 0.625rem;
 }
 
-.empty-btn {
-  min-height: 30px;
-  padding: 0 0.75rem;
-  border: 1px solid var(--border-color, #e3dbcf);
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-primary, #2b2723);
-  font-family: inherit;
-  font-size: 0.8125rem;
-  cursor: pointer;
-}
-
-.empty-btn:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-}
-
-.empty-btn.primary {
-  background: var(--bg-primary, #c2532f);
-  border-color: var(--bg-primary, #c2532f);
-  color: var(--text-on-accent, #fbf8f3);
-}
-
-.empty-btn.primary:hover {
-  background: var(--bg-primary-hover, #a8431f);
-}
-
 .filter-empty {
   margin: 0;
   padding: 0.5rem 0.75rem;
   font-size: 0.75rem;
   color: var(--text-muted, #a39a8e);
   border-bottom: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-}
-
-.filter-clear {
-  border: none;
-  background: transparent;
-  color: var(--text-accent, #c2532f);
-  font-family: inherit;
-  font-size: 0.75rem;
-  cursor: pointer;
-  text-decoration: underline;
 }
 
 .col-switcher {
@@ -368,21 +332,6 @@ function onReorder(cardId: string, delta: -1 | 1) {
 
 .switch-btn {
   flex: 0 0 auto;
-  min-height: 44px;
-  padding: 0 0.75rem;
-  border: 1px solid var(--border-color, #e3dbcf);
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-secondary, #6b6259);
-  font-family: inherit;
-  font-size: 0.75rem;
-  cursor: pointer;
-}
-
-.switch-btn.active {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-  border-color: var(--text-accent, #c2532f);
-  color: var(--text-accent, #c2532f);
 }
 
 .switch-count {
@@ -403,13 +352,4 @@ function onReorder(cardId: string, delta: -1 | 1) {
   min-height: 0;
 }
 
-@media (max-width: 800px) {
-  .empty-btn {
-    min-height: 44px;
-  }
-
-  .filter-clear {
-    min-height: 44px;
-  }
-}
 </style>

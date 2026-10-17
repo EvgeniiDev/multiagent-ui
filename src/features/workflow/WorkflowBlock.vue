@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from '../../components/ui/UiButton.vue';
 // One render block inside an expanded workflow node — assistant text,
 // collapsible reasoning, a tool card, or a muted lifecycle line (meta).
 //
@@ -28,9 +29,9 @@ function renderMarkdown(content: string): string {
   </div>
 
   <div v-else-if="props.block.kind === 'reasoning'" class="wf-block">
-    <button class="wf-reason-toggle" type="button" @click="open = !open">
+    <UiButton variant="ghost" class="wf-reason-toggle" type="button" @click="open = !open">
       {{ open ? '▾' : '▸' }} reasoning
-    </button>
+    </UiButton>
     <div v-if="open" class="wf-reasoning">
       {{ props.block.text }}<span v-if="props.block.truncated" class="wf-trunc" title="Preview truncated by porch (200-char cap)">…</span>
     </div>
@@ -85,19 +86,6 @@ function renderMarkdown(content: string): string {
 .wf-md :deep(ol) {
   margin: 0 0 0.375rem;
   padding-left: 1.25rem;
-}
-
-.wf-reason-toggle {
-  border: none;
-  background: transparent;
-  padding: 0;
-  font: inherit;
-  font-size: 0.6875rem;
-  color: var(--text-muted, #a39a8e);
-  cursor: pointer;
-}
-.wf-reason-toggle:hover {
-  color: var(--text-secondary, #6b6259);
 }
 .wf-reasoning {
   font-size: 0.75rem;

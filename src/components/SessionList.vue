@@ -167,12 +167,10 @@ async function setArchived(session: SavedSession, archived: boolean) {
         class="session-row"
         :class="{ active: runtime ? runtime.id === sessionStore.activeTabId : session.id === activeSessionId }"
         :title="`${session.title}\n${session.agentName} · ${session.cwd || '—'}`"
-        tabindex="0"
-        role="link"
-        @keydown.enter.self="openRow(session, runtime, transient)"
-        @keydown.space.self.prevent="openRow(session, runtime, transient)"
-        @click="openRow(session, runtime, transient)"
       >
+        <UiButton variant="row" class="session-open"
+          :aria-pressed="runtime ? runtime.id === sessionStore.activeTabId : session.id === activeSessionId"
+          @click="openRow(session, runtime, transient)">
         <div class="row-content">
           <div class="row-heading">
             <span
@@ -194,6 +192,7 @@ async function setArchived(session: SavedSession, archived: boolean) {
             <span class="row-stamp">{{ formatStamp(session.lastUpdated) }}</span>
           </div>
         </div>
+        </UiButton>
         <UiButton
           v-if="showArchived"
           variant="ghost" icon size="xs"
@@ -310,13 +309,9 @@ ul {
   margin-top: 0.25rem;
 }
 
-.session-row:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-}
 
-.session-row.active {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-}
+
+
 
 /* Keep agent names compact so metadata fits narrow sidebars. */
 .row-agent {
@@ -388,11 +383,8 @@ ul {
   color: var(--text-muted, #a39a8e);
 }
 
-.row-close { flex: 0 0 auto; opacity: 0; }
-.session-row:hover .row-close,
-.session-row:focus-within .row-close,
-.session-row.active .row-close { opacity: 1; }
-.session-row:focus-visible { outline: 2px solid var(--text-accent); outline-offset: -2px; }
+.row-close { flex: 0 0 auto; }
+.session-open { flex: 1; min-width: 0; }
 
 .row-status {
   font-size: 0.625rem;
@@ -420,6 +412,6 @@ ul {
   .row-agent, .row-status, .row-stamp { font-size: 0.6875rem; }
   .row-tag { display: none; }
 
-  .row-close { display: inline-flex; opacity: 1; }
+  .row-close { display: inline-flex; }
 }
 </style>

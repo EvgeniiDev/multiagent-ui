@@ -196,19 +196,19 @@ onMounted(() => {
       <div class="tree-panel">
         <div class="tree-header">
           <span class="tree-title">Browse (agent host)</span>
-          <button class="tree-close" type="button" aria-label="Close" @click="close"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+          <UiButton variant="ghost" icon class="tree-close" type="button" aria-label="Close" @click="close"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></UiButton>
         </div>
 
         <div class="crumb-row">
-          <button class="crumb" type="button" title="Root" @click="goRoot">⌂</button>
+          <UiButton variant="ghost" class="crumb" type="button" title="Root" @click="goRoot">⌂</UiButton>
           <template v-for="c in chain" :key="c.path">
             <span class="crumb-sep">›</span>
-            <button class="crumb" type="button" @click="goTo(c.path)">{{ c.name }}</button>
+            <UiButton variant="ghost" class="crumb" type="button" @click="goTo(c.path)">{{ c.name }}</UiButton>
           </template>
           <span class="spacer"></span>
-          <button class="small-btn" type="button" aria-label="Go up" @click="goUp" :disabled="!parent"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
+          <UiButton variant="secondary" icon class="small-btn" type="button" aria-label="Go up" @click="goUp" :disabled="!parent"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></UiButton>
           <label class="hidden-toggle">
-            <input type="checkbox" :checked="showHidden" @change="toggleHidden" />
+            <input class="ui-checkbox" type="checkbox" :checked="showHidden" @change="toggleHidden" />
             hidden
           </label>
         </div>
@@ -218,21 +218,22 @@ onMounted(() => {
           <p v-else-if="error" class="tree-error">{{ error }}</p>
           <div v-else-if="dirs.length === 0" class="tree-note">No directories</div>
           <ul v-else class="dir-list">
-            <li v-for="d in dirs" :key="d.path">
-              <button class="dir-row" type="button" @click="onDirClick(d)">
+            <li v-for="d in dirs" :key="d.path" class="dir-list-row">
+              <UiButton variant="row" class="dir-row" type="button" @click="onDirClick(d)">
                 <span class="dir-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
                 <span class="dir-name">{{ d.name }}</span>
-                <span class="dir-pick" title="Use this directory" @click.stop="useDir(d)" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg></span>
-              </button>
+              </UiButton>
+              <UiButton variant="ghost" icon class="dir-pick" title="Use this directory" :aria-label="`Use ${d.name}`" @click="useDir(d)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg>
+              </UiButton>
             </li>
           </ul>
         </div>
 
         <div class="tree-footer">
           <span class="selected-path" :title="path">{{ path }}</span>
-          <button class="use-btn" type="button" :disabled="!path" @click="useCurrent">
+          <UiButton variant="primary" class="use-btn" type="button" :disabled="!path" @click="useCurrent">
             Use this directory
-          </button>
+          </UiButton>
         </div>
       </div>
     </div>
@@ -240,6 +241,7 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.dir-list-row { display: flex; align-items: center; }
 .dir-picker {
   display: flex;
   flex-direction: column;
@@ -251,7 +253,6 @@ onMounted(() => {
   gap: 0.5rem;
   align-items: center;
 }
-
 .cwd-input { flex: 1; min-width: 0; }
 .browse-btn { flex: 0 0 auto; }
 
@@ -292,14 +293,6 @@ onMounted(() => {
   letter-spacing: -0.005em;
 }
 
-.tree-close {
-  border: none;
-  background: none;
-  font-size: 1.4rem;
-  cursor: pointer;
-  color: var(--text-secondary, #666);
-}
-
 .crumb-row {
   display: flex;
   align-items: center;
@@ -309,30 +302,12 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
-.crumb {
-  border: none;
-  background: none;
-  color: var(--text-accent, #c2532f);
-  cursor: pointer;
-  font-size: 0.85rem;
-  padding: 0;
-}
-
 .crumb-sep {
   color: var(--text-secondary, #999);
 }
 
 .spacer {
   flex: 1;
-}
-
-.small-btn {
-  border: 1px solid var(--border-color, #ccc);
-  border-radius: 4px;
-  background: var(--bg-main, #fbf8f3);
-  cursor: pointer;
-  font-size: 0.9rem;
-  padding: 0.1rem 0.5rem;
 }
 
 .hidden-toggle {
@@ -364,27 +339,7 @@ onMounted(() => {
   margin: 0;
   padding: 0.25rem;
 }
-
-.dir-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  width: 100%;
-  min-height: 26px;
-  padding: 0.125rem 0.5rem;
-  border: none;
-  background: none;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 0.8125rem;
-  color: inherit;
-  text-align: left;
-  border-radius: var(--radius-md, 6px);
-}
-
-.dir-row:hover {
-  background: var(--bg-hover, #efe9e0);
-}
+.dir-row { display: flex; align-items: center; gap: 0.5rem; width: 100%; }
 
 .dir-icon {
   flex: 0 0 auto;
@@ -396,17 +351,9 @@ onMounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.dir-pick { flex: 0 0 auto; }
 
-.dir-pick {
-  flex: 0 0 auto;
-  opacity: 0;
-  color: var(--text-accent, #c2532f);
-  font-weight: 700;
-}
 
-.dir-row:hover .dir-pick {
-  opacity: 1;
-}
 
 .tree-footer {
   display: flex;
@@ -425,18 +372,5 @@ onMounted(() => {
   white-space: nowrap;
   direction: rtl;
   text-align: left;
-}
-
-.use-btn {
-  height: 30px;
-  border: none;
-  border-radius: var(--radius-md, 6px);
-  background: var(--text-accent, #c2532f);
-  color: var(--bg-main, #fbf8f3);
-  padding: 0 0.875rem;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 0.8125rem;
-  font-weight: 600;
 }
 </style>

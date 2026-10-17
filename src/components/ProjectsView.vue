@@ -205,15 +205,15 @@ async function newSessionIn(row: ProjectRow) {
     <header class="pane-head">
       <h2>Projects</h2>
       <div class="head-controls">
-        <input v-model="search" class="search" type="search" placeholder="Filter path or name" aria-label="Filter projects" />
-        <select v-model="agentFilter" class="picker" aria-label="Filter by agent">
+        <input v-model="search" class="ui-input search" type="search" placeholder="Filter path or name" aria-label="Filter projects" />
+        <select v-model="agentFilter" class="ui-input picker" aria-label="Filter by agent">
           <option value="">all agents</option>
           <option v-for="agent in agentsInUse" :key="agent" :value="agent">{{ agent }}</option>
         </select>
         <div class="range" role="group" aria-label="Usage range">
-          <button :class="{ active: range === 7 }" @click="range = 7">7d</button>
-          <button :class="{ active: range === 30 }" @click="range = 30">30d</button>
-          <button :class="{ active: range === 0 }" @click="range = 0">all</button>
+          <UiButton variant="ghost" :aria-pressed="range === 7" @click="range = 7">7d</UiButton>
+          <UiButton variant="ghost" :aria-pressed="range === 30" @click="range = 30">30d</UiButton>
+          <UiButton variant="ghost" :aria-pressed="range === 0" @click="range = 0">all</UiButton>
         </div>
         <span class="pane-note">{{ projects.length }} projects</span>
         <UiButton class="new-project-cta" type="button" @click="showNewProject = true">
@@ -235,22 +235,21 @@ async function newSessionIn(row: ProjectRow) {
         <div ref="listEl" class="list-col">
           <ul class="project-list">
             <template v-for="row in projects" :key="row.cwd">
-              <li
-                class="project-row"
-                :class="{ open: row.cwd === selectedCwd }"
-                :aria-current="row.cwd === selectedCwd ? 'true' : undefined"
-                tabindex="0"
-                @click="openProject(row)"
-                @keydown.enter.prevent="openProject(row)"
-                @keydown.space.prevent="openProject(row)"
-              >
-                <span class="live-dot" :class="{ on: row.live }" :title="row.live ? 'Working now' : 'Idle'"></span>
-                <span class="project-name">{{ row.name }}</span>
-                <span class="project-path" :title="row.cwd">{{ row.cwd }}</span>
-                <span class="project-agents">{{ row.agents.join(' · ') }}</span>
-                <span class="project-stat" :title="`${row.turns} turns in range`">{{ row.sessions }} sess</span>
-                <span class="project-stat mono">{{ compactNumber(row.tokens) }}</span>
-                <span class="project-stamp">{{ formatStamp(row.lastActivity) }}</span>
+              <li>
+                <UiButton variant="row"
+                  class="project-row"
+                  :class="{ open: row.cwd === selectedCwd }"
+                  :aria-pressed="row.cwd === selectedCwd"
+                  @click="openProject(row)"
+                >
+                  <span class="live-dot" :class="{ on: row.live }" :title="row.live ? 'Working now' : 'Idle'"></span>
+                  <span class="project-name">{{ row.name }}</span>
+                  <span class="project-path" :title="row.cwd">{{ row.cwd }}</span>
+                  <span class="project-agents">{{ row.agents.join(' · ') }}</span>
+                  <span class="project-stat" :title="`${row.turns} turns in range`">{{ row.sessions }} sess</span>
+                  <span class="project-stat mono">{{ compactNumber(row.tokens) }}</span>
+                  <span class="project-stamp">{{ formatStamp(row.lastActivity) }}</span>
+                </UiButton>
               </li>
               <li
                 v-if="isNarrow && selected && row.cwd === selected.cwd"
@@ -327,48 +326,14 @@ async function newSessionIn(row: ProjectRow) {
   align-items: center;
   gap: 0.5rem;
 }
-
-.search,
-.picker {
-  height: 28px;
-  padding: 0 0.5rem;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-main, #fbf8f3);
-  color: var(--text-primary, #2b2723);
-  font-family: inherit;
-  font-size: 0.75rem;
-}
-
-.search {
-  width: 180px;
-}
-
-.picker {
-  max-width: 200px;
-}
+.search { width: 180px; }
+.picker { max-width: 200px; }
 
 .range {
   display: flex;
   border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
   border-radius: var(--radius-md, 6px);
   overflow: hidden;
-}
-
-.range button {
-  height: 28px;
-  padding: 0 0.5rem;
-  border: none;
-  background: transparent;
-  color: var(--text-muted, #a39a8e);
-  font-family: var(--font-mono, monospace);
-  font-size: 0.6875rem;
-  cursor: pointer;
-}
-
-.range button.active {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-  color: var(--text-accent, #c2532f);
 }
 
 .pane-note {
@@ -423,33 +388,7 @@ async function newSessionIn(row: ProjectRow) {
   margin: 0;
   padding: 0;
 }
-
-/* Dense one-line rows: dot · name · path · agents · sessions · tokens · stamp. */
-.project-row {
-  display: flex;
-  align-items: center;
-  gap: 0.625rem;
-  min-height: 30px;
-  padding: 0 0.375rem;
-  border-radius: var(--radius-sm, 4px);
-  cursor: pointer;
-}
-
-.project-row:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-}
-
-.project-row:focus-visible {
-  outline: 2px solid var(--bg-primary, #c2532f);
-  outline-offset: -2px;
-}
-
-/* Selected row: accent bar on the left edge + active tint — visible from
- * across the list, not just on hover. */
-.project-row.open {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-  box-shadow: inset 3px 0 0 var(--bg-primary, #c2532f);
-}
+.project-row { display: flex; align-items: center; gap: 0.625rem; }
 
 .project-row.open .project-name {
   font-weight: 600;
@@ -548,27 +487,11 @@ async function newSessionIn(row: ProjectRow) {
   .head-controls {
     flex-wrap: wrap;
   }
-
-  .search {
-    width: 100%;
-    height: 44px;
-  }
-
-  .picker {
-    height: 44px;
-  }
-
-  .range button {
-    height: 44px;
-  }
+.search { width: 100%; }
 
   .project-path,
   .project-agents {
     display: none;
-  }
-
-  .project-row {
-    min-height: 44px;
   }
 
   /* Single column: the list takes the full pane and scrolls; the second
