@@ -117,12 +117,12 @@ function onKeydown(e: KeyboardEvent) {
   }
 }
 
-// A scroll outside the menu drifts the anchor away — close rather than
-// reposition (the narrow nav bar can auto-hide under the open menu).
+// Background chat updates auto-scroll the feed too. Keep the menu and its
+// directory browser mounted, and follow the anchor if it actually moves.
 function onScroll(e: Event) {
   const t = e.target as Node | null;
   if (t && menuEl.value?.contains(t)) return;
-  close();
+  positionMenu();
 }
 
 async function pickNative() {
