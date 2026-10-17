@@ -1,3 +1,4 @@
+import { priceUsage } from './pricing';
 import { projectName, type ActivityEntry, type UsageSourceStatus, type UsageSource } from '../../stores/activity';
 
 export interface SpendRow {
@@ -52,7 +53,8 @@ export function aggregateUsage(rows: SpendRow[], entries: ActivityEntry[], sourc
   const get = (map: Map<string, Accumulator>, key: string, name: string, detail = '') => {
     const value = map.get(key) ?? bucket(key, name, detail); map.set(key, value); return value;
   };
-  for (const row of rows) {
+  for (const rawRow of rows) {
+    const row = priceUsage(rawRow);
     const sessionKey = `${row.agentName}::${row.sessionId}`;
     const modelKey = `${row.provider}::${row.model}`;
     const project = projectName(row.cwd);

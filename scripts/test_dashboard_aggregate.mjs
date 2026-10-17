@@ -38,3 +38,23 @@ test('token mix buckets aggregate per group and total', () => {
   assert.equal(r.total.input,150);assert.equal(r.total.output,40);assert.equal(r.total.cacheRead,200);assert.equal(r.total.cacheWrite,20);
   assert.equal(r.agents.find(x=>x.name==='Pi').cacheRead,200);
 });
+test('API token prices replace missing or subscription-zero costs in every breakdown', () => {
+  const r = aggregateUsage([row(117000, {model:'gpt-6.1-sol',provider:'openai-codex',input:100000,output:7000,cacheRead:10000,cost:0,currency:'USD'})], []);
+  assert.deepEqual(r.total.costs, [{currency:'USD',amount:0.271}]);
+  for (const key of ['models','projects','agents','sessions','days']) assert.deepEqual(r[key][0].costs,r.total.costs,key);
+});
+const { apiCost } = await import('../src/features/dashboard/pricing.ts');
+test('API pricing includes cache writes, cached context in tier selection, and vendor aliases', () => {
+  assert.equal(apiCost(row(300000,{model:'cx/gpt-6.1-sol',input:2000,cacheRead:280000,cacheWrite:3000,output:15000})), 0.304);
+  assert.equal(apiCost(row(117000,{model:'openai/gpt-6.1-sol',input:100000,output:7000,cacheRead:10000})),0.271);
+  assert.equal(apiCost(row(272001,{model:'gpt-6.1-sol',input:272000,output:1})),0.54401);
+});
+test('unknown prices and missing or invalid splits do not invent a dollar cost', () => {
+  assert.equal(apiCost(row(10,{model:'new-unpriced-model',input:10})),undefined);
+  assert.equal(apiCost(row(10,{model:'gpt-6.1-sol'})),undefined);
+  assert.equal(apiCost(row(10,{model:'gpt-6.1-sol',input:NaN})),undefined);
+  assert.equal(apiCost(row(10,{model:'gpt-6.1-sol',input:-1})),undefined);
+});
+test('Codex legacy reasoning does not inflate API output cost', () => {
+  assert.equal(apiCost(row(120,{agentName:'Codex',model:'gpt-6.1-sol',input:20,cacheRead:80,output:30})),0.000248);
+});

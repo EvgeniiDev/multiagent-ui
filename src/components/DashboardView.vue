@@ -9,6 +9,7 @@ import { useUiStore } from '../stores/ui';
 import { loadKvStore, type KVStore } from '../lib/host/storage';
 import { RANGES, rangeBounds, rangeLabel, type RangeId } from '../features/dashboard/range';
 import { fmtInt, fmtCompact, fmtCostGroups, fmtTokensWithEst, shortDate, fmtStamp, fmtAgo } from '../features/dashboard/format';
+import { priceUsage } from '../features/dashboard/pricing';
 import { aggregateUsage, localDayKey, type UsageGroup } from '../features/dashboard/aggregate';
 import { exportFileName, toJson, toCsv, downloadFile, type ExportPayload } from '../features/dashboard/exportData';
 
@@ -91,7 +92,7 @@ const selectionStats = computed(() => {
 });
 const summary = computed(() => selectionStats.value.total);
 const initialLoading = computed(() => activity.usageLoading && !activity.usageSources.length);
-const hasMissingCosts = computed(() => selectedSpendRows.value.some(r => typeof r.cost !== 'number' || !Number.isFinite(r.cost)));
+const hasMissingCosts = computed(() => selectedSpendRows.value.some(raw => { const r = priceUsage(raw); return typeof r.cost !== 'number' || !Number.isFinite(r.cost); }));
 const availableHistories = computed(() => activity.usageSources.filter(s => s.status !== 'unavailable').length);
 const chartBucketLabel = computed(() => dayPoints.value[0]?.step === 7 ? 'Weekly totals' : 'Daily totals');
 const peakPoint = computed(() => dayPoints.value.reduce<DayPoint | null>((peak, d) => !peak || d.tokens > peak.tokens ? d : peak, null));
@@ -373,7 +374,7 @@ watch(
                 <div><h4 data-testid="inspector-title">{{ inspectorTitle }}</h4><p class="inspector-dates">{{ inspectorDates }}</p></div>
                 <dl class="inspector-metrics">
                   <div><dt>Tokens used</dt><dd class="metric-value">{{ initialLoading ? '—' : `${summary.estTokens >= summary.tokens && summary.estTokens > 0 ? '~' : ''}${compactTokens(summary.tokens)}` }}</dd><dd class="metric-exact mono" data-testid="sum-tokens" :data-est="summary.estTokens > 0">{{ initialLoading ? '—' : fmtTokensWithEst(summary.tokens, summary.estTokens) }}</dd><dd class="metric-caption" :title="mixText(summary, fmtInt)" data-testid="token-mix">{{ mixText(summary) || 'Includes cached input' }}</dd></div>
-                  <div><dt>Reported cost <span v-if="hasMissingCosts" class="muted">· partial</span></dt><dd class="metric-value metric-money" data-testid="sum-cost">{{ initialLoading ? '—' : fmtCostGroups(summary.costs) }}</dd><dd v-if="hasMissingCosts" class="metric-caption">Some costs are unavailable</dd></div>
+                  <div><dt>Estimated API cost <span v-if="hasMissingCosts" class="muted">· partial</span></dt><dd class="metric-value metric-money" data-testid="sum-cost">{{ initialLoading ? '—' : fmtCostGroups(summary.costs) }}</dd><dd v-if="hasMissingCosts" class="metric-caption">Some costs are unavailable</dd></div>
                   <div><dt>Sessions</dt><dd class="metric-value" data-testid="sum-sessions">{{ initialLoading ? '—' : fmtInt(summary.sessions) }}</dd></div>
                 </dl>
                 <UiButton v-if="selectedPoint" variant="ghost" size="xs" data-testid="clear-selection" @click="selectedBucket = null">← Back to full period</UiButton>
@@ -382,7 +383,7 @@ watch(
 
             <div v-if="activity.usageSources.length" class="coverage-strip" data-testid="usage-sources">
               <div class="coverage-copy"><span class="coverage-dot" aria-hidden="true"></span><span>{{ availableHistories }} agent histories connected</span><span v-if="activity.porchUsage?.status === 'ready'" class="coverage-tag">Porch included</span></div>
-              <details class="coverage-details"><summary>About these numbers</summary><div class="coverage-body"><p>Includes server sessions, CLI, subagents and background runs.</p><ul><li v-for="source in activity.usageSources" :key="source.agentName">{{ source.agentName }} <span class="muted">{{ source.status === 'ready' ? 'available' : source.status }}</span></li></ul><p v-if="activity.porchUsage?.status === 'ready'">{{ activity.porchUsage.rawFiles }} Porch journals included, covering ephemeral runs.</p><p v-else-if="activity.porchUsage">Porch coverage is {{ activity.porchUsage.status }}. Some ephemeral runs may be missing.</p><p>Costs are shown only when reported by providers. Unavailable costs are excluded from the total; currencies stay separate.</p><p>Hermes history is dated by each session’s last activity, so its daily totals are approximate.</p><p data-testid="usage-legend">Exact counts come from agents. <strong>~</strong> marks a bridge estimate based on message length.</p><p>ACP activity log: <span data-testid="sum-turns">{{ fmtInt(summary.turns) }}</span> recorded turns · <span data-testid="sum-tools">{{ fmtInt(summary.toolCalls) }}</span> tool calls. Native histories may contain additional turns.</p></div></details>
+              <details class="coverage-details"><summary>About these numbers</summary><div class="coverage-body"><p>Includes server sessions, CLI, subagents and background runs.</p><ul><li v-for="source in activity.usageSources" :key="source.agentName">{{ source.agentName }} <span class="muted">{{ source.status === 'ready' ? 'available' : source.status }}</span></li></ul><p v-if="activity.porchUsage?.status === 'ready'">{{ activity.porchUsage.rawFiles }} Porch journals included, covering ephemeral runs.</p><p v-else-if="activity.porchUsage">Porch coverage is {{ activity.porchUsage.status }}. Some ephemeral runs may be missing.</p><p>USD estimates use standard API model rates (price snapshot: Oct 17, 2026), including input, output, cache reads/writes and long-context tiers. Subscription fees and tool charges are excluded. When a model rate or token split is unavailable, provider-reported costs are used if present; otherwise that usage is excluded and the total is marked partial. Currencies stay separate.</p><p>Hermes history is dated by each session’s last activity, so its daily totals are approximate.</p><p data-testid="usage-legend">Exact counts come from agents. <strong>~</strong> marks a bridge estimate based on message length.</p><p>ACP activity log: <span data-testid="sum-turns">{{ fmtInt(summary.turns) }}</span> recorded turns · <span data-testid="sum-tools">{{ fmtInt(summary.toolCalls) }}</span> tool calls. Native histories may contain additional turns.</p></div></details>
             </div>
 
             <section :id="`breakdown-${activeBreakdown}`" role="tabpanel" :aria-labelledby="`tab-${activeBreakdown}`" tabindex="0" class="panel explore-panel">

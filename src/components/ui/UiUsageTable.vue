@@ -14,7 +14,7 @@ defineEmits<{ open: [key: string] }>();
 <template>
   <table :id="id" class="usage-table" :data-testid="testId">
     <caption class="sr-only">{{ caption }}</caption>
-    <thead><tr><th scope="col">{{ nameLabel }}</th><th scope="col">{{ detailLabel }}</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Reported cost</th><th scope="col" class="num">Share</th></tr></thead>
+    <thead><tr><th scope="col">{{ nameLabel }}</th><th scope="col">{{ detailLabel }}</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Estimated cost</th><th scope="col" class="num">Share</th></tr></thead>
     <tbody>
       <tr v-for="row in rows" :key="row.key" :data-testid="rowTestId" :data-agent="row.agentName" :data-model="row.model" :data-day="row.day" :data-tokens="row.tokens" :data-est="row.estTokens > 0">
         <td class="name-cell" :data-label="nameLabel" :title="row.title || row.name">

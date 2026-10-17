@@ -118,7 +118,7 @@ def run_case(browser, fail=False, large=False, mixed=False):
             page.locator('[data-testid=inspect-period]').select_option(oldest)
             expect(page.locator('[data-testid=sum-tokens]')).to_have_text('600')
             expect(page.locator('[data-testid=sum-sessions]')).to_have_text('1')
-            expect(page.locator('.inspector dt').filter(has_text='Reported cost')).to_have_text('Reported cost')
+            expect(page.locator('.inspector dt').filter(has_text='Estimated API cost')).to_have_text('Estimated API cost')
             expect(page.locator('[data-testid=sum-cost]')).to_have_text('0 USD')
             expect(page.locator('[data-testid=by-model-row]')).to_have_count(1)
             # Native history must be inspectable without a browser chat or activity log.
@@ -179,9 +179,43 @@ def run_case(browser, fail=False, large=False, mixed=False):
     assert not errors, errors
     context.close()
 
+def run_api_pricing_case(browser):
+    context = browser.new_context(viewport=dict(width=390, height=844))
+    errors = []
+    context.on('page', lambda page: page.on('pageerror', lambda e: errors.append(str(e))))
+    priced = dict(usage('Codex', 117000, cost=0, currency='USD'),
+                  model='gpt-6.1-sol', input=100000, output=7000, cacheRead=10000)
+    def route(request):
+        url = urlparse(request.request.url)
+        if url.port == 25808:
+            path = DIST / url.path.lstrip('/')
+            if not path.is_file(): path = DIST / 'index.html'
+            request.fulfill(body=path.read_bytes(), content_type=mimetypes.guess_type(str(path))[0] or 'application/octet-stream')
+        elif url.path == '/api/usage':
+            request.fulfill(json=dict(usage=[priced], sources=[dict(agentName='Codex', status='ready', samples=1)]))
+        elif url.path.startswith('/api/state/'):
+            request.fulfill(json=dict(rev=1, updatedAt=1, data=dict(entries=[], usage=[])))
+        elif url.path == '/health': request.fulfill(json=dict(ok=True))
+        else: request.fulfill(status=404, json=dict(error='not found'))
+    context.route('**/*', route)
+    page = context.new_page()
+    page.goto('http://127.0.0.1:25808/dashboard')
+    expect(page.get_by_test_id('sum-cost')).to_have_text('0.271 USD')
+    expect(page.locator('.inspector dt').filter(has_text='Estimated API cost')).not_to_contain_text('partial')
+    expect(page.get_by_test_id('by-model-row').first).to_contain_text('0.271 USD')
+    page.locator('.export-menu summary').click()
+    with page.expect_download() as download:
+        page.get_by_test_id('export-json').click()
+    payload = json.loads(Path(download.value.path()).read_text())
+    assert payload['summary']['costs'] == [dict(currency='USD', amount=0.271)]
+    page.reload()
+    expect(page.get_by_test_id('sum-cost')).to_have_text('0.271 USD')
+    assert not errors, errors
+    context.close()
+
 if __name__ == '__main__':
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        run_case(browser); run_case(browser, fail=True); run_case(browser, large=True); run_case(browser,mixed=True)
+        run_api_pricing_case(browser); run_case(browser); run_case(browser, fail=True); run_case(browser, large=True); run_case(browser,mixed=True)
         browser.close()
     print('PASS dashboard B: accounting, chart selection, search, tabs, exports, mobile density, keyboard, errors and 52k history')
