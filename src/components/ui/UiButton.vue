@@ -1,17 +1,18 @@
 <script setup lang="ts">
 /** Shared native button: attributes, listeners, aria state and focus stay on the button. */
 withDefaults(defineProps<{
-  variant?: 'secondary' | 'primary' | 'danger' | 'ghost' | 'image' | 'select' | 'option' | 'row' | 'tab' | 'chip';
-  tone?: 'default' | 'danger' | 'success' | 'warning';
+  variant?: 'secondary' | 'primary' | 'danger' | 'ghost' | 'image' | 'select' | 'option' | 'row' | 'tab' | 'chip' | 'transcript' | 'session-tab';
+  tone?: 'default' | 'danger' | 'success' | 'warning' | 'muted' | 'info';
   size?: 'sm' | 'xs';
   icon?: boolean;
+  reveal?: boolean;
   layout?: 'inline' | 'stacked';
   type?: 'button' | 'submit' | 'reset';
-}>(), { tone: 'default', variant: 'secondary', size: 'sm', icon: false, layout: 'inline', type: 'button' });
+}>(), { tone: 'default', variant: 'secondary', size: 'sm', icon: false, reveal: false, layout: 'inline', type: 'button' });
 </script>
 
 <template>
-  <button :type="type" class="ds-button" :class="[`ds-button--${variant}`, `ds-button--${size}`, `ds-button--tone-${tone}`, `ds-button--${layout}`, { 'ds-button--icon': icon }]">
+  <button :type="type" class="ds-button" :class="[`ds-button--${variant}`, `ds-button--${size}`, `ds-button--tone-${tone}`, `ds-button--${layout}`, { 'ds-button--icon': icon, 'ds-button--reveal': reveal }]">
     <slot />
   </button>
 </template>
@@ -68,10 +69,21 @@ withDefaults(defineProps<{
 .ds-button--option[aria-selected='true'] { border-color: transparent; }
 .ds-button--option:focus-visible { outline-offset: -2px; }
 .ds-button--row { white-space: normal; width: 100%; justify-content: flex-start; text-align: left; border-color: transparent; }
-.ds-button--tab { border-color: transparent; color: var(--text-secondary); }
+.ds-button--tab { border-color: transparent; border-radius: 0; color: var(--text-secondary); }
+.ds-button--tab[aria-selected='true'] {
+  background: transparent; color: var(--text-primary); border-color: transparent;
+  border-bottom-color: var(--text-accent);
+}
+.ds-button--session-tab { border-color: transparent; border-radius: var(--radius-md) var(--radius-md) 0 0; color: var(--text-secondary); }
+.ds-button--session-tab[aria-selected='true'] {
+  background: var(--bg-main); color: var(--text-primary);
+  border-color: var(--border-faint); border-bottom-color: transparent;
+}
 .ds-button--chip { border-radius: var(--radius-sm); white-space: normal; overflow-wrap: anywhere; }
 .ds-button--tone-danger { color: var(--bg-danger); }
 .ds-button--tone-success { color: var(--bg-success); }
+.ds-button--tone-muted { color: var(--text-secondary); }
+.ds-button--tone-info { color: var(--text-info); }
 .ds-button--tone-warning { color: var(--text-warning); }
 .ds-button--tone-danger:hover:not(:disabled) { background: var(--accent-danger-soft, var(--tint-hover)); color: var(--bg-danger); }
 .ds-button--xs { min-height: 24px; padding: 0.125rem 0.375rem; font-size: 0.6875rem; }
@@ -82,5 +94,31 @@ withDefaults(defineProps<{
 @media (max-width: 800px), (pointer: coarse) {
   .ds-button, .ds-button--xs { min-height: 44px; min-width: 44px; }
   .ds-button--icon, .ds-button--icon.ds-button--xs { width: 44px; }
+}
+/* Dense transcript disclosures: deliberate 32px touch target instead of form-button spacing. */
+.ds-button--transcript {
+  width: 100%; justify-content: flex-start; text-align: left;
+  min-height: 24px; padding: 0 0.5rem; border: none;
+  border-radius: var(--radius-sm); background: var(--tint-hover);
+  font-family: var(--font-mono); font-size: 0.6875rem; font-weight: 400;
+  line-height: 1.4; gap: 0.4375rem;
+}
+.ds-button--transcript.ds-button--tone-danger { background: var(--accent-danger-soft); }
+.ds-button--transcript.ds-button--tone-info { background: var(--surface-info); }
+.ds-button--transcript:hover:not(:disabled) { background: var(--tint-active, var(--bg-hover)); }
+.ds-button--transcript.ds-button--tone-danger:hover:not(:disabled) { background: var(--accent-danger-soft); }
+.ds-button--transcript.ds-button--tone-info:hover:not(:disabled) { background: var(--surface-info); }
+.ds-button--transcript:focus-visible { outline-offset: -2px; }
+@media (max-width: 800px), (pointer: coarse) {
+  .ds-button--transcript { min-height: 32px; }
+}
+/* Keep secondary actions quiet with a pointer; touch and keyboard retain access. */
+@media (hover: hover) and (pointer: fine) {
+  .ds-button--reveal { opacity: 0; }
+  :global(.ui-action-group:hover .ds-button--reveal),
+  :global(.ui-action-group:focus-within .ds-button--reveal),
+  .ds-button--reveal:focus-visible { opacity: 1; }
+  :global(.ui-action-group:hover .ds-button--reveal:disabled),
+  :global(.ui-action-group:focus-within .ds-button--reveal:disabled) { opacity: 0.5; }
 }
 </style>

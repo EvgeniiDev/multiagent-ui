@@ -72,9 +72,9 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
     <div
       v-for="rt in tabs"
       :key="rt.id"
-      class="session-tab"
+      class="session-tab ui-action-group"
     >
-      <UiButton variant="tab" class="tab"
+      <UiButton variant="session-tab" class="tab"
         :class="{
           active: rt.id === activeId,
           disconnected: !rt.isConnected && !rt.isConnecting,
@@ -117,7 +117,7 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
 
       </UiButton>
       <UiButton
-        class="tab-close"
+        class="tab-close" :reveal="rt.id !== activeId"
         variant="ghost"
         size="xs"
         icon
@@ -134,7 +134,7 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
 </template>
 
 <style scoped>
-.session-tab { display: flex; align-items: center; flex: 0 0 auto; min-width: 0; }
+.session-tab { display: flex; align-items: center; flex: 0 0 auto; min-width: 0; max-width: 220px; }
 /* Pure scroll container: the bar chrome (background, border, padding) lives
  * on .session-navigation in App.vue so the "+" menu and the tabs share one
  * strip. */

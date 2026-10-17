@@ -37,10 +37,11 @@ import UiButton from '../../components/ui/UiButton.vue';
 
 | Свойство | Значения | Назначение |
 |---|---|---|
-| variant | secondary (по умолчанию), primary, danger, ghost, image | Обычное действие, основное, опасное, второстепенное/вкладка |
+| variant | secondary (по умолчанию), primary, danger, ghost, image, select, option, row, tab, chip, transcript, session-tab | Обычное действие, основное, опасное, второстепенное/вкладка |
 | size | sm (по умолчанию), xs | Высота 28 или 24 px; компактные кнопки для вкладок |
 | layout | inline (по умолчанию), stacked | Иконка и подпись в строку или друг над другом для навигации |
-| tone | default, danger, success, warning | Семантический цвет для строк и других вариантов |
+| tone | default, danger, success, warning, muted, info | Семантический цвет для строк и других вариантов |
+| reveal | boolean | Второстепенное действие внутри `ui-action-group`: видно при hover/focus на десктопе, всегда на touch |
 | icon | boolean | Квадратная кнопка; обязательна доступная подпись aria-label |
 | type | button (по умолчанию), submit, reset | Нативное поведение в форме |
 
@@ -53,6 +54,12 @@ aria-busy, title, data-testid, click и т.д. Текст передаётся �
 Компонент определяет hover, видимый клавиатурный фокус, disabled и выбранную
 вкладку по aria-selected/aria-pressed; текущую страницу — по aria-current="page". Для узких экранов и touch-устройств
 минимальная высота и ширина кнопки с иконкой — 44 px.
+Исключение для плотной ленты: `variant="transcript"` — раскрытие tool calls,
+24 px на десктопе и 32 px на touch, с моноширинным шрифтом и клавиатурным фокусом.
+`tab` выделяет раздел нижней линией; `session-tab` сохраняет рамку и фон
+активной вкладки сессии, соединяя её с панелью чата.
+Композер использует `ui-input--composer` внутри `ui-composer`: спокойный фокус
+показывается рамкой контейнера, без прямоугольной обводки textarea.
 
 ## Правила использования
 
@@ -63,7 +70,9 @@ aria-busy, title, data-testid, click и т.д. Текст передаётся �
    размещайте рядом. Нативные ссылки с `href`, SVG-графики, drag handles и
    содержимое документов сохраняют свою семантику.
 2. Поля: `ui-input` для input/select/textarea, `ui-checkbox` для checkbox/radio,
-   `ui-range` для range, `ui-file` для file. Композер использует общий вариант
+   `ui-range` для range, `ui-file` для file. `tab` выделяет раздел нижней линией; `session-tab` сохраняет рамку и фон
+активной вкладки сессии, соединяя её с панелью чата.
+Композер использует общий вариант
    `ui-input--composer`; моноширинное поле — `ui-input mono`.
 3. Страница задаёт размещение, ширину и промежутки. Цвета, границы, шрифты,
    padding, hover, focus и disabled задаются только библиотекой через токены.

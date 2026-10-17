@@ -1226,7 +1226,7 @@ function planGlyph(status: string): string {
         <!-- One framed card, Claude-Code style: the field on top, the bottom
              menu row under it — attach + mic, model and thinking pickers,
              then the context meter and send on the right. -->
-        <div ref="composerBox" class="composer-box" @paste="handlePaste">
+        <div ref="composerBox" class="composer-box ui-composer" @paste="handlePaste">
           <div class="composer-field">
             <textarea class="ui-input ui-input--composer"
               ref="composerEl"
@@ -1809,9 +1809,6 @@ function planGlyph(status: string): string {
   padding: 0 0.375rem;
 }
 
-.composer-box:focus-within {
-  border-color: var(--text-accent, #b04a28);
-}
 
 /* One geometry for every composer button: a square stroke-icon hit area.
  * No fills except the primary action, no shadows anywhere. */

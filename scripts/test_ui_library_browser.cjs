@@ -44,6 +44,43 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
       page.on('response', r => { if (r.status() >= 400) { const item = `${r.status()} ${new URL(r.url()).pathname}`; if (r.status() === 404 && /\/execution\/cards\/ui-library-card(?:\/|$)/.test(new URL(r.url()).pathname)) expected404.push(item); else failed.push(item); } });
       await page.goto(`${process.env.UI_TEST_URL || `http://127.0.0.1:${server.address().port}`}/chat?s=E2E%3A%3Ae2e`, { waitUntil: 'domcontentloaded' });
       await page.waitForFunction(() => window.__session?.activeRuntime?.isConnected);
+      // Mixed static/expandable transcript rows must remain dense after control migration.
+      const update = update => socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'e2e', update } }));
+      update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Transcript density fixture' } });
+      for (let i = 0; i < 12; i++) update({ sessionUpdate: 'tool_call', toolCallId: `dense-${i}`, title: `Read fixture ${i}`, kind: 'read', status: i < 2 ? 'failed' : i < 4 ? 'in_progress' : 'completed', ...(i % 2 ? {} : { rawInput: { path: '/tmp/fixture.txt' } }) });
+      const rows = page.locator('.chat-view:visible .tool-call-inline');
+      await rows.nth(11).waitFor();
+      const composer = page.locator('.chat-view:visible textarea.ui-input--composer');
+      const density = await rows.evaluateAll(nodes => nodes.map(e => ({ height: e.getBoundingClientRect().height, top: e.getBoundingClientRect().top, font: getComputedStyle(e).fontFamily })));
+      console.log(JSON.stringify({ width, density }));
+      for (const scheme of ['light', 'dark']) {
+        await page.emulateMedia({ colorScheme: scheme });
+        await composer.fill('Проверка фокуса');
+        await composer.focus();
+        const outline = await composer.evaluate(e => getComputedStyle(e).outlineWidth);
+        console.log(JSON.stringify({ width, scheme, composerOutline: outline }));
+        await page.waitForFunction(e => getComputedStyle(e.closest('.ui-composer')).borderTopColor === 'rgb(128, 128, 128)', await composer.elementHandle());
+        assert.equal(outline, '0px', 'composer uses its frame focus cue, no rectangular textarea outline');
+        assert(density.every(row => row.height <= 32), 'transcript disclosure rows stay compact on touch screens');
+        assert(density.every(row => /mono/i.test(row.font)), 'static and expandable tool rows share monospace typography');
+        for (let i = 1; i < density.length; i++) assert(density[i].top - density[i - 1].top <= 40, 'no large gaps between tool calls');
+        await page.screenshot({ path: `/tmp/acp-ui-library-chat-${width}-${scheme}.png` });
+      }
+      await composer.fill('');
+      const backgrounds = await rows.evaluateAll(nodes => nodes.map(e => getComputedStyle(e).backgroundColor));
+      assert.equal(backgrounds[0], backgrounds[1], 'failed tool tint matches across static/disclosure rows');
+      assert.equal(backgrounds[2], backgrounds[3], 'running tool tint matches across static/disclosure rows');
+      assert.notEqual(backgrounds[0], backgrounds[4], 'failed tools retain status tint');
+      assert.notEqual(backgrounds[2], backgrounds[4], 'running tools retain status tint');
+      await rows.first().hover();
+      assert.equal(await rows.first().evaluate(e => getComputedStyle(e).backgroundColor), backgrounds[0], 'hover preserves failed tool tint');
+      if (width >= 800) assert.notEqual(await page.getByRole('tab', { name: /Library fixture/ }).evaluate(e => getComputedStyle(e).backgroundColor), 'rgba(0, 0, 0, 0)', 'session tab retains its panel background');
+      const disclosure = rows.filter({ has: page.locator('.tool-chevron') }).first();
+      await disclosure.click();
+      assert.equal(await disclosure.getAttribute('aria-expanded'), 'true');
+      await page.locator('.chat-view:visible .tool-args').first().waitFor();
+      await disclosure.focus(); await page.keyboard.press('Enter');
+      assert.equal(await disclosure.getAttribute('aria-expanded'), 'false');
       // Permission autofocus, native keyboard activation and actual ACP reply.
       socket.send(JSON.stringify({ jsonrpc: '2.0', id: 811, method: 'session/request_permission', params: { sessionId: 'e2e', toolCall: { toolCallId: 'qa-permission', title: 'Read browser fixture', kind: 'read', status: 'pending' }, options: [{ optionId: 'allow', kind: 'allow_once', name: 'Allow once' }, { optionId: 'reject', kind: 'reject_once', name: 'Reject' }] } }));
       const allow = page.getByRole('button', { name: 'Allow once', exact: true }); await allow.waitFor();
@@ -67,9 +104,47 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
         const nav = page.getByRole('navigation', { name: 'Main views' }).filter({ visible: true }).first();
         await nav.getByRole('button', { name, exact: true }).click();
       }
+      if (width >= 800) {
+        const runMode = page.locator('.chat-view:visible .mode-picker').last();
+        await runMode.locator('.mode-button').click();
+        await runMode.getByRole('button', { name: 'Workflow', exact: true }).click();
+        const workflow = page.locator('.wf-panel:visible'); await workflow.waitFor();
+        for (const tab of await workflow.getByRole('tab').all()) {
+          await tab.click(); assert.equal(await tab.getAttribute('aria-selected'), 'true');
+        }
+      }
+      if (!await page.locator('#app-sidebar').isVisible()) await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+      await page.getByRole('button', { name: 'ACP Traffic Monitor', exact: true }).click();
+      const traffic = page.locator('.traffic-monitor'); await traffic.waitFor();
+      const header = traffic.locator('.monitor-header');
+      assert(await header.evaluate(e => e.scrollWidth <= e.clientWidth + 1), 'traffic controls fit narrow screens');
+      await traffic.getByRole('textbox', { name: 'Search ACP traffic' }).fill('fixture');
+      assert(await header.evaluate(e => e.scrollWidth <= e.clientWidth + 1), 'traffic search clear action fits too');
+      await traffic.getByRole('button', { name: 'Clear search', exact: true }).click();
+      await traffic.getByRole('button', { name: 'Pause', exact: true }).click();
+      await traffic.getByRole('button', { name: 'Resume', exact: true }).click();
+      await traffic.getByRole('combobox').selectOption('requests');
+      await page.screenshot({ path: `/tmp/acp-ui-library-traffic-${width}.png` });
+      await traffic.getByRole('button', { name: 'Close', exact: true }).click();
       await navigate('Board');
       const card = page.locator('[data-card-id="ui-library-card"]'); await card.waitFor();
-      const menu = card.getByRole('button', { name: 'Card actions' }); await menu.click();
+      const roleSelect = page.locator('[data-testid="col-role-select"]').first();
+      assert.match(await roleSelect.evaluate(e => getComputedStyle(e).fontFamily), /mono/i);
+      if (width < 800) assert.equal(await roleSelect.evaluate(e => getComputedStyle(e).fontSize), '16px');
+      await roleSelect.evaluate(e => e.setAttribute('aria-invalid', 'true'));
+      assert.equal(await roleSelect.evaluate(e => getComputedStyle(e).color), await roleSelect.evaluate(e => getComputedStyle(e).borderTopColor), 'missing-runner field retains its error color');
+      await roleSelect.evaluate(e => e.removeAttribute('aria-invalid'));
+      const menu = card.getByRole('button', { name: 'Card actions' });
+      await page.mouse.move(0, 0);
+      if (width >= 800) {
+        assert.equal(await menu.evaluate(e => getComputedStyle(e).opacity), '0', 'secondary card action stays quiet until hover/focus');
+        await menu.focus();
+        assert.equal(await menu.evaluate(e => getComputedStyle(e).opacity), '1', 'keyboard focus reveals secondary action');
+        await page.keyboard.press('Tab'); await card.hover();
+      }
+      assert.equal(await card.evaluate(e => getComputedStyle(e).opacity), '1', 'reveal affects only the secondary action');
+      assert.equal(await menu.evaluate(e => getComputedStyle(e).opacity), '1', 'card action remains available to touch/hover');
+      await menu.click();
       const blocked = card.getByRole('menuitem', { name: /blocked/ }); assert(await blocked.evaluate(e => e.classList.contains('ds-button')));
       await page.keyboard.press('Escape');
       await card.locator('.card-title').click();
@@ -103,7 +178,11 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
       const sections = page.getByRole('navigation', { name: 'Board sections' });
       for (const name of ['Events', 'Links', 'Timeline', 'Agents', 'Tasks']) {
         await sections.getByRole('tab', { name: new RegExp(`^${name}`) }).click();
-        assert.equal(await sections.getByRole('tab', { name: new RegExp(`^${name}`) }).getAttribute('aria-selected'), 'true');
+        await page.mouse.move(0, 0);
+        const selected = sections.getByRole('tab', { name: new RegExp(`^${name}`) });
+        assert.equal(await selected.getAttribute('aria-selected'), 'true');
+        assert.equal(await selected.evaluate(e => getComputedStyle(e).backgroundColor), 'rgba(0, 0, 0, 0)', 'active section uses a quiet underline');
+        assert.notEqual(await selected.evaluate(e => getComputedStyle(e).borderBottomColor), 'rgba(0, 0, 0, 0)');
       }
       await sections.getByRole('tab', { name: /^Events/ }).click();
       const eventFilter = page.getByRole('combobox', { name: 'Filter events by kind' }); await eventFilter.waitFor();

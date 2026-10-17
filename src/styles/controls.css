@@ -38,13 +38,15 @@ textarea.ui-input { resize: vertical; }
 .ui-file { max-width: 100%; font: inherit; color: var(--text-primary); }
 .ui-checkbox:focus-visible, .ui-range:focus-visible, .ui-file:focus-visible { outline: 2px solid var(--text-accent); outline-offset: 2px; }
 .ui-checkbox:disabled, .ui-range:disabled, .ui-file:disabled { opacity: 0.5; cursor: not-allowed; }
-.ui-input[aria-invalid='true'] { border-color: var(--bg-danger); }
+.ui-input[aria-invalid='true'] { border-color: var(--bg-danger); color: var(--bg-danger); }
 .ui-input--composer {
   min-height: 34px; height: 34px; padding: 7px 0.125rem;
   border: none; border-radius: 0; background: transparent;
   font-size: 0.875rem; line-height: 20px; resize: none;
 }
-.ui-input--composer:focus-visible { outline-offset: -2px; }
+.ui-input--composer:focus-visible { outline: 0; }
+/* The composer frame supplies the focus cue, rather than boxing its textarea. */
+.ui-composer:focus-within { border-color: var(--border-strong); }
 .ui-input--composer::placeholder { color: var(--text-muted); opacity: 1; }
 .ui-input--composer:disabled { color: var(--text-muted); }
 .ui-input--composer.voice-ghost, .ui-input--composer.voice-ghost::placeholder { color: transparent; caret-color: var(--text-primary); }

@@ -164,7 +164,7 @@ async function setArchived(session: SavedSession, archived: boolean) {
         v-for="{ session, runtime, status, transient } in rows"
         :key="session.id"
         :data-session-id="session.id"
-        class="session-row"
+        class="session-row ui-action-group"
         :class="{ active: runtime ? runtime.id === sessionStore.activeTabId : session.id === activeSessionId }"
         :title="`${session.title}\n${session.agentName} · ${session.cwd || '—'}`"
       >
@@ -202,7 +202,7 @@ async function setArchived(session: SavedSession, archived: boolean) {
         ><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 111 8M4 4v6h6" /></svg></UiButton>
         <UiButton
           v-else
-          class="row-close"
+          class="row-close" :reveal="!(runtime ? runtime.id === sessionStore.activeTabId : session.id === activeSessionId)"
           variant="ghost" icon size="xs"
           :aria-label="transient ? 'Close session' : 'Archive session'"
           :title="transient ? 'Close session' : 'Archive session (keep history)'"

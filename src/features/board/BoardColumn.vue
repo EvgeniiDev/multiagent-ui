@@ -115,7 +115,7 @@ function onDragEnd() {
         :title="`${blockedCount} card(s) flagged blocked`"
       >{{ blockedCount }} blocked</span>
       <select
-        class="ui-input col-role"
+        class="ui-input mono col-role"
         :aria-invalid="stageRoleNoRunner || undefined"
         :value="stageRole?.id ?? ''"
         data-testid="col-role-select"

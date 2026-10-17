@@ -405,4 +405,15 @@ function handleCopy(entry: TrafficEntry) {
   font-size: 0.7rem;
   color: var(--text-secondary, #6b6259);
 }
+/* Shared touch controls wrap instead of pushing search/filter off-screen. */
+@media (max-width: 800px) {
+  .monitor-header { flex-wrap: wrap; }
+  .title { flex: 1 1 auto; }
+  .close-btn { order: 1; }
+  .controls { order: 2; flex: 1 1 100%; min-width: 0; flex-wrap: wrap; }
+  .search-container { flex: 1 1 100px; min-width: 0; }
+  .search-input { width: 100%; min-width: 0; flex: 1 1 auto; }
+  .filter-select { flex: 1 1 100px; width: auto; min-width: 0; }
+}
+
 </style>

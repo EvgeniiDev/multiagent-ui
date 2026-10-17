@@ -247,7 +247,7 @@ async function onManagedApproveWo(versionId: string) {
           <span class="managed-title">Managed runs</span>
           <span v-if="exec.indexError" class="managed-err">{{ exec.indexError }}</span>
         </div>
-        <UiButton variant="row" :aria-pressed="exec.focused?.cardId === mc.cardId"
+        <UiButton variant="row" size="xs" :aria-pressed="exec.focused?.cardId === mc.cardId"
           v-for="mc in exec.managedIndex"
           :key="mc.cardId"
           class="managed-row mono"
@@ -286,7 +286,7 @@ async function onManagedApproveWo(versionId: string) {
           </div>
           <p v-if="focusedState?.runError" class="managed-err mono" data-testid="managed-run-error">
             {{ focusedState.runError }}
-            <UiButton variant="secondary" data-testid="managed-run-retry" @click="exec.focused && void exec.refreshRun(exec.focused.cardId)">retry</UiButton>
+            <UiButton variant="secondary" size="xs" data-testid="managed-run-retry" @click="exec.focused && void exec.refreshRun(exec.focused.cardId)">retry</UiButton>
           </p>
           <p v-else-if="!focusedRun" class="managed-sub mono">
             {{ focusedState?.runInflight ? 'loading run detail…' : 'no detail loaded' }}
@@ -313,20 +313,20 @@ async function onManagedApproveWo(versionId: string) {
               >
                 <span class="managed-warn">{{ pendingActionText(a, focusedRun) }}</span>
                 <template v-if="a.type === 'participant_decision'">
-                  <UiButton variant="secondary"
+                  <UiButton variant="secondary" size="xs"
                     :data-testid="`managed-retry-${a.participantId}`"
                     :disabled="fusionGate(canRetryParticipant(focusedRun, a.participantId)).disabled"
                     :title="fusionGate(canRetryParticipant(focusedRun, a.participantId)).title"
                     @click="onManagedRetry(a.participantId)"
                   >retry</UiButton>
-                  <UiButton variant="secondary"
+                  <UiButton variant="secondary" size="xs"
                     :data-testid="`managed-exclude-${a.participantId}`"
                     :disabled="fusionGate(canExcludePanelist(focusedRun, a.participantId)).disabled"
                     :title="fusionGate(canExcludePanelist(focusedRun, a.participantId)).title"
                     @click="onManagedExclude(a.participantId)"
                   >exclude</UiButton>
                 </template>
-                <UiButton variant="secondary"
+                <UiButton variant="secondary" size="xs"
                   v-else-if="a.type === 'work_order_approval'"
                   :data-testid="`managed-approve-${a.versionId}`"
                   :disabled="fusionGate(canApproveWorkOrder(focusedRun, a.versionId)).disabled"

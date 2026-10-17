@@ -277,7 +277,7 @@ onBeforeUnmount(() => {
 
 <template>
   <article
-    class="board-card"
+    class="board-card ui-action-group"
     :class="[`prio-${card.priority}`, {
       'has-menu': menuOpen || statusOpen,
       'flag-blocked': card.blocked,
@@ -295,7 +295,7 @@ onBeforeUnmount(() => {
     <div class="card-top">
       <span class="card-title">{{ card.title || 'Untitled card' }}</span>
       <UiButton variant="ghost" icon
-        class="card-menu-btn"
+        class="card-menu-btn" :reveal="!(menuOpen || statusOpen)" size="xs"
         aria-label="Card actions"
         :aria-expanded="menuOpen"
         title="Card actions"
@@ -312,7 +312,7 @@ onBeforeUnmount(() => {
     <div class="card-meta">
       <!-- In-stage status chip: click opens the stage's status picker.
            backlog/done have no status, so no chip renders there. -->
-      <UiButton variant="chip"
+      <UiButton variant="chip" :tone="card.status === 'done' || card.status === 'accepted' ? 'muted' : 'default'"
         v-if="stageStatuses.length"
         class="status-chip"
         :class="`st-${card.status}`"

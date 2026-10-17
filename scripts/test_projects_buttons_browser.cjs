@@ -54,9 +54,14 @@ const assert = require('node:assert/strict');
       }));
       await page.goto(base + '/', { waitUntil: 'domcontentloaded' });
       await page.locator('.rail-btn[aria-label="Projects"]').click();
+      await page.locator('.project-row').filter({ hasText: 'Button QA' }).waitFor();
       await page.setViewportSize({ width, height: 844 });
       if (width < 800 && await page.locator('#app-sidebar').isVisible()) await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click();
       const row = page.locator('.project-row').filter({ hasText: 'Button QA' });
+      if (!await row.isVisible()) {
+        await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+        await page.getByRole('navigation', { name: 'Main views' }).filter({ visible: true }).getByRole('button', { name: 'Projects', exact: true }).click();
+      }
       await row.click();
       const newProject = page.getByRole('button', { name: 'New project', exact: true });
       const newSession = page.getByRole('button', { name: 'New session', exact: true });
@@ -92,6 +97,10 @@ const assert = require('node:assert/strict');
       await page.locator('.ns-cancel').click();
       await page.getByRole('button', { name: 'Close project detail' }).click();
       assert.equal(await page.locator('.project-detail').count(), 0, 'close still dismisses detail');
+      if (!await row.isVisible()) {
+        await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+        await page.getByRole('navigation', { name: 'Main views' }).filter({ visible: true }).getByRole('button', { name: 'Projects', exact: true }).click();
+      }
       await row.click();
       await scoped.click();
       await page.locator('.chat-view:visible').waitFor();

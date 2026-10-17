@@ -60,7 +60,7 @@ function getToolKind(kind: string): string {
 
 <template>
   <div class="tool-call-wrap">
-    <UiButton variant="row"
+    <UiButton variant="transcript" :tone="tc.status === 'failed' ? 'danger' : tc.status === 'in_progress' ? 'info' : 'default'"
       v-if="tc.rawInput != null || tc.rawOutput"
       :class="['tool-call-inline', 'is-expandable', `tool-${tc.status}`]"
       :aria-expanded="expanded"
@@ -106,6 +106,9 @@ function getToolKind(kind: string): string {
   font-size: 0.6875rem;
 }
 .tool-call-inline.is-expandable { width: 100%; }
+
+.tool-call-inline:not(.ds-button).tool-failed { background: var(--accent-danger-soft); }
+.tool-call-inline:not(.ds-button).tool-in_progress { background: var(--surface-info); }
 
 .tool-chevron {
   flex: 0 0 auto;
