@@ -4,7 +4,7 @@
 // persists the open set, and delegates the legacy single-session API
 // surface to the active runtime so existing callers keep working.
 import { defineStore } from 'pinia';
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, onScopeDispose } from 'vue';
 import { loadKvStore, type KVStore } from '../lib/host/storage';
 import { trackEvent } from '../lib/telemetry';
 import { uuid } from '../lib/uuid';
@@ -687,12 +687,39 @@ export const useSessionStore = defineStore('session', () => {
    * scoped list used to. Open tabs always show, even when hidden by a prefix
    * (otherwise the list would deny what a tab is displaying).
    */
-  const visibleSessions = computed(() =>
-    savedSessions.value
+  // Keep row order stable during streaming; one trailing sort per five seconds.
+  // Do not reset the timer on chunks: continuous output must still be reflected.
+  const sessionOrder = ref(new Map<string, number>());
+  let lastSortAt = -Infinity;
+  let sortTimer: ReturnType<typeof setTimeout> | null = null;
+  function updateSessionOrder() {
+    sortTimer = null;
+    lastSortAt = performance.now();
+    sessionOrder.value = new Map(
+      [...savedSessions.value]
+        .sort((a, b) => b.lastUpdated - a.lastUpdated)
+        .map((session, index) => [session.id, index] as const)
+    );
+  }
+  watch(() => savedSessions.value.map(s => [s.id, s.lastUpdated] as const), () => {
+    if (sessionOrder.value.size === 0) {
+      updateSessionOrder();
+      return;
+    }
+    if (sortTimer !== null) return;
+    const remaining = Math.max(0, 5000 - (performance.now() - lastSortAt));
+    if (remaining === 0) updateSessionOrder();
+    else sortTimer = setTimeout(updateSessionOrder, remaining);
+  }, { immediate: true });
+  onScopeDispose(() => { if (sortTimer !== null) clearTimeout(sortTimer); });
+
+  const visibleSessions = computed(() => {
+    const order = sessionOrder.value;
+    return savedSessions.value
       .filter(s => openSessionIds.value.has(s.id) || s.supportsLoadSession === true)
       .filter(s => openSessionIds.value.has(s.id) || !isHiddenSession(s))
-      .sort((a, b) => b.lastUpdated - a.lastUpdated)
-  );
+      .sort((a, b) => (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+  });
 
   /**
    * True when EVERY configured agent is known to lack `session/list` — only

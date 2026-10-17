@@ -87,6 +87,30 @@ const assert = require('node:assert/strict');
         assert.equal(await page.locator('.row-status.unread').innerText(), 'Unread reply');
         liveSocket.send(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'older', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'A fresh reply' } } } }));
         await page.waitForFunction(() => document.querySelector('.row-title')?.textContent === 'older');
+        if (width === 390) {
+          // Continuous output must neither reshuffle every chunk nor defer forever.
+          const started = Date.now();
+          for (let burst = 0; burst < 6; burst++) {
+            await page.evaluate(() => {
+              const session = window.__session.savedSessions.find(s => s.id === 'newer');
+              session.lastUpdated = session.lastMessageAt = Date.now();
+              window.__session.openTabs.find(t => t.descriptor.sessionId === 'newer').isLoading = true;
+            });
+            await page.waitForTimeout(500);
+            assert.equal(await page.locator('.row-title').first().innerText(), 'older', 'streaming cannot immediately move rows');
+            assert(await page.locator('.session-row').filter({ hasText: 'newer' }).locator('.row-status.working').isVisible(), 'statuses stay live while ordering waits');
+          }
+          await page.waitForFunction(() => document.querySelector('.row-title')?.textContent === 'newer', null, { timeout: 3000 });
+          assert(Date.now() - started < 6500, 'continuous output is sorted within the next five-second window');
+          await page.evaluate(() => {
+            const session = window.__session.savedSessions.find(s => s.id === 'older');
+            session.lastUpdated = session.lastMessageAt = Date.now();
+            window.__session.openTabs.find(t => t.descriptor.sessionId === 'newer').isLoading = false;
+          });
+          await page.waitForTimeout(500);
+          assert.equal(await page.locator('.row-title').first().innerText(), 'newer', 'a second reorder cannot occur inside five seconds');
+          await page.waitForFunction(() => document.querySelector('.row-title')?.textContent === 'older');
+        }
         await page.getByRole('button', { name: 'Load sessions from all agents', exact: true }).click();
         await page.waitForFunction(() => !window.__session.isSyncingSessions);
         assert.equal(await page.locator('.row-title').first().innerText(), 'older', 'stale inventory cannot override a fresh message');
