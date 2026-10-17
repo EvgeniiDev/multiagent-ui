@@ -151,7 +151,51 @@ const assert = require('node:assert/strict');
         await page.keyboard.press('Control+V');
         await staged.locator('.attach-chip').waitFor();
       }
+      const chat = page.locator('.chat-view:visible');
+      const hint = chat.getByRole('status').filter({ hasText: 'Drop files to attach' });
+      async function dragData(files) {
+        return page.evaluateHandle(files => {
+          const data = new DataTransfer();
+          for (const file of files) {
+            const bytes = file.base64 ? Uint8Array.from(atob(file.base64), c => c.charCodeAt(0)) : file.content;
+            data.items.add(new File([bytes], file.name, { type: file.type }));
+          }
+          return data;
+        }, files);
+      }
+      async function drop(data, target = chat.locator('.messages-container')) {
+        return target.evaluate((el, data) => {
+          const event = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: data });
+          el.dispatchEvent(event);
+          return event.defaultPrevented;
+        }, data);
+      }
       await field.fill('Following draft');
+      const dropped = await dragData([{ name: 'dropped.txt', type: 'text/plain', content: 'Dropped text' }, { name: 'notes.json', type: 'application/json', content: '{"dropped":true}' }, { name: 'dropped.png', type: 'image/png', base64: image.toString('base64') }]);
+      await chat.dispatchEvent('dragenter', { dataTransfer: dropped });
+      await hint.waitFor();
+      if (process.env.SHOTS) await page.screenshot({ path: path.join(process.env.SHOTS, `file-drop-hint-${width}.png`) });
+      await chat.locator('.composer-field').dispatchEvent('dragenter', { dataTransfer: dropped });
+      await chat.locator('.composer-field').dispatchEvent('dragleave', { dataTransfer: dropped });
+      assert(await hint.isVisible(), 'nested drag targets do not flicker the hint');
+      await chat.dispatchEvent('dragleave', { dataTransfer: dropped });
+      await hint.waitFor({ state: 'detached' });
+      await chat.dispatchEvent('dragenter', { dataTransfer: dropped });
+      assert(await drop(dropped), 'file drop prevents browser navigation');
+      await page.waitForFunction(() => document.querySelectorAll('.attach-tray .attach-chip').length === 3);
+      assert.equal(await field.inputValue(), 'Following draft', 'drop preserves typed draft');
+      await checkPreview(staged.getByRole('button', { name: 'Preview dropped.png' }));
+      await hint.waitFor({ state: 'detached' });
+      while (await staged.count()) await staged.getByRole('button', { name: 'Remove attachment' }).first().click();
+      await dropped.dispose();
+      const invalid = await dragData([{ name: 'unsupported.pdf', type: 'application/pdf', content: 'pdf' }]);
+      assert(await drop(invalid));
+      await chat.locator('.attach-error').filter({ hasText: 'only images and text files' }).waitFor();
+      assert.equal(await staged.count(), 0, 'unsupported dropped files are not attached');
+      await invalid.dispose();
+      const textDrag = await page.evaluateHandle(() => { const data = new DataTransfer(); data.setData('text/plain', 'Dragged text'); return data; });
+      assert.equal(await drop(textDrag, field), false, 'text-only dragging keeps native behavior');
+      await textDrag.dispose();
       await pasteImage();
       assert.equal(await field.inputValue(), 'Following draft', 'idle image paste preserves text');
       await staged.getByRole('button', { name: /^Preview pasted-/ }).click();
@@ -160,6 +204,13 @@ const assert = require('node:assert/strict');
       await page.getByRole('button', { name: 'Send', exact: true }).click();
       await page.getByRole('button', { name: 'Stop response', exact: true }).waitFor();
       assert.equal(prompts.length, 1, 'fixture has one real pending prompt RPC');
+      const duringResponse = await dragData([{ name: 'during-response.md', type: 'text/markdown', content: '# Still answering' }]);
+      assert(await drop(duringResponse, chat.locator('.composer-box')));
+      await staged.getByText('during-response.md', { exact: true }).waitFor();
+      assert.equal(prompts.length, 1, 'dropping does not send a prompt');
+      assert.equal(cancels, 0, 'dropping does not stop generation');
+      await staged.getByRole('button', { name: 'Remove attachment' }).click();
+      await duringResponse.dispose();
       await pasteImage();
       assert(await attach.isEnabled(), 'file picker stays enabled while agent answers');
       await attach.focus();
@@ -186,17 +237,21 @@ const assert = require('node:assert/strict');
         { name: 'while-answering.json', mimeType: 'application/json', buffer: Buffer.from('{"duringResponse":true}') },
       ]);
       await staged.getByRole('button', { name: 'Preview while-answering.png' }).waitFor();
+      const queuedDrop = await dragData([{ name: 'queued-drop.txt', type: 'text/plain', content: 'Dropped into next prompt' }]);
+      await drop(queuedDrop);
+      await staged.getByText('queued-drop.txt', { exact: true }).waitFor();
+      await queuedDrop.dispose();
       pendingPrompt.ws.send(JSON.stringify({ jsonrpc: '2.0', id: pendingPrompt.id, result: { stopReason: 'end_turn' } }));
       await page.waitForTimeout(100);
-      assert.equal(await staged.locator('.attach-chip').count(), 4, 'image, text, markdown and JSON survive completion');
+      assert.equal(await staged.locator('.attach-chip').count(), 5, 'chosen and dropped files survive completion');
       await page.getByRole('button', { name: 'Send', exact: true }).click();
       await page.waitForTimeout(100);
       assert.equal(prompts.length, 2, 'next message sends normally');
       const sentImage = prompts[1].params.prompt.find(c => c.type === 'image');
       assert.equal(sentImage.data, image.toString('base64'), 'original image bytes reach prompt');
       const resources = prompts[1].params.prompt.filter(c => c.type === 'resource');
-      assert.equal(resources.length, 3, 'all ordinary file attachments reach prompt');
-      assert.deepEqual(resources.map(c => c.resource.text), ['plain text file during response', '# Markdown during response', '{"duringResponse":true}']);
+      assert.equal(resources.length, 4, 'chosen and dropped text files reach prompt');
+      assert.deepEqual(resources.map(c => c.resource.text), ['plain text file during response', '# Markdown during response', '{"duringResponse":true}', 'Dropped into next prompt']);
       pendingPrompt.ws.send(JSON.stringify({ jsonrpc: '2.0', id: pendingPrompt.id, result: { stopReason: 'end_turn' } }));
       await field.focus();
       await page.evaluate(() => navigator.clipboard.writeText('plain clipboard text'));
@@ -205,9 +260,14 @@ const assert = require('node:assert/strict');
       socket.close();
       await page.waitForFunction(() => document.querySelector('.chat-view .attach-btn')?.disabled === true);
       assert(await field.isDisabled(), 'offline composer remains disabled');
+      const offlineFile = await dragData([{ name: 'offline.txt', type: 'text/plain', content: 'offline' }]);
+      assert(await drop(offlineFile), 'offline file drop cannot navigate away');
+      await chat.locator('.attach-error').filter({ hasText: 'Reconnect' }).waitFor();
+      assert.equal(await staged.count(), 0, 'offline drop does not stage files');
+      await offlineFile.dispose();
       assert.deepEqual(errors, []);
       assert.deepEqual(failedHttp, []);
-      console.log(`PASS ${width}px: staged/history/reload, full image, focus/Tab/Escape, outside/close, error, removal, themes, touch, native clipboard idle/streaming, file picker, image prompt bytes`);
+      console.log(`PASS ${width}px: staged/history/reload, full image, focus/Tab/Escape, outside/close, error, removal, themes, touch, native clipboard idle/streaming, file picker, image prompt bytes, drag/drop idle/streaming, nested drag, invalid/offline drops`);
       await context.close();
     }
   } finally {

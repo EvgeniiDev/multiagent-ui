@@ -854,6 +854,48 @@ function handlePaste(event: ClipboardEvent) {
   void stageFiles(files.map(namePastedFile));
 }
 
+// Enter/leave events also fire for nested children; count them to avoid flicker.
+const fileDragDepth = ref(0);
+const canAttachFiles = computed(() => isConnected.value && !isReconnecting.value);
+watch([() => sessionStore.activeTabId, () => uiStore.activeView, isConnected, isReconnecting], () => {
+  fileDragDepth.value = 0;
+});
+
+function isFileDrag(event: DragEvent): boolean {
+  return Array.from(event.dataTransfer?.types ?? []).includes('Files');
+}
+
+function onFileDragEnter(event: DragEvent) {
+  if (!isFileDrag(event)) return;
+  event.preventDefault();
+  fileDragDepth.value += 1;
+}
+
+function onFileDragLeave(event: DragEvent) {
+  if (!isFileDrag(event)) return;
+  fileDragDepth.value = Math.max(0, fileDragDepth.value - 1);
+}
+
+function onFileDragOver(event: DragEvent) {
+  if (!isFileDrag(event)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = canAttachFiles.value ? 'copy' : 'none';
+}
+
+function onFileDrop(event: DragEvent) {
+  if (!isFileDrag(event)) return;
+  // Suppress the browser's default navigation even when staging is unavailable.
+  event.preventDefault();
+  fileDragDepth.value = 0;
+  const files = Array.from(event.dataTransfer?.files ?? []);
+  if (!files.length) return;
+  if (!canAttachFiles.value) {
+    attachError.value = 'Reconnect before attaching files.';
+    return;
+  }
+  void stageFiles(files);
+}
+
 function removeAttachment(id?: string) {
   attachments.value = attachments.value.filter(a => a.id !== id);
   attachError.value = null;
@@ -982,7 +1024,8 @@ function planGlyph(status: string): string {
 </script>
 
 <template>
-  <div class="chat-view" :class="{ 'document-chat-view': isNarrowLayout && !isTauriHost() }" :style="{ '--chat-input-height': `${inputHeight}px` }">
+  <div class="chat-view" :class="{ 'document-chat-view': isNarrowLayout && !isTauriHost() }" :style="{ '--chat-input-height': `${inputHeight}px` }"
+    @dragenter="onFileDragEnter" @dragleave="onFileDragLeave" @dragover="onFileDragOver" @drop="onFileDrop" @dragend="fileDragDepth = 0">
     <div class="chat-column">
       <div class="chat-header">
         <h2>{{ currentSession?.title || 'Chat' }}</h2>
@@ -1136,6 +1179,10 @@ function planGlyph(status: string): string {
         @select="handleCommandSelect"
         @close="handleCommandClose"
       />
+
+      <div v-if="fileDragDepth > 0" class="file-drop-hint" role="status">
+        {{ canAttachFiles ? 'Drop files to attach' : 'Reconnect to attach files' }}
+      </div>
 
       <!-- Staged files: one dense chip each, with a thumbnail for images. -->
       <div v-if="attachments.length" class="attach-tray">
@@ -1787,6 +1834,22 @@ function planGlyph(status: string): string {
 
 .file-input {
   display: none;
+}
+
+.file-drop-hint {
+  position: absolute;
+  inset: -0.25rem;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.75rem;
+  border: 2px dashed var(--text-accent);
+  border-radius: var(--radius-md);
+  background: var(--bg-main);
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  pointer-events: none;
 }
 
 .attach-tray {
