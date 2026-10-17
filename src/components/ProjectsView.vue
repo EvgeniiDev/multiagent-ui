@@ -22,6 +22,7 @@ import { useConfigStore } from '../stores/config';
 import { useUiStore } from '../stores/ui';
 import { useProjectsStore } from '../features/scope/registry';
 import type { SavedSession } from '../lib/types';
+import UiButton from './ui/UiButton.vue';
 import ProjectDetail from '../features/projects/ProjectDetail.vue';
 import NewSessionDialog from '../features/projects/NewSessionDialog.vue';
 import NewProjectDialog from '../features/projects/NewProjectDialog.vue';
@@ -215,12 +216,12 @@ async function newSessionIn(row: ProjectRow) {
           <button :class="{ active: range === 0 }" @click="range = 0">all</button>
         </div>
         <span class="pane-note">{{ projects.length }} projects</span>
-        <button class="new-project-cta" type="button" @click="showNewProject = true">
+        <UiButton class="new-project-cta" type="button" @click="showNewProject = true">
           New project
-        </button>
-        <button class="new-session-cta" type="button" @click="showNewSession = true">
+        </UiButton>
+        <UiButton class="new-session-cta" type="button" @click="showNewSession = true">
           New session
-        </button>
+        </UiButton>
       </div>
     </header>
 
@@ -374,24 +375,6 @@ async function newSessionIn(row: ProjectRow) {
   font-family: var(--font-mono, monospace);
   font-size: 0.6875rem;
   color: var(--text-muted, #a39a8e);
-}
-
-.new-session-cta {
-  height: 28px;
-  padding: 0 0.75rem;
-  border: none;
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-primary, #c2532f);
-  color: var(--text-on-accent, #fbf8f3);
-  font-family: inherit;
-  font-size: 0.75rem;
-  font-weight: 600;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.new-session-cta:hover {
-  background: var(--bg-primary-hover, #a8431f);
 }
 
 /* Two independently scrolling panes: list column on the left (fixed band,
@@ -577,29 +560,6 @@ async function newSessionIn(row: ProjectRow) {
 
   .range button {
     height: 44px;
-  }
-
-.new-project-cta {
-  height: 28px;
-  padding: 0 0.75rem;
-  border: 1px solid var(--bg-primary, #c2532f);
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-accent, #c2532f);
-  font-family: inherit;
-  font-size: 0.75rem;
-  font-weight: 600;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.new-project-cta:hover {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-}
-
-  .new-project-cta,
-  .new-session-cta {
-    min-height: 44px;
   }
 
   .project-path,

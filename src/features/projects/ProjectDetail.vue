@@ -4,6 +4,7 @@
 // roll-up for the selected range, the per-project session list, and the
 // project-scoped "New session here" action. An × dismisses the pane (the
 // selection itself is cleared by the parent).
+import UiButton from '../../components/ui/UiButton.vue';
 import type { SavedSession } from '../../lib/types';
 import type { ProjectRow } from './types';
 import { formatStamp, relative, compactNumber } from './format';
@@ -29,16 +30,17 @@ const emit = defineEmits<{
         <p class="detail-path mono">{{ project.cwd }}</p>
       </div>
       <div class="detail-actions">
-        <button class="action" @click="emit('newSession', project)">New session here</button>
-        <button
-          class="detail-close"
+        <UiButton @click="emit('newSession', project)">New session here</UiButton>
+        <UiButton
+          icon
+          variant="ghost"
           type="button"
           aria-label="Close project detail"
           title="Close"
           @click="emit('close')"
         >
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-        </button>
+        </UiButton>
       </div>
     </header>
 
@@ -115,43 +117,6 @@ const emit = defineEmits<{
   display: flex;
   align-items: center;
   gap: 0.375rem;
-}
-
-.action {
-  height: 28px;
-  padding: 0 0.75rem;
-  border: 1px solid var(--bg-primary, #c2532f);
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-accent, #c2532f);
-  font-family: inherit;
-  font-size: 0.75rem;
-  font-weight: 600;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.action:hover {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-}
-
-.detail-close {
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  background: transparent;
-  color: var(--text-secondary, #6b6259);
-  cursor: pointer;
-}
-
-.detail-close:hover {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-primary, #2b2723);
 }
 
 .detail-metrics {
@@ -238,13 +203,5 @@ const emit = defineEmits<{
     min-height: 44px;
   }
 
-  .action {
-    min-height: 44px;
-  }
-
-  .detail-close {
-    width: 44px;
-    height: 44px;
-  }
 }
 </style>
