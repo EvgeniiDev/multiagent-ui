@@ -2,6 +2,7 @@
 import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue';
 import { loadKvStore, type KVStore } from './lib/host';
 import { isTauriHost } from './lib/platform';
+import { standalone } from './lib/pwa';
 import { useConfigStore } from './stores/config';
 import { useSessionStore } from './stores/session';
 import { initTelemetry } from './lib/telemetry';
@@ -33,6 +34,8 @@ import { setSessionInUrl, sessionFromUrl } from './lib/sessionUrl';
 import { viewFromUrl } from './lib/viewUrl';
 import { createMobileMenuHistory } from './lib/mobileMenuHistory';
 import type { ViewId } from './stores/ui';
+
+const standaloneApp = !isTauriHost() && standalone();
 
 // Install before stores register their window popstate listeners.
 const mobileMenuHistory = createMobileMenuHistory({
@@ -482,7 +485,7 @@ function clearError() {
 <template>
   <div
     class="app-container"
-    :class="{ 'narrow-layout': isNarrowLayout, 'document-chat': documentChat }"
+    :class="{ 'narrow-layout': isNarrowLayout, 'document-chat': documentChat, 'standalone-app': standaloneApp }"
     :style="viewportHeight ? { '--app-viewport-height': `${viewportHeight}px`, '--app-viewport-top': `${viewportTop}px` } : undefined"
     @pointerdown="drawerSwipe.start"
     @pointermove="drawerSwipe.move"
@@ -1188,6 +1191,11 @@ html.sessions-page { overflow: hidden; }
 }
 
 @media (max-width: 800px) {
+  /* Keep the installed app at its layout scale while retaining native scrolling. */
+  .app-container.standalone-app {
+    touch-action: pan-x pan-y;
+  }
+
   /* On phones the downward rail becomes a hamburger: it's hidden entirely and
      view switching lives in the drawer's top row instead — content starts one
      chrome strip higher. */
