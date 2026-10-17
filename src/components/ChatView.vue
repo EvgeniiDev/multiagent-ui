@@ -845,8 +845,8 @@ function namePastedFile(file: File): File {
 function handlePaste(event: ClipboardEvent) {
   const files = Array.from(event.clipboardData?.files ?? []);
   if (files.length === 0) return;
-  // Same gate as the attach button: no staging mid-turn or while offline.
-  if (isLoading.value || isReconnecting.value || !isConnected.value) return;
+  // Like the editable draft, attachments remain available during a response.
+  if (isReconnecting.value || !isConnected.value) return;
   event.preventDefault();
   void stageFiles(files.map(namePastedFile));
 }
@@ -1190,10 +1190,12 @@ function planGlyph(status: string): string {
             ><span>{{ voicePre }}</span><span>{{ voiceSep }}</span><span class="voice-commit">{{ voiceCommitted }}</span><span>{{ voiceTailSep }}</span><span class="voice-volatile">{{ voiceVolatile }}</span><span>{{ voicePostSep }}</span><span>{{ voicePost }}</span></div>
           </div>
           <div class="composer-menu">
-            <button
-              class="icon-btn attach-btn"
-              :class="{ active: attachments.length > 0 }"
-              :disabled="isLoading || isReconnecting || !isConnected"
+            <UiButton
+              icon
+              variant="ghost"
+              class="attach-btn"
+              :aria-pressed="attachments.length > 0"
+              :disabled="isReconnecting || !isConnected"
               @click="openFilePicker"
               :title="imageHint"
               aria-label="Attach files"
@@ -1211,7 +1213,7 @@ function planGlyph(status: string): string {
               >
                 <path d="M21.44 11.05l-8.49 8.49a5.5 5.5 0 01-7.78-7.78l8.49-8.49a3.5 3.5 0 014.95 4.95l-8.49 8.49a1.5 1.5 0 01-2.12-2.12l7.78-7.78" />
               </svg>
-            </button>
+            </UiButton>
             <input
               ref="fileInput"
               class="file-input"
@@ -1790,22 +1792,6 @@ function planGlyph(status: string): string {
 }
 
 /* ---------------- Attachments ---------------- */
-
-/* Attach lives inside the field's frame, so it carries no border of its
- * own — a quiet glyph that tints on hover and marks staged files. */
-.attach-btn:hover:not(:disabled) {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-primary, #2b2723);
-}
-
-.attach-btn.active {
-  background: var(--tint-active, rgba(194, 83, 47, 0.10));
-  color: var(--text-accent, #b04a28);
-}
-
-.attach-btn:disabled {
-  color: var(--text-muted, #786d62);
-}
 
 .file-input {
   display: none;
