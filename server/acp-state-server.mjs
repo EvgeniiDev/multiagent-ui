@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { realpathSync } from 'node:fs';
 import { createStateService } from './execution/state-service.mjs';
 import { nativeUsage } from './usage/native-usage.mjs';
+import { subscriptionLimits } from './usage/subscription-limits.mjs';
 import { createPushService } from './push/service.mjs';
 import { createChatFileHandler } from './chat-files.mjs';
 
@@ -82,7 +83,7 @@ function readBody(req) {
   });
 }
 
-export function createRequestHandler(service, { usageReader = nativeUsage, pushService, chatFileRoots, chatFileMaxBytes } = {}) {
+export function createRequestHandler(service, { usageReader = nativeUsage, limitsReader = subscriptionLimits, pushService, chatFileRoots, chatFileMaxBytes } = {}) {
   const chatFiles = createChatFileHandler({ roots: chatFileRoots, maxBytes: chatFileMaxBytes });
   return async function handler(req, res) {
     if (req.method === 'OPTIONS') {
@@ -100,6 +101,11 @@ export function createRequestHandler(service, { usageReader = nativeUsage, pushS
     try {
       if (url.pathname === '/api/chat-files') {
         await chatFiles(req, res, url);
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/api/subscription-limits') {
+        res.setHeader('cache-control', 'no-store');
+        send(res, 200, await limitsReader());
         return;
       }
       if (req.method === 'GET' && url.pathname === '/api/usage') {

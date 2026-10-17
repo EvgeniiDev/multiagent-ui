@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import UiButton from './ui/UiButton.vue';
+import SubscriptionLimits from './SubscriptionLimits.vue';
 import UiExpandableRows from './ui/UiExpandableRows.vue';
 import UiUsageTable, { type UsageTableRow } from './ui/UiUsageTable.vue';
 import { useActivityStore } from '../stores/activity';
@@ -326,6 +327,8 @@ watch(
             <div class="export-options"><UiButton data-testid="export-csv" @click="exportCsv">Download CSV</UiButton><UiButton data-testid="export-json" @click="exportJson">Download JSON</UiButton><p>Full time range, including hidden rows.</p></div>
           </details>
         </header>
+
+        <SubscriptionLimits />
 
         <div class="period-toolbar">
           <div class="range-seg" role="group" aria-label="Time range" data-testid="range-selector">
