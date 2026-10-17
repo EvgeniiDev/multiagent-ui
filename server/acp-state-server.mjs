@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { realpathSync } from 'node:fs';
 import { createStateService } from './execution/state-service.mjs';
 import { nativeUsage } from './usage/native-usage.mjs';
+import { createPushService } from './push/service.mjs';
 
 export const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
@@ -30,7 +31,7 @@ export const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const CORS_HEADERS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET,PUT,POST,DELETE,OPTIONS',
-  'access-control-allow-headers': 'content-type',
+  'access-control-allow-headers': 'content-type,authorization',
 };
 
 export function resolveConfig(env = process.env) {
@@ -80,7 +81,7 @@ function readBody(req) {
   });
 }
 
-export function createRequestHandler(service, { usageReader = nativeUsage } = {}) {
+export function createRequestHandler(service, { usageReader = nativeUsage, pushService } = {}) {
   return async function handler(req, res) {
     if (req.method === 'OPTIONS') {
       res.writeHead(204, CORS_HEADERS);
@@ -125,6 +126,21 @@ export function createRequestHandler(service, { usageReader = nativeUsage } = {}
           throw e;
         }
       }
+      if (pushService && url.pathname.startsWith('/api/push/')) {
+        const origin = req.headers.origin;
+        if (req.method !== 'GET') {
+          let allowed = false;
+          try { allowed = new URL(origin).hostname === new URL(`http://${req.headers.host}`).hostname; } catch {}
+          if (!allowed) { send(res, 403, { error: 'Invalid origin' }); return; }
+        }
+        let body;
+        try { body = bodyText ? JSON.parse(bodyText) : undefined; }
+        catch { send(res, 400, { error: 'Invalid JSON' }); return; }
+        const { status, json } = await pushService.request({ method: req.method, path: url.pathname,
+          body, origin, token: req.headers.authorization?.replace(/^Bearer /, '') });
+        send(res, status, json);
+        return;
+      }
       const { status, json } = await service.request({
         method: req.method,
         path: url.pathname,
@@ -147,7 +163,9 @@ export function createRequestHandler(service, { usageReader = nativeUsage } = {}
 async function main() {
   const { stateDir, port } = resolveConfig(process.env);
   const service = await createStateService({ stateDir });
-  const server = createServer(createRequestHandler(service));
+  const pushService = await createPushService({ stateDir });
+  const server = createServer(createRequestHandler(service, { pushService }));
+  pushService.attach(server);
   server.listen(port, '0.0.0.0', () => {
     console.log(`acp-state-server listening on :${port} dir=${stateDir}`);
   });

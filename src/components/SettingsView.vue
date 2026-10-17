@@ -8,6 +8,7 @@ import { addAgent, removeAgent, updateAgent } from '../lib/host';
 import { getTransportKind, type AgentTransportKind } from '../lib/types';
 import { restrictedTransports } from '../lib/platform';
 import EnvVarEditor from './EnvVarEditor.vue';
+import PwaSettings from './PwaSettings.vue';
 
 const emit = defineEmits<{
   (e: 'close'): void;
@@ -230,6 +231,7 @@ async function handleDelete(name: string) {
       </div>
 
       <div class="settings-content">
+        <PwaSettings />
         <section class="agents-section">
           <div class="section-header">
             <h3>Agents</h3>

@@ -5,6 +5,7 @@ import { getTransportKind } from '../types';
 import { restrictedTransports } from '../platform';
 import type { AcpTransport } from './types';
 import { WebSocketTransport } from './websocket';
+import { notificationConnection } from '../pwa';
 
 /**
  * Create and connect a transport for the named agent.
@@ -40,8 +41,10 @@ export async function createTransport(
       if (!config.url) {
         throw new Error(`Agent '${agentName}' is missing 'url' for websocket transport`);
       }
+      const connection = notificationConnection(config.url, []);
       return WebSocketTransport.connect({
-        url: config.url,
+        url: connection.url,
+        protocols: connection.protocols,
         headers: config.headers,
       });
     }

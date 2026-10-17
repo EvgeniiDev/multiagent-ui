@@ -19,4 +19,6 @@ RUN mkdir -p /run/acp-bridge-locks \
  && touch /run/acp-bridge-locks/hermes.lock /run/acp-bridge-locks/opencode.lock /run/acp-bridge-locks/devin.lock /run/acp-bridge-locks/pi.lock /run/acp-bridge-locks/codex.lock \
  && chmod 0555 /run/acp-bridge-locks
 WORKDIR /repo
+COPY server/push/package.json server/push/package-lock.json /opt/acp-ui/push/
+RUN npm ci --prefix /opt/acp-ui/push --omit=dev --ignore-scripts
 CMD ["node", "--version"]

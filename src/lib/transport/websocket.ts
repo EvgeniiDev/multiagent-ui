@@ -67,6 +67,8 @@ export interface WebSocketTransportOptions {
    * Other entries are recorded but ignored on the wire.
    */
   headers?: Record<string, string>;
+  /** Additional application subprotocols, alongside ACP and bearer auth. */
+  protocols?: string[];
   /**
    * Override the connection timeout (ms). Defaults to 15s; long enough for a
    * cold TLS handshake on slow mobile networks but short enough that users
@@ -144,7 +146,7 @@ export class WebSocketTransport implements AcpTransport {
     }
 
     const subprotocols = buildSubprotocols(opts.headers);
-    const ws = new Ctor(opts.url, subprotocols);
+    const ws = new Ctor(opts.url, [...subprotocols, ...(opts.protocols || [])]);
     const timeoutMs = opts.connectTimeoutMs ?? 15000;
 
     await new Promise<void>((resolve, reject) => {

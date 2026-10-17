@@ -18,7 +18,15 @@ export default defineConfig(async ({ mode }) => {
   const isWeb = mode === "web";
 
   return {
-    plugins: [vue()],
+    plugins: [vue(), ...(isWeb ? [{
+      name: 'acp-pwa-head',
+      transformIndexHtml() {
+        return [
+          { tag: 'link', attrs: { rel: 'manifest', href: '/manifest.webmanifest' }, injectTo: 'head' as const },
+          { tag: 'link', attrs: { rel: 'apple-touch-icon', href: '/pwa-180.png' }, injectTo: 'head' as const },
+        ];
+      },
+    }] : [])],
 
     define: {
       // Exposed to the frontend as `import.meta.env.VITE_APP_VERSION`. The
