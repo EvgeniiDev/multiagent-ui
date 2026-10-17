@@ -119,20 +119,26 @@ function handleDelete(sessionId: string, event: Event) {
         :title="`${session.title}\n${session.agentName} · ${session.cwd || '—'}`"
         @click="handleResume(session)"
       >
-        <span class="row-agent" :title="session.agentName">{{ session.agentName }}</span>
-        <span
-          v-if="openSessionIds.has(session.id)"
-          class="row-open"
-          title="Open in a tab"
-          aria-hidden="true"
-        ></span>
-        <span class="row-title">{{ session.title }}</span>
-        <span
-          v-if="showUnassigned && isUnassigned(session)"
-          class="row-tag"
-          title="Not inside any registered project"
-        >unassigned</span>
-        <span class="row-stamp">{{ formatStamp(session.lastUpdated) }}</span>
+        <div class="row-content">
+          <div class="row-heading">
+            <span
+              v-if="openSessionIds.has(session.id)"
+              class="row-open"
+              title="Open in a tab"
+              aria-hidden="true"
+            ></span>
+            <span class="row-title">{{ session.title }}</span>
+          </div>
+          <div class="row-meta">
+            <span class="row-agent" :title="session.agentName">{{ session.agentName }}</span>
+            <span
+              v-if="showUnassigned && isUnassigned(session)"
+              class="row-tag"
+              title="Not inside any registered project"
+            >unassigned</span>
+            <span class="row-stamp">{{ formatStamp(session.lastUpdated) }}</span>
+          </div>
+        </div>
         <button
           class="row-delete"
           @click="(e) => handleDelete(session.id, e)"
@@ -237,16 +243,32 @@ ul {
   gap: 1px;
 }
 
-/* One dense line per session: agent chip and title on the left, the
- * timestamp right-aligned. No card chrome — a hover tint carries the state. */
+/* Title first; agent and timestamp share the quieter line below. */
 .session-row {
   display: flex;
   align-items: center;
   gap: 0.4375rem;
-  min-height: 26px;
-  padding: 0 0.375rem 0 0.5rem;
+  min-height: 44px;
+  padding: 0.375rem 0.375rem 0.375rem 0.5rem;
   border-radius: var(--radius-md, 6px);
   cursor: pointer;
+}
+
+.row-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.row-heading,
+.row-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4375rem;
+  min-width: 0;
+}
+
+.row-meta {
+  margin-top: 0.25rem;
 }
 
 .session-row:hover {
@@ -257,8 +279,7 @@ ul {
   background: var(--tint-active, rgba(194, 83, 47, 0.10));
 }
 
-/* Agent chip at the start of every row — the merged list's answer to the
- * old per-agent scoping. Collapses to its max width on narrow sidebars. */
+/* Keep agent names compact so metadata fits narrow sidebars. */
 .row-agent {
   flex: 0 1 auto;
   max-width: 7.5em;
@@ -303,7 +324,11 @@ ul {
 
 /* Small muted tag marking sessions outside every project (All mode only). */
 .row-tag {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 0.625rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -316,6 +341,8 @@ ul {
 
 .row-stamp {
   flex: 0 0 auto;
+  margin-left: auto;
+  white-space: nowrap;
   font-family: var(--font-mono, monospace);
   font-size: 0.6875rem;
   font-variant-numeric: tabular-nums;
