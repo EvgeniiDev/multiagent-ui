@@ -6,6 +6,13 @@ from urllib.parse import urlsplit
 PORT = int(os.environ.get("PORT", "25808"))
 
 class PanelHandler(SimpleHTTPRequestHandler):
+    # The slim container has no system MIME database. Android's certificate
+    # picker needs the certificate type rather than application/octet-stream.
+    extensions_map = {
+        **SimpleHTTPRequestHandler.extensions_map,
+        '.crt': 'application/x-x509-ca-cert',
+    }
+
     def do_GET(self):
         self.serve_route(super().do_GET)
 

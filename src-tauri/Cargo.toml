@@ -32,9 +32,3 @@ uuid = { version = "1", features = ["v4"] }
 parking_lot = "0.12"
 indexmap = { version = "2", features = ["serde"] }
 shell-escape = "0.1"
-
-# `machine-uid` reads platform-specific machine identifiers and does not
-# support iOS / Android. Telemetry on mobile falls back to an anonymous id.
-[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-machine-uid = "0.5"
-

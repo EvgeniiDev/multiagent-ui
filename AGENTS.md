@@ -7,6 +7,24 @@ or deploying. Select checks by the affected user flow; documentation-only
 changes require content/link/diff checks. Do not claim production readiness
 without verifying the actual deployed artifacts and affected user flow.
 
+## Commit and deploy after changes
+
+After completing a fix and the required checks, immediately commit only your
+own changes to `main` and deploy them to production without asking for another
+confirmation. Do not leave completed fixes only on a feature branch or in the
+working tree. This instruction takes precedence over skill defaults that
+create feature branches or stop at a local commit or PR.
+
+Stage explicit paths or hunks belonging to the current task. Preserve other
+agents' and the user's changes; never include unrelated edits in the commit
+or deployment. If the working tree contains unrelated changes, prepare the
+release from an isolated checkout of the intended committed revision.
+Documentation-only changes require a commit and content/link/diff checks;
+they do not require rebuilding or restarting runtime services.
+
+Follow the deployment rules below and verify the deployed artifacts and
+affected user flow according to `TESTING.md` before reporting success.
+
 ## UI design system
 
 Read and follow [docs/design-system.md](docs/design-system.md) for UI changes.

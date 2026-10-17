@@ -154,7 +154,7 @@ function handleDelete(sessionId: string, event: Event) {
 
 <style scoped>
 .session-list {
-  padding: 0.625rem 0.5rem;
+  padding: 0;
 }
 
 .list-head {

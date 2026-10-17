@@ -4,12 +4,12 @@ import { loadKvStore, type KVStore } from './lib/host';
 import { isTauriHost } from './lib/platform';
 import { useConfigStore } from './stores/config';
 import { useSessionStore } from './stores/session';
-import { initTelemetry } from './lib/telemetry';
 import NewSessionMenu from './components/NewSessionMenu.vue';
 import SessionList from './components/SessionList.vue';
 import SessionTabs from './components/SessionTabs.vue';
 import ChatView from './components/ChatView.vue';
 import UiButton from './components/ui/UiButton.vue';
+import UiSidebarResize from './components/ui/UiSidebarResize.vue';
 import { createDrawerSwipe } from './lib/drawerSwipe';
 import PermissionDialog from './components/PermissionDialog.vue';
 import SettingsView from './components/SettingsView.vue';
@@ -28,7 +28,22 @@ import { useProjectsStore } from './features/scope/registry';
 import type { SavedSession } from './lib/types';
 import { setSessionInUrl, sessionFromUrl } from './lib/sessionUrl';
 import { viewFromUrl } from './lib/viewUrl';
+import { createMobileMenuHistory } from './lib/mobileMenuHistory';
 import type { ViewId } from './stores/ui';
+
+// Install before stores register their window popstate listeners.
+const mobileMenuHistory = createMobileMenuHistory({
+  enabled: () => !isTauriHost() && isNarrowLayout.value && uiStore.ready,
+  isOpen: () => showSidebar.value,
+  setOpen: (open) => {
+    showSidebar.value = open;
+    if (open) {
+      showSettings.value = false;
+      showTrafficMonitor.value = false;
+      showWelcomeNewSession.value = false;
+    }
+  },
+});
 
 const configStore = useConfigStore();
 const sessionStore = useSessionStore();
@@ -42,6 +57,7 @@ const projectsStore = useProjectsStore();
 // (the tab strip's "+" menu owns the pref itself).
 const lastCwd = ref('');
 const showSidebar = ref(true);
+const sidebarWidth = ref(280);
 const showSettings = ref(false);
 const showTrafficMonitor = ref(false);
 const showStartupDetails = ref(false);
@@ -58,6 +74,8 @@ const scopeCwd = computed(() => projectsStore.activeProject?.path ?? '');
 // by the template to decide when the backdrop is interactive and by
 // onMounted to default the drawer closed.
 const isNarrowLayout = ref(false);
+watch([isNarrowLayout, showSidebar, () => uiStore.ready, () => uiStore.activeView,
+  () => sessionStore.activeTabId], () => mobileMenuHistory.sync(), { flush: 'post' });
 // Browser bars and the soft keyboard change the visual viewport independently
 // of 100vh. Keep the entire composer inside the part the user can see.
 const viewportHeight = ref<number | null>(null);
@@ -226,10 +244,6 @@ onMounted(async () => {
 
   // Load persisted preferences first
   prefsStore = await loadKvStore('preferences.json');
-  
-  // Initialize telemetry (check user preference)
-  const telemetryEnabled = await prefsStore.get<boolean>('telemetryEnabled') ?? true;
-  await initTelemetry(telemetryEnabled);
   
   // Initialize stores
   await configStore.loadConfig();
@@ -404,6 +418,7 @@ function handleDrawerViewClick(view: ViewId) {
 }
 
 onBeforeUnmount(() => {
+  mobileMenuHistory.dispose();
   window.removeEventListener('popstate', restoreSessionFromHistory);
   window.removeEventListener('resize', syncViewportHeight);
   window.visualViewport?.removeEventListener('resize', syncViewportHeight);
@@ -492,6 +507,7 @@ function clearError() {
       id="app-sidebar"
       class="sidebar"
       :class="{ 'is-drawer': isNarrowLayout }"
+      :style="isNarrowLayout ? undefined : { '--sidebar-width': `${sidebarWidth}px` }"
     >
       <div class="sidebar-header">
         <h1>ACP UI</h1>
@@ -583,7 +599,7 @@ function clearError() {
         </div>
 
         <!-- Session List -->
-        <div class="section">
+        <div class="section session-section">
           <SessionList
             @resume="handleResumeSession"
             @delete="handleDeleteSession"
@@ -591,6 +607,7 @@ function clearError() {
           />
         </div>
       </div>
+      <UiSidebarResize v-if="!isNarrowLayout" v-model="sidebarWidth" />
     </aside>
     
     <!-- Backdrop behind the drawer on narrow viewports. Only intercepts
@@ -831,8 +848,9 @@ html.document-chat {
 }
 
 .sidebar {
-  width: var(--sidebar-w);
-  min-width: var(--sidebar-w);
+  position: relative;
+  width: var(--sidebar-width, var(--sidebar-w));
+  min-width: var(--sidebar-width, var(--sidebar-w));
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border-faint);
   display: flex;
@@ -869,6 +887,10 @@ html.document-chat {
   border-bottom: 1px solid var(--border-faint);
 }
 
+.session-section {
+  padding: 0.75rem 0.375rem;
+}
+
 .cwd-picker {
   margin-top: 0.75rem;
 }
@@ -887,7 +909,7 @@ html.document-chat {
    layouts — on narrow it's the same drawer block). Shares the AGENT /
    WORKING DIRECTORY label language, and the selector's internal narrow
    media query already stretches its select, so just force full width. */
-.drawer-project-scope label {
+.drawer-project-scope > label:not(.scope-selector) {
   display: block;
   font-size: 0.6875rem;
   font-weight: 600;

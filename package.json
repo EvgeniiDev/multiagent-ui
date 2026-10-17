@@ -14,7 +14,6 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.13.1",
-    "@microsoft/applicationinsights-web": "^3.3.11",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-fs": "^2.4.5",

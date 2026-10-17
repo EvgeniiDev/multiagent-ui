@@ -1,5 +1,35 @@
 # PWA installation and chat completion notifications
 
+## Correction: Android installation is blocked by certificate trust
+
+The user subsequently reported Chrome Android installation failure on the LAN
+HTTPS origin. A regular persistent Chrome profile (not incognito) reports
+`not-from-secure-origin`; the manifest parses without errors. Without certificate
+bypass, worker registration fails with an SSL certificate error. The existing UI
+suite bypassed certificate errors, so its passing result did not establish
+installability. Installation is not yet confirmed on the physical phone.
+
+`scripts/check_pwa_installability.cjs` now checks a regular profile with strict
+TLS validation separately from UI emulation. On the current LAN origin it fails
+with `net::ERR_CERT_AUTHORITY_INVALID`, as expected until the device trusts the
+local CA. This is a reported deployment prerequisite, not a green release gate.
+
+Published the existing public certificate, DER-encoded, at
+`https://192.168.1.222:25809/acp-lan-ca.crt` in the verified web mount. No private
+key was published and no certificate was replaced. The web service alone was
+restarted to serve `.crt` with `application/x-x509-ca-cert` in the slim Python
+container, which lacks the host MIME database. All bridges remained running.
+Its SHA-256 fingerprint is
+`F1:27:02:4A:B1:CE:2D:FC:32:B2:26:57:1F:6A:C7:6A:01:53:E0:D0:21:30:DF:C3:C1:2E:FC:AF:5E:CA:F2:05`.
+The downloaded certificate matches the active one; trusting that downloaded
+certificate with `curl --cacert` validates the actual HTTPS endpoint (HTTP200).
+Android device trust and subsequent installation remain user-side checks.
+
+The certificate download is a host-specific live artifact rather than a bundled
+repository asset. It must be re-exported if the host certificate changes or the
+live directory is replaced wholesale. The historical release evidence below
+describes UI/relay behavior and must not be read as successful Android install.
+
 Released on 2026-10-17 from `/home/hermes/projects/acp-ui`, branch
 `feature/pi-session-image-cleanup`. Source baseline was
 `07a57f5ec356b6a55a54e267826b13ea4d9bd9e8`; the feature commit containing this

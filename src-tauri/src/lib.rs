@@ -201,21 +201,6 @@ fn build_agent_config(
     }
 }
 
-#[tauri::command]
-fn get_machine_id() -> Result<String, String> {
-    // `machine-uid` is desktop-only (no support for iOS / Android). Telemetry
-    // on mobile falls back to an anonymous id (the frontend handles a failure
-    // here by leaving `machineId = null`).
-    #[cfg(desktop)]
-    {
-        machine_uid::get().map_err(|e| format!("Failed to get machine ID: {}", e))
-    }
-    #[cfg(not(desktop))]
-    {
-        Err("machine id is not available on this platform".to_string())
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_state = AppState {
@@ -255,8 +240,7 @@ pub fn run() {
             list_running_agents,
             add_agent,
             remove_agent,
-            update_agent,
-            get_machine_id
+            update_agent
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

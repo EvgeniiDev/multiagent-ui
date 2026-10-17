@@ -7,7 +7,6 @@ import { readSharedHistoryCache, writeSharedHistoryCache } from './historyShared
 // spawned process per tab).
 import { ref, computed, watch } from 'vue';
 import { getAppVersion } from './host';
-import { trackEvent, trackError } from './telemetry';
 import { uuid } from './uuid';
 import type { SavedSession, ChatMessage, ToolCallInfo, PermissionRequest, SessionMode, SlashCommand, ModelInfo, AgentConfig, Attachment, AttachmentMeta, MessageSegment } from './types';
 import { getTransportKind } from './types';
@@ -1295,8 +1294,6 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         detail: 'new session',
       });
 
-      // Track successful session creation
-      trackEvent('SessionCreated', { agentName: agent, success: 'true' });
 
       // Set up session modes if available
       if (sessionResponse.modes) {
@@ -1354,9 +1351,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         }
       }
       acpClient = null;
-      // Track session creation failure
-      trackEvent('SessionCreated', { agentName: agent, success: 'false' });
-      trackError(e instanceof Error ? e : new Error(String(e)));
+
       throw e;
     } finally {
       // `isLoading` is owned by `inFlightPrompts` (sendPrompt :1576) — a
@@ -1535,8 +1530,6 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         detail: 'resumed',
       });
 
-      // Track successful session resume
-      trackEvent('SessionResumed', { agentName: savedSession.agentName, success: 'true' });
 
       // Update last accessed time
       savedSession.lastUpdated = Date.now();
@@ -1581,9 +1574,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         }
         acpClient = null;
       }
-      // Track session resume failure
-      trackEvent('SessionResumed', { agentName: savedSession.agentName, success: 'false' });
-      trackError(e instanceof Error ? e : new Error(String(e)));
+
       throw e;
     } finally {
       // Same ownership rule as create(): a prompt in flight keeps `isLoading`.
@@ -1658,11 +1649,6 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         detail: response.stopReason || 'unknown',
       });
 
-      // Track prompt sent
-      trackEvent('PromptSent', {
-        messageLength: String(text.length),
-        stopReason: response.stopReason || 'unknown',
-      });
 
       // Update session title if it's the first message
       if (messages.value.length === 2 && session.value) {
@@ -1773,8 +1759,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   /**
    * Tear the connection down and drop the transcript. Closing a TAB never
    * deletes the session — the agent keeps it and the sidebar row survives;
-   * this only frees the transport. Returns the session duration for
-   * telemetry.
+   * this only frees the transport.
    */
   async function close(): Promise<void> {
     // Abort an in-flight connect: without this a mid-create close would let
@@ -1782,20 +1767,12 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     connectionAborted = true;
     disarmAutoReconnect();
     isReconnecting.value = false;
-    const sessionStart = session.value?.lastUpdated || Date.now();
-    const sessionDuration = Math.round((Date.now() - sessionStart) / 1000);
 
     if (acpClient) {
       await acpClient.disconnect();
       acpClient = null;
     }
 
-    // Track session disconnect
-    trackEvent('SessionDisconnected', {
-      agentName: session.value?.agentName || agentName.value || 'unknown',
-      sessionDurationSeconds: String(sessionDuration),
-      messageCount: String(messages.value.length),
-    });
 
     isConnected.value = false;
     // Last chance to keep the tail: the transcript is dropped below.

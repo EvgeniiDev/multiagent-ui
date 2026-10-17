@@ -663,8 +663,10 @@ function onVoiceFinal(text: string) {
     inputText.value = inserted.value;
     const caret = inserted.caret;
     void nextTick(() => {
-      composerEl.value?.focus();
-      composerEl.value?.setSelectionRange(caret, caret);
+      if (sessionStore.activeTabId === rt.id && uiStore.activeView === 'chat') {
+        composerEl.value?.focus();
+        composerEl.value?.setSelectionRange(caret, caret);
+      }
     });
   }
 }
@@ -763,6 +765,7 @@ async function handleSend() {
       // Keep a visibly incomplete dictation for review instead of sending it.
       if (voiceError.value) return;
     }
+    if (!isConnected.value || isReconnecting.value) return;
     text = inputText.value.trim();
     files = attachments.value;
     if (!text && files.length === 0) return;
@@ -1257,14 +1260,6 @@ function planGlyph(status: string): string {
               :title="contextTitle"
             >{{ contextLabel }}</span>
             <div class="composer-actions">
-              <VoiceInput
-                ref="voiceInputRef"
-                :disabled="isReconnecting || !isConnected"
-                @state="onVoiceState"
-                @partial="onVoicePartial"
-                @final="onVoiceFinal"
-                @error="onVoiceError"
-              />
               <UiButton
                 v-if="isLoading && !composerStopsGeneration"
                 class="stop-btn"
@@ -1275,22 +1270,19 @@ function planGlyph(status: string): string {
               >
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" /></svg>
               </UiButton>
-              <UiButton
-                class="composer-primary"
-                :class="{ 'stop-btn': composerStopsGeneration, 'send-btn': !composerStopsGeneration }"
-                :variant="composerStopsGeneration || !composerCanSend ? 'secondary' : 'primary'"
-                icon
-                :disabled="!composerStopsGeneration && !composerCanSend"
-                :title="composerStopsGeneration ? 'Stop response' : voiceActive ? 'Finish dictation and send' : 'Send'"
-                :aria-label="composerStopsGeneration ? 'Stop response' : 'Send'"
-                @click="composerStopsGeneration ? handleCancel() : handleSend()"
-              >
-                <svg v-if="composerStopsGeneration" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" /></svg>
-                <svg v-else viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M22 2 11 13" />
-                  <path d="M22 2 15 22l-4-9-9-4 20-7z" />
-                </svg>
-              </UiButton>
+              <VoiceInput
+                ref="voiceInputRef"
+                :disabled="preparingSend || isReconnecting || !isConnected"
+                :can-send="composerCanSend"
+                :stop-response="composerStopsGeneration"
+                :active="sessionStore.activeTabId === rt.id && uiStore.activeView === 'chat'"
+                @send="handleSend"
+                @stop-response="handleCancel"
+                @state="onVoiceState"
+                @partial="onVoicePartial"
+                @final="onVoiceFinal"
+                @error="onVoiceError"
+              />
             </div>
           </div>
         </div>
@@ -1712,7 +1704,7 @@ function planGlyph(status: string): string {
 
 /* One framed card: the field on top, the bottom menu row beneath it —
  * attach/settings on the left, status/context in the middle and the
- * microphone + contextual primary action on the right. */
+ * combined voice/send action on the right. */
 .composer-box {
   flex: 1;
   min-width: 0;

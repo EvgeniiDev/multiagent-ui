@@ -7,16 +7,21 @@
 // disabled with the reason on its title; mic denial or a failed request emits
 // `error` so the composer shows a line, while typed draft text stays untouched.
 import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue';
-import UiButton from './ui/UiButton.vue';
+import UiSendVoiceButton from './ui/UiSendVoiceButton.vue';
 import { sttHealth, StreamingStt, createVoiceEvents, type SttPartial } from '../lib/stt';
 
 const props = defineProps<{
   /** Composer busy (a turn is running / reconnecting) — matches the other
    *  row buttons. */
   disabled?: boolean;
+  canSend: boolean;
+  stopResponse: boolean;
+  active: boolean;
 }>();
 
 const emit = defineEmits<{
+  send: [];
+  'stop-response': [];
   /** phase transition or elapsed-second tick */
   state: [{ phase: VoicePhase; elapsedS: number }];
   /** Ordered committed phrases plus the current replaceable hypothesis. */
@@ -330,41 +335,24 @@ function stopListening(): void {
   }, FINAL_WAIT_MS);
 }
 
+const voiceUnavailable = computed(() => micUnavailable.value
+  ? 'Voice input needs a secure context (localhost or HTTPS)'
+  : serviceDown.value ? 'Voice input unavailable — speech service not reachable' : '');
 const buttonDisabled = computed(() => {
-  if (phase.value === 'listening') return false; // stop must stay reachable
-  if (phase.value !== 'idle') return true;
-  return !!(props.disabled || serviceDown.value || micUnavailable.value);
+  if (phase.value === 'connecting' || phase.value === 'listening') return false;
+  if (phase.value === 'stopping') return true;
+  if (props.stopResponse) return false;
+  return !!props.disabled || (!props.canSend && !!voiceUnavailable.value);
 });
-
-const buttonTitle = computed(() => {
-  if (micUnavailable.value)
-    return 'Voice input needs a secure context (localhost or HTTPS)';
-  if (serviceDown.value)
-    return 'Voice input unavailable — speech service not reachable';
-  switch (phase.value) {
-    case 'connecting':
-      return 'Starting microphone…';
-    case 'listening':
-      return 'Stop dictation (Esc)';
-    case 'stopping':
-      return 'Finishing…';
-    default:
-      return 'Dictate';
-  }
-});
-
-/** Live transcript for the take: committed + still-moving hypothesis.
- *  Empty while the first partial is in flight — the caller shows the
- *  `listeningHint` instead of guessing.
- *  // ponytail: derived accessor, no tests of its own — covered by e2e_voice overlay asserts. */
-
-function onClick(): void {
-  if (phase.value === 'listening') {
-    stopListening();
-    return;
-  }
-  if (phase.value !== 'idle' || buttonDisabled.value) return;
+function record(): void {
+  if (props.disabled || phase.value !== 'idle' || !props.active) return;
+  if (voiceUnavailable.value) { emit('error', voiceUnavailable.value); return; }
   void startListening();
+}
+function cancelRecording(): void {
+  sessionGen += 1;
+  endSession();
+  lastPartial = { committed: '', volatile: '' };
 }
 
 function onKeydown(ev: KeyboardEvent): void {
@@ -420,79 +408,17 @@ defineExpose({ stop: stopListening, finish });
 </script>
 
 <template>
-  <UiButton
-    icon
-    class="voice-btn"
-    :class="{
-      listening: phase === 'listening',
-      working: phase === 'connecting' || phase === 'stopping',
-    }"
+  <UiSendVoiceButton
+    :phase="phase"
+    :can-send="canSend"
+    :stop-response="stopResponse"
+    :active="active"
     :disabled="buttonDisabled"
-    :title="buttonTitle"
-    :aria-label="buttonTitle"
-    :aria-pressed="phase === 'listening'"
-    @click="onClick"
-  >
-    <svg
-      v-if="phase !== 'listening'"
-      viewBox="0 0 24 24"
-      width="16"
-      height="16"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.5"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-      <line x1="12" y1="19" x2="12" y2="23" />
-      <line x1="8" y1="23" x2="16" y2="23" />
-    </svg>
-    <svg
-      v-else
-      viewBox="0 0 24 24"
-      width="16"
-      height="16"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.5"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      <rect x="6" y="6" width="12" height="12" rx="2" />
-    </svg>
-    <span v-if="phase === 'listening'" class="voice-dot" aria-hidden="true"></span>
-  </UiButton>
+    :voice-unavailable="voiceUnavailable"
+    @record="record"
+    @send="emit('send')"
+    @stop-response="emit('stop-response')"
+    @stop-recording="stopListening"
+    @cancel-recording="cancelRecording"
+  />
 </template>
-
-<style scoped>
-.voice-btn { position: relative; flex: 0 0 auto; }
-.voice-btn svg { display: block; }
-
-.voice-dot {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--text-accent, #b04a28);
-  animation: voice-blink 1.2s steps(1) infinite;
-}
-
-@keyframes voice-blink {
-  50% {
-    opacity: 0.25;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .voice-dot {
-    animation: none;
-  }
-}
-
-</style>

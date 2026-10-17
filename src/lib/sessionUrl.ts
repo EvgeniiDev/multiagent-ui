@@ -11,6 +11,8 @@
  * (`${agentName}::${sessionId}`), URL-encoded as one query parameter.
  */
 
+import { noteMobileMenuUrlChange } from './mobileMenuHistory';
+
 export function sessionUrlKey(agentName: string, sessionId: string): string {
   return `${agentName}::${sessionId}`;
 }
@@ -27,6 +29,7 @@ export function setSessionInUrl(agentName: string, sessionId: string | null): vo
     url.searchParams.set('s', sessionUrlKey(agentName, sessionId));
   }
   history.replaceState(history.state, '', url);
+  noteMobileMenuUrlChange();
 }
 
 /** The session key from the current URL, or null. */

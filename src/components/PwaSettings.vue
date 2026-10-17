@@ -76,6 +76,9 @@ function reload() { window.location.reload(); }
 <template>
   <section v-if="web" class="pwa-settings ui-surface" aria-labelledby="pwa-title">
     <h3 id="pwa-title">App &amp; notifications</h3>
+    <div class="pwa-actions">
+      <UiButton @click="reload">Reload app</UiButton>
+    </div>
     <p v-if="installed" class="ui-note">ACP UI is running as an app, without the browser address bar.</p>
     <template v-else>
       <p class="ui-note">Open ACP UI as a separate app, without the browser address bar.</p>
@@ -92,7 +95,6 @@ function reload() { window.location.reload(); }
         <UiButton :disabled="busy || loading" @click="testPush">Send test notification</UiButton>
         <UiButton :disabled="busy || loading" @click="disable">Disable notifications</UiButton>
       </template>
-      <UiButton v-if="reloadNeeded" :disabled="busy" @click="reload">Reload app</UiButton>
     </div>
     <p v-if="status" class="ui-note" role="status">{{ status }}</p>
     <p v-if="error" class="pwa-error" role="alert">{{ error }}</p>

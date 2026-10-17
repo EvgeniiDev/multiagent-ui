@@ -1,6 +1,8 @@
 // Actual browser/worker, mocked notification subscription and state/ACP.
 // BUILD tests a candidate on an ephemeral localhost HTTP server. UI_TEST_URL
 // tests published assets. No model prompts or user-state writes are performed.
+// This UI harness bypasses TLS errors and does not establish installability.
+// Run check_pwa_installability.cjs separately against the device-facing origin.
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const { createServer } = require('node:http');
 const fs = require('node:fs');
@@ -93,6 +95,9 @@ const key = webpush.generateVAPIDKeys().publicKey;
       await section.waitFor();
       const enable = section.getByRole('button', { name: 'Enable notifications', exact: true });
       await enable.waitFor();
+      const reload = section.getByRole('button', { name: 'Reload app', exact: true });
+      assert(await reload.isVisible(), 'reload is available before enabling notifications');
+      assert(await reload.isEnabled(), 'reload does not require notification permission');
       await page.evaluate(() => { window.__denyPush = true; });
       await enable.click();
       await section.getByRole('alert').filter({ hasText: 'Notifications are blocked' }).waitFor();
@@ -116,7 +121,7 @@ const key = webpush.generateVAPIDKeys().publicKey;
       await test.waitFor();
       await page.waitForFunction(() => !document.querySelector('.pwa-settings button[disabled]'));
       assert.equal(await page.evaluate(() => localStorage.getItem('acp-ui:push-device')), 'b'.repeat(64), 'subscription token restored after reload');
-      assert.equal(await section.getByRole('button', { name: 'Reload app', exact: true }).count(), 0, 'reload requirement clears on actual reload');
+      assert(await reload.isVisible(), 'reload remains available after a page reload');
       refreshFailure = true;
       await close.click(); await page.getByRole('button', { name: 'Settings', exact: true }).click();
       await section.getByRole('alert').filter({ hasText: 'Notifications temporarily unavailable' }).waitFor();
@@ -144,6 +149,18 @@ const key = webpush.generateVAPIDKeys().publicKey;
       await enable.waitFor(); assert.equal(deleted, 1);
       assert.equal(await page.evaluate(() => localStorage.getItem('acp-ui:push-device')), null);
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+      assert(await reload.isVisible(), 'reload remains available after disabling notifications');
+      await context.addInitScript(() => Object.defineProperty(window, 'isSecureContext', { value: false }));
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      if (width < 800) await page.getByRole('button', { name: /Expand sidebar|Open menu/, exact: true }).first().click();
+      await page.getByRole('button', { name: 'Settings', exact: true }).click();
+      await section.getByText('Push notifications require HTTPS', { exact: false }).waitFor();
+      assert(await reload.isVisible(), 'reload is independent of push support');
+      assert(await reload.isEnabled(), 'reload works without push support');
+      await Promise.all([page.waitForEvent('domcontentloaded'), reload.click()]);
+      if (width < 800) await page.getByRole('button', { name: /Expand sidebar|Open menu/, exact: true }).first().click();
+      await page.getByRole('button', { name: 'Settings', exact: true }).click();
+      assert(await reload.isVisible(), 'reload button navigates and remains available');
       assert.deepEqual(errors, []);
       console.log(`PASS ${width}px: manifest, real worker, no cache, permission denial, enable/pending/error/test/disable, theme, focus, touch, no JS errors`);
       await context.close();

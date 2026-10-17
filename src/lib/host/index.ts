@@ -2,11 +2,10 @@
 // `@tauri-apps/*` packages directly. There are three runtime hosts:
 //
 //   - Tauri desktop: full feature set (stdio agents, fs RPCs, plugin-store,
-//     plugin-dialog, machine-uid).
-//   - Tauri mobile:  websocket-only agents, plugin-store/dialog, machine-id
-//     unsupported (already handled by call sites).
+//     plugin-dialog).
+//   - Tauri mobile:  websocket-only agents, plugin-store/dialog.
 //   - Web (browser): websocket-only agents, no fs, no folder picker,
-//     localStorage for persistence, no machine id.
+//     localStorage for persistence.
 //
 // All functions live behind a runtime `isTauriHost()` switch; Tauri SDK
 // imports are deferred via `await import(...)` so a web build can ship
@@ -321,14 +320,6 @@ export async function onConfigChanged(
 // ---------------------------------------------------------------------------
 // Misc capability helpers
 // ---------------------------------------------------------------------------
-
-export async function getMachineId(): Promise<string> {
-  if (!isTauriHost()) {
-    throw new Error('machine id is not available on this platform');
-  }
-  const { invoke } = await import('@tauri-apps/api/core');
-  return invoke<string>('get_machine_id');
-}
 
 const FALLBACK_VERSION = '0.0.0-web';
 
