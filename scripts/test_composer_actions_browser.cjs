@@ -2,6 +2,7 @@
 // VOICE_WAV is a 16kHz mono speech/pause/speech WAV; STT_REAL=1 uses the live recognizer.
 // UI_TEST_URL selects the existing Compose-served site; BUILD optionally intercepts its frontend assets.
 // PLAYWRIGHT_MODULE can point to an installed Playwright package. No server is started.
+const {voicePress,voicePointer}=require('./browser_voice_gestures.cjs');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const fs=require('node:fs');const path=require('node:path');const assert=require('node:assert/strict');
 (async()=>{
@@ -25,25 +26,86 @@ try{await p.waitForSelector('.chat-view:visible .context-meter',{state:'attached
 
 const field=p.locator('.chat-view:visible textarea'),group=p.locator('.chat-view:visible .composer-actions'),primary=p.locator('.chat-view:visible .composer-primary'),mic=p.locator('.chat-view:visible .voice-btn');
 assert.equal(await group.count(),1,'recording and primary action share one compact group');
-assert.equal(await group.locator('button').count(),2,'empty idle composer has two primary controls');assert(await primary.isDisabled());
+assert.equal(await group.locator('button').count(),1,'empty composer has one combined voice/send control');assert(await primary.isEnabled());
 await field.fill('Following draft');assert.equal(await primary.getAttribute('aria-label'),'Send');assert(await primary.isEnabled());
 for(const theme of ['light','dark']){await p.mouse.move(0,0);await p.emulateMedia({colorScheme:theme});assert.equal(await primary.evaluate(e=>getComputedStyle(e).backgroundColor),'rgb(222, 222, 222)','send preserves graphite theme');await primary.hover();assert.equal(await primary.evaluate(e=>getComputedStyle(e).backgroundColor),'rgb(255, 255, 255)');}
 await p.keyboard.press('Tab');await primary.focus();assert.equal(await primary.evaluate(e=>getComputedStyle(e).outlineWidth),'2px');
 await field.fill('');await p.evaluate(()=>window.__session.activeRuntime.isLoading=true);
-assert.equal(await group.locator('button').count(),2,'generation with no draft reuses Send for Stop');assert.equal(await primary.getAttribute('aria-label'),'Stop response');assert(await primary.isEnabled());assert(await mic.isEnabled());assert.equal(await p.locator('.chat-view:visible .send-btn').count(),0);
+assert.equal(await group.locator('button').count(),1,'generation with no draft reuses the combined button for Stop');assert.equal(await primary.getAttribute('aria-label'),'Stop response');assert(await primary.isEnabled());assert(await mic.isEnabled());assert.equal(await p.locator('.chat-view:visible .send-btn').count(),0);
 if(process.env.ARTIFACT_DIR)await p.locator('.chat-view:visible .input-container').screenshot({path:path.join(process.env.ARTIFACT_DIR,'contextual-stop-'+width+'.png')});
 const cancelCount=rpcCalls.filter(q=>q.method==='session/cancel').length;await primary.click();await p.waitForTimeout(200);assert.equal(rpcCalls.filter(q=>q.method==='session/cancel').length,cancelCount+1);assert.equal(await field.inputValue(),'');
 await p.evaluate(()=>window.__session.activeRuntime.isLoading=true);await field.fill('Prepared follow-up');
-assert.equal(await primary.getAttribute('aria-label'),'Send');assert.equal(await group.locator('button').count(),3,'a prepared follow-up keeps its independent Stop action');
+assert.equal(await primary.getAttribute('aria-label'),'Send');assert.equal(await group.locator('button').count(),2,'a prepared follow-up keeps its independent Stop action');
 const extraStop=group.locator('.stop-btn:not(.composer-primary)');assert.equal(await extraStop.count(),1);assert(await mic.isEnabled());
 if(width<800){for(const button of [mic,primary,extraStop]){const r=await button.boundingBox();assert(r.width>=44&&r.height>=44,'touch actions remain at least 44px');}}
 await extraStop.click();await p.waitForTimeout(200);assert.equal(await field.inputValue(),'Prepared follow-up','stopping generation keeps the next draft');
-await p.evaluate(()=>window.__session.activeRuntime.isLoading=false);await field.fill('');await mic.click();await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) .voice-btn')?.getAttribute('aria-pressed')==='true');
-assert.equal(await primary.getAttribute('aria-label'),'Send');assert(await primary.isEnabled(),'Send can finish recording before its first hypothesis');assert.equal(await group.locator('button').count(),2);
-await p.waitForTimeout(1400);await mic.click();await p.waitForFunction(()=>!document.querySelector('.chat-view:not([style*="display: none"]) .voice-overlay'));assert((await field.inputValue()).length>0,'mic Stop retains recognized text');
+await p.evaluate(()=>window.__session.activeRuntime.isLoading=false);await field.fill('');
+const promptsBeforeVoice=rpcCalls.filter(q=>q.method==='session/prompt').length;
+await mic.click();await p.waitForTimeout(450);
+assert.equal(await mic.getAttribute('aria-pressed'),'false','a short empty tap never starts the mic');
+const held=await voicePress(p,mic,{lock:false});
+assert.equal(await group.locator('button').count(),1,'held recording uses the single primary action');
+await p.waitForTimeout(1400);await held.release();
+await p.waitForFunction(n=>window.__session.activeRuntime.messages.some(m=>m.role==='user')&&document.querySelector('.chat-view:not([style*="display: none"]) textarea').value==='',{},{timeout:20000});
+assert.equal(rpcCalls.filter(q=>q.method==='session/prompt').length,promptsBeforeVoice+1,'release sends exactly one voice message');
+await voicePress(p,mic);
+assert.equal(await mic.getAttribute('aria-label'),'Send voice message','upward swipe locks recording');
+assert(await group.getByRole('button',{name:'Cancel voice recording'}).isVisible());
+await p.waitForTimeout(1400);
+assert.equal(await mic.getAttribute('aria-pressed'),'true','recording continues with the finger lifted');
+assert.equal(rpcCalls.filter(q=>q.method==='session/prompt').length,promptsBeforeVoice+1,'locking never sends');
+await mic.click();
+await p.waitForFunction(()=>!document.querySelector('.chat-view:not([style*="display: none"]) .voice-overlay'),{},{timeout:20000});
+await p.waitForTimeout(150);
+assert.equal(rpcCalls.filter(q=>q.method==='session/prompt').length,promptsBeforeVoice+2,'tap sends exactly once after locking');
+await field.fill('Keep this draft');await voicePress(p,mic);await p.waitForTimeout(800);
+await group.getByRole('button',{name:'Cancel voice recording'}).click();
+assert.equal(await field.inputValue(),'Keep this draft','cancel preserves the typed draft');
+assert.equal(await mic.getAttribute('aria-pressed'),'false');
+assert.equal(rpcCalls.filter(q=>q.method==='session/prompt').length,promptsBeforeVoice+2,'cancel sends nothing');
+await field.fill('');await voicePress(p,mic);await p.waitForTimeout(1200);await p.keyboard.press('Escape');
+await p.waitForFunction(()=>!document.querySelector('.chat-view:not([style*="display: none"]) .voice-overlay'));
+assert((await field.inputValue()).length>0,'Escape keeps recognized text as an unsent draft');
 await field.fill('Send this draft');const prompts=rpcCalls.filter(q=>q.method==='session/prompt').length;await primary.click();await p.waitForTimeout(200);assert.equal(rpcCalls.filter(q=>q.method==='session/prompt').length,prompts+1);assert.equal(await field.inputValue(),'');
-assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);assert.deepEqual(errors,[]);
-console.log(JSON.stringify({width,controls:'two main actions, contextual Stop, rare follow-up Stop',errors}));await c.close();
+if(width===390){
+  const sentBeforeEdges=rpcCalls.filter(q=>q.method==='session/prompt').length;
+  await field.fill('Never send this draft accidentally');
+  await p.evaluate(()=>{window.qaOriginalMic=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);window.qaMicCalls=0;navigator.mediaDevices.getUserMedia=(...args)=>{window.qaMicCalls++;return window.qaOriginalMic(...args);};});
+  const flick=await voicePointer(p,mic);await flick.moveTo(flick.x,flick.y-64);await flick.release();await p.waitForTimeout(450);
+  assert.equal(await p.evaluate(()=>window.qaMicCalls),0,'a quick swipe cannot start the microphone');
+  assert.equal(rpcCalls.filter(q=>q.method==='session/prompt').length,sentBeforeEdges,'a quick swipe cannot send a draft');
+  assert.equal(await field.inputValue(),'Never send this draft accidentally');
+  await p.evaluate(()=>{navigator.mediaDevices.getUserMedia=async(...args)=>{const stream=await window.qaOriginalMic(...args);window.qaPendingStream=stream;await new Promise(resolve=>window.qaGrantMic=resolve);return stream;};});
+  const pending=await voicePress(p,mic,{lock:false,waitForListening:false});
+  await p.waitForFunction(()=>typeof window.qaGrantMic==='function');
+  await pending.release();
+  assert.equal(await field.inputValue(),'Never send this draft accidentally','release before permission preserves draft');
+  assert.equal(await mic.getAttribute('aria-pressed'),'false');
+  await p.evaluate(()=>window.qaGrantMic());
+  await p.waitForFunction(()=>window.qaPendingStream.getTracks().every(t=>t.readyState==='ended'));
+  assert.equal(rpcCalls.filter(q=>q.method==='session/prompt').length,sentBeforeEdges,'late microphone grant cannot send');
+  await p.evaluate(()=>{navigator.mediaDevices.getUserMedia=async()=>{throw new DOMException('Denied by fixture','NotAllowedError');};});
+  const denied=await voicePress(p,mic,{lock:false,waitForListening:false});await denied.release();
+  await p.locator('.chat-view:visible .voice-status.is-error').filter({hasText:'denied'}).waitFor();
+  assert.equal(await field.inputValue(),'Never send this draft accidentally','permission denial preserves draft');
+  assert.equal(rpcCalls.filter(q=>q.method==='session/prompt').length,sentBeforeEdges,'permission denial never sends typed text');
+  await p.evaluate(()=>{navigator.mediaDevices.getUserMedia=window.qaOriginalMic;delete window.qaOriginalMic;});
+  const interrupted=await voicePress(p,mic,{lock:false});await p.waitForTimeout(1200);await interrupted.cancel();
+  await p.waitForFunction(()=>!document.querySelector('.chat-view:not([style*="display: none"]) .voice-overlay'));
+  assert((await field.inputValue()).startsWith('Never send this draft accidentally'),'pointer cancellation preserves typed draft');
+  assert.equal(rpcCalls.filter(q=>q.method==='session/prompt').length,sentBeforeEdges,'pointer cancellation never sends');
+  await field.fill('Original tab draft');await voicePress(p,mic);await p.waitForTimeout(1200);
+  if(process.env.ARTIFACT_DIR)await p.screenshot({path:path.join(process.env.ARTIFACT_DIR,'voice-locked-390.png')});
+  await p.locator('.tab-strip [role="tab"]').nth(1).click();
+  await p.waitForFunction(()=>!document.querySelector('.voice-overlay'));
+  assert.equal(await field.inputValue(),'','switching tabs does not copy the voice draft');
+  await p.locator('.tab-strip [role="tab"]').first().click();
+  assert((await field.inputValue()).startsWith('Original tab draft'),'recording stays with the original tab');
+  assert.equal(rpcCalls.filter(q=>q.method==='session/prompt').length,sentBeforeEdges,'switching an active recording sends nothing');
+  console.log('PASS quick flick, pending permission, stale grant cleanup, mic denial, pointercancel, and tab isolation');
 }
-await b.close();console.log('PASS contextual actions, mic stop, generation stop, preserved drafts, send, focus, touch, graphite');
+assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);assert.deepEqual(errors,[]);
+console.log(JSON.stringify({width,controls:'one voice/send action, contextual Stop, hold/release, swipe lock, cancel',errors}));await c.close();
+}
+await b.close();console.log('PASS one combined action, hold/release, swipe lock, tap-to-send, cancel, Escape, contextual Stop, preserved drafts, focus, touch, graphite');
 })().catch(async error=>{console.error(error);await globalThis.qaBrowser?.close();process.exit(1)});

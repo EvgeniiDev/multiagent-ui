@@ -1,6 +1,7 @@
 // Browser regression for mobile navigation scrolling. Uses mocked ACP/state; never prompts a model.
 // UI_TEST_URL selects the existing Compose-served site; BUILD optionally intercepts its frontend assets.
 // PLAYWRIGHT_MODULE can point to an installed Playwright package. No server is started.
+const {voicePress}=require('./browser_voice_gestures.cjs');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const fs=require('node:fs');const path=require('node:path');const assert=require('node:assert/strict');
 (async()=>{
@@ -147,10 +148,10 @@ if(width<800){
   const model=p.locator('.chat-view:visible .model-button');assert(await model.isEnabled(),'model can change while busy');await model.click();await p.locator('.chat-view:visible .model-picker .dropdown-item').filter({hasText:'QA Model B'}).click();await p.waitForFunction(()=>window.__session.activeRuntime.currentModelId==='qa-b');
   const mode=p.locator('.chat-view:visible .mode-picker .mode-button').first();assert(await mode.isEnabled(),'mode can change while busy');await mode.click();await p.locator('.chat-view:visible .mode-picker .dropdown-item').filter({hasText:'QA Auto'}).click();await p.waitForFunction(()=>window.__session.activeRuntime.currentModeId==='qa-auto');await settings.tap();
   assert(await p.evaluate(()=>window.__session.activeRuntime.isLoading),'settings do not stop the current turn');
-  await p.locator('.chat-view:visible .voice-btn').click();await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) .voice-btn').getAttribute('aria-pressed')==='true');await p.waitForTimeout(process.env.VOICE_WAV?1400:300);
+  await voicePress(p,p.locator('.chat-view:visible .voice-btn'));await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) .voice-btn').getAttribute('aria-pressed')==='true');await p.waitForTimeout(process.env.VOICE_WAV?1400:300);
   const liveDuration=p.locator('.chat-view:visible .voice-status-inline');assert(await liveDuration.isVisible());assert(await liveDuration.evaluate(e=>e.scrollWidth<=e.clientWidth),'timer fits beside Stop and Send while busy');
   assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
-  await p.locator('.chat-view:visible .voice-btn').click();await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) textarea').value.includes('Dictated follow-up while the model works'));
+  await p.keyboard.press('Escape');await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) textarea').value.includes('Dictated follow-up while the model works'));
   assert(await p.evaluate(()=>window.__session.activeRuntime.isLoading),'finishing voice input does not cancel model work');
   const cancelBefore=rpcCalls.filter(q=>q.method==='session/cancel').length;await stop.click();await p.waitForTimeout(150);assert.equal(rpcCalls.filter(q=>q.method==='session/cancel').length,cancelBefore+1,'Stop dispatches one cancellation');assert.match(await draft.inputValue(),/Dictated follow-up/,'Stop preserves the next draft');
   await draft.fill(draftBeforeVoice);

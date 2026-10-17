@@ -2,6 +2,7 @@
 // VOICE_WAV is a 16kHz mono speech/pause/speech WAV; STT_REAL=1 uses the live recognizer.
 // UI_TEST_URL selects the existing Compose-served site; BUILD optionally intercepts its frontend assets.
 // PLAYWRIGHT_MODULE can point to an installed Playwright package. No server is started.
+const {voicePress}=require('./browser_voice_gestures.cjs');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const fs=require('node:fs');const path=require('node:path');const assert=require('node:assert/strict');
 (async()=>{
@@ -24,7 +25,7 @@ try{await p.waitForSelector('.chat-view:visible .context-meter',{state:'attached
 
 const field=p.locator('.chat-view:visible textarea'),mic=p.locator('.chat-view:visible .voice-btn');
 await field.fill('До После');await field.evaluate(e=>e.setSelectionRange(3,3));
-await mic.click();await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) .voice-btn')?.getAttribute('aria-pressed')==='true');
+await voicePress(p,mic);await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) .voice-btn')?.getAttribute('aria-pressed')==='true');
 await p.waitForFunction(()=>!!document.querySelector('.chat-view:not([style*="display: none"]) .voice-commit')?.textContent.trim(),{},{timeout:25000});
 const first=await p.locator('.chat-view:visible .voice-commit').innerText();
 assert.equal(await mic.getAttribute('aria-pressed'),'true','first phrase arrives before Stop');
@@ -33,22 +34,25 @@ await field.fill('Ручное До После');await p.waitForTimeout(100);
 await p.waitForFunction(first=>document.querySelector('.chat-view:not([style*="display: none"]) .voice-commit')?.textContent.startsWith(first+' '),first,{timeout:25000});
 const committed=await p.locator('.chat-view:visible .voice-commit').innerText();assert(committed.length>first.length);
 assert.equal(await mic.getAttribute('aria-pressed'),'true','both phrases are processed while still recording');
-await mic.click();await p.waitForFunction(()=>!document.querySelector('.chat-view:not([style*="display: none"]) .voice-overlay'),{},{timeout:25000});
-const final=await field.inputValue();assert.equal(final,'Ручное До '+committed+' После','ordered spoken text is inserted once between preserved edits');
+await p.keyboard.press('Escape');await p.waitForFunction(()=>!document.querySelector('.chat-view:not([style*="display: none"]) .voice-overlay'),{},{timeout:25000});
+const final=await field.inputValue();
+assert(final.startsWith('Ручное До '+committed),'committed phrases keep their order and typed prefix');
+assert(final.endsWith(' После'),'typed suffix survives final recognition');
+if(!process.env.STT_REAL){const ids=[...final.matchAll(/Фраза (\d+)/g)].map(m=>Number(m[1]));assert.deepEqual(ids,[...new Set(ids)].sort((a,b)=>a-b),'finalized phrases occur once in capture order; disposable previews may be skipped');assert(ids.every(id=>requests.some(r=>r.id===id)));}
 assert.equal(await mic.getAttribute('aria-pressed'),'false');assert(await mic.isEnabled());
 assert.equal(await p.locator('.chat-view:visible .voice-status.is-error').count(),0,'successful dictation leaves no error');
 assert(requests.length>=2,'recognition starts during recording');assert(requests.every(r=>r.status===200));assert.deepEqual(errors,[]);
 const palette=await p.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue('--bg-main').trim());assert.equal(palette,'#202020');
 console.log(JSON.stringify({width,realStt:!!process.env.STT_REAL,requests,first,final,errors}));
 if(width===390&&!process.env.STT_REAL){
-  const beforeFailure=await field.inputValue();let failureCalls=0;
-  await p.route('**/v1/audio/transcriptions',r=>{failureCalls++;return r.fulfill({status:failureCalls<=2?200:503,contentType:'text/plain',body:failureCalls<=2?'Сохранённая фраза':'inference unavailable'});});
-  await mic.click();await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) .voice-commit')?.textContent==='Сохранённая фраза',{},{timeout:20000});
+  const beforeFailure=await field.inputValue();let failureCalls=0,releaseFailure;const failureGate=new Promise(resolve=>releaseFailure=resolve);
+  await p.route('**/v1/audio/transcriptions',async r=>{const call=++failureCalls;if(call>2)await failureGate;return r.fulfill({status:call<=2?200:503,contentType:'text/plain',body:call<=2?'Сохранённая фраза':'inference unavailable'});});
+  await voicePress(p,mic);await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) .voice-commit')?.textContent==='Сохранённая фраза',{},{timeout:20000});
   for(let i=0;i<300&&failureCalls<3;i++)await p.waitForTimeout(100);assert(failureCalls>=3,'second phrase reached the service before Send');
-  await p.locator('.chat-view:visible .send-btn').click();
+  await p.locator('.chat-view:visible .send-btn').click();releaseFailure();
   await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) .voice-status.is-error')?.textContent.includes('503'),{},{timeout:20000});
   assert.equal(await p.locator('.chat-view:visible .voice-overlay').count(),0);
-  assert.equal((await field.inputValue()).replace('Сохранённая фраза ',''),beforeFailure,'failed dictation preserves the draft plus recognized words');
+  assert.equal((await field.inputValue()).replaceAll('Сохранённая фраза ',''),beforeFailure,'failed dictation preserves the draft plus recognized words');
   assert.equal(rpcCalls.filter(q=>q.method==='session/prompt').length,0,'Send must wait and stop on a transcription failure');
   console.log('PASS partial text retained after final chunk failure, no incomplete message sent');
 }
