@@ -4,6 +4,9 @@ export interface ChatFile {
   name: string;
   url: string;
   mimeType?: string;
+  /** Ephemeral content for a loaded preview; never persisted in chat history. */
+  blob?: Blob;
+  text?: string;
 }
 export const MAX_PREVIEW_BYTES = 32 * 1024 * 1024;
 const FILE_EXT = /\.(?:png|jpe?g|gif|webp|avif|svg|pdf|txt|md|markdown|jsonl?|csv|tsv|log|ya?ml|xml|html?|css|[cm]?js|tsx?|vue|py|sh|sql|toml|ini|cfg|conf|diff|patch|zip|gz|tar|docx?|xlsx?|pptx?)(?:$|[?#])/i;
@@ -36,6 +39,10 @@ export function previewKind(file: ChatFile, mime = file.mimeType || ''): 'image'
   return 'binary';
 }
 
+export function isMarkdownFile(file: ChatFile): boolean {
+  return /\.(md|markdown)$/i.test(file.name) || file.mimeType?.split(';', 1)[0]?.trim() === 'text/markdown';
+}
+
 export function downloadChatBlob(blob: Blob, name: string): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
@@ -49,6 +56,11 @@ export function downloadChatBlob(blob: Blob, name: string): void {
 }
 
 export async function fetchChatFile(file: ChatFile, signal: AbortSignal): Promise<Blob> {
+  const embedded = file.blob ?? (file.text !== undefined ? new Blob([file.text], { type: file.mimeType || 'text/plain' }) : null);
+  if (embedded) {
+    if (embedded.size > MAX_PREVIEW_BYTES) throw new Error('File is too large (maximum 32 MB)');
+    return embedded;
+  }
   const response = await fetch(file.url, { signal, credentials: 'omit' });
   if (!response.ok) {
     let reason = `Could not open file (HTTP ${response.status})`;

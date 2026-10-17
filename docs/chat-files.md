@@ -1,8 +1,17 @@
 # Files in chat replies
 
+The web panel displays preview cards for text, Markdown and PDF links directly
+in agent replies, and opens them in a full preview dialog with Open. Text cards
+show an excerpt, Markdown retains formatting, and PDF cards show the first page.
+Cards load only near the viewport in the active chat and release file data when
+scrolled away. Full previews reuse already loaded file bytes.
+
+Markdown file formatting treats HTML as text and disables document-supplied
+images and active links. The original file is preserved for downloading.
+
 The web panel opens local file links from agent replies in a preview dialog.
-Images and PDFs are rendered; text formats (including Markdown, JSON, CSV and
-source files) show their text. Other supported file links, such as ZIP and Office
+Images and PDFs are rendered, Markdown retains formatting, and other text
+formats (including JSON, CSV and source files) show their text. Other supported file links, such as ZIP and Office
 documents, offer a download. Download always preserves the original bytes.
 
 For agent-created deliverables, keep the files in the project directory. An

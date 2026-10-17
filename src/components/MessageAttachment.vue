@@ -5,10 +5,11 @@
 import { computed, ref, watch } from 'vue';
 import type { AttachmentMeta } from '../lib/types';
 import { formatBytes } from '../lib/attachments';
+import ChatFileCard from './ChatFileCard.vue';
 import UiImagePreview from './ui/UiImagePreview.vue';
 import UiButton from './ui/UiButton.vue';
 import UiFilePreview from './ui/UiFilePreview.vue';
-import { chatFileFromLink, type ChatFile } from '../lib/chatFiles';
+import { chatFileFromLink, previewKind, type ChatFile } from '../lib/chatFiles';
 
 const props = defineProps<{
   cwd?: string;
@@ -19,29 +20,27 @@ const props = defineProps<{
 const selected = ref<ChatFile | null>(null);
 const file = computed<ChatFile | null>(() => {
   const att = props.att;
+  if (att.body != null) return { name: att.name, url: '', mimeType: att.mimeType, text: att.body };
   if (att.previewUrl) return { name: att.name, url: att.previewUrl, mimeType: att.mimeType };
   return att.uri ? chatFileFromLink(att.uri, props.cwd, true) : null;
 });
+const inlinePreview = computed(() => file.value && ['text', 'pdf'].includes(previewKind(file.value)));
 watch(() => props.active, active => { if (active === false) selected.value = null; });
-function show() {
-  const att = props.att;
-  if (file.value) { selected.value = file.value; return; }
-  if (att.body == null) return;
-  // Defer encoding until asked to view, rather than copying every replayed body.
-  selected.value = { name: att.name, url: `data:${att.mimeType || 'text/plain'};charset=utf-8,${encodeURIComponent(att.body)}`, mimeType: att.mimeType };
-}
+function show() { selected.value = file.value; }
+
 </script>
 
 <template>
-  <div class="attachment-block">
+  <div class="attachment-block" :class="{ 'has-preview': inlinePreview }">
     <UiFilePreview :file="selected" @close="selected = null" />
+    <ChatFileCard v-if="inlinePreview && file" :file="file" :active="active" @open="selected = $event" />
     <UiImagePreview
       v-if="att.kind === 'image' && att.previewUrl"
       :src="att.previewUrl"
       :name="att.name"
       class="attachment-image"
     />
-    <div class="attachment-line">
+    <div v-if="!inlinePreview" class="attachment-line">
       <span class="attachment-kind">{{ att.kind }}</span>
       <span class="attachment-name" :title="att.name">{{ att.name }}</span>
       <span v-if="att.size" class="attachment-size">{{ formatBytes(att.size) }}</span>
@@ -64,6 +63,8 @@ function show() {
   border-radius: var(--radius-md, 6px);
   background: var(--bg-main, #fbf8f3);
 }
+
+.attachment-block.has-preview { padding: 0; border: none; background: transparent; }
 
 .attachment-line {
   display: flex;

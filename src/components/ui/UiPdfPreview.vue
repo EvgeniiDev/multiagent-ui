@@ -3,7 +3,7 @@ import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import UiButton from './UiButton.vue';
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
 
-const props = defineProps<{ url: string }>();
+const props = defineProps<{ url: string; thumbnail?: boolean }>();
 const canvas = ref<HTMLCanvasElement | null>(null);
 const container = ref<HTMLElement | null>(null);
 const page = ref(1);
@@ -21,10 +21,10 @@ async function render(number: number) {
   try {
     const pdfPage = await document.getPage(number);
     if (disposed || !canvas.value) return;
-    const width = Math.max(200, Math.min(container.value?.clientWidth || 800, 1400));
+    const width = Math.max(200, Math.min(container.value?.clientWidth || 800, props.thumbnail ? 300 : 1400));
     const original = pdfPage.getViewport({ scale: 1 });
     const viewport = pdfPage.getViewport({ scale: Math.min(width / original.width, 2) });
-    const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    const ratio = props.thumbnail ? 1 : Math.min(window.devicePixelRatio || 1, 2);
     const target = canvas.value;
     target.width = Math.floor(viewport.width * ratio);
     target.height = Math.floor(viewport.height * ratio);
@@ -58,8 +58,8 @@ onBeforeUnmount(() => { disposed = true; renderTask?.cancel(); void task?.destro
 </script>
 
 <template>
-  <div ref="container" class="pdf-preview">
-    <nav class="pdf-pages" aria-label="PDF pages">
+  <div ref="container" class="pdf-preview" :class="{ thumbnail }">
+    <nav v-if="!thumbnail" class="pdf-pages" aria-label="PDF pages">
       <UiButton :disabled="busy || page <= 1" @click="render(page - 1)">Previous</UiButton>
       <span>Page {{ page }} / {{ pages || '…' }}</span>
       <UiButton :disabled="busy || page >= pages" @click="render(page + 1)">Next</UiButton>
@@ -74,6 +74,7 @@ onBeforeUnmount(() => { disposed = true; renderTask?.cancel(); void task?.destro
 .pdf-preview { min-width: 0; width: 100%; }
 .pdf-pages { position: sticky; top: -1rem; display: flex; align-items: center; justify-content: center; gap: 0.75rem; padding: 0.5rem 0; background: var(--bg-main); }
 .pdf-pages span { font-size: 0.75rem; color: var(--text-secondary); }
+.thumbnail canvas { max-height: 180px; width: auto !important; height: auto !important; margin: 0 auto; }
 canvas { display: block; max-width: 100%; height: auto !important; margin: 0.5rem auto; background: white; }
 p { font-size: 0.875rem; color: var(--text-secondary); }
 </style>

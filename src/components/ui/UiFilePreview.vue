@@ -2,7 +2,8 @@
 import { ref, watch, nextTick, onBeforeUnmount } from 'vue';
 import UiButton from './UiButton.vue';
 import UiPdfPreview from './UiPdfPreview.vue';
-import { fetchChatFile, previewKind, downloadChatBlob, type ChatFile } from '../../lib/chatFiles';
+import UiMarkdownDocument from './UiMarkdownDocument.vue';
+import { fetchChatFile, previewKind, downloadChatBlob, isMarkdownFile, type ChatFile } from '../../lib/chatFiles';
 import { formatBytes } from '../../lib/attachments';
 
 const props = defineProps<{ file: ChatFile | null }>();
@@ -71,6 +72,7 @@ onBeforeUnmount(() => { generation++; cleanup(); });
         <template v-else-if="blob">
           <img v-if="kind === 'image'" :src="url" :alt="file.name" @error="error = 'Could not display this image. You can still download the file.'" />
           <UiPdfPreview v-else-if="kind === 'pdf'" :url="url" />
+          <UiMarkdownDocument v-else-if="kind === 'text' && isMarkdownFile(file)" :text="text" />
           <pre v-else-if="kind === 'text'">{{ text }}</pre>
           <p v-else>Preview is unavailable for this format. You can download the file.</p>
         </template>

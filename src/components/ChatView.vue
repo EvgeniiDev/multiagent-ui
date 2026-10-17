@@ -11,6 +11,7 @@ import ModePicker from './ModePicker.vue';
 import ModelPicker from './ModelPicker.vue';
 import ToolCallChip from './ToolCallChip.vue';
 import MessageAttachment from './MessageAttachment.vue';
+import ChatFilePreviews from './ChatFilePreviews.vue';
 import UiComposerSettings from './ui/UiComposerSettings.vue';
 import UiButton from './ui/UiButton.vue';
 import UiImagePreview from './ui/UiImagePreview.vue';
@@ -1108,13 +1109,12 @@ function planGlyph(status: string): string {
              and file blocks at their own positions. -->
         <div v-if="message.role === 'assistant'" class="message-parts">
           <template v-for="(item, i) in assistantItems(message)" :key="i">
-            <div
-              v-if="item.kind === 'text'"
-              class="message-content"
-              :class="{ 'stream-tail': item.last }"
-              v-mermaid
-              v-html="renderMarkdown(item.text)"
-            />
+            <template v-if="item.kind === 'text'">
+              <div class="message-content" :class="{ 'stream-tail': item.last }" v-mermaid v-html="renderMarkdown(item.text)" />
+              <ChatFilePreviews :text="item.text" :cwd="currentSession?.cwd"
+                :active="sessionStore.activeTabId === rt.id && uiStore.activeView === 'chat'"
+                @open="filePreview = $event" />
+            </template>
             <ToolCallChip
               v-else-if="item.kind === 'tool'"
               :tc="item.tc"
