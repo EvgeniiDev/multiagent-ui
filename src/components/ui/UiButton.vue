@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** Shared native button: attributes, listeners, aria state and focus stay on the button. */
 withDefaults(defineProps<{
-  variant?: 'secondary' | 'primary' | 'danger' | 'ghost' | 'image';
+  variant?: 'secondary' | 'primary' | 'danger' | 'ghost' | 'image' | 'select' | 'option';
   size?: 'sm' | 'xs';
   icon?: boolean;
   layout?: 'inline' | 'stacked';
@@ -56,6 +56,15 @@ withDefaults(defineProps<{
 }
 .ds-button[aria-current='page'] { background: var(--bg-hover); border-color: transparent; color: var(--text-primary); }
 .ds-button.ds-button--stacked { flex-direction: column; gap: 0.375rem; min-height: 60px; padding: 0.5rem 0.25rem; font-size: 0.6875rem; border-radius: var(--radius-lg); }
+.ds-button--select, .ds-button--option {
+  width: 100%; min-height: 44px; justify-content: flex-start;
+  padding: 0.625rem 0.75rem; font-size: 0.8125rem; text-align: left;
+}
+.ds-button--select { background: var(--bg-main); }
+.ds-button--select[aria-expanded='true'] { border-color: var(--border-strong); }
+.ds-button--option { border-color: transparent; }
+.ds-button--option[aria-selected='true'] { border-color: transparent; }
+.ds-button--option:focus-visible { outline-offset: -2px; }
 .ds-button--xs { min-height: 24px; padding: 0.125rem 0.375rem; font-size: 0.6875rem; }
 .ds-button--icon { width: 28px; padding: 0; flex-shrink: 0; }
 .ds-button--icon.ds-button--xs { width: 24px; }

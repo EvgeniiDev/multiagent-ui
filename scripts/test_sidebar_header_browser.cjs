@@ -51,8 +51,12 @@ const assert = require('node:assert/strict');
       const header = sidebar.locator('.sidebar-header');
       const settings = header.getByRole('button', { name: 'Settings', exact: true });
       assert.equal(await header.locator('.ds-button').count(), 3, 'all header actions use shared buttons');
-      const selector = sidebar.getByRole('combobox', { name: 'Project scope' });
-      assert.equal(await selector.locator('option:checked').textContent(), 'All projects');
+      const selector = sidebar.getByRole('button', { name: /^Project scope:/ });
+      assert.match(await selector.textContent(), /All projects/);
+      async function chooseProject(name) {
+        await selector.click();
+        await page.getByRole('listbox', { name: 'Project scope' }).getByRole('option', { name, exact: true }).click();
+      }
       assert.equal(await sidebar.locator('.drawer-project-scope > label:not(.scope-selector)').count(), 0, 'no duplicate Project heading');
       const row = await sidebar.locator('.session-row').first().boundingBox();
       if (width < 800) {
@@ -89,12 +93,12 @@ const assert = require('node:assert/strict');
         await sidebar.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `sidebar-${width}.png`) });
         await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `sidebar-header-${width}.png`), clip: { x: bounds.x, y: bounds.y, width: bounds.width, height: Math.min(350, bounds.height) } });
       }
-      await selector.selectOption('alpha');
+      await chooseProject('A project with a longer name');
       await page.waitForFunction(() => document.querySelectorAll('#app-sidebar .session-row').length === 2);
       await page.reload({ waitUntil: 'domcontentloaded' });
       await openMenu();
-      await page.waitForFunction(() => document.querySelector('#app-sidebar select')?.value === 'alpha');
-      await selector.selectOption('all');
+      await page.waitForFunction(() => document.querySelector('#app-sidebar [aria-haspopup="listbox"]')?.textContent.includes('A project with a longer name'));
+      await chooseProject('All projects');
       if (width < 800) {
         for (const name of ['Projects', 'Board', 'Dashboard', 'Chat']) {
           await sidebar.getByRole('navigation', { name: 'Main views' }).getByRole('button', { name, exact: true }).click();
