@@ -38,3 +38,16 @@ Limits: reopening history still depends on the agent's load capability. This
 change retains archived metadata and the existing transcript/attachment records;
 it cannot add a missing agent resume capability. Browser fixture checks do not
 claim a live-provider execution.
+
+Published verification:
+
+- Runtime commit: 6f0a3ea5cb74ff7a928b66e6e986369e618472f1 on main.
+- Served assets: /assets/index-Bk29ut98.js and /assets/index-BYMhgyH7.css.
+- Published index SHA-256: 2b15fc0f6659760e0606b6047bc1544370a9418974d2bc83ca3ee25825fadb8c. HTTP-fetched index and
+  entry assets match the verified web mount.
+- Complete browser regression passed again against the published frontend at
+  https://192.168.1.222:25809 with isolated state/ACP fixtures, exit 0;
+  archive/restore, refresh and reload passed on all four widths.
+- Screenshot inspected: /tmp/acp-session-archive-390.png. No JS or unexpected
+  HTTP errors in the tested flow. No model calls or real user chats modified.
+- Web image remained sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9; services were not restarted.
