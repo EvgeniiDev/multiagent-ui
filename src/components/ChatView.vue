@@ -32,6 +32,7 @@ const props = defineProps<{
    *  Reached through the reactive tabs array, so its ref fields surface
    *  unwrapped (rt.isLoading is a plain boolean). */
   runtime: SessionTab;
+  covered?: boolean;
 }>();
 
 const sessionStore = useSessionStore();
@@ -74,7 +75,7 @@ const submitOnEnter = !isMobile();
 // sidebar-drawer breakpoint. Placeholder text and the desktop-only update
 // nag can't be swapped by CSS, so the flag lives here.
 const isNarrowLayout = ref(false);
-const useDocumentScroll = computed(() => isNarrowLayout.value && !isTauriHost() && sessionStore.activeTabId === rt.id && uiStore.activeView === 'chat');
+const useDocumentScroll = computed(() => !props.covered && isNarrowLayout.value && !isTauriHost() && sessionStore.activeTabId === rt.id && uiStore.activeView === 'chat');
 let savedDocumentTop = 0;
 function feedScroller(): HTMLElement | null {
   return useDocumentScroll.value ? document.scrollingElement as HTMLElement | null : messagesContainer.value;

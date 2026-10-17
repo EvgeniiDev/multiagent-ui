@@ -239,3 +239,21 @@ test('late shared snapshot cannot resurrect a closed or settled runtime', async 
   await vue.nextTick();
   assert.equal(rt.messages.value.length, 0);
 });
+
+test('session ordering follows messages, never opening, replay, or service events', async () => {
+  const rt = createSessionRuntime(deps);
+  const session = { ...saved, lastUpdated: 100 };
+  try {
+    await rt.resume(session);
+    assert.equal(session.lastUpdated, 100, 'opening/replaying keeps the original message timestamp');
+    emit({ sessionUpdate: 'session_info_update', title: 'Renamed' });
+    emit({ sessionUpdate: 'tool_call', toolCallId: 'service-event', title: 'Tool only', kind: 'search', status: 'pending' });
+    assert.equal(session.lastUpdated, 100, 'metadata and tools do not affect ordering');
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'New answer' } });
+    assert(session.lastUpdated > 100, 'live agent messages update ordering');
+    rt.session.value.lastUpdated = 100;
+    client.prompt = async () => ({ stopReason: 'end_turn' });
+    await rt.sendPrompt('New question');
+    assert(session.lastUpdated > 100, 'sending a user message updates ordering');
+  } finally { await rt.close(); }
+});

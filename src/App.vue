@@ -79,6 +79,13 @@ const scopeCwd = computed(() => projectsStore.activeProject?.path ?? '');
 const isNarrowLayout = ref(false);
 watch([isNarrowLayout, showSidebar, () => uiStore.ready, () => uiStore.activeView,
   () => sessionStore.activeTabId], () => mobileMenuHistory.sync(), { flush: 'post' });
+watch(() => sessionStore.activeTabId, () => {
+  if (isNarrowLayout.value && showWelcomeNewSession.value) closeMobileSessionPage();
+});
+const mobileSessionPage = computed(() => isNarrowLayout.value && showSidebar.value);
+watch(mobileSessionPage, (open) => {
+  document.documentElement.classList.toggle('sessions-page', open);
+}, { immediate: true });
 // Browser bars and the soft keyboard change the visual viewport independently
 // of 100vh. Keep the entire composer inside the part the user can see.
 const viewportHeight = ref<number | null>(null);
@@ -330,6 +337,10 @@ function restoreSessionFromHistory(): void {
 }
 
 async function handleResumeSession(session: SavedSession) {
+  if (isNarrowLayout.value) {
+    closeMobileSessionPage();
+    void uiStore.setView('chat');
+  }
   // The URL carries the user's intent at click time — F5 restores exactly this
   // chat even when the resume fails or a background sync rewrites the store.
   setSessionInUrl(session.agentName, session.sessionId);
@@ -338,6 +349,13 @@ async function handleResumeSession(session: SavedSession) {
   } catch (e) {
     console.error('Failed to resume session:', e);
   }
+}
+
+function handleActivateSession(tabId: string) {
+  if (isNarrowLayout.value) closeMobileSessionPage();
+  void uiStore.setView('chat');
+  sessionStore.activateTab(tabId);
+  setSessionInUrl('', null);
 }
 
 async function handleDeleteSession(sessionId: string) {
@@ -390,7 +408,7 @@ async function handleAuthNewSession() {
 const drawerSwipe = createDrawerSwipe({
   isEnabled: () => isNarrowLayout.value,
   isOpen: () => showSidebar.value,
-  setOpen: (open) => { showSidebar.value = open; },
+  setOpen: (open) => { if (open) void openDrawer(); else closeMobileSessionPage(); },
 });
 
 async function openDrawer() {
@@ -399,24 +417,36 @@ async function openDrawer() {
   document.getElementById('app-sidebar')?.querySelector<HTMLButtonElement>('[aria-label="Collapse sidebar"]')?.focus();
 }
 
+function closeMobileSessionPage() {
+  showSidebar.value = false;
+}
+
+function handleTrafficToggle() {
+  showTrafficMonitor.value = !showTrafficMonitor.value;
+  if (isNarrowLayout.value && showTrafficMonitor.value) closeMobileSessionPage();
+}
+
 function handleDrawerEscape() {
-  if (isNarrowLayout.value) showSidebar.value = false;
+  if (isNarrowLayout.value) closeMobileSessionPage();
 }
 
 function toggleSidebar() {
-  showSidebar.value = !showSidebar.value;
+  if (isNarrowLayout.value) {
+    if (showSidebar.value) closeMobileSessionPage();
+    else void openDrawer();
+  } else showSidebar.value = !showSidebar.value;
 }
 
 /** Close the drawer when the user taps the backdrop on a narrow viewport. */
 function handleBackdropClick() {
-  if (isNarrowLayout.value) showSidebar.value = false;
+  if (isNarrowLayout.value) closeMobileSessionPage();
 }
 
 /** Pick a view from the drawer's view row (narrow only): switch, then close
  *  the drawer so the chosen view fills the screen. */
 function handleDrawerViewClick(view: ViewId) {
   void uiStore.setView(view);
-  if (isNarrowLayout.value) showSidebar.value = false;
+  if (isNarrowLayout.value) closeMobileSessionPage();
 }
 
 onBeforeUnmount(() => {
@@ -425,7 +455,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', syncViewportHeight);
   window.visualViewport?.removeEventListener('resize', syncViewportHeight);
   window.visualViewport?.removeEventListener('scroll', syncViewportHeight);
-  document.documentElement.classList.remove('document-chat');
+  document.documentElement.classList.remove('document-chat', 'sessions-page');
   if (narrowMql) {
     narrowMql.removeEventListener('change', syncNarrowLayout);
     narrowMql = null;
@@ -513,7 +543,7 @@ function clearError() {
     >
       <SidebarHeader
         :traffic-active="showTrafficMonitor"
-        @traffic="showTrafficMonitor = !showTrafficMonitor"
+        @traffic="handleTrafficToggle"
         @settings="showSettings = true"
         @collapse="toggleSidebar"
       />
@@ -555,6 +585,8 @@ function clearError() {
         <div class="section session-section">
           <SessionList
             @resume="handleResumeSession"
+            @create="showWelcomeNewSession = true"
+            @activate="handleActivateSession"
             @delete="handleDeleteSession"
             @refresh="handleRefreshSessions"
           />
@@ -583,7 +615,7 @@ function clearError() {
     </button>
     
     <!-- Main Content Area -->
-    <div class="main-area" :style="{ '--mobile-navigation-height': isNarrowLayout && !mobileNavigationHidden ? '52px' : '0px' }">
+    <div class="main-area" :inert="mobileSessionPage" :aria-hidden="mobileSessionPage || undefined" :style="{ '--mobile-navigation-height': isNarrowLayout && !mobileNavigationHidden ? '52px' : '0px' }">
       <div
         v-if="isNarrowLayout && !showSidebar"
         class="drawer-swipe-edge"
@@ -643,12 +675,13 @@ function clearError() {
           >
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
           </UiButton>
+          <span v-if="isNarrowLayout" class="mobile-session-title">{{ uiStore.activeView === 'chat' ? sessionStore.currentSession?.title || 'Chat' : VIEWS.find(view => view.id === uiStore.activeView)?.label }}</span>
           <!-- "+" starts a session: agent + working directory dropdown. It
                sits before the tabs and stays fixed on narrow layouts, where
                the tab strip itself scrolls horizontally. -->
           <NewSessionMenu v-if="uiStore.ready && uiStore.activeView === 'chat'" />
           <div class="navigation-items">
-            <SessionTabs v-if="uiStore.activeView === 'chat' && sessionStore.openTabs.length > 0" />
+            <SessionTabs v-if="!isNarrowLayout && uiStore.activeView === 'chat' && sessionStore.openTabs.length > 0" />
           </div>
         </div>
 
@@ -663,6 +696,7 @@ function clearError() {
             v-show="uiStore.activeView === 'chat' && rt.id === sessionStore.activeTabId"
             :key="rt.id"
             :runtime="rt"
+            :covered="mobileSessionPage"
           />
 
         <!-- Welcome screen when no tabs are open at all. The New session
@@ -789,6 +823,12 @@ html.document-chat #app {
 html.document-chat {
   overflow-x: clip;
   overflow-anchor: none;
+}
+.mobile-session-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.8125rem; color: var(--text-primary); }
+html.sessions-page { overflow: hidden; }
+@media (max-width: 800px) {
+  .sessions-page .main-area { visibility: hidden; }
+  .session-navigation > .navigation-items { display: none; }
 }
 </style>
 
@@ -1194,13 +1234,16 @@ html.document-chat {
     top: 0;
     left: 0;
     bottom: 0;
-    width: 85vw;
-    max-width: 360px;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    height: var(--app-viewport-height, 100dvh);
     z-index: 100;
-    box-shadow: 2px 0 16px rgba(0, 0, 0, 0.3);
+    box-shadow: none;
     touch-action: pan-y pinch-zoom;
     /* Honour iOS notch / Android status bar. */
     padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 
   .sidebar.is-drawer .sidebar-content {
@@ -1208,7 +1251,7 @@ html.document-chat {
   }
 
   .drawer-backdrop {
-    display: block;
+    display: none;
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.4);

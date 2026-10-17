@@ -64,7 +64,8 @@ const assert = require('node:assert/strict');
           assert(rect.width >= 44 && rect.height >= 44);
           assert.equal(await button.evaluate(e => getComputedStyle(e).flexDirection), 'column');
         }
-        assert(row.y < 250, 'menu gives sessions most of the phone screen');
+        const listHead = await sidebar.locator('.list-head').boundingBox();
+        assert(listHead.y < 230 && row.y - listHead.y <= 64, 'sessions start promptly after their 44px touch actions');
         assert((await settings.boundingBox()).height >= 44);
       }
       const bounds = await sidebar.boundingBox();

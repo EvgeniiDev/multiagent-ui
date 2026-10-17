@@ -588,6 +588,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   // replay died — keep the tail, marked stale). Writes are fire-and-forget:
   // a localStorage failure must never break the chat.
 
+  let sessionMetadataDirty = false;
+
   /** Persist the rendered tail under `cacheScope`. Never throws. */
   function flushHistoryNow(): void {
     if (historyFlushTimer) {
@@ -596,6 +598,10 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     }
     lastHistoryFlushAt = Date.now();
     if (!cacheScope || messages.value.length === 0 || loadingHistory || replayMerge || historyCacheNote.value) return;
+    if (sessionMetadataDirty) {
+      sessionMetadataDirty = false;
+      void deps.persistSessions();
+    }
     const entry = writeHistoryCache(cacheScope.agent, cacheScope.sessionId, messages.value);
     if (entry) void writeSharedHistoryCache(cacheScope.agent, cacheScope.sessionId, entry);
   }
@@ -835,6 +841,14 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     if (foreign) return;
 
     deps.notifyActivity(runtimeApi);
+    // Replayed history and service notifications must not reorder the list.
+    if (!loadingHistory && (update.sessionUpdate === 'agent_message_chunk'
+        || update.sessionUpdate === 'user_message_chunk')) {
+      if (session.value) {
+        session.value.lastUpdated = session.value.lastMessageAt = Date.now();
+        sessionMetadataDirty = true;
+      }
+    }
 
     // While a cached tail is on screen, the replay lands in the merge buffer
     // — appending it to `messages` would duplicate the cache and push the
@@ -1538,8 +1552,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       // Track successful session resume
       trackEvent('SessionResumed', { agentName: savedSession.agentName, success: 'true' });
 
-      // Update last accessed time
-      savedSession.lastUpdated = Date.now();
+      // Opening a session preserves its last message time.
       await deps.persistSessions();
 
     } catch (e) {
@@ -1631,6 +1644,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       );
     }
 
+    session.value.lastUpdated = session.value.lastMessageAt = Date.now();
+    void deps.persistSessions();
     isLoading.value = true;
     inFlightPrompts += 1;
     const activity = useActivityStore();
@@ -1667,8 +1682,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       // Update session title if it's the first message
       if (messages.value.length === 2 && session.value) {
         session.value.title = text.slice(0, 50) + (text.length > 50 ? '...' : '');
-        session.value.lastUpdated = Date.now();
-        await deps.persistSessions();
+        sessionMetadataDirty = true;
       }
     } catch (e) {
       activity.recordEntry({

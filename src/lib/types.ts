@@ -86,6 +86,8 @@ export interface SavedSession {
   sessionId: string;
   title: string;
   lastUpdated: number;
+  /** Latest live user/agent message observed here; protects against stale inventories. */
+  lastMessageAt?: number;
   cwd: string;
   supportsLoadSession?: boolean; // Whether the agent supports session/load
   /**

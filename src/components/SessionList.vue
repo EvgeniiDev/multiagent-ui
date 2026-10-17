@@ -1,14 +1,18 @@
 <script setup lang="ts">
 import { computed } from 'vue';
+import UiButton from './ui/UiButton.vue';
 import { useSessionStore } from '../stores/session';
 import { useUiStore } from '../stores/ui';
 import { useProjectsStore } from '../features/scope/registry';
 import type { SavedSession } from '../lib/types';
+import type { SessionTab } from '../lib/sessionRuntime';
 
 const emit = defineEmits<{
   resume: [session: SavedSession];
+  activate: [tabId: string];
   delete: [sessionId: string];
   refresh: [];
+  create: [];
 }>();
 
 const sessionStore = useSessionStore();
@@ -31,11 +35,42 @@ function isUnassigned(session: SavedSession): boolean {
 }
 
 const activeSessionId = computed(() => sessionStore.currentSession?.id ?? '');
-/** Ids of sessions already open in a tab — they get a marker and a click
- *  just focuses the tab instead of re-resuming. */
-const openSessionIds = computed(
-  () => new Set(sessionStore.openTabs.map((t) => t.session?.id))
-);
+// Include descriptors so connecting and failed restores retain their status.
+const openRuntimes = computed(() => new Map(sessionStore.openTabs.map(runtime => {
+  const target = runtime.session ?? runtime.descriptor;
+  return [JSON.stringify([target?.agentName, target?.sessionId]), runtime];
+})));
+function sessionStatus(runtime?: SessionTab) {
+  if (!runtime) return null;
+  if (runtime.pendingPermission) return { kind: 'permission', label: 'Waiting for permission' };
+  if (runtime.error) return { kind: 'error', label: 'Error', detail: runtime.error };
+  if (runtime.isConnecting) return { kind: 'working', label: 'Connecting' };
+  if (runtime.isLoading && runtime.isConnected) return { kind: 'working', label: 'Working' };
+  if (runtime.unread) return { kind: 'unread', label: 'Unread reply' };
+  if (!runtime.isConnected) return { kind: 'disconnected', label: 'Disconnected' };
+  return { kind: 'open', label: 'Open' };
+}
+const rows = computed(() => {
+  const savedRows = sessions.value.map(session => {
+    const runtime = openRuntimes.value.get(JSON.stringify([session.agentName, session.sessionId]));
+    return { session, runtime, status: sessionStatus(runtime), transient: false };
+  });
+  // session/new can still be pending or failed before a saved session exists.
+  const transientRows = sessionStore.openTabs
+    .filter(runtime => !runtime.session && !runtime.descriptor)
+    .map(runtime => ({
+      session: {
+        id: runtime.id, sessionId: '', agentName: runtime.agentName,
+        title: 'New session', cwd: '', lastUpdated: 0,
+      } as SavedSession,
+      runtime, status: sessionStatus(runtime), transient: true,
+    }));
+  return [...savedRows, ...transientRows];
+});
+function openRow(session: SavedSession, runtime: SessionTab | undefined, transient: boolean) {
+  if (transient && runtime) emit('activate', runtime.id);
+  else handleResume(session);
+}
 
 const isSyncing = computed(() => sessionStore.isSyncingSessions);
 const syncError = computed(() => sessionStore.syncError);
@@ -46,6 +81,7 @@ const canListAgentSessions = computed(() => !sessionStore.sessionListUnsupported
 
 /** Compact stamp: today -> HH:MM, this year -> "12 сен", else ISO date. */
 function formatStamp(timestamp: number): string {
+  if (!timestamp) return '—';
   const d = new Date(timestamp);
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -87,18 +123,20 @@ function handleDelete(sessionId: string, event: Event) {
   <div class="session-list">
     <div class="list-head">
       <span class="list-label">Sessions</span>
-      <span class="list-count">{{ sessions.length || '' }}</span>
+      <span class="list-count">{{ rows.length || '' }}</span>
+      <UiButton class="list-create" variant="primary" @click="emit('create')">New session</UiButton>
       <!-- New sessions start from the "+" on the tab strip; the only manual
            action left here is re-pulling the agents' inventories. -->
-      <button
+      <UiButton
         v-if="canListAgentSessions"
+        variant="ghost" icon
         class="list-refresh"
         :class="{ busy: isSyncing }"
         :disabled="isSyncing"
         @click="handleRefresh"
         :title="isSyncing ? 'Loading sessions from agents…' : 'Load sessions from all agents'"
         aria-label="Load sessions from all agents"
-      >⟳</button>
+      >⟳</UiButton>
     </div>
 
     <div v-if="syncError" class="sync-note error" :title="syncError">Couldn&rsquo;t load agent sessions</div>
@@ -106,23 +144,28 @@ function handleDelete(sessionId: string, event: Event) {
       None of the configured agents can list sessions.
     </div>
 
-    <div v-if="sessions.length === 0" class="empty-state">
-      No sessions yet — start one with the &ldquo;+&rdquo; on the tab bar.
+    <div v-if="rows.length === 0" class="empty-state">
+      No sessions yet — start a new session.
     </div>
 
     <ul v-else>
       <li
-        v-for="session in sessions"
+        v-for="{ session, runtime, status, transient } in rows"
         :key="session.id"
+        :data-session-id="session.id"
         class="session-row"
-        :class="{ active: session.id === activeSessionId }"
+        :class="{ active: runtime ? runtime.id === sessionStore.activeTabId : session.id === activeSessionId }"
         :title="`${session.title}\n${session.agentName} · ${session.cwd || '—'}`"
-        @click="handleResume(session)"
+        tabindex="0"
+        role="link"
+        @keydown.enter.self="openRow(session, runtime, transient)"
+        @keydown.space.self.prevent="openRow(session, runtime, transient)"
+        @click="openRow(session, runtime, transient)"
       >
         <div class="row-content">
           <div class="row-heading">
             <span
-              v-if="openSessionIds.has(session.id)"
+              v-if="runtime"
               class="row-open"
               title="Open in a tab"
               aria-hidden="true"
@@ -136,17 +179,28 @@ function handleDelete(sessionId: string, event: Event) {
               class="row-tag"
               title="Not inside any registered project"
             >unassigned</span>
+            <span v-if="status" class="row-status" :class="status.kind" :title="status.detail || status.label">{{ status.label }}</span>
             <span class="row-stamp">{{ formatStamp(session.lastUpdated) }}</span>
           </div>
         </div>
-        <button
+        <UiButton
+          v-if="runtime"
+          class="row-close"
+          variant="ghost" icon size="xs"
+          aria-label="Close session"
+          title="Close session (keep history)"
+          @click.stop="sessionStore.closeTab(runtime.id)"
+        >×</UiButton>
+        <UiButton
+          variant="ghost" icon size="xs"
+          v-if="!transient"
           class="row-delete"
           @click="(e) => handleDelete(session.id, e)"
           title="Delete session"
           aria-label="Delete session"
         >
           ×
-        </button>
+        </UiButton>
       </li>
     </ul>
   </div>
@@ -174,32 +228,8 @@ function handleDelete(sessionId: string, event: Event) {
 }
 
 /* Pull the agents' session inventories (`session/list`) into this list. */
-.list-refresh {
-  flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm, 4px);
-  background: transparent;
-  color: var(--text-muted, #a39a8e);
-  font-size: 0.8125rem;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.list-refresh:hover:not(:disabled) {
-  background: var(--tint-hover, rgba(43, 39, 35, 0.045));
-  color: var(--text-primary, #2b2723);
-}
-
-.list-refresh:disabled {
-  cursor: default;
-  opacity: 0.55;
-}
+.list-refresh { flex: 0 0 auto; }
+.list-create { display: none; }
 
 .list-refresh.busy {
   animation: session-list-spin 0.9s linear infinite;
@@ -349,32 +379,38 @@ ul {
   color: var(--text-muted, #a39a8e);
 }
 
-.row-delete {
-  flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm, 4px);
-  background: transparent;
-  color: var(--text-muted, #a39a8e);
-  font-size: 1rem;
-  line-height: 1;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s;
-}
-
+.row-delete { flex: 0 0 auto; opacity: 0; }
 .session-row:hover .row-delete,
-.session-row.active .row-delete {
-  opacity: 1;
+.session-row:focus-within .row-delete,
+.session-row.active .row-delete { opacity: 1; }
+.session-row:focus-visible { outline: 2px solid var(--text-accent); outline-offset: -2px; }
+.row-close { display: none; }
+.row-status {
+  font-size: 0.625rem;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-
-.row-delete:hover {
-  background: var(--bg-danger-hover, #9c3524);
-  color: var(--text-on-accent, #fbf8f3);
+.row-status.working, .row-status.unread, .row-status.permission { color: var(--text-accent); }
+.row-status.error { color: var(--bg-danger); }
+.row-status.working::before {
+  content: '';
+  display: inline-block;
+  width: 8px; height: 8px;
+  margin-right: 4px;
+  border: 1px solid var(--border-faint);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: session-list-spin 0.9s linear infinite;
+}
+@media (max-width: 800px) {
+  .list-create { display: inline-flex; }
+  .session-row { min-height: 72px; padding: 0.625rem 0.5rem; }
+  .row-title { font-size: 0.9375rem; white-space: normal; overflow-wrap: anywhere; }
+  .row-agent, .row-status, .row-stamp { font-size: 0.6875rem; }
+  .row-tag { display: none; }
+  .row-delete { display: none; }
+  .row-close { display: inline-flex; }
 }
 </style>

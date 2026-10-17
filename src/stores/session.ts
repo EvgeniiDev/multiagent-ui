@@ -343,7 +343,7 @@ export const useSessionStore = defineStore('session', () => {
       if (existing) {
         existing.title = title;
         if (info.cwd) existing.cwd = info.cwd;
-        if (Number.isFinite(stamp)) existing.lastUpdated = stamp;
+        if (Number.isFinite(stamp)) existing.lastUpdated = Math.max(existing.lastMessageAt ?? 0, stamp);
         existing.supportsLoadSession = true;
         continue;
       }
@@ -352,7 +352,7 @@ export const useSessionStore = defineStore('session', () => {
         agentName,
         sessionId: info.sessionId,
         title,
-        lastUpdated: Number.isFinite(stamp) ? stamp : Date.now(),
+        lastUpdated: Number.isFinite(stamp) ? stamp : 0,
         cwd: info.cwd || '',
         supportsLoadSession: true,
         origin: 'agent',
@@ -689,7 +689,7 @@ export const useSessionStore = defineStore('session', () => {
    */
   const visibleSessions = computed(() =>
     savedSessions.value
-      .filter(s => s.supportsLoadSession === true)
+      .filter(s => openSessionIds.value.has(s.id) || s.supportsLoadSession === true)
       .filter(s => openSessionIds.value.has(s.id) || !isHiddenSession(s))
       .sort((a, b) => b.lastUpdated - a.lastUpdated)
   );

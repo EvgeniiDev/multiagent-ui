@@ -7,11 +7,11 @@ const fs=require('node:fs');const path=require('node:path');const assert=require
 (async()=>{
 const b=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH,args:['--no-sandbox','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream',...(process.env.VOICE_WAV?['--use-file-for-fake-audio-capture='+process.env.VOICE_WAV]:[])]});
 globalThis.qaBrowser=b;
-for (const width of [320,390,430,780,1440]) {
+for (const width of JSON.parse(process.env.WIDTHS || '[320,390,430,780,1440]')) {
 const c=await b.newContext({ignoreHTTPSErrors:true,hasTouch:width<800,isMobile:width<800,userAgent:width===430?'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1':undefined,viewport:{width,height:844}});
 await c.grantPermissions(['local-network-access','microphone']);
 await c.addInitScript(()=>{localStorage.setItem('acp-ui:sessions.json',JSON.stringify({sessions:['e2e','other'].map(id=>({id,agentName:'E2E',sessionId:id,cwd:'/tmp',title:id,supportsLoadSession:true,lastUpdated:Date.now()})),openTabs:[{agentName:'E2E',sessionId:'e2e'},{agentName:'E2E',sessionId:'other'}]}));localStorage.setItem('acp-ui:agents',JSON.stringify({agents:{E2E:{transport:'websocket',url:'ws://127.0.0.1:25993/'}}}));localStorage.setItem('acp-ui:preferences.json',JSON.stringify({telemetryEnabled:false,lastCwd:'/tmp'}));});
-const p=await c.newPage();const errors=[],rpcCalls=[];p.on('pageerror',e=>{errors.push(e.message);console.log('ERROR',e.message)});
+const p=await c.newPage();globalThis.qaPage=p;const errors=[],rpcCalls=[];p.on('pageerror',e=>{errors.push(e.message);console.log('ERROR',e.message)});
 if(process.env.BUILD) await p.route('**/*',r=>{const u=new URL(r.request().url());if(u.port==='25809' && (u.pathname==='/chat'||u.pathname==='/'||u.pathname.startsWith('/assets/'))){const file=path.join(process.env.BUILD,u.pathname.startsWith('/assets/')?u.pathname:'index.html');return r.fulfill({path:file,contentType:file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html'});}return r.continue();});
 await p.route('**/openapi.json',r=>r.fulfill({json:{paths:{'/v1/audio/transcriptions':{post:{}}}}}));
 await p.route('**/v1/audio/transcriptions',r=>r.fulfill({json:{text:'Dictated follow-up while the model works'}}));
@@ -29,7 +29,7 @@ assert((await p.locator('.chat-view[style*="display: none"] .message').count())<
 await p.evaluate(()=>{qaHiddenOriginal.rt.messages=qaHiddenOriginal.messages;delete window.qaHiddenOriginal;});
 
 await feed.evaluate(e=>{if(document.documentElement.classList.contains('document-chat'))window.scrollTo(0,500);else e.scrollTop=500;});await p.waitForTimeout(250);
-assert.equal(await p.locator('.tab-strip [role="tab"]').count(),2);
+assert.equal(await p.locator('.tab-strip [role="tab"]').count(),width<800?0:2);
 if(width<800){
   assert.equal(await p.evaluate(()=>document.documentElement.classList.contains('document-chat')),true,'mobile chat uses native page scrolling');
   assert.equal(await feed.evaluate(e=>getComputedStyle(e).overflowY),'visible','history has no nested scrollport');
@@ -109,7 +109,7 @@ if(width<800){
     await p.keyboard.press('Tab');await menu.focus();
     assert.equal(await menu.evaluate(e=>getComputedStyle(e).outlineWidth),'2px','menu has visible keyboard focus');
     const activeBefore=await p.evaluate(()=>window.__session.activeTabId);
-    await menu.tap();await p.waitForSelector('.drawer-backdrop');
+    await menu.tap();await p.waitForSelector('#app-sidebar');
     assert.equal(await p.evaluate(()=>window.__session.activeTabId),activeBefore,'menu opens the drawer without changing sessions');
     await p.locator('[aria-label="Collapse sidebar"]').click();
   }
@@ -126,7 +126,7 @@ if(width<800){
   assert(await p.evaluate(()=>{const e=document.scrollingElement,top=e.scrollTop,max=e.scrollHeight-e.clientHeight;e.scrollTop=top<max/2?Math.min(max,top+100):Math.max(0,top-100);return e.scrollTop!==top;}),'history remains scrollable inside real fullscreen');
   assert.equal(await p.evaluate(()=>document.fullscreenElement.contains(document.querySelector('.chat-view:not([style*="display: none"]) .input-container'))),true,'fullscreen targets the whole app, including the input');
   await p.evaluate(()=>document.exitFullscreen());await p.waitForFunction(()=>!document.fullscreenElement);await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) .fullscreen-toggle')?.getAttribute('aria-pressed')==='false');assert.equal(await fullscreen.getAttribute('aria-pressed'),'false','browser-initiated exit updates the control');
-  await fullscreen.click();await p.waitForFunction(()=>document.fullscreenElement===document.documentElement);const rotation=await c.newCDPSession(p);await rotation.send('Emulation.setDeviceMetricsOverride',{width:900,height:844,deviceScaleFactor:1,mobile:true});assert(await fullscreen.isVisible(),'fullscreen exit stays available after rotating to a wide layout');await fullscreen.click();await p.waitForFunction(()=>!document.fullscreenElement);await p.waitForTimeout(100);await p.setViewportSize({width,height:844});await rotation.detach();await p.waitForTimeout(100);
+  await fullscreen.click();await p.waitForFunction(()=>document.fullscreenElement===document.documentElement);const rotation=await c.newCDPSession(p);await rotation.send('Emulation.setDeviceMetricsOverride',{width:900,height:844,deviceScaleFactor:1,mobile:true});assert(await fullscreen.isVisible(),'fullscreen exit stays available after rotating to a wide layout');await fullscreen.click();await p.waitForFunction(()=>!document.fullscreenElement);await p.waitForTimeout(100);await p.setViewportSize({width,height:844});await rotation.send('Emulation.setDeviceMetricsOverride',{width,height:844,deviceScaleFactor:1,mobile:true});await rotation.detach();await p.waitForTimeout(100);
   await p.evaluate(()=>{Object.defineProperty(document,'fullscreenEnabled',{configurable:true,value:false});document.dispatchEvent(new Event('fullscreenchange'));});await p.waitForTimeout(50);
   assert.equal(await fullscreen.count(),0,'unsupported fullscreen does not show a broken action');const help=await p.locator('.chat-view:visible .fullscreen-help').innerText();assert.match(help,width===430?/Share.*Add to Home Screen/:/unavailable/);
   await p.evaluate(()=>{delete document.fullscreenEnabled;document.dispatchEvent(new Event('fullscreenchange'));});
@@ -185,22 +185,26 @@ if(width<800){
   await voiceEvent('state',{phase:'listening',elapsedS:1});
   await voiceEvent('state',{phase:'idle',elapsedS:0});
   assert.equal(await p.locator('.chat-view:visible .voice-status').count(),0);
-  const tabs=p.locator('.tab-strip [role="tab"]');
+  async function switchSession(index) {
+    const id=await p.evaluate(index=>(window.__session.openTabs[index].session??window.__session.openTabs[index].descriptor).id,index);
+    await p.locator('[aria-label="Open menu"]').click();
+    await p.locator(`.session-row[data-session-id="${id}"] .row-title`).click();
+  }
   await p.evaluate(()=>window.scrollTo(0, Math.max(700,document.documentElement.scrollHeight/2)));await p.waitForTimeout(250);
   const savedTop=await p.evaluate(()=>scrollY);
-  await tabs.nth(1).click();
+  await switchSession(1);
   await p.waitForFunction(()=>window.__session.activeRuntime.descriptor.sessionId==='other');
-  assert.equal(await tabs.nth(1).getAttribute('aria-selected'),'true');
+  assert.equal(await p.locator('.tab-strip').count(),0,'mobile switching uses the sessions page');
   await p.locator('.chat-view:visible textarea').fill('Other session draft');
-  await tabs.nth(0).click();
+  await switchSession(0);
   await p.waitForFunction(()=>window.__session.activeRuntime.descriptor.sessionId==='e2e');
-  assert.equal(await tabs.nth(0).getAttribute('aria-selected'),'true');
+  assert.equal(await p.locator('.tab-strip').count(),0);
   assert.equal(await draft.inputValue(),'Draft preserved while the viewport changes','session switching preserves the chat draft');
   await p.waitForTimeout(250);assert(Math.abs((await p.evaluate(()=>scrollY))-savedTop)<=2,'switching tabs restores the page position in history');
-  await tabs.nth(1).click();await p.waitForTimeout(200);await p.evaluate(()=>window.scrollTo(0,document.documentElement.scrollHeight));await p.waitForTimeout(200);
+  await switchSession(1);await p.waitForTimeout(200);await p.evaluate(()=>window.scrollTo(0,document.documentElement.scrollHeight));await p.waitForTimeout(200);
   await p.evaluate(()=>window.__session.activeRuntime.messages.push({id:'follow-page-stream',role:'assistant',content:'New output at the bottom',timestamp:Date.now()}));await p.waitForTimeout(250);
   assert(await p.evaluate(()=>document.documentElement.scrollHeight-scrollY-document.documentElement.clientHeight<=2),'a bottom-following chat stays pinned during new output');
-  await tabs.nth(0).click();await p.waitForTimeout(200);
+  await switchSession(0);await p.waitForTimeout(200);
   await p.evaluate(()=>{const rt=window.__session.activeRuntime;window.qaActiveMessages=rt.messages;rt.messages=Array.from({length:150},(_,i)=>({id:'page-history-'+i,role:i%2?'assistant':'user',content:'Page history row '+i,timestamp:Date.now()}));});
   await p.waitForTimeout(200);
   await p.evaluate(()=>window.scrollTo(0,Math.min(500,(document.documentElement.scrollHeight-innerHeight)/2)));await p.waitForTimeout(150);
@@ -219,13 +223,11 @@ if(width<800){
   assert(Math.abs((await p.evaluate(()=>scrollY))-historyTop)<=2,'returning from another view restores history position');
   await p.evaluate(()=>{window.__session.activeRuntime.messages=window.qaActiveMessages;delete window.qaActiveMessages;});await p.waitForTimeout(200);
   await p.evaluate(()=>window.__session.closeTab(window.__session.openTabs.find(t=>t.id!==window.__session.activeTabId).id));
-  assert.equal(await p.locator('.tab-strip [role="tab"]').count(),1,'single open chat still has a tab');
-  await p.locator('.navigation-items').evaluate(e=>e.scrollLeft=e.scrollWidth);
-  const tab=await p.locator('.tab-strip [role="tab"]').boundingBox();
-  assert(tab.x+tab.width<=width,'session tab reachable by horizontal scrolling');
+  assert.equal(await p.evaluate(()=>window.__session.openTabs.length),1,'closing a session preserves the remaining chat');
+  assert.equal(await p.locator('.tab-strip').count(),0,'single mobile chat has no top tab');
 }else{await p.evaluate(()=>window.__session.activeRuntime.isLoading=true);await p.waitForTimeout(200);assert.equal(await p.locator('.chat-view:visible .input-container .loading-indicator').count(),1,'desktop live status also stays beside the composer');assert.equal(await p.locator('.chat-view:visible .messages-container .loading-indicator').count(),0);await p.evaluate(()=>window.__session.activeRuntime.isLoading=false);await feed.hover();await p.mouse.wheel(0,200);await p.waitForTimeout(250);assert.equal(await nav.getAttribute('inert'),null,'desktop tabs stay visible');}
 if(width===430){await p.addInitScript(()=>Object.defineProperty(navigator,'standalone',{configurable:true,value:true}));await p.reload({waitUntil:'domcontentloaded'});await p.waitForSelector('.chat-view:visible .settings-toggle');await p.locator('.chat-view:visible .settings-toggle').tap();assert.equal(await p.locator('.chat-view:visible .fullscreen-control').count(),0,'Home Screen app needs no fullscreen action');assert.equal(await p.locator('meta[name=apple-mobile-web-app-capable]').getAttribute('content'),'yes','iPhone Home Screen launch is configured without browser bars');}
 assert.deepEqual(errors,[]);await p.screenshot({path:`/tmp/acp-navigation-${width}.png`});await c.close();
 }
 await b.close();console.log('PASS native page scrolling, fixed composer, inline recording and thinking status, Stop beside Send, busy voice/settings, real fullscreen/exit/fallback, history/follow, saved positions, keyboard viewport, desktop unchanged');
-})().catch(async e=>{console.error(e);await globalThis.qaBrowser?.close();process.exit(1)});
+})().catch(async e=>{console.error(e);if(globalThis.qaPage&&!globalThis.qaPage.isClosed()){console.log('FAILURE_STATE',await globalThis.qaPage.evaluate(()=>({url:location.href,classes:document.documentElement.className,width:innerWidth,sidebar:document.querySelector('#app-sidebar')?.getAttribute('style'),main:document.querySelector('.main-area')?.getAttribute('inert')})));await globalThis.qaPage.screenshot({path:'/tmp/acp-navigation-failure.png'});}await globalThis.qaBrowser?.close();process.exit(1)});
