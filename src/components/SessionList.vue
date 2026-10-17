@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import UiButton from './ui/UiButton.vue';
 import { useSessionStore } from '../stores/session';
 import { useUiStore } from '../stores/ui';
@@ -23,8 +23,11 @@ const projectsStore = useProjectsStore();
 // per-row agent chip carries the distinction. On top of that the global
 // project scope applies: with a project selected only sessions whose cwd
 // lies inside its path show; 'all' is unfiltered.
+const showArchived = ref(false);
+const actionBusy = ref(false);
+const actionError = ref('');
 const sessions = computed(() =>
-  projectsStore.sessionsOfProject(sessionStore.visibleSessions)
+  projectsStore.sessionsOfProject(showArchived.value ? sessionStore.archivedSessions : sessionStore.visibleSessions)
 );
 
 // 'all' is the only mode where a session outside every project is visible —
@@ -40,8 +43,8 @@ const openRuntimes = computed(() => new Map(sessionStore.openTabs.map(runtime =>
   const target = runtime.session ?? runtime.descriptor;
   return [JSON.stringify([target?.agentName, target?.sessionId]), runtime];
 })));
-function sessionStatus(runtime?: SessionTab) {
-  if (!runtime) return null;
+function sessionStatus(runtime?: SessionTab, session?: SavedSession) {
+  if (!runtime) return session?.supportsLoadSession ? null : { kind: 'unavailable', label: 'Cannot reopen', detail: 'This agent does not support reopening saved sessions.' };
   if (runtime.pendingPermission) return { kind: 'permission', label: 'Waiting for permission' };
   if (runtime.error) return { kind: 'error', label: 'Error', detail: runtime.error };
   if (runtime.isConnecting) return { kind: 'working', label: 'Connecting' };
@@ -53,10 +56,10 @@ function sessionStatus(runtime?: SessionTab) {
 const rows = computed(() => {
   const savedRows = sessions.value.map(session => {
     const runtime = openRuntimes.value.get(JSON.stringify([session.agentName, session.sessionId]));
-    return { session, runtime, status: sessionStatus(runtime), transient: false };
+    return { session, runtime, status: sessionStatus(runtime, session), transient: false };
   });
   // session/new can still be pending or failed before a saved session exists.
-  const transientRows = sessionStore.openTabs
+  const transientRows = (showArchived.value ? [] : sessionStore.openTabs)
     .filter(runtime => !runtime.session && !runtime.descriptor)
     .map(runtime => ({
       session: {
@@ -68,6 +71,10 @@ const rows = computed(() => {
   return [...savedRows, ...transientRows];
 });
 function openRow(session: SavedSession, runtime: SessionTab | undefined, transient: boolean) {
+  if (!runtime && !session.supportsLoadSession) {
+    actionError.value = 'This agent does not support reopening saved sessions.';
+    return;
+  }
   if (transient && runtime) emit('activate', runtime.id);
   else handleResume(session);
 }
@@ -104,17 +111,17 @@ function handleRefresh() {
   emit('refresh');
 }
 
-function handleDelete(sessionId: string, event: Event) {
-  event.stopPropagation();
-  // Agent-owned sessions cannot be removed from the agent, so say what the
-  // button actually does instead of promising a delete that won't stick.
-  const session = sessions.value.find((s) => s.id === sessionId);
-  const message =
-    session?.origin === 'agent'
-      ? 'Hide this session from the list? The agent keeps its history.'
-      : 'Delete this session?';
-  if (confirm(message)) {
-    emit('delete', sessionId);
+async function setArchived(session: SavedSession, archived: boolean) {
+  if (actionBusy.value) return;
+  actionBusy.value = true;
+  actionError.value = '';
+  try {
+    if (archived) await sessionStore.archiveSession(session.id);
+    else await sessionStore.restoreArchivedSession(session.id);
+  } catch (error) {
+    actionError.value = `Could not ${archived ? 'archive' : 'restore'} session: ${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    actionBusy.value = false;
   }
 }
 </script>
@@ -122,9 +129,12 @@ function handleDelete(sessionId: string, event: Event) {
 <template>
   <div class="session-list">
     <div class="list-head">
-      <span class="list-label">Sessions</span>
+      <span class="list-label">{{ showArchived ? 'Archived' : 'Sessions' }}</span>
       <span class="list-count">{{ rows.length || '' }}</span>
-      <UiButton class="list-create" variant="ghost" icon aria-label="New session" title="New session" @click="emit('create')">
+      <UiButton variant="ghost" icon :aria-label="showArchived ? 'Show active sessions' : 'Show archived sessions'" :title="showArchived ? 'Back to sessions' : 'Archive'" :aria-pressed="showArchived" @click="showArchived = !showArchived">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8v12h16V8M3 4h18v4H3zM9 12h6" /></svg>
+      </UiButton>
+      <UiButton v-if="!showArchived" class="list-create" variant="ghost" icon aria-label="New session" title="New session" @click="emit('create')">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
       </UiButton>
       <UiButton
@@ -139,13 +149,14 @@ function handleDelete(sessionId: string, event: Event) {
       >⟳</UiButton>
     </div>
 
+    <div v-if="actionError" class="sync-note error" role="alert">{{ actionError }}</div>
     <div v-if="syncError" class="sync-note error" :title="syncError">Couldn&rsquo;t load agent sessions</div>
     <div v-else-if="sessionStore.sessionListUnsupported" class="sync-note">
       None of the configured agents can list sessions.
     </div>
 
     <div v-if="rows.length === 0" class="empty-state">
-      No sessions yet — start a new session.
+      {{ showArchived ? 'No archived sessions.' : 'No sessions yet — start a new session.' }}
     </div>
 
     <ul v-else>
@@ -184,25 +195,21 @@ function handleDelete(sessionId: string, event: Event) {
           </div>
         </div>
         <UiButton
-          v-if="runtime"
+          v-if="showArchived"
+          variant="ghost" icon size="xs"
+          aria-label="Restore session" title="Restore session to history"
+          :disabled="actionBusy"
+          @click.stop="setArchived(session, false)"
+        ><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 111 8M4 4v6h6" /></svg></UiButton>
+        <UiButton
+          v-else
           class="row-close"
           variant="ghost" icon size="xs"
-          aria-label="Close session"
-          title="Close session (keep history)"
-          @click.stop="sessionStore.closeTab(runtime.id)"
-        >
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 4l16 16M20 4L4 20" /></svg>
-        </UiButton>
-        <UiButton
-          variant="ghost" icon size="xs"
-          v-if="!transient"
-          class="row-delete"
-          @click="(e) => handleDelete(session.id, e)"
-          title="Delete session"
-          aria-label="Delete session"
-        >
-          ×
-        </UiButton>
+          :aria-label="transient ? 'Close session' : 'Archive session'"
+          :title="transient ? 'Close session' : 'Archive session (keep history)'"
+          :disabled="actionBusy"
+          @click.stop="transient && runtime ? sessionStore.closeTab(runtime.id) : setArchived(session, true)"
+        ><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 4l16 16M20 4L4 20" /></svg></UiButton>
       </li>
     </ul>
   </div>
@@ -381,12 +388,12 @@ ul {
   color: var(--text-muted, #a39a8e);
 }
 
-.row-delete { flex: 0 0 auto; opacity: 0; }
-.session-row:hover .row-delete,
-.session-row:focus-within .row-delete,
-.session-row.active .row-delete { opacity: 1; }
+.row-close { flex: 0 0 auto; opacity: 0; }
+.session-row:hover .row-close,
+.session-row:focus-within .row-close,
+.session-row.active .row-close { opacity: 1; }
 .session-row:focus-visible { outline: 2px solid var(--text-accent); outline-offset: -2px; }
-.row-close { display: none; }
+
 .row-status {
   font-size: 0.625rem;
   color: var(--text-secondary);
@@ -412,7 +419,7 @@ ul {
   .row-title { font-size: 0.9375rem; white-space: normal; overflow-wrap: anywhere; }
   .row-agent, .row-status, .row-stamp { font-size: 0.6875rem; }
   .row-tag { display: none; }
-  .row-delete { display: none; }
-  .row-close { display: inline-flex; }
+
+  .row-close { display: inline-flex; opacity: 1; }
 }
 </style>

@@ -117,7 +117,7 @@ const assert = require('node:assert/strict');
         await page.waitForFunction(() => JSON.parse(localStorage.getItem('acp-ui:sessions.json')).sessions.find(s => s.id === 'older').lastMessageAt > 1700000060000);
         for (const theme of ['light', 'dark']) {
           await page.emulateMedia({ colorScheme: theme });
-          const close = page.getByRole('button', { name: 'Close session', exact: true }).first();
+          const close = page.getByRole('button', { name: 'Archive session', exact: true }).first();
           const box = await close.boundingBox();
           assert(box.width >= 44 && box.height >= 44);
           const glyph = close.locator('svg');
@@ -151,18 +151,69 @@ const assert = require('node:assert/strict');
         await sidebar.waitFor();
         await page.waitForFunction(() => window.__session?.openTabs.length === 2 && window.__session.openTabs.every(t => t.isConnected));
         assert.equal(Math.round((await sidebar.boundingBox()).width), width, 'session page survives reload');
-        await page.getByRole('button', { name: 'Close session', exact: true }).first().click({ position: { x: 4, y: 4 } });
-        assert(await sidebar.isVisible(), 'tapping the edge of close does not open the session row');
-        assert.equal(await page.locator('.session-row').count(), 2, 'closing keeps history in the list');
-        assert.equal(await page.locator('.row-close').count(), 1);
-        await page.evaluate(() => { const rt = window.__session.openTabs[0]; rt.session.supportsLoadSession = false; });
-        assert.equal(await page.locator('.row-close').count(), 1, 'an open session without load support stays reachable');
+        await page.evaluate(() => {
+          window.qaOriginalArchive = window.__session.archiveSession;
+          window.__session.archiveSession = async () => { await new Promise(resolve => setTimeout(resolve, 300)); throw new Error('Test archive failure'); };
+        });
+        const archiveButton = page.getByRole('button', { name: 'Archive session', exact: true }).first();
+        await archiveButton.click();
+        assert(await archiveButton.isDisabled(), 'archive action prevents repeated clicks while pending');
+        await page.getByRole('alert').filter({ hasText: 'Test archive failure' }).waitFor();
+        assert.equal(await page.locator('.session-row').count(), 2, 'failed archive leaves the session visible');
+        await page.evaluate(() => { window.__session.archiveSession = window.qaOriginalArchive; });
+        await page.getByRole('button', { name: 'Archive session', exact: true }).first().click({ position: { x: 4, y: 4 } });
+        assert(await sidebar.isVisible(), 'archiving does not open the row');
+        assert.equal(await page.locator('.session-row').count(), 1, 'archived chat disappears from history');
+        await page.waitForFunction(() => JSON.parse(localStorage.getItem('acp-ui:sessions.json')).sessions.some(s => s.archivedAt));
+        const archived = await page.evaluate(() => window.__session.savedSessions.find(s => s.archivedAt));
+        assert(archived, 'archiving retains metadata instead of deleting history');
+        await page.getByRole('button', { name: 'Load sessions from all agents', exact: true }).click();
+        await page.waitForFunction(() => !window.__session.isSyncingSessions);
+        assert.equal(await page.locator('.session-row').count(), 1, 'inventory refresh cannot resurrect an archived chat');
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await sidebar.waitFor();
+        await page.waitForFunction(() => window.__session?.openTabs.every(t => t.isConnected));
+        assert.equal(await page.locator('.session-row').count(), 1, 'archive survives reload');
+        assert.equal(await page.evaluate(() => window.__session.openTabs.length), 1, 'archived tab is not restored');
+        await page.getByRole('button', { name: 'Show archived sessions', exact: true }).click();
+        assert.equal(await page.locator('.session-row').count(), 1);
+        assert.equal(await page.locator('.row-title').innerText(), archived.title);
+        if (width === 390) await page.screenshot({ path: '/tmp/acp-session-archive-390.png' });
+        await page.getByRole('button', { name: 'Restore session', exact: true }).click();
+        await page.getByRole('button', { name: 'Show active sessions', exact: true }).click();
+        assert.equal(await page.locator('.session-row').count(), 2, 'restore returns history to the main list');
+        // A session with no open tab is also archivable.
+        await page.locator('.session-row').filter({ hasText: archived.title }).getByRole('button', { name: 'Archive session', exact: true }).click();
+        assert.equal(await page.locator('.session-row').count(), 1);
+        await page.getByRole('button', { name: 'Show archived sessions', exact: true }).click();
+        await page.getByRole('button', { name: 'Restore session', exact: true }).click();
+        await page.getByRole('button', { name: 'Show active sessions', exact: true }).click();
+        assert.equal(await page.locator('.row-close').count(), 2, 'all history rows have archive controls');
+        await page.evaluate(() => { const rt = window.__session.openTabs[0]; rt.session.supportsLoadSession = false; const saved = window.__session.savedSessions.find(s => s.id === rt.session.id); saved.supportsLoadSession = false; saved.title = 'porch-delegate# explicitly restored'; });
+        assert.equal(await page.locator('.row-close').count(), 2, 'open non-resumable session remains archivable');
+        const unsupportedId = await page.evaluate(() => window.__session.openTabs[0].session.id);
+        await page.locator(`[data-session-id="${unsupportedId}"]`).getByRole('button', { name: 'Archive session', exact: true }).click();
+        await page.getByRole('button', { name: 'Show archived sessions', exact: true }).click();
+        await page.getByRole('button', { name: 'Restore session', exact: true }).click();
+        await page.getByRole('button', { name: 'Show active sessions', exact: true }).click();
+        const unavailable = page.locator(`[data-session-id="${unsupportedId}"]`);
+        assert(await unavailable.isVisible(), 'explicit restore keeps non-resumable and prefix-hidden session discoverable');
+        assert.equal(await unavailable.locator('.row-status').innerText(), 'Cannot reopen');
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await sidebar.waitFor();
+        await unavailable.waitFor();
+        // With all tabs archived the chat component (and its test seam) is absent.
+        // Open a supported history row through the UI before creating a new tab.
+        await page.locator('.session-row').filter({ hasText: 'older' }).locator('.row-title').click();
+        await page.waitForFunction(() => window.__session?.activeRuntime?.isConnected);
+        await menu.click();
+
         await page.evaluate(() => { window.qaCreation = window.__session.createSession('E2E', '/tmp').catch(() => {}); });
         const creating = page.locator('.session-row').filter({ hasText: 'New session' });
         await creating.locator('.row-status.working').waitFor();
         await creating.locator('.row-status.error').waitFor();
         assert.equal(await creating.locator('.row-status').getAttribute('title'), 'Test creation failure');
-        await page.locator('.session-row').filter({ hasText: 'newer' }).locator('.row-title').click();
+        await page.locator('.session-row').filter({ hasText: 'older' }).locator('.row-title').click();
         await menu.click();
         await creating.locator('.row-title').click();
         assert.equal(await page.locator('.main-area .error-text').innerText(), 'Test creation failure', 'failed new runtime can be opened again');
@@ -192,11 +243,20 @@ const assert = require('node:assert/strict');
         assert.equal(await page.locator('.tab-strip [role="tab"]').count(), 2, 'desktop tabs retained');
         assert.equal(await page.locator('.session-navigation [aria-label="New session"]').count(), 1, 'desktop creation stays in its tab bar');
         assert((await page.locator('#app-sidebar').boundingBox()).width < 600);
+        await page.locator('.session-row').first().hover();
+        await page.getByRole('button', { name: 'Archive session', exact: true }).first().click();
+        assert.equal(await page.locator('.session-row').count(), 1, 'desktop X also archives');
+        await page.getByRole('button', { name: 'Show archived sessions', exact: true }).click();
+        assert.equal(await page.locator('.session-row').count(), 1);
+        await page.getByRole('button', { name: 'Restore session', exact: true }).click();
+        await page.getByRole('button', { name: 'Show active sessions', exact: true }).click();
+        assert.equal(await page.locator('.session-row').count(), 2);
+
       }
       assert.deepEqual(errors, []);
       assert.deepEqual(failed, []);
       await context.close();
-      console.log(`PASS ${width}: navigation, statuses, message order, drafts, reload, close, layout`);
+      console.log(`PASS ${width}: navigation, statuses, message order, drafts, reload, archive/restore, layout`);
     }
   } finally { await browser?.close(); if (server) await new Promise(resolve => server.close(resolve)); }
 })().catch(e => { console.error(e); process.exitCode = 1; });

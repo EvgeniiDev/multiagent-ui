@@ -529,7 +529,7 @@ export const useSessionStore = defineStore('session', () => {
       const saved = savedSessions.value.find(
         (s) => s.agentName === tab.agentName && s.sessionId === tab.sessionId
       );
-      if (saved) toOpen.push({ tab, saved });
+      if (saved && !saved.archivedAt) toOpen.push({ tab, saved });
     }
     // The `?s=` session may not be among the persisted tabs — a tab whose
     // resume was refused kept no `session` to persist. The URL is the
@@ -545,7 +545,7 @@ export const useSessionStore = defineStore('session', () => {
       const focusSaved = savedSessions.value.find(
         (s) => s.agentName === target.agentName && s.sessionId === target.sessionId
       );
-      if (focusSaved) toOpen.push({ tab: target, saved: focusSaved });
+      if (focusSaved && !focusSaved.archivedAt) toOpen.push({ tab: target, saved: focusSaved });
     }
     if (toOpen.length === 0) return;
 
@@ -614,7 +614,7 @@ export const useSessionStore = defineStore('session', () => {
   const toolCallList = computed(() => activeRuntime.value?.toolCallList ?? []);
   // Only sessions that support resuming (loadSession capability)
   const resumableSessions = computed(() =>
-    savedSessions.value.filter(s => s.supportsLoadSession === true)
+    savedSessions.value.filter(s => !s.archivedAt && s.supportsLoadSession === true)
   );
   /** Gate duplicate session starts during connection, independently of turns. */
   const anySessionConnecting = computed(() =>
@@ -644,6 +644,30 @@ export const useSessionStore = defineStore('session', () => {
       await store.save();
     }
   }
+
+  /** Archive metadata stays in the inventory, so agent sync cannot resurrect
+   * the row and attachments/history remain available for restoration. */
+  async function setSessionArchived(sessionId: string, archived: boolean): Promise<void> {
+    const saved = savedSessions.value.find(s => s.id === sessionId);
+    if (!saved || !!saved.archivedAt === archived) return;
+    const previous = saved.archivedAt;
+    if (archived) saved.archivedAt = Date.now();
+    else saved.archivedAt = null;
+    try {
+      // Persist before detaching: a reload during cleanup must not reopen it.
+      await saveSessionsToStore();
+    } catch (error) {
+      if (previous === undefined) delete saved.archivedAt;
+      else saved.archivedAt = previous;
+      throw error;
+    }
+    if (archived) {
+      const runtime = findTab(saved.agentName, saved.sessionId);
+      if (runtime) await closeTab(runtime.id);
+    }
+  }
+  const archiveSession = (id: string) => setSessionArchived(id, true);
+  const restoreArchivedSession = (id: string) => setSessionArchived(id, false);
 
   // Delete saved session — also closes its tab if one is open.
   async function deleteSession(sessionId: string): Promise<void> {
@@ -716,10 +740,16 @@ export const useSessionStore = defineStore('session', () => {
   const visibleSessions = computed(() => {
     const order = sessionOrder.value;
     return savedSessions.value
-      .filter(s => openSessionIds.value.has(s.id) || s.supportsLoadSession === true)
-      .filter(s => openSessionIds.value.has(s.id) || !isHiddenSession(s))
+      .filter(s => !s.archivedAt)
+      .filter(s => openSessionIds.value.has(s.id) || s.supportsLoadSession === true || s.archivedAt === null)
+      .filter(s => openSessionIds.value.has(s.id) || s.archivedAt === null || !isHiddenSession(s))
       .sort((a, b) => (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER));
   });
+
+  const archivedSessions = computed(() => savedSessions.value
+    .filter(s => !!s.archivedAt)
+    .sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0))
+  );
 
   /**
    * True when EVERY configured agent is known to lack `session/list` — only
@@ -821,6 +851,9 @@ export const useSessionStore = defineStore('session', () => {
     toolCallList,
     resumableSessions,
     visibleSessions,
+    archivedSessions,
+    archiveSession,
+    restoreArchivedSession,
 
     // Actions
     initStore,
