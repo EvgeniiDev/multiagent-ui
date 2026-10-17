@@ -190,7 +190,9 @@ function handleDelete(sessionId: string, event: Event) {
           aria-label="Close session"
           title="Close session (keep history)"
           @click.stop="sessionStore.closeTab(runtime.id)"
-        >×</UiButton>
+        >
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 4l16 16M20 4L4 20" /></svg>
+        </UiButton>
         <UiButton
           variant="ghost" icon size="xs"
           v-if="!transient"
