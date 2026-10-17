@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, onMounted } from 'vue';
+import UiButton from './ui/UiButton.vue';
 
 interface DirEntry {
   name: string;
@@ -172,14 +173,14 @@ onMounted(() => {
   <div class="dir-picker">
     <div class="cwd-row">
       <input
-        class="cwd-input"
+        class="cwd-input ui-input"
         type="text"
         :value="modelValue"
         placeholder="~/path  or  absolute path"
         spellcheck="false"
         @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
       />
-      <button
+      <UiButton icon
         class="browse-btn"
         type="button"
         title="Browse directories"
@@ -188,7 +189,7 @@ onMounted(() => {
         @click="openPicker"
       >
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-      </button>
+      </UiButton>
     </div>
 
     <div v-if="open" class="tree-overlay" @click.self="close">
@@ -251,34 +252,8 @@ onMounted(() => {
   align-items: center;
 }
 
-.cwd-input {
-  flex: 1;
-  min-width: 0;
-  height: 30px;
-  padding: 0 0.5rem;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  font-family: var(--font-mono, monospace);
-  font-size: 0.75rem;
-  background: var(--bg-main, #fbf8f3);
-  color: var(--text-primary, #2b2723);
-}
-
-.browse-btn {
-  flex: 0 0 auto;
-  width: 30px;
-  height: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid var(--border-faint, rgba(43, 39, 35, 0.09));
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-main, #fbf8f3);
-  color: var(--text-secondary, #6b6259);
-  cursor: pointer;
-  font-size: 0.875rem;
-}
+.cwd-input { flex: 1; min-width: 0; }
+.browse-btn { flex: 0 0 auto; }
 
 .tree-overlay {
   position: fixed;

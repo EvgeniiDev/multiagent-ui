@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from '../../components/ui/UiButton.vue';
 import { computed, onMounted, ref } from 'vue';
 import DirectoryPicker from '../../components/DirectoryPicker.vue';
 import { useConfigStore } from '../../stores/config';
@@ -157,7 +158,7 @@ onMounted(async () => {
     <div class="project-form" data-testid="projects-form">
       <div class="form-group">
         <label for="proj-name">Name</label>
-        <input
+        <input class="ui-input"
           id="proj-name"
           v-model="newName"
           type="text"
@@ -174,16 +175,17 @@ onMounted(async () => {
         />
       </div>
       <div class="form-actions">
-        <button
+        <UiButton
           class="save-btn"
           type="button"
           :disabled="busy"
           data-testid="projects-create"
           @click="handleCreate"
+          variant="primary"
         >
           Create project (new folder)
-        </button>
-        <button
+        </UiButton>
+        <UiButton
           class="cancel-btn"
           type="button"
           :disabled="busy"
@@ -191,7 +193,7 @@ onMounted(async () => {
           @click="handleAddExisting"
         >
           Add existing folder
-        </button>
+        </UiButton>
       </div>
     </div>
 
@@ -206,23 +208,23 @@ onMounted(async () => {
         <template v-if="editingId === p.id">
           <div class="form-group">
             <label>Name</label>
-            <input v-model="editName" type="text" data-testid="project-edit-name" />
+            <input class="ui-input" v-model="editName" type="text" data-testid="project-edit-name" />
           </div>
           <div class="form-group">
             <label>Path</label>
-            <input v-model="editPath" type="text" data-testid="project-edit-path" />
+            <input class="ui-input" v-model="editPath" type="text" data-testid="project-edit-path" />
           </div>
           <div class="form-group">
             <label>Notes</label>
-            <input v-model="editNotes" type="text" data-testid="project-edit-notes" />
+            <input class="ui-input" v-model="editNotes" type="text" data-testid="project-edit-notes" />
           </div>
           <div class="form-actions">
-            <button class="save-btn" type="button" :disabled="busy" data-testid="project-save" @click="saveEdit(p)">
+            <UiButton class="save-btn" type="button" :disabled="busy" data-testid="project-save" @click="saveEdit(p)" variant="primary">
               Save
-            </button>
-            <button class="cancel-btn" type="button" data-testid="project-cancel" @click="cancelEdit">
+            </UiButton>
+            <UiButton class="cancel-btn" type="button" data-testid="project-cancel" @click="cancelEdit">
               Cancel
-            </button>
+            </UiButton>
           </div>
         </template>
         <template v-else>
@@ -236,37 +238,38 @@ onMounted(async () => {
             </div>
             <div v-if="p.notes" class="project-notes" :data-testid="`project-notes-${p.id}`">{{ p.notes }}</div>
             <div v-else class="project-notes-form">
-              <input
+              <input class="ui-input"
                 v-model="notesDrafts[p.id]"
                 type="text"
                 placeholder="Add a note…"
                 :aria-label="`Notes for ${p.name}`"
                 :data-testid="`project-notes-input-${p.id}`"
               />
-              <button
+              <UiButton
                 class="edit-btn"
                 type="button"
                 :data-testid="`project-notes-save-${p.id}`"
                 @click="saveNotes(p)"
               >
                 Save note
-              </button>
+              </UiButton>
             </div>
           </div>
           <div class="project-actions">
-            <button class="edit-btn" type="button" data-testid="project-rename" @click="startEdit(p)">
+            <UiButton class="edit-btn" type="button" data-testid="project-rename" @click="startEdit(p)">
               Rename
-            </button>
-            <button
+            </UiButton>
+            <UiButton
               class="delete-btn"
               type="button"
               :disabled="isCommon(p)"
               :title="isCommon(p) ? 'The Common project cannot be deleted' : `Delete ${p.name}`"
               data-testid="project-delete"
               @click="handleRemove(p)"
+              variant="danger"
             >
               Delete
-            </button>
+            </UiButton>
           </div>
         </template>
       </li>
@@ -311,35 +314,10 @@ onMounted(async () => {
   font-weight: 500;
   margin-bottom: 0.25rem;
 }
-.form-group input {
-  width: 100%;
-  padding: 0.5rem;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  font-size: 0.9rem;
-  background: var(--bg-main);
-  color: var(--text-primary);
-}
 .form-actions {
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
-}
-.save-btn {
-  padding: 0.5rem 1rem;
-  background: var(--bg-primary);
-  color: var(--text-on-accent, #fbf8f3);
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-}
-.cancel-btn {
-  padding: 0.5rem 1rem;
-  background: transparent;
-  color: var(--text-secondary);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  cursor: pointer;
 }
 .projects-list {
   list-style: none;
@@ -363,6 +341,7 @@ onMounted(async () => {
   min-width: 0;
 }
 .project-name {
+  overflow-wrap: anywhere;
   font-weight: 500;
   margin-bottom: 0.25rem;
 }
@@ -388,6 +367,7 @@ onMounted(async () => {
   word-break: break-all;
 }
 .project-notes {
+  overflow-wrap: anywhere;
   font-size: 0.8rem;
   color: var(--text-secondary);
   margin-top: 0.25rem;
@@ -397,46 +377,26 @@ onMounted(async () => {
   gap: 0.5rem;
   margin-top: 0.25rem;
 }
-.project-notes-form input {
-  flex: 1;
-  min-width: 0;
-  padding: 0.375rem 0.5rem;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  font-size: 0.8rem;
-  background: var(--bg-main);
-  color: var(--text-primary);
-}
+.project-notes-form input { flex: 1; min-width: 0; }
 .project-actions {
   display: flex;
   gap: 0.5rem;
   margin-left: 1rem;
   flex-shrink: 0;
 }
-.edit-btn,
-.delete-btn {
-  padding: 0.25rem 0.5rem;
-  border-radius: 4px;
-  font-size: 0.8rem;
-  cursor: pointer;
-}
-.edit-btn {
-  background: transparent;
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-}
-.delete-btn {
-  background: transparent;
-  border: 1px solid var(--bg-danger);
-  color: var(--bg-danger);
-}
-.delete-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
 .no-projects {
   text-align: center;
   padding: 1rem;
   color: var(--text-muted);
+}
+/* Editing fields always have their own full-width row. */
+.project-item:has(> .form-group) { flex-direction: column; align-items: stretch; }
+@media (max-width: 600px) {
+  .project-item { flex-direction: column; align-items: stretch; gap: 0.75rem; }
+  .project-actions { margin-left: 0; }
+  .project-actions > * { flex: 1; }
+  .project-notes-form { margin-top: 0.75rem; }
+  .project-notes-form > .edit-btn { flex-shrink: 0; }
+  .project-form .form-actions { flex-direction: column; align-items: stretch; }
 }
 </style>

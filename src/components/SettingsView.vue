@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from './ui/UiButton.vue';
 import { ref, computed, watch } from 'vue';
 import { useConfigStore } from '../stores/config';
 import { useSessionStore } from '../stores/session';
@@ -227,7 +228,7 @@ async function handleDelete(name: string) {
     <div class="settings-panel">
       <div class="settings-header">
         <h2>Settings</h2>
-        <button class="close-btn" aria-label="Close" @click="emit('close')"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+        <UiButton class="close-btn" aria-label="Close" @click="emit('close')" variant="ghost" icon><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></UiButton>
       </div>
 
       <div class="settings-content">
@@ -235,9 +236,9 @@ async function handleDelete(name: string) {
         <section class="agents-section">
           <div class="section-header">
             <h3>Agents</h3>
-            <button class="add-btn" @click="startAdd" :disabled="showAddForm">
+            <UiButton class="add-btn" @click="startAdd" :disabled="showAddForm">
               + Add Agent
-            </button>
+            </UiButton>
           </div>
 
           <!-- Add/Edit Form -->
@@ -246,7 +247,7 @@ async function handleDelete(name: string) {
 
             <div class="form-group">
               <label>Name</label>
-              <input
+              <input class="ui-input"
                 v-model="formName"
                 type="text"
                 placeholder="My Agent"
@@ -256,7 +257,7 @@ async function handleDelete(name: string) {
 
             <div class="form-group">
               <label>Transport</label>
-              <select v-model="formTransport">
+              <select class="ui-input" v-model="formTransport">
                 <option v-if="!restricted" value="stdio">stdio (local subprocess)</option>
                 <option value="websocket">websocket (remote)</option>
                 <option value="http">http (remote)</option>
@@ -267,7 +268,7 @@ async function handleDelete(name: string) {
             <template v-if="formTransport === 'stdio'">
               <div class="form-group">
                 <label>Command</label>
-                <input
+                <input class="ui-input"
                   v-model="formCommand"
                   type="text"
                   placeholder="npx"
@@ -276,7 +277,7 @@ async function handleDelete(name: string) {
 
               <div class="form-group">
                 <label>Arguments</label>
-                <input
+                <input class="ui-input"
                   v-model="formArgs"
                   type="text"
                   placeholder="-y @example/agent"
@@ -292,7 +293,7 @@ async function handleDelete(name: string) {
             <template v-else>
               <div class="form-group">
                 <label>URL</label>
-                <input
+                <input class="ui-input"
                   v-model="formUrl"
                   type="text"
                   :placeholder="formTransport === 'websocket' ? 'wss://acp.example.com/v1' : 'https://acp.example.com/v1'"
@@ -318,16 +319,17 @@ async function handleDelete(name: string) {
             </div>
 
             <div class="form-actions">
-              <button
+              <UiButton
                 class="save-btn"
                 @click="handleSubmit"
                 :disabled="isSubmitting"
+                variant="primary"
               >
                 {{ isSubmitting ? 'Saving...' : 'Save' }}
-              </button>
-              <button class="cancel-btn" @click="resetForm">
+              </UiButton>
+              <UiButton class="cancel-btn" @click="resetForm">
                 Cancel
-              </button>
+              </UiButton>
             </div>
           </div>
 
@@ -349,12 +351,12 @@ async function handleDelete(name: string) {
                 </div>
               </div>
               <div class="agent-actions">
-                <button class="edit-btn" @click="startEdit(agent)">
+                <UiButton class="edit-btn" @click="startEdit(agent)">
                   Edit
-                </button>
-                <button class="delete-btn" @click="handleDelete(agent.name)">
+                </UiButton>
+                <UiButton class="delete-btn" @click="handleDelete(agent.name)" variant="danger">
                   Delete
-                </button>
+                </UiButton>
               </div>
             </div>
 
@@ -368,7 +370,7 @@ async function handleDelete(name: string) {
           <h3>Sessions</h3>
           <div class="form-group">
             <label>Hidden title prefixes</label>
-            <textarea
+            <textarea class="ui-input"
               v-model="hiddenPrefixesText"
               rows="3"
               placeholder="porch-delegate#"
@@ -431,13 +433,16 @@ async function handleDelete(name: string) {
   border-radius: 8px;
   width: 90%;
   max-width: 600px;
-  max-height: 80vh;
+  max-height: 90vh;
+  max-height: 90dvh;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   box-shadow: none;
 }
 
 .settings-header {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -450,25 +455,17 @@ async function handleDelete(name: string) {
   font-size: 1.25rem;
 }
 
-.close-btn {
-  border: none;
-  background: transparent;
-  font-size: 1.25rem;
-  cursor: pointer;
-  color: var(--text-secondary);
-  padding: 0.25rem;
-}
-
-.close-btn:hover {
-  color: var(--text-primary);
-}
-
 .settings-content {
+  min-height: 0;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
   padding: 1.25rem;
   overflow-y: auto;
 }
 
 .section-header {
+  gap: 0.75rem;
+  flex-wrap: wrap;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -477,26 +474,6 @@ async function handleDelete(name: string) {
 
 .section-header h3 {
   margin: 0;
-}
-
-.add-btn {
-  padding: 0.375rem 0.75rem;
-  border: 1px solid var(--bg-primary);
-  background: transparent;
-  color: var(--bg-primary);
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 0.875rem;
-}
-
-.add-btn:hover:not(:disabled) {
-  background: var(--bg-primary);
-  color: var(--text-on-accent, #fbf8f3);
-}
-
-.add-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .agent-form {
@@ -522,25 +499,6 @@ async function handleDelete(name: string) {
   margin-bottom: 0.25rem;
 }
 
-.form-group input,
-.form-group textarea {
-  width: 100%;
-  padding: 0.5rem;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  font-size: 0.9rem;
-  font-family: var(--font-mono, monospace);
-  background: var(--bg-main);
-  color: var(--text-primary);
-  resize: vertical;
-}
-
-.form-group input:focus,
-.form-group textarea:focus {
-  outline: none;
-  border-color: var(--bg-primary);
-}
-
 .form-group small {
   display: block;
   margin-top: 0.25rem;
@@ -555,39 +513,9 @@ async function handleDelete(name: string) {
 }
 
 .form-actions {
+  flex-wrap: wrap;
   display: flex;
   gap: 0.5rem;
-}
-
-.save-btn {
-  padding: 0.5rem 1rem;
-  background: var(--bg-primary);
-  color: var(--text-on-accent, #fbf8f3);
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.save-btn:hover:not(:disabled) {
-  background: var(--bg-primary-hover);
-}
-
-.save-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.cancel-btn {
-  padding: 0.5rem 1rem;
-  background: transparent;
-  color: var(--text-secondary);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.cancel-btn:hover {
-  background: var(--bg-hover);
 }
 
 .agents-list {
@@ -611,6 +539,7 @@ async function handleDelete(name: string) {
 }
 
 .agent-name {
+  overflow-wrap: anywhere;
   font-weight: 500;
   margin-bottom: 0.25rem;
 }
@@ -630,36 +559,8 @@ async function handleDelete(name: string) {
 .agent-actions {
   display: flex;
   gap: 0.5rem;
+  flex-shrink: 0;
   margin-left: 1rem;
-}
-
-.edit-btn,
-.delete-btn {
-  padding: 0.25rem 0.5rem;
-  border-radius: 4px;
-  font-size: 0.8rem;
-  cursor: pointer;
-}
-
-.edit-btn {
-  background: transparent;
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-}
-
-.edit-btn:hover {
-  background: var(--bg-hover);
-}
-
-.delete-btn {
-  background: transparent;
-  border: 1px solid var(--bg-danger);
-  color: var(--bg-danger);
-}
-
-.delete-btn:hover {
-  background: var(--bg-danger-hover);
-  color: var(--text-on-accent, #fbf8f3);
 }
 
 .no-agents {
@@ -692,5 +593,24 @@ async function handleDelete(name: string) {
 .config-section small {
   font-size: 0.75rem;
   color: var(--text-muted);
+}
+@media (max-width: 600px) {
+  .settings-panel {
+    width: 100%;
+    max-width: none;
+    height: 100%;
+    height: 100dvh;
+    max-height: 100%;
+    border-radius: 0;
+  }
+  .settings-header {
+    padding: max(0.5rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) 0.5rem max(1rem, env(safe-area-inset-left));
+  }
+  .settings-content {
+    padding: 1rem max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+  }
+  .agent-item { flex-direction: column; align-items: stretch; gap: 0.75rem; }
+  .agent-actions { margin-left: 0; }
+  .agent-actions > * { flex: 1; }
 }
 </style>

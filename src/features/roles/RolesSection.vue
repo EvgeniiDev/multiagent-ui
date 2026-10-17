@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from '../../components/ui/UiButton.vue';
 import { computed, onMounted, ref } from 'vue';
 import { useConfigStore } from '../../stores/config';
 import { useProjectsStore } from '../../stores/projects';
@@ -318,7 +319,7 @@ function closePrompt(): void {
 }
 
 function isAssigned(r: Role): boolean {
-  return rolesStore.stagesForRole(r.id).length > 0;
+  return rolesStore.stagesForRole(r.id).length> 0;
 }
 
 onMounted(async () => {
@@ -332,9 +333,9 @@ onMounted(async () => {
   <section class="roles-section" data-testid="settings-roles">
     <div class="section-header">
       <h3>Roles</h3>
-      <button class="add-btn" type="button" data-testid="roles-add-toggle" @click="startAdd" :disabled="showForm">
+      <UiButton class="add-btn" type="button" data-testid="roles-add-toggle" @click="startAdd" :disabled="showForm">
         + Add role
-      </button>
+      </UiButton>
     </div>
     <p class="section-hint">
       A role binds a CLI, its arguments and a prompt file to a pipeline stage.
@@ -349,90 +350,90 @@ onMounted(async () => {
       <div class="form-grid">
         <div class="form-group">
           <label>Id</label>
-          <input v-model="formId" type="text" placeholder="dev" :disabled="!!editingId" data-testid="role-id" />
+          <input class="ui-input" v-model="formId" type="text" placeholder="dev" :disabled="!!editingId" data-testid="role-id" />
         </div>
         <div class="form-group">
           <label>Label</label>
-          <input v-model="formLabel" type="text" placeholder="Developer" data-testid="role-label" />
+          <input class="ui-input" v-model="formLabel" type="text" placeholder="Developer" data-testid="role-label" />
         </div>
         <div class="form-group">
           <label>CLI</label>
-          <select v-model="formCli" data-testid="role-cli">
+          <select class="ui-input" v-model="formCli" data-testid="role-cli">
             <option v-for="c in CLI_OPTIONS" :key="c" :value="c">{{ c }}</option>
           </select>
         </div>
         <div class="form-group">
           <label>Prompt file</label>
-          <input v-model="formPromptFile" type="text" placeholder=".acp/roles/dev.md" data-testid="role-prompt" />
+          <input class="ui-input" v-model="formPromptFile" type="text" placeholder=".acp/roles/dev.md" data-testid="role-prompt" />
           <small>Relative to the project folder, or absolute.</small>
         </div>
         <div class="form-group form-group-wide">
           <label>Arguments</label>
-          <input v-model="formArgs" type="text" placeholder="-p --model swe-2-max" data-testid="role-args" />
+          <input class="ui-input" v-model="formArgs" type="text" placeholder="-p --model swe-2-max" data-testid="role-args" />
           <small>Space-separated. Use quotes for args with spaces. Reference
             <code>{models.plan}</code> / <code>{models.execute}</code> to take
             the step model from the pair below.</small>
         </div>
         <div class="form-group" v-if="showModelFields">
           <label>Model for planning (optional)</label>
-          <input v-model="formModelPlan" type="text" placeholder="model for the plan stage" data-testid="role-model-plan" />
+          <input class="ui-input" v-model="formModelPlan" type="text" placeholder="model for the plan stage" data-testid="role-model-plan" />
           <small>Substituted into <code>{models.*}</code> args while the card is in the plan stage.</small>
         </div>
         <div class="form-group" v-if="showModelFields">
           <label>Model for execution (optional)</label>
-          <input v-model="formModelExecute" type="text" placeholder="model for all other stages" data-testid="role-model-execute" />
+          <input class="ui-input" v-model="formModelExecute" type="text" placeholder="model for all other stages" data-testid="role-model-execute" />
           <small>Substituted on every other step. Both fields are required to store the pair.</small>
         </div>
         <div class="form-group">
           <label>Max concurrent</label>
-          <input v-model.number="formMaxConcurrent" type="number" min="1" step="1" data-testid="role-maxc" />
+          <input class="ui-input" v-model.number="formMaxConcurrent" type="number" min="1" step="1" data-testid="role-maxc" />
         </div>
         <div class="form-group">
           <label>Poll interval (s)</label>
-          <input v-model.number="formPollIntervalSec" type="number" min="5" step="1" data-testid="role-poll" />
+          <input class="ui-input" v-model.number="formPollIntervalSec" type="number" min="5" step="1" data-testid="role-poll" />
         </div>
         <div class="form-group">
           <label>Timeout (min)</label>
-          <input v-model.number="formTimeoutMin" type="number" min="1" step="1" data-testid="role-timeout" />
+          <input class="ui-input" v-model.number="formTimeoutMin" type="number" min="1" step="1" data-testid="role-timeout" />
         </div>
         <div class="form-group">
           <label>Max retries</label>
-          <input v-model.number="formMaxRetries" type="number" min="1" step="1" data-testid="role-retries" />
+          <input class="ui-input" v-model.number="formMaxRetries" type="number" min="1" step="1" data-testid="role-retries" />
           <small>Attempts per card; 1 = no retry, then the card is flagged blocked.</small>
         </div>
         <div class="form-group">
           <label>Idle timeout (min)</label>
-          <input v-model.number="formIdleTimeoutMin" type="number" min="0" step="1" data-testid="role-idle" />
+          <input class="ui-input" v-model.number="formIdleTimeoutMin" type="number" min="0" step="1" data-testid="role-idle" />
           <small>A child silent this long is killed as a failed attempt; 0 disables the watchdog.</small>
         </div>
         <div class="form-group">
           <label>Review severities</label>
-          <input v-model="formReviewSev" type="text" placeholder="critical major minor nit" data-testid="role-review-sev" />
+          <input class="ui-input" v-model="formReviewSev" type="text" placeholder="critical major minor nit" data-testid="role-review-sev" />
           <small>Space-separated vocabulary; empty = no review data on the role.</small>
         </div>
         <div class="form-group">
           <label>Review blocking severities</label>
-          <input v-model="formReviewBlocking" type="text" placeholder="critical major" data-testid="role-review-blocking" />
+          <input class="ui-input" v-model="formReviewBlocking" type="text" placeholder="critical major" data-testid="role-review-blocking" />
           <small>Open findings of these severities refuse agent_tested.</small>
         </div>
         <div class="form-group">
           <label>Review backlog severities</label>
-          <input v-model="formReviewBacklog" type="text" placeholder="minor nit" data-testid="role-review-backlog" />
+          <input class="ui-input" v-model="formReviewBacklog" type="text" placeholder="minor nit" data-testid="role-review-backlog" />
           <small>These never block; each becomes a backlog card on sync.</small>
         </div>
         <div class="form-group">
           <label>Review round limit</label>
-          <input v-model="formReviewRounds" type="number" min="1" step="1" placeholder="3" data-testid="role-review-rounds" />
+          <input class="ui-input" v-model="formReviewRounds" type="number" min="1" step="1" placeholder="3" data-testid="role-review-rounds" />
           <small>Reaching the limit with open blocking findings flags the card blocked.</small>
         </div>
       </div>
       <div class="form-actions">
-        <button class="save-btn" type="button" :disabled="busy" data-testid="role-save" @click="handleSubmit">
+        <UiButton class="save-btn" type="button" :disabled="busy" data-testid="role-save" @click="handleSubmit" variant="primary">
           {{ editingId ? 'Save' : 'Add role' }}
-        </button>
-        <button class="cancel-btn" type="button" data-testid="role-cancel" @click="resetForm">
+        </UiButton>
+        <UiButton class="cancel-btn" type="button" data-testid="role-cancel" @click="resetForm">
           Cancel
-        </button>
+        </UiButton>
       </div>
     </div>
 
@@ -464,7 +465,7 @@ onMounted(async () => {
             <template v-if="r.models">
               · models <code :data-testid="`role-models-${r.id}`">plan→{{ r.models.plan }} execute→{{ r.models.execute }}</code>
             </template>
-            · idle {{ r.idleTimeoutMin > 0 ? `${r.idleTimeoutMin}m` : 'off' }}
+            · idle {{ r.idleTimeoutMin> 0 ? `${r.idleTimeoutMin}m` : 'off' }}
             <template v-if="r.review">
               · review <code data-testid="role-review-{{ r.id }}">{{ r.review.severities.join(' ') }}</code>
               · gate {{ r.review.blocking.join(',') || '—' }} · backlog {{ r.review.backlog.join(',') || '—' }}
@@ -474,24 +475,25 @@ onMounted(async () => {
           </div>
         </div>
         <div class="role-actions">
-          <button class="edit-btn" type="button" :data-testid="`role-prompt-btn-${r.id}`" @click="openPrompt(r)">
+          <UiButton class="edit-btn" type="button" :data-testid="`role-prompt-btn-${r.id}`" @click="openPrompt(r)">
             Prompt file
-          </button>
-          <button class="edit-btn" type="button" :data-testid="`role-edit-${r.id}`" @click="startEdit(r)">
+          </UiButton>
+          <UiButton class="edit-btn" type="button" :data-testid="`role-edit-${r.id}`" @click="startEdit(r)">
             Edit
-          </button>
-          <button class="delete-btn" type="button" :data-testid="`role-delete-${r.id}`" @click="handleRemove(r)">
+          </UiButton>
+          <UiButton class="delete-btn" type="button" :data-testid="`role-delete-${r.id}`" @click="handleRemove(r)" variant="danger">
             Delete
-          </button>
-          <button
+          </UiButton>
+          <UiButton
             v-if="forceDeleteId === r.id"
             class="delete-btn force"
             type="button"
             :data-testid="`role-force-delete-${r.id}`"
             @click="handleForceRemove(r)"
+            variant="danger"
           >
             Force delete
-          </button>
+          </UiButton>
         </div>
       </li>
     </ul>
@@ -503,25 +505,25 @@ onMounted(async () => {
     <div v-if="promptRoleId" class="prompt-editor" data-testid="prompt-editor">
       <div class="prompt-head">
         <span class="prompt-path" :title="promptPath" data-testid="prompt-path">{{ promptPath }}</span>
-        <button class="cancel-btn slim" type="button" data-testid="prompt-close" @click="closePrompt">
+        <UiButton class="cancel-btn" type="button" data-testid="prompt-close" @click="closePrompt">
           Close
-        </button>
+        </UiButton>
       </div>
       <p v-if="promptBusy" class="prompt-status" data-testid="prompt-status">working…</p>
       <p v-else-if="promptStatus" class="prompt-status" data-testid="prompt-status">{{ promptStatus }}</p>
       <p v-if="promptError" class="form-error" data-testid="prompt-error">{{ promptError }}</p>
       <textarea
         v-model="promptContent"
-        class="prompt-content"
+        class="ui-input prompt-content"
         rows="8"
         spellcheck="false"
         placeholder="Prompt file content (empty file is fine)"
         data-testid="prompt-content"
       ></textarea>
       <div class="form-actions">
-        <button class="save-btn" type="button" :disabled="promptBusy" data-testid="prompt-save" @click="savePrompt">
+        <UiButton class="save-btn" type="button" :disabled="promptBusy" data-testid="prompt-save" @click="savePrompt" variant="primary">
           Save prompt file
-        </button>
+        </UiButton>
       </div>
     </div>
 
@@ -532,7 +534,7 @@ onMounted(async () => {
       <div class="stage-grid">
         <div v-for="s in BOARD_STAGES" :key="s.id" class="stage-row">
           <label :for="`stage-role-${s.id}`">{{ s.label }}</label>
-          <select
+          <select class="ui-input"
             :id="`stage-role-${s.id}`"
             :value="stageRoleValue(s.id)"
             :data-testid="`stage-role-${s.id}`"
@@ -567,23 +569,6 @@ onMounted(async () => {
   color: var(--text-muted);
   margin: 0.25rem 0 1rem;
 }
-.add-btn {
-  padding: 0.375rem 0.75rem;
-  border: 1px solid var(--bg-primary);
-  background: transparent;
-  color: var(--bg-primary);
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 0.875rem;
-}
-.add-btn:hover:not(:disabled) {
-  background: var(--bg-primary);
-  color: var(--text-on-accent, #fbf8f3);
-}
-.add-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
 .form-error {
   color: var(--bg-danger);
   font-size: 0.875rem;
@@ -616,21 +601,6 @@ onMounted(async () => {
   font-weight: 500;
   margin-bottom: 0.25rem;
 }
-.form-group input,
-.form-group select {
-  width: 100%;
-  padding: 0.5rem;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  font-size: 0.9rem;
-  background: var(--bg-main);
-  color: var(--text-primary);
-}
-.form-group input:focus,
-.form-group select:focus {
-  outline: none;
-  border-color: var(--bg-primary);
-}
 .form-group small {
   display: block;
   margin-top: 0.25rem;
@@ -641,36 +611,6 @@ onMounted(async () => {
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
-}
-.save-btn {
-  padding: 0.5rem 1rem;
-  background: var(--bg-primary);
-  color: var(--text-on-accent, #fbf8f3);
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-}
-.save-btn:hover:not(:disabled) {
-  background: var(--bg-primary-hover);
-}
-.save-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.cancel-btn {
-  padding: 0.5rem 1rem;
-  background: transparent;
-  color: var(--text-secondary);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  cursor: pointer;
-}
-.cancel-btn.slim {
-  padding: 0.25rem 0.75rem;
-  font-size: 0.8rem;
-}
-.cancel-btn:hover {
-  background: var(--bg-hover);
 }
 .roles-list {
   list-style: none;
@@ -694,6 +634,7 @@ onMounted(async () => {
   min-width: 0;
 }
 .role-name {
+  overflow-wrap: anywhere;
   font-weight: 500;
   margin-bottom: 0.25rem;
 }
@@ -733,6 +674,7 @@ onMounted(async () => {
   word-break: break-all;
 }
 .role-limits {
+  overflow-wrap: anywhere;
   font-size: 0.75rem;
   color: var(--text-secondary);
   margin-top: 0.25rem;
@@ -744,30 +686,6 @@ onMounted(async () => {
   flex-shrink: 0;
   flex-wrap: wrap;
   justify-content: flex-end;
-}
-.edit-btn,
-.delete-btn {
-  padding: 0.25rem 0.5rem;
-  border-radius: 4px;
-  font-size: 0.8rem;
-  cursor: pointer;
-}
-.edit-btn {
-  background: transparent;
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-}
-.edit-btn:hover {
-  background: var(--bg-hover);
-}
-.delete-btn {
-  background: transparent;
-  border: 1px solid var(--bg-danger);
-  color: var(--bg-danger);
-}
-.delete-btn:hover {
-  background: var(--bg-danger-hover);
-  color: var(--text-on-accent, #fbf8f3);
 }
 .no-roles {
   text-align: center;
@@ -801,18 +719,7 @@ onMounted(async () => {
   color: var(--text-muted);
   margin-bottom: 0.5rem;
 }
-.prompt-content {
-  width: 100%;
-  padding: 0.5rem;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  font-family: var(--font-mono, monospace);
-  font-size: 0.8rem;
-  background: var(--bg-main);
-  color: var(--text-primary);
-  resize: vertical;
-  margin-bottom: 0.5rem;
-}
+.prompt-content { margin-bottom: 0.5rem; }
 .stage-roles {
   margin-top: 1.25rem;
 }
@@ -835,14 +742,12 @@ onMounted(async () => {
   font-size: 0.8rem;
   color: var(--text-secondary);
 }
-.stage-row select {
-  flex: 1;
-  min-width: 0;
-  padding: 0.25rem 0.375rem;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  font-size: 0.8rem;
-  background: var(--bg-main);
-  color: var(--text-primary);
+.stage-row select { flex: 1; min-width: 0; }
+@media (max-width: 600px) {
+  .form-grid, .stage-grid { grid-template-columns: minmax(0, 1fr); }
+  .role-item { flex-direction: column; align-items: stretch; }
+  .role-actions { margin-left: 0; justify-content: flex-start; }
+  .role-actions > * { flex: 1; }
+  .prompt-head { flex-wrap: wrap; }
 }
 </style>

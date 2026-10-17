@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UiButton from './ui/UiButton.vue';
 import { ref, watch, computed } from 'vue';
 
 interface EnvVar {
@@ -67,16 +68,16 @@ const hasEnvVars = computed(() => envVars.value.length > 0);
   <div class="env-var-editor">
     <div class="env-header">
       <span class="env-label">Environment Variables</span>
-      <button type="button" class="add-env-btn" @click="addEnvVar">
+      <UiButton type="button" class="add-env-btn" @click="addEnvVar">
         + Add
-      </button>
+      </UiButton>
     </div>
 
     <div v-if="hasEnvVars" class="env-list">
       <div v-for="(env, index) in envVars" :key="index" class="env-row">
         <input
           type="text"
-          class="env-key"
+          class="ui-input env-key"
           placeholder="KEY"
           :value="env.key"
           @input="onKeyChange(index, $event)"
@@ -84,20 +85,21 @@ const hasEnvVars = computed(() => envVars.value.length > 0);
         <span class="env-equals">=</span>
         <input
           type="text"
-          class="env-value"
+          class="ui-input env-value"
           placeholder="value"
           :value="env.value"
           @input="onValueChange(index, $event)"
         />
-        <button
+        <UiButton
           type="button"
           class="remove-env-btn"
           @click="removeEnvVar(index)"
           title="Remove"
           aria-label="Remove"
+          variant="ghost" icon
         >
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-        </button>
+        </UiButton>
       </div>
     </div>
 
@@ -124,20 +126,6 @@ const hasEnvVars = computed(() => envVars.value.length > 0);
   color: var(--text-secondary);
 }
 
-.add-env-btn {
-  background: transparent;
-  border: 1px solid var(--border-color);
-  color: var(--text-primary);
-  padding: 0.25rem 0.5rem;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 0.75rem;
-}
-
-.add-env-btn:hover {
-  background: var(--bg-hover);
-}
-
 .env-list {
   display: flex;
   flex-direction: column;
@@ -150,44 +138,9 @@ const hasEnvVars = computed(() => envVars.value.length > 0);
   gap: 0.25rem;
 }
 
-.env-key {
-  flex: 0 0 120px;
-  padding: 0.375rem 0.5rem;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: var(--bg-main);
-  color: var(--text-primary);
-  font-family: monospace;
-  font-size: 0.875rem;
-}
-
 .env-equals {
   color: var(--text-secondary);
   padding: 0 0.25rem;
-}
-
-.env-value {
-  flex: 1;
-  padding: 0.375rem 0.5rem;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: var(--bg-main);
-  color: var(--text-primary);
-  font-family: monospace;
-  font-size: 0.875rem;
-}
-
-.remove-env-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-secondary);
-  cursor: pointer;
-  padding: 0.25rem 0.5rem;
-  font-size: 0.875rem;
-}
-
-.remove-env-btn:hover {
-  color: #e74c3c;
 }
 
 .env-empty {
@@ -196,9 +149,12 @@ const hasEnvVars = computed(() => envVars.value.length > 0);
   font-style: italic;
 }
 
-.env-key:focus,
-.env-value:focus {
-  outline: none;
-  border-color: var(--text-accent);
+.env-key { flex: 0 1 120px; }
+.env-value { flex: 1; }
+@media (max-width: 600px) {
+  .env-row { display: grid; grid-template-columns: minmax(0, 1fr) 44px; gap: 0.5rem; }
+  .env-key, .env-value { grid-column: 1; }
+  .env-equals { display: none; }
+  .remove-env-btn { grid-column: 2; grid-row: 1 / 3; }
 }
 </style>

@@ -104,4 +104,7 @@ function reload() { window.location.reload(); }
 .pwa-settings h3, .pwa-settings p { margin: 0; }
 .pwa-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .pwa-error { color: var(--bg-danger); overflow-wrap: anywhere; font-size: 0.875rem; }
+@media (max-width: 600px) {
+  .pwa-actions { flex-direction: column; align-items: stretch; }
+}
 </style>
