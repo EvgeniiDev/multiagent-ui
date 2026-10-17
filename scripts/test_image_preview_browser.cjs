@@ -85,6 +85,8 @@ const assert = require('node:assert/strict');
         if (process.env.SHOTS) await page.screenshot({ path: path.join(process.env.SHOTS, `image-preview-${width}.png`) });
         const r = await preview.boundingBox();
         assert(r.x >= 0 && r.y >= 0 && r.x + r.width <= width && r.y + r.height <= 844, 'preview fits viewport');
+        assert(Math.abs(r.x + r.width / 2 - width / 2) < 2, 'preview is centered horizontally');
+        assert(Math.abs(r.y + r.height / 2 - 844 / 2) < 2, 'preview is centered vertically');
         assert.equal(await preview.evaluate(e => e.matches(':modal')), true, 'native modal traps focus');
         await close.focus();
         await page.keyboard.press('Tab');

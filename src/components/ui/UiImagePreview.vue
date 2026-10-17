@@ -50,6 +50,7 @@ function close() {
 .preview-thumbnail.compact { width: 44px; height: 44px; object-fit: cover; }
 .image-preview {
   box-sizing: border-box;
+  margin: auto;
   width: min(1100px, calc(100vw - 32px));
   max-width: calc(100vw - 32px);
   max-height: calc(100dvh - 32px);
