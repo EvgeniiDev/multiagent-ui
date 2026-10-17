@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
+import UiButton from './ui/UiButton.vue';
 import { useSessionStore } from '../stores/session';
 import type { SessionTab } from '../lib/sessionRuntime';
 
@@ -112,12 +113,19 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
       <span class="tab-title">{{ title(rt) }}</span>
       <span v-if="severalAgents" class="tab-agent">{{ agent(rt) }}</span>
 
-      <button
+      <UiButton
         class="tab-close"
+        variant="ghost"
+        size="xs"
+        icon
         title="Close tab (the session stays in the list)"
         aria-label="Close tab"
         @click="close(rt, $event)"
-      >×</button>
+      >
+        <svg class="tab-close-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <path d="m6 6 12 12M18 6 6 18" />
+        </svg>
+      </UiButton>
     </div>
   </div>
 </template>
@@ -242,29 +250,28 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
 
 .tab-close {
   flex: 0 0 auto;
-  width: 16px;
-  height: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 0.875rem;
-  line-height: 1;
-  cursor: pointer;
   opacity: 0;
 }
 
 .tab:hover .tab-close,
+.tab:focus-within .tab-close,
 .tab.active .tab-close {
   opacity: 1;
 }
 
-.tab-close:hover {
-  background: var(--tint-hover);
-  color: var(--text-primary);
+.tab-close-icon {
+  width: 14px;
+  height: 14px;
+}
+
+@media (max-width: 800px), (pointer: coarse) {
+  .tab-close {
+    opacity: 1;
+  }
+
+  .tab-close-icon {
+    width: 20px;
+    height: 20px;
+  }
 }
 </style>
