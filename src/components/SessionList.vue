@@ -124,9 +124,9 @@ function handleDelete(sessionId: string, event: Event) {
     <div class="list-head">
       <span class="list-label">Sessions</span>
       <span class="list-count">{{ rows.length || '' }}</span>
-      <UiButton class="list-create" variant="primary" @click="emit('create')">New session</UiButton>
-      <!-- New sessions start from the "+" on the tab strip; the only manual
-           action left here is re-pulling the agents' inventories. -->
+      <UiButton class="list-create" variant="ghost" icon aria-label="New session" title="New session" @click="emit('create')">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+      </UiButton>
       <UiButton
         v-if="canListAgentSessions"
         variant="ghost" icon
