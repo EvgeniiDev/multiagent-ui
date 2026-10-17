@@ -191,7 +191,7 @@ function handleDelete(sessionId: string, event: Event) {
           title="Close session (keep history)"
           @click.stop="sessionStore.closeTab(runtime.id)"
         >
-          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 4l16 16M20 4L4 20" /></svg>
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 4l16 16M20 4L4 20" /></svg>
         </UiButton>
         <UiButton
           variant="ghost" icon size="xs"
