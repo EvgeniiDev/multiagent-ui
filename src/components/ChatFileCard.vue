@@ -60,7 +60,7 @@ onBeforeUnmount(() => { generation++; observer?.disconnect(); cleanup(); });
       <span class="file-kind">{{ label }}</span>
       <strong :title="file.name">{{ file.name }}</strong>
       <span v-if="blob" class="file-size">{{ formatBytes(blob.size) }}</span>
-      <UiButton size="xs" @click="open">Open</UiButton>
+      <UiButton variant="ghost" size="xs" @click="open">Open</UiButton>
     </header>
     <div class="card-preview" :aria-busy="loading">
       <p v-if="loading" role="status">Loading preview…</p>
@@ -77,7 +77,7 @@ onBeforeUnmount(() => { generation++; observer?.disconnect(); cleanup(); });
 
 <style scoped>
 .file-card { min-width: 0; width: 100%; box-sizing: border-box; border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-assistant); overflow: hidden; }
-header { display: flex; align-items: center; gap: 0.5rem; min-width: 0; padding: 0.625rem 0.75rem; border-bottom: 1px solid var(--border-faint); }
+header { display: flex; align-items: center; gap: 0.5rem; min-width: 0; min-height: 36px; padding: 0 0.5rem; border-bottom: 1px solid var(--border-faint); }
 .file-kind { flex: 0 0 auto; font: 0.5625rem var(--font-mono); letter-spacing: 0.04em; color: var(--text-muted); }
 strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font: 500 0.8125rem var(--font-ui); }
 .file-size { font: 0.625rem var(--font-mono); color: var(--text-muted); white-space: nowrap; }
