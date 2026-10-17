@@ -38,3 +38,14 @@ Limits: Chromium automation exercises the same history traversal used by
 system Back, but cannot establish physical Android/iOS gesture behavior.
 On-screen keyboards may consume the first system Back to hide themselves.
 Open PWA pages need a reload to receive the new frontend.
+
+Production verification completed after publication:
+
+- Runtime source commit: `d4182f23e4aa6a8abb085a5019aed76a08e327a4` on main.
+- Published index SHA-256: `448a8c8dc19af5acf0914c43d1fc9fe46a4623a4a0de957dc26c1556e7b0f331`.
+- Browser fetched `/projects` and confirmed the exact published index hash and
+  `/assets/index-BcvEqZ1l.js`; actual backend, 390px: Back opened the sidebar,
+  Projects remained selected, no pageerror or HTTP errors.
+- The complete browser regression script passed again against published assets
+  (isolated mocked state/ACP); all scenarios listed above passed with exit 0.
+- Screenshot inspected: `/tmp/acp-mobile-back-live.png`. No services restarted.
