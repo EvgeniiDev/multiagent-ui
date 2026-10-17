@@ -1,13 +1,25 @@
 <script setup lang="ts">
 import { nextTick, ref } from 'vue';
 import UiButton from './UiButton.vue';
+import { fetchChatFile, downloadChatBlob } from '../../lib/chatFiles';
 
-defineProps<{ src: string; name: string; compact?: boolean }>();
+const props = defineProps<{ src: string; name: string; compact?: boolean }>();
 
 const dialog = ref<HTMLDialogElement | null>(null);
 const open = ref(false);
 const loading = ref(false);
 const failed = ref(false);
+const downloading = ref(false);
+const downloadError = ref('');
+async function download() {
+  downloading.value = true;
+  downloadError.value = '';
+  try {
+    const blob = await fetchChatFile({ name: props.name, url: props.src }, new AbortController().signal);
+    downloadChatBlob(blob, props.name);
+  } catch (e) { downloadError.value = e instanceof Error ? e.message : 'Could not download image'; }
+  finally { downloading.value = false; }
+}
 
 async function show() {
   open.value = true;
@@ -32,9 +44,11 @@ function close() {
     <dialog v-if="open" ref="dialog" class="image-preview" aria-label="Image preview" @close="open = false" @click.self="close">
       <header class="preview-header">
         <span class="preview-name" :title="name">{{ name }}</span>
+        <UiButton :disabled="downloading" @click="download">Download</UiButton>
         <UiButton icon aria-label="Close image preview" autofocus @click="close">×</UiButton>
       </header>
       <div class="preview-content">
+        <p v-if="downloadError" role="alert">{{ downloadError }}</p>
         <p v-if="loading" role="status">Loading image…</p>
         <p v-if="failed" role="alert">Could not load this image. Close the preview and try again.</p>
         <img :src="src" :alt="name" class="preview-image" :hidden="failed" @load="loading = false" @error="loading = false; failed = true" />

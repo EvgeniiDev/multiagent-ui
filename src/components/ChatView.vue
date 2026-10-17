@@ -14,6 +14,8 @@ import MessageAttachment from './MessageAttachment.vue';
 import UiComposerSettings from './ui/UiComposerSettings.vue';
 import UiButton from './ui/UiButton.vue';
 import UiImagePreview from './ui/UiImagePreview.vue';
+import UiFilePreview from './ui/UiFilePreview.vue';
+import { chatFileFromLink, type ChatFile } from '../lib/chatFiles';
 import UiFullscreen from './ui/UiFullscreen.vue';
 import WorkflowPanel from './WorkflowPanel.vue';
 import { useWorkflowStore } from '../stores/workflow';
@@ -275,22 +277,7 @@ function assistantItems(message: ChatMessage): RenderItem[] {
   return items;
 }
 
-// Per-attachment disclosure for the replayed file body (keyed message:index).
-const expandedAttachments = ref<Set<string>>(new Set());
 
-function attachmentKey(messageId: string, index: number): string {
-  return `${messageId}:${index}`;
-}
-
-function isAttachmentExpanded(messageId: string, index: number): boolean {
-  return expandedAttachments.value.has(attachmentKey(messageId, index));
-}
-
-function toggleAttachment(messageId: string, index: number): void {
-  const key = attachmentKey(messageId, index);
-  if (expandedAttachments.value.has(key)) expandedAttachments.value.delete(key);
-  else expandedAttachments.value.add(key);
-}
 const isLoading = computed(() => rt.isLoading);
 
 // Live turn status: when the agent works without writing text (a long tool
@@ -1000,7 +987,26 @@ function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 }
 
+const filePreview = ref<ChatFile | null>(null);
+watch(() => [sessionStore.activeTabId, uiStore.activeView], () => { filePreview.value = null; });
+function onFileLinkClick(event: MouseEvent) {
+  if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || !(event.target instanceof Element)) return;
+  const link = event.target.closest<HTMLAnchorElement>('a[data-chat-file]');
+  if (!link) return;
+  event.preventDefault();
+  filePreview.value = { name: link.dataset.chatFile || 'File', url: link.href };
+}
 const mdRenderer = new Renderer();
+mdRenderer.link = function (this: Renderer, token: Tokens.Link): string {
+  const file = chatFileFromLink(token.href, currentSession.value?.cwd);
+  if (!file) return Renderer.prototype.link.call(this, token);
+  return `<a href="${escapeHtml(file.url)}" data-chat-file="${escapeHtml(file.name)}" title="Preview ${escapeHtml(file.name)}">${this.parser.parseInline(token.tokens)}</a>`;
+};
+mdRenderer.image = function (this: Renderer, token: Tokens.Image): string {
+  const file = chatFileFromLink(token.href, currentSession.value?.cwd, true);
+  if (!file) return Renderer.prototype.image.call(this, token);
+  return `<a href="${escapeHtml(file.url)}" data-chat-file="${escapeHtml(file.name)}" aria-label="Preview ${escapeHtml(file.name)}"><img src="${escapeHtml(file.url)}" alt="${escapeHtml(token.text)}" loading="lazy" /></a>`;
+};
 mdRenderer.code = function (this: Renderer, token: Tokens.Code): string {
   const lang = (token.lang ?? '').trim().toLowerCase();
   if (lang === 'mermaid' || lang === 'flowchart' || lang === 'graph' || (!lang && DIAGRAM_RE.test(token.text))) {
@@ -1027,6 +1033,7 @@ function planGlyph(status: string): string {
 <template>
   <div class="chat-view" :class="{ 'document-chat-view': isNarrowLayout && !isTauriHost() }" :style="{ '--chat-input-height': `${inputHeight}px` }"
     @dragenter="onFileDragEnter" @dragleave="onFileDragLeave" @dragover="onFileDragOver" @drop="onFileDrop" @dragend="fileDragDepth = 0">
+    <UiFilePreview :file="filePreview" @close="filePreview = null" />
     <div class="chat-column">
       <div class="chat-header">
         <h2>{{ currentSession?.title || 'Chat' }}</h2>
@@ -1040,6 +1047,7 @@ function planGlyph(status: string): string {
     <div
       ref="messagesContainer"
       class="messages-container"
+      @click="onFileLinkClick"
       @scroll="onFeedScroll"
       @wheel.passive="onFeedWheel"
     >
@@ -1079,8 +1087,8 @@ function planGlyph(status: string): string {
             v-for="(att, i) in message.attachments"
             :key="att.id || i"
             :att="att"
-            :expanded="isAttachmentExpanded(message.id, i)"
-            @toggle="toggleAttachment(message.id, i)"
+            :cwd="currentSession?.cwd"
+            :active="sessionStore.activeTabId === rt.id && uiStore.activeView === 'chat'"
           />
         </div>
 
@@ -1116,8 +1124,8 @@ function planGlyph(status: string): string {
             <MessageAttachment
               v-else-if="item.kind === 'attachment'"
               :att="item.att"
-              :expanded="isAttachmentExpanded(message.id, item.index)"
-              @toggle="toggleAttachment(message.id, item.index)"
+              :cwd="currentSession?.cwd"
+              :active="sessionStore.activeTabId === rt.id && uiStore.activeView === 'chat'"
             />
             <div v-else-if="item.kind === 'plan'" class="plan-card">
               <div class="plan-head">Plan</div>
@@ -1348,6 +1356,11 @@ function planGlyph(status: string): string {
 </template>
 
 <style scoped>
+.message-content :deep(a[data-chat-file] img) { max-width: 100%; max-height: 320px; object-fit: contain; }
+@media (max-width: 800px), (pointer: coarse) {
+  .message-content :deep(a[data-chat-file]) { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; max-width: 100%; }
+}
+
 .chat-view {
   display: flex;
   flex-direction: row;

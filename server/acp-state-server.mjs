@@ -24,6 +24,7 @@ import { realpathSync } from 'node:fs';
 import { createStateService } from './execution/state-service.mjs';
 import { nativeUsage } from './usage/native-usage.mjs';
 import { createPushService } from './push/service.mjs';
+import { createChatFileHandler } from './chat-files.mjs';
 
 export const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
@@ -81,7 +82,8 @@ function readBody(req) {
   });
 }
 
-export function createRequestHandler(service, { usageReader = nativeUsage, pushService } = {}) {
+export function createRequestHandler(service, { usageReader = nativeUsage, pushService, chatFileRoots, chatFileMaxBytes } = {}) {
+  const chatFiles = createChatFileHandler({ roots: chatFileRoots, maxBytes: chatFileMaxBytes });
   return async function handler(req, res) {
     if (req.method === 'OPTIONS') {
       res.writeHead(204, CORS_HEADERS);
@@ -96,6 +98,10 @@ export function createRequestHandler(service, { usageReader = nativeUsage, pushS
       return;
     }
     try {
+      if (url.pathname === '/api/chat-files') {
+        await chatFiles(req, res, url);
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/api/usage') {
         send(res, 200, await usageReader());
         return;

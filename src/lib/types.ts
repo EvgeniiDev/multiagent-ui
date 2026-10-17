@@ -143,6 +143,8 @@ export interface AttachmentMeta {
   size: number;
   /** Data URL for images — lets the transcript show what was sent. */
   previewUrl?: string;
+  /** Agent-host path or resource URI, resolved only by the scoped file endpoint. */
+  uri?: string;
   /**
    * Inline content, set only for attachments recovered from a REPLAYED user
    * message: the agent echoes the file body inside the message text, so the

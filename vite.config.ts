@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // @ts-expect-error process is a nodejs global
@@ -13,12 +13,26 @@ const pkg = JSON.parse(
   readFileSync(fileURLToPath(new URL("./package.json", import.meta.url)), "utf-8")
 ) as { version: string };
 
+// Keep PDF resources versioned so older open tabs retain their own assets.
+const pdfRoot = new URL('./node_modules/pdfjs-dist/', import.meta.url);
+const pdfVersion = JSON.parse(readFileSync(new URL('package.json', pdfRoot), 'utf-8')).version as string;
+const pdfAssetDir = `pdfjs-${pdfVersion}`;
+
 // https://vite.dev/config/
 export default defineConfig(async ({ mode }) => {
   const isWeb = mode === "web";
 
   return {
-    plugins: [vue(), ...(isWeb ? [{
+    plugins: [vue(), {
+      name: 'acp-pdf-resources',
+      generateBundle() {
+        for (const folder of ['cmaps', 'standard_fonts', 'wasm']) {
+          for (const name of readdirSync(new URL(`${folder}/`, pdfRoot))) {
+            this.emitFile({ type: 'asset', fileName: `${pdfAssetDir}/${folder}/${name}`, source: readFileSync(new URL(`${folder}/${name}`, pdfRoot)) });
+          }
+        }
+      },
+    }, ...(isWeb ? [{
       name: 'acp-pwa-head',
       transformIndexHtml() {
         return [
@@ -29,6 +43,7 @@ export default defineConfig(async ({ mode }) => {
     }] : [])],
 
     define: {
+      "import.meta.env.VITE_PDF_ASSET_DIR": JSON.stringify(pdfAssetDir),
       // Exposed to the frontend as `import.meta.env.VITE_APP_VERSION`. The
       // host abstraction (`src/lib/host/index.ts`) reads this on the web
       // build and falls back to it when `@tauri-apps/api/app` is unavailable.

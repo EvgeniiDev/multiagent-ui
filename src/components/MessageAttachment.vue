@@ -1,23 +1,40 @@
 <script setup lang="ts">
 // One attachment block inside a transcript message — image preview or a
-// named file line, with the replayed body behind a disclosure. Appearance is
+// named file line with a modal preview and download. Appearance is
 // self-contained: nothing here may rely on a parent's scoped styles.
+import { computed, ref, watch } from 'vue';
 import type { AttachmentMeta } from '../lib/types';
 import { formatBytes } from '../lib/attachments';
 import UiImagePreview from './ui/UiImagePreview.vue';
+import UiButton from './ui/UiButton.vue';
+import UiFilePreview from './ui/UiFilePreview.vue';
+import { chatFileFromLink, type ChatFile } from '../lib/chatFiles';
 
-defineProps<{
+const props = defineProps<{
+  cwd?: string;
+  active?: boolean;
   att: AttachmentMeta;
-  /** Whether the replayed file body disclosure is open (state lives in the
-   *  parent, keyed by message id + index, so it survives the render window). */
-  expanded: boolean;
 }>();
 
-const emit = defineEmits<{ toggle: [] }>();
+const selected = ref<ChatFile | null>(null);
+const file = computed<ChatFile | null>(() => {
+  const att = props.att;
+  if (att.previewUrl) return { name: att.name, url: att.previewUrl, mimeType: att.mimeType };
+  return att.uri ? chatFileFromLink(att.uri, props.cwd, true) : null;
+});
+watch(() => props.active, active => { if (active === false) selected.value = null; });
+function show() {
+  const att = props.att;
+  if (file.value) { selected.value = file.value; return; }
+  if (att.body == null) return;
+  // Defer encoding until asked to view, rather than copying every replayed body.
+  selected.value = { name: att.name, url: `data:${att.mimeType || 'text/plain'};charset=utf-8,${encodeURIComponent(att.body)}`, mimeType: att.mimeType };
+}
 </script>
 
 <template>
   <div class="attachment-block">
+    <UiFilePreview :file="selected" @close="selected = null" />
     <UiImagePreview
       v-if="att.kind === 'image' && att.previewUrl"
       :src="att.previewUrl"
@@ -28,13 +45,7 @@ const emit = defineEmits<{ toggle: [] }>();
       <span class="attachment-kind">{{ att.kind }}</span>
       <span class="attachment-name" :title="att.name">{{ att.name }}</span>
       <span v-if="att.size" class="attachment-size">{{ formatBytes(att.size) }}</span>
-      <button
-        v-if="att.body"
-        class="attachment-toggle"
-        @click="emit('toggle')"
-      >
-        {{ expanded ? 'Hide file' : 'Show file' }}
-      </button>
+      <UiButton v-if="file || att.body != null" size="xs" @click="show">View file</UiButton>
       <!-- An image/file whose bytes could not be recovered is a named
            placeholder with a reason — never a silent gap. -->
       <span
@@ -43,7 +54,6 @@ const emit = defineEmits<{ toggle: [] }>();
       >{{ att.unavailableReason }}</span>
       <span v-else-if="att.kind === 'image' && !att.previewUrl" class="attachment-note">no preview in history</span>
     </div>
-    <pre v-if="att.body && expanded" class="attachment-body">{{ att.body }}</pre>
   </div>
 </template>
 
@@ -57,7 +67,8 @@ const emit = defineEmits<{ toggle: [] }>();
 
 .attachment-line {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 0.5rem;
   min-width: 0;
 }
@@ -89,25 +100,8 @@ const emit = defineEmits<{ toggle: [] }>();
   color: var(--text-muted, #a39a8e);
 }
 
-.attachment-toggle {
-  flex: 0 0 auto;
-  margin-left: auto;
-  padding: 0;
-  border: none;
-  background: transparent;
-  font-family: inherit;
-  font-size: 0.6875rem;
-  color: var(--text-accent, #c2532f);
-  cursor: pointer;
-}
-
-.attachment-toggle:hover {
-  text-decoration: underline;
-}
-
 .attachment-note {
-  flex: 0 0 auto;
-  margin-left: auto;
+  flex: 1 1 100%;
   font-size: 0.6875rem;
   color: var(--text-muted, #a39a8e);
 }
@@ -123,16 +117,4 @@ const emit = defineEmits<{ toggle: [] }>();
   margin-bottom: 0.4375rem;
 }
 
-/* Replayed file content: monospace, bounded height, behind a disclosure. */
-.attachment-body {
-  margin: 0.5rem 0 0;
-  max-height: 260px;
-  overflow: auto;
-  font-family: var(--font-mono, monospace);
-  font-size: 0.75rem;
-  line-height: 1.5;
-  color: var(--text-secondary, #6b6259);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
 </style>

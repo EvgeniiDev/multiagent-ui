@@ -257,7 +257,7 @@ export function attachmentFromContentBlock(block: ContentBlock): AttachmentMeta 
         return {
           name, kind: 'text', mimeType: res.mimeType || 'application/octet-stream',
           size: res.blob.length,
-          unavailableReason: 'binary file — bytes were embedded but cannot be shown',
+          previewUrl: `data:${res.mimeType || 'application/octet-stream'};base64,${res.blob}`,
         };
       }
       if ('text' in res && res.text != null) {
@@ -281,6 +281,7 @@ export function attachmentFromContentBlock(block: ContentBlock): AttachmentMeta 
         name, kind: image ? 'image' : 'text',
         mimeType: block.mimeType || (image ? 'image/*' : 'text/plain'),
         size: block.size != null ? Number(block.size) : 0,
+        uri: block.uri,
         unavailableReason: 'the replay only carries a link — the panel cannot read it',
       };
     }

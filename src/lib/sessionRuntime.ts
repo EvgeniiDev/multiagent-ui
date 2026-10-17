@@ -494,6 +494,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     if (!dst.previewUrl && src.previewUrl) dst.previewUrl = src.previewUrl;
     if (!dst.body && src.body) dst.body = src.body;
     if (!dst.cachePath && src.cachePath) dst.cachePath = src.cachePath;
+    if (!dst.uri && src.uri) dst.uri = src.uri;
     if (dst.previewUrl || dst.body) dst.unavailableReason = undefined;
   }
 
