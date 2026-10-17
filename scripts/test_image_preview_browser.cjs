@@ -179,16 +179,24 @@ const assert = require('node:assert/strict');
       await staged.getByRole('button', { name: 'Remove attachment' }).click();
       const chooser = page.waitForEvent('filechooser');
       await attach.click();
-      await (await chooser).setFiles({ name: 'while-answering.png', mimeType: 'image/png', buffer: image });
+      await (await chooser).setFiles([
+        { name: 'while-answering.png', mimeType: 'image/png', buffer: image },
+        { name: 'while-answering.txt', mimeType: 'text/plain', buffer: Buffer.from('plain text file during response') },
+        { name: 'while-answering.md', mimeType: 'text/markdown', buffer: Buffer.from('# Markdown during response') },
+        { name: 'while-answering.json', mimeType: 'application/json', buffer: Buffer.from('{"duringResponse":true}') },
+      ]);
       await staged.getByRole('button', { name: 'Preview while-answering.png' }).waitFor();
       pendingPrompt.ws.send(JSON.stringify({ jsonrpc: '2.0', id: pendingPrompt.id, result: { stopReason: 'end_turn' } }));
       await page.waitForTimeout(100);
-      assert.equal(await staged.locator('.attach-chip').count(), 1, 'draft attachment survives completion');
+      assert.equal(await staged.locator('.attach-chip').count(), 4, 'image, text, markdown and JSON survive completion');
       await page.getByRole('button', { name: 'Send', exact: true }).click();
       await page.waitForTimeout(100);
       assert.equal(prompts.length, 2, 'next message sends normally');
       const sentImage = prompts[1].params.prompt.find(c => c.type === 'image');
       assert.equal(sentImage.data, image.toString('base64'), 'original image bytes reach prompt');
+      const resources = prompts[1].params.prompt.filter(c => c.type === 'resource');
+      assert.equal(resources.length, 3, 'all ordinary file attachments reach prompt');
+      assert.deepEqual(resources.map(c => c.resource.text), ['plain text file during response', '# Markdown during response', '{"duringResponse":true}']);
       pendingPrompt.ws.send(JSON.stringify({ jsonrpc: '2.0', id: pendingPrompt.id, result: { stopReason: 'end_turn' } }));
       await field.focus();
       await page.evaluate(() => navigator.clipboard.writeText('plain clipboard text'));
