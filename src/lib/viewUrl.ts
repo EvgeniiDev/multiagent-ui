@@ -1,5 +1,6 @@
 import type { ViewId } from '../stores/ui';
 import { isTauriHost } from './platform';
+import { hasMobileMenuHistory, viewHistoryState, noteMobileMenuUrlChange } from './mobileMenuHistory';
 const VIEWS: ViewId[] = ['chat', 'projects', 'board', 'dashboard'];
 export function viewFromUrl(href?: string): ViewId | null {
   if (isTauriHost()) return null;
@@ -17,5 +18,6 @@ export function setViewInUrl(view: ViewId, replace = false): void {
   if (!['http:', 'https:'].includes(url.protocol)) return;
   url.pathname = `/${view}`;
   if (url.href === location.href) return;
-  history[replace ? 'replaceState' : 'pushState'](history.state, '', url);
+  history[replace || hasMobileMenuHistory() ? 'replaceState' : 'pushState'](viewHistoryState(), '', url);
+  noteMobileMenuUrlChange();
 }

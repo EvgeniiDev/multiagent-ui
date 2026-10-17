@@ -29,7 +29,22 @@ import { useProjectsStore } from './features/scope/registry';
 import type { SavedSession } from './lib/types';
 import { setSessionInUrl, sessionFromUrl } from './lib/sessionUrl';
 import { viewFromUrl } from './lib/viewUrl';
+import { createMobileMenuHistory } from './lib/mobileMenuHistory';
 import type { ViewId } from './stores/ui';
+
+// Install before stores register their window popstate listeners.
+const mobileMenuHistory = createMobileMenuHistory({
+  enabled: () => !isTauriHost() && isNarrowLayout.value && uiStore.ready,
+  isOpen: () => showSidebar.value,
+  setOpen: (open) => {
+    showSidebar.value = open;
+    if (open) {
+      showSettings.value = false;
+      showTrafficMonitor.value = false;
+      showWelcomeNewSession.value = false;
+    }
+  },
+});
 
 const configStore = useConfigStore();
 const sessionStore = useSessionStore();
@@ -60,6 +75,8 @@ const scopeCwd = computed(() => projectsStore.activeProject?.path ?? '');
 // by the template to decide when the backdrop is interactive and by
 // onMounted to default the drawer closed.
 const isNarrowLayout = ref(false);
+watch([isNarrowLayout, showSidebar, () => uiStore.ready, () => uiStore.activeView,
+  () => sessionStore.activeTabId], () => mobileMenuHistory.sync(), { flush: 'post' });
 // Browser bars and the soft keyboard change the visual viewport independently
 // of 100vh. Keep the entire composer inside the part the user can see.
 const viewportHeight = ref<number | null>(null);
@@ -406,6 +423,7 @@ function handleDrawerViewClick(view: ViewId) {
 }
 
 onBeforeUnmount(() => {
+  mobileMenuHistory.dispose();
   window.removeEventListener('popstate', restoreSessionFromHistory);
   window.removeEventListener('resize', syncViewportHeight);
   window.visualViewport?.removeEventListener('resize', syncViewportHeight);
