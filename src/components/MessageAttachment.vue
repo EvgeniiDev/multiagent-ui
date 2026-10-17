@@ -4,6 +4,7 @@
 // self-contained: nothing here may rely on a parent's scoped styles.
 import type { AttachmentMeta } from '../lib/types';
 import { formatBytes } from '../lib/attachments';
+import UiImagePreview from './ui/UiImagePreview.vue';
 
 defineProps<{
   att: AttachmentMeta;
@@ -17,10 +18,10 @@ const emit = defineEmits<{ toggle: [] }>();
 
 <template>
   <div class="attachment-block">
-    <img
+    <UiImagePreview
       v-if="att.kind === 'image' && att.previewUrl"
       :src="att.previewUrl"
-      :alt="att.name"
+      :name="att.name"
       class="attachment-image"
     />
     <div class="attachment-line">
@@ -119,10 +120,7 @@ const emit = defineEmits<{ toggle: [] }>();
 
 .attachment-image {
   display: block;
-  max-width: 100%;
-  max-height: 220px;
   margin-bottom: 0.4375rem;
-  border-radius: var(--radius-sm, 4px);
 }
 
 /* Replayed file content: monospace, bounded height, behind a disclosure. */

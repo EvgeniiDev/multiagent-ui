@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** Shared native button: attributes, listeners, aria state and focus stay on the button. */
 withDefaults(defineProps<{
-  variant?: 'secondary' | 'primary' | 'danger' | 'ghost';
+  variant?: 'secondary' | 'primary' | 'danger' | 'ghost' | 'image';
   size?: 'sm' | 'xs';
   icon?: boolean;
   type?: 'button' | 'submit' | 'reset';
@@ -46,6 +46,8 @@ withDefaults(defineProps<{
 .ds-button--danger { color: var(--bg-danger, #b3402e); }
 .ds-button--danger:hover:not(:disabled) { border-color: var(--bg-danger, #b3402e); }
 .ds-button--ghost { border-color: transparent; color: var(--text-secondary, #6b6259); }
+.ds-button--image { padding: 0; border-color: transparent; overflow: hidden; cursor: zoom-in; }
+.ds-button--image:hover:not(:disabled) { border-color: var(--text-accent, #b04a28); }
 .ds-button[aria-selected='true'], .ds-button[aria-pressed='true'] {
   background: var(--accent-soft, rgba(194,83,47,0.14));
   border-color: var(--text-accent, #b04a28);

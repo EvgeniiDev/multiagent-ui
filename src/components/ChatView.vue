@@ -13,6 +13,7 @@ import ToolCallChip from './ToolCallChip.vue';
 import MessageAttachment from './MessageAttachment.vue';
 import UiComposerSettings from './ui/UiComposerSettings.vue';
 import UiButton from './ui/UiButton.vue';
+import UiImagePreview from './ui/UiImagePreview.vue';
 import UiFullscreen from './ui/UiFullscreen.vue';
 import WorkflowPanel from './WorkflowPanel.vue';
 import { useWorkflowStore } from '../stores/workflow';
@@ -1136,11 +1137,11 @@ function planGlyph(status: string): string {
       <!-- Staged files: one dense chip each, with a thumbnail for images. -->
       <div v-if="attachments.length" class="attach-tray">
         <div v-for="att in attachments" :key="att.id" class="attach-chip">
-          <img
+          <UiImagePreview
             v-if="att.kind === 'image' && att.previewUrl"
             :src="att.previewUrl"
-            :alt="att.name"
-            class="attach-thumb"
+            :name="att.name"
+            compact
           />
           <span v-else class="attach-glyph" aria-hidden="true">▤</span>
           <span class="attach-name" :title="att.name">{{ att.name }}</span>
@@ -1821,18 +1822,11 @@ function planGlyph(status: string): string {
   align-items: center;
   gap: 0.375rem;
   max-width: 100%;
-  height: 26px;
-  padding: 0 0.25rem 0 0.375rem;
+  min-height: 28px;
+  padding: 0.25rem 0.375rem;
   border-radius: var(--radius-md, 6px);
   background: var(--bg-hover, #efe9e0);
   font-size: 0.75rem;
-}
-
-.attach-thumb {
-  width: 18px;
-  height: 18px;
-  object-fit: cover;
-  border-radius: 3px;
 }
 
 .attach-glyph {
