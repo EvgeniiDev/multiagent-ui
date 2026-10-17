@@ -127,7 +127,7 @@ onBeforeUnmount(() => {
       </svg>
       {{ fullscreen ? 'Exit fullscreen' : 'Fullscreen' }}
     </UiButton>
-    <p v-else-if="iphone" class="ui-note fullscreen-help">To open without browser bars: Share → Add to Home Screen, then launch ACP UI from its icon.</p>
+    <p v-else-if="iphone" class="ui-note fullscreen-help">To open without browser bars: Share → Add to Home Screen, then launch Multiagent UI from its icon.</p>
     <p v-else class="ui-note fullscreen-help">Fullscreen is unavailable in this browser.</p>
     <p v-if="error" class="ui-note" role="alert">{{ error }}</p>
   </div>

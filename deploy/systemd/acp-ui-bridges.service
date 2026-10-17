@@ -1,5 +1,5 @@
 [Unit]
-Description=ACP UI bridge mode supervisor (five chat bridges only)
+Description=Multiagent UI bridge mode supervisor (five chat bridges only)
 After=network-online.target
 
 [Service]

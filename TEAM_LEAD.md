@@ -1,8 +1,8 @@
-# TEAM_LEAD — ACP UI
+# TEAM_LEAD — Multiagent UI
 
 ## Operating rule: autonomous unless the action is critical or destructive
 
-The user has authorized autonomous diagnosis and operation for this project. Do not pause for approval before ordinary fixes, project-scoped configuration changes, or a targeted restart/recreation of an ACP UI test container when evidence shows it is needed.
+The user has authorized autonomous diagnosis and operation for this project. Do not pause for approval before ordinary fixes, project-scoped configuration changes, or a targeted restart/recreation of a Multiagent UI test container when evidence shows it is needed.
 
 Before acting:
 1. Diagnose with live evidence; distinguish product, test-harness, stale-runtime, and infrastructure failures.

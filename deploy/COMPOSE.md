@@ -2,7 +2,7 @@
 
 Основной стек описан в `compose.yaml` (корень репо), `network_mode: host`.
 Голосовая транскрибация предоставляется отдельным проектом
-`../audio-video-to-text`, а не Compose-сервисом ACP UI.
+`../audio-video-to-text`, а не Compose-сервисом Multiagent UI.
 
 Режим пяти постоянных chat bridges выбирается отдельно: `docker` по умолчанию
 или явный `host`. Используй `node scripts/acp-bridges.mjs status` и инструкции
@@ -25,7 +25,7 @@
 
 `../audio-video-to-text` должен отдельно слушать host `127.0.0.1:8099` и
 предоставлять `POST /v1/audio/transcriptions`. HTTPS-front принимает UI-запросы
-на `25906` и проксирует их на этот API. Compose ACP UI не запускает и не
+на `25906` и проксирует их на этот API. Compose Multiagent UI не запускает и не
 контролирует жизненный цикл transcriber; без внешнего API голосовой ввод
 недоступен. Старый STT listener `25905`, `server/stt-server.py`,
 `Dockerfile.stt` и `gigaam-venv` больше не являются частью развёртывания.

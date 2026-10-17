@@ -1,5 +1,5 @@
 [Unit]
-Description=ACP UI researcher wakeup — periodic source-harvest trigger
+Description=Multiagent UI researcher wakeup — periodic source-harvest trigger
 
 [Timer]
 # First chance 15 min after boot, then 3x/day. A quiet tick is free:

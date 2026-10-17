@@ -1,6 +1,6 @@
 # LAN deployment (web build + filesystem-aware ACP bridges)
 
-This fork adds everything needed to run ACP UI as a **self-hosted web panel on a
+This fork adds everything needed to run Multiagent UI as a **self-hosted web panel on a
 LAN box**, driving agents that live on that same machine — including a directory
 tree picker for the working directory and relative paths.
 

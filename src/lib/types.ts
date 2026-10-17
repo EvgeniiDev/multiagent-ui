@@ -1,4 +1,4 @@
-// Types for ACP UI application
+// Types for Multiagent UI application
 
 import type { PlanEntry } from '@agentclientprotocol/sdk';
 

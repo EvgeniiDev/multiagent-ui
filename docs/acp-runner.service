@@ -1,5 +1,5 @@
 [Unit]
-Description=ACP UI card runner (board -> CLI dispatcher)
+Description=Multiagent UI card runner (board -> CLI dispatcher)
 After=network.target acp-state.service
 Requires=acp-state.service
 

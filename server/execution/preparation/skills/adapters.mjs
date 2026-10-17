@@ -16,7 +16,7 @@
 //   * results are DATA, not authority — translateResult() imports exactly
 //     the whitelisted fields the session's prep_result seam consumes and
 //     refuses outright on any command/API/tool-shaped channel. Skill
-//     resources can never mint ACP UI commands (KTD6);
+//     resources can never mint Multiagent UI commands (KTD6);
 //   * resources are the ORIGINAL pinned files — the launch plan passes
 //     each skillDir to pi via --skill (pi loads the upstream SKILL.md
 //     itself); no skill text is inlined, rewritten, or substituted.
@@ -74,7 +74,7 @@ function checkKeys(obj, allowed, what) {
 // `exec`, … — refuses the whole result with a structured error rather than
 // being silently dropped or, worse, executed. Known sub-objects are
 // whitelisted too so a `document: {run: ...}` style smuggle fails the same
-// way. Skill resources never mint ACP UI commands (KTD6).
+// way. Skill resources never mint Multiagent UI commands (KTD6).
 export function assertResultChannels(raw) {
   const r = isObj(raw) ? raw : {};
   checkKeys(r, RESULT_KEYS, 'skill result');

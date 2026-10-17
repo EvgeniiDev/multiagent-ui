@@ -1,6 +1,6 @@
 [Unit]
 Description=ACP bridge: Hermes Agent (WebSocket on :25901)
-Documentation=https://github.com/EvgeniiDev/acp-ui/blob/main/docs/lan-deployment.md
+Documentation=https://github.com/EvgeniiDev/multiagent-ui/blob/main/docs/lan-deployment.md
 After=network-online.target
 
 [Service]

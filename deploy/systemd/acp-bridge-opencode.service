@@ -1,6 +1,6 @@
 [Unit]
 Description=ACP bridge: OpenCode (WebSocket on :25902)
-Documentation=https://github.com/EvgeniiDev/acp-ui/blob/main/docs/lan-deployment.md
+Documentation=https://github.com/EvgeniiDev/multiagent-ui/blob/main/docs/lan-deployment.md
 After=network-online.target
 
 [Service]

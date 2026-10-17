@@ -79,11 +79,11 @@ function reload() { window.location.reload(); }
     <div class="pwa-actions">
       <UiButton @click="reload">Reload app</UiButton>
     </div>
-    <p v-if="installed" class="ui-note">ACP UI is running as an app, without the browser address bar.</p>
+    <p v-if="installed" class="ui-note">Multiagent UI is running as an app, without the browser address bar.</p>
     <template v-else>
-      <p class="ui-note">Open ACP UI as a separate app, without the browser address bar.</p>
-      <UiButton v-if="installPrompt" @click="install">Install ACP UI</UiButton>
-      <p v-else-if="ios" class="ui-note">On iPhone or iPad: open Share → Add to Home Screen → Open as Web App (if shown), then open ACP UI from its icon.</p>
+      <p class="ui-note">Open Multiagent UI as a separate app, without the browser address bar.</p>
+      <UiButton v-if="installPrompt" @click="install">Install Multiagent UI</UiButton>
+      <p v-else-if="ios" class="ui-note">On iPhone or iPad: open Share → Add to Home Screen → Open as Web App (if shown), then open Multiagent UI from its icon.</p>
       <p v-else class="ui-note">In your browser menu, choose Install app or Add to Home Screen.</p>
     </template>
     <p class="ui-note">Get a notification when a chat agent finishes responding, even after you close the app. Enable separately on each device.</p>

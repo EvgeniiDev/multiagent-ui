@@ -81,7 +81,7 @@ to the path the container actually mounts). Publish built assets to that
 mount, keep older hashed assets for open tabs, and replace `index.html`
 last. Never restart the `web` container while its mount source is missing:
 the recreate fails and leaves the container exited.
-The Docker socket allows agents inside ACP UI to inspect and manage the
+The Docker socket allows agents inside Multiagent UI to inspect and manage the
 existing stack; service lifecycle still follows the Compose rules above.
 
 ## UI-only changes: leave agent bridges running

@@ -1,5 +1,5 @@
 [Unit]
-Description=ACP UI researcher wakeup — collect sources, then one researcher run
+Description=Multiagent UI researcher wakeup — collect sources, then one researcher run
 After=acp-state.service
 Requires=acp-state.service
 

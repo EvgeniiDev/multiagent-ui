@@ -1,5 +1,5 @@
 {
-  "name": "acp-ui-push",
+  "name": "multiagent-ui-push",
   "private": true,
   "type": "module",
   "dependencies": {

@@ -62,8 +62,8 @@ export function initializeHandshake(client: AcpClientBridge) {
       },
     },
     clientInfo: {
-      name: 'acp-ui',
-      title: 'ACP UI',
+      name: 'multiagent-ui',
+      title: 'Multiagent UI',
       version: appVersion,
     },
   });

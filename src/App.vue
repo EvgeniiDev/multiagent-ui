@@ -510,7 +510,7 @@ function clearError() {
       :style="isNarrowLayout ? undefined : { '--sidebar-width': `${sidebarWidth}px` }"
     >
       <div class="sidebar-header">
-        <h1>ACP UI</h1>
+        <h1>Multiagent UI</h1>
         <div class="header-actions">
           <button
             class="scope-icon-btn"
@@ -716,7 +716,7 @@ function clearError() {
              dialog is reachable here too — a session start must not depend
              on an existing connection. -->
         <div v-if="uiStore.activeView === 'chat' && sessionStore.openTabs.length === 0" class="welcome-screen">
-          <h2>Welcome to ACP UI</h2>
+          <h2>Welcome to Multiagent UI</h2>
           <p>Select an agent and create a new session to get started.</p>
           <button
             class="welcome-new-session"
