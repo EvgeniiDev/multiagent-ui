@@ -17,7 +17,7 @@ test('activity recovery uses terminal protocol results, never replay/output noti
  const event = (kind, at, detail) => ({ kind, at, detail, agentName: 'E2E', sessionId: 'one' });
  const base = [event('turn-start', 1), event('turn-end', 2, 'end_turn'), event('session-open', 3), event('tool-call', 4), event('error', 5, 'history load failed')];
  assert.deepEqual(sessionStatusesFromActivity(base)[key], { status: 'completed', at: 2 });
- assert.deepEqual(sessionStatusesFromActivity([...base, event('turn-start', 6)])[key], { status: 'working', at: 6 });
+ assert.deepEqual(sessionStatusesFromActivity([...base, event('turn-start', 6)])[key], { status: null, at: 6 });
  assert.deepEqual(sessionStatusesFromActivity([...base, event('turn-start', 6), event('error', 7)])[key], { status: 'error', at: 7 });
  assert.deepEqual(sessionStatusesFromActivity([event('turn-end', 8, 'cancelled')])[key], { status: 'cancelled', at: 8 });
  assert.deepEqual(sessionStatusesFromActivity([event('tool-call', 1)]), {});

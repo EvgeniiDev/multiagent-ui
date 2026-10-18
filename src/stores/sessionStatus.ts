@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { shallowRef, onScopeDispose } from 'vue';
-import { loadKvStore, mutateRemoteDoc, probeStateServer, type KVStore } from '../lib/host/storage';
+import { loadKvStore, mutateRemoteDoc, probeStateServer, stateServerBase, type KVStore } from '../lib/host/storage';
 import { isTauriHost } from '../lib/platform';
 import type { SavedSession } from '../lib/types';
 import type { ActivityEntry } from './activity';
@@ -35,7 +35,7 @@ export function sessionStatusesFromActivity(entries: ActivityEntry[]): Records {
     if (!entry.sessionId || !Number.isFinite(entry.at) || entry.at <= 0) continue;
     const key = keyFor(entry.agentName, entry.sessionId);
     let status: Result;
-    if (entry.kind === 'turn-start') { status = 'working'; active.add(key); }
+    if (entry.kind === 'turn-start') { status = null; active.add(key); }
     else if (entry.kind === 'turn-end') status = entry.detail === 'end_turn' ? 'completed' : entry.detail === 'cancelled' ? 'cancelled' : null;
     else if (entry.kind === 'error' && active.has(key)) status = 'error';
     else continue; // Opening/replaying a session is never a new result.
@@ -47,6 +47,8 @@ export function sessionStatusesFromActivity(entries: ActivityEntry[]): Records {
 
 export const useSessionStatusStore = defineStore('session-status', () => {
   const records = shallowRef<Records>({});
+  const nativeRecords = shallowRef<Records>({});
+  const localDecisions = new Map<string, number>();
   let store: KVStore | null = null;
   let remote = false;
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -56,7 +58,7 @@ export const useSessionStatusStore = defineStore('session-status', () => {
   function mirror() {
     try { globalThis.localStorage?.setItem(MIRROR, JSON.stringify({ statuses: records.value })); } catch { /* Offline storage may be unavailable. */ }
   }
-  function forSession(agent: string, sessionId: string) { return records.value[keyFor(agent, sessionId)]; }
+  function forSession(agent: string, sessionId: string) { const key = keyFor(agent, sessionId); return nativeRecords.value[key] ?? records.value[key]; }
 
   async function flush(): Promise<void> {
     if (!store || writing || pending.size === 0) return writing ?? undefined;
@@ -80,20 +82,36 @@ export const useSessionStatusStore = defineStore('session-status', () => {
     if (pending.size && Object.entries(batch).some(([key, row]) => pending.get(key) !== row)) await flush();
   }
 
-  function record(session: SavedSession, status: Result) {
+  function record(session: SavedSession, status: Result, owned = true) {
     const key = keyFor(session.agentName, session.sessionId);
     const row = { status, at: Math.max(Date.now(), (records.value[key]?.at ?? 0) + 1) };
+    if (owned) localDecisions.set(key, row.at);
+    const nextNative = { ...nativeRecords.value }; delete nextNative[key]; nativeRecords.value = nextNative;
     records.value = { ...records.value, [key]: row };
     pending.set(key, row);
     mirror();
     void flush();
   }
 
+  async function syncNative() {
+    if (!remote) return;
+    try {
+      const response = await fetch(`${stateServerBase()}/api/chat-session-statuses`, { signal: AbortSignal.timeout(5000) });
+      if (!response.ok) return;
+      const evidence = mergeSessionStatuses((await response.json()).statuses);
+      const next: Records = {};
+      for (const [key, row] of Object.entries(evidence)) {
+        if (row.at >= (localDecisions.get(key) ?? 0)) next[key] = row;
+      }
+      nativeRecords.value = mergeSessionStatuses(next);
+    } catch { /* An unavailable provider is not evidence of completion or work. */ }
+  }
+
   async function sync() {
     if (!store) return;
     const merged = mergeSessionStatuses(records.value, await store.get('statuses'));
     if (merged !== records.value) { records.value = merged; mirror(); }
-    await flush();
+    await Promise.all([flush(), syncNative()]);
   }
 
   async function init(entries: ActivityEntry[], sessions: SavedSession[]) {
@@ -112,13 +130,12 @@ export const useSessionStatusStore = defineStore('session-status', () => {
     // turn must never replace an explicitly saved result from the new store.
     const recovered = mergeSessionStatuses(legacy, sessionStatusesFromActivity(entries));
     records.value = { ...recovered, ...mergeSessionStatuses(local, records.value, server) };
-    // Earlier clients used null for an unfinished turn. Recover that state
-    // only when the turn ledger actually has an unmatched start.
+    // A stored start alone cannot establish that a process is still working.
+    // Native lifecycle evidence or live events must confirm an ongoing turn.
     for (const [key, row] of Object.entries(records.value)) {
-      if (row.status === null && recovered[key]?.status === 'working') {
-        records.value[key] = { status: 'working', at: Math.max(row.at, recovered[key].at) + 1 };
-      }
+      if (row.status === 'working') records.value[key] = { status: null, at: row.at };
     }
+    await syncNative();
     for (const [key, row] of Object.entries(records.value)) {
       if (!server[key] || row.at > server[key].at) pending.set(key, row);
     }

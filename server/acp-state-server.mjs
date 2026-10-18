@@ -26,6 +26,7 @@ import { nativeUsage } from './usage/native-usage.mjs';
 import { subscriptionLimits } from './usage/subscription-limits.mjs';
 import { createPushService } from './push/service.mjs';
 import { createChatFileHandler } from './chat-files.mjs';
+import { createChatSessionStatusReader } from './chat-session-statuses.mjs';
 
 export const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
@@ -83,7 +84,7 @@ function readBody(req) {
   });
 }
 
-export function createRequestHandler(service, { usageReader = nativeUsage, limitsReader = subscriptionLimits, pushService, chatFileRoots, chatFileMaxBytes } = {}) {
+export function createRequestHandler(service, { usageReader = nativeUsage, limitsReader = subscriptionLimits, pushService, chatFileRoots, chatFileMaxBytes, sessionStatusReader = createChatSessionStatusReader() } = {}) {
   const chatFiles = createChatFileHandler({ roots: chatFileRoots, maxBytes: chatFileMaxBytes });
   return async function handler(req, res) {
     if (req.method === 'OPTIONS') {
@@ -99,6 +100,13 @@ export function createRequestHandler(service, { usageReader = nativeUsage, limit
       return;
     }
     try {
+      if (req.method === 'GET' && url.pathname === '/api/chat-session-statuses') {
+        const inventory = await service.request({ method: 'GET', path: '/api/state/sessions.json', query: new URLSearchParams(), headers: {} });
+        if (inventory.status !== 200 && inventory.status !== 404) { send(res, 503, { error: 'Session inventory unavailable' }); return; }
+        res.setHeader('cache-control', 'no-store');
+        send(res, 200, await sessionStatusReader(inventory.json?.data?.sessions ?? []));
+        return;
+      }
       if (url.pathname === '/api/chat-files') {
         await chatFiles(req, res, url);
         return;
