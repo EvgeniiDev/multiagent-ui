@@ -1285,7 +1285,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
 
       session.value = saved;
       descriptor.value = saved;
-      await deps.persistSessions();
+      // The caller adds this row to the inventory and persists it together
+      // with its open-tab pointer after create() returns.
 
       isConnected.value = true;
       autoReconnectAttempts = 0;

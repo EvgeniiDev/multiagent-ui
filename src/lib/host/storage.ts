@@ -101,20 +101,6 @@ export function stateServerBase(): string {
   return toSecureUrl(`http://${hostname}:${STATE_SERVER_PORT}`);
 }
 
-async function fetchWithTimeout(
-  url: string,
-  init: RequestInit,
-  ms: number,
-): Promise<Response> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
-  try {
-    return await fetch(url, { ...init, signal: ctrl.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 // The probe is session-scoped: one answer decides the backend for every
 // `loadKvStore` call on this page — no re-probing per store.
 let healthProbe: Promise<boolean> | null = null;
@@ -123,11 +109,11 @@ function probeStateServer(): Promise<boolean> {
   if (!healthProbe) {
     healthProbe = (async () => {
       try {
-        const res = await fetchWithTimeout(
+        const res = await requestRemoteJson(
           `${stateServerBase()}/health`, {}, HEALTH_TIMEOUT_MS,
         );
-        if (!res.ok) return false;
-        const body = (await res.json().catch(() => null)) as { ok?: boolean } | null;
+        if (!res?.ok) return false;
+        const body = res.body as { ok?: boolean } | null;
         return body?.ok === true;
       } catch {
         return false;
@@ -164,6 +150,10 @@ class RemoteKVStore implements KVStore {
   private updatedAt = 0;   // server stamp of the doc we last adopted/wrote
   private touchedAt = 0;   // local clock of the newest `set()`
   private dirty = false;   // local edits not yet confirmed by the server
+  private lastAttemptedData: string | null = null;
+  // Expected revision + snapshot for writes whose response was lost. Clear
+  // only after an acknowledged write or adoption of authoritative state.
+  private readonly unacknowledgedData = new Set<string>();
   private down = false;    // server unreachable — localStorage-only mode
   private queue: Promise<unknown> = Promise.resolve();
   private poll: ReturnType<typeof setInterval> | null = null;
@@ -223,7 +213,6 @@ class RemoteKVStore implements KVStore {
     // The mirror is always written first: if the server is gone the edits
     // still survive a reload, and the next poll ships them.
     writeLocalData(this.storageKey, this.data);
-    if (this.down) return;
     await this.enqueue(() => this.push());
   }
 
@@ -240,14 +229,14 @@ class RemoteKVStore implements KVStore {
 
   private async fetchDoc(): Promise<DocFetch> {
     try {
-      const res = await fetchWithTimeout(
+      const res = await requestRemoteJson(
         `${this.base}/api/state/${encodeURIComponent(this.name)}`,
         {},
         REQUEST_TIMEOUT_MS,
       );
-      if (res.status === 404) return 'missing';
-      if (!res.ok) return 'error';
-      const body = (await res.json().catch(() => null)) as Partial<RemoteDoc> | null;
+      if (res?.status === 404) return 'missing';
+      if (!res?.ok) return 'error';
+      const body = res.body as Partial<RemoteDoc> | null;
       if (!body || typeof body !== 'object') return 'error';
       return {
         rev: typeof body.rev === 'number' ? body.rev : 0,
@@ -262,11 +251,13 @@ class RemoteKVStore implements KVStore {
     }
   }
 
-  private async putRemote(force: boolean): Promise<'ok' | 'conflict' | 'error'> {
-    const body: { data: unknown; rev?: number } = { data: this.data };
-    if (!force) body.rev = this.rev;
+  private async putRemote(): Promise<'ok' | 'conflict' | 'error'> {
+    const body = { data: this.data, rev: this.rev };
+    const snapshot = JSON.stringify(this.data);
+    this.lastAttemptedData = snapshot;
+    const candidate = `${body.rev + 1}:${snapshot}`;
     try {
-      const res = await fetchWithTimeout(
+      const res = await requestRemoteJson(
         `${this.base}/api/state/${encodeURIComponent(this.name)}`,
         {
           method: 'PUT',
@@ -275,8 +266,10 @@ class RemoteKVStore implements KVStore {
         },
         REQUEST_TIMEOUT_MS,
       );
-      if (res.ok) {
-        const r = (await res.json().catch(() => null)) as {
+      if (!res) this.unacknowledgedData.add(candidate);
+      if (res?.ok) {
+        this.unacknowledgedData.clear();
+        const r = res.body as {
           rev?: number;
           updatedAt?: number;
         } | null;
@@ -284,8 +277,9 @@ class RemoteKVStore implements KVStore {
         if (r && typeof r.updatedAt === 'number') this.updatedAt = r.updatedAt;
         return 'ok';
       }
-      return res.status === 409 ? 'conflict' : 'error';
+      return res?.status === 409 ? 'conflict' : 'error';
     } catch {
+      this.unacknowledgedData.add(candidate);
       return 'error';
     }
   }
@@ -296,31 +290,44 @@ class RemoteKVStore implements KVStore {
     this.updatedAt = doc.updatedAt;
     this.touchedAt = doc.updatedAt;
     this.dirty = false;
+    this.unacknowledgedData.clear();
     writeLocalData(this.storageKey, this.data);
   }
 
   // Push the local document. On a rev conflict the later `updatedAt` wins:
   // adopt the remote copy when it is newer than our newest local edit,
-  // otherwise overwrite it.
+  // otherwise retry our newer edit against the freshly read revision.
   private async push(): Promise<void> {
-    const sentTouchedAt = this.touchedAt;
-    let res = await this.putRemote(false);
+    // Repeated saves of the same failed snapshot share its timeout. A newer
+    // snapshot must still be sent: the earlier PUT may have committed before
+    // its response stalled, and omitting this write loses a newly created tab.
+    if (this.down && JSON.stringify(this.data) === this.lastAttemptedData) return;
+    let res = await this.putRemote();
     if (res === 'conflict') {
       const remote = await this.fetchDoc();
-      if (
-        remote !== 'error' &&
-        remote !== 'missing' &&
-        remote.updatedAt > this.touchedAt
-      ) {
-        this.adopt(remote);
+      if (remote === 'error') {
+        this.down = true;
         return;
       }
-      res = await this.putRemote(true);
+      if (remote !== 'missing' && this.unacknowledgedData.has(`${remote.rev}:${JSON.stringify(remote.data)}`)) {
+        // The timed-out PUT did commit. Its newer server timestamp does not
+        // acknowledge edits made while that response was pending. Retry the
+        // latest snapshot against this exact revision, preserving CAS.
+        this.rev = remote.rev;
+        res = await this.putRemote();
+      } else if (remote !== 'missing' && remote.updatedAt > this.touchedAt) {
+        this.adopt(remote);
+        return;
+      } else {
+        this.rev = remote === 'missing' ? 0 : remote.rev;
+        res = await this.putRemote();
+      }
     }
     if (res === 'ok') {
-      // A `set()` that raced the in-flight PUT bumped `touchedAt` — keep the
-      // store dirty so the next push still ships that edit.
-      if (this.touchedAt === sentTouchedAt) this.dirty = false;
+      this.down = false;
+      // Compare the acknowledged snapshot, including edits made in the same
+      // millisecond while the PUT was pending. Timestamps cannot prove this.
+      if (JSON.stringify(this.data) === this.lastAttemptedData) this.dirty = false;
     } else if (res === 'error') {
       this.down = true;
     }
@@ -338,7 +345,7 @@ class RemoteKVStore implements KVStore {
       this.down = false;
       if (this.dirty) {
         // Push unconditionally — the conflict path inside push() resolves
-        // a newer remote by adopting it (or force-puts when the local edit
+        // a newer remote by adopting it (or retries with CAS when the local edit
         // is newer). Skipping the push when the remote is newer wedges the
         // store for good: `dirty` never clears and no remote document is
         // ever adopted again.
@@ -372,12 +379,12 @@ export async function mutateRemoteDoc(
     let data: Record<string, unknown> = {};
     let rev = 0;
     try {
-      const res = await fetchWithTimeout(url, {}, REQUEST_TIMEOUT_MS);
-      if (res.status === 404) {
+      const res = await requestRemoteJson(url, {}, REQUEST_TIMEOUT_MS);
+      if (res?.status === 404) {
         data = {};
         rev = 0;
-      } else if (res.ok) {
-        const body = (await res.json().catch(() => null)) as {
+      } else if (res?.ok) {
+        const body = res.body as {
           data?: Record<string, unknown>;
           rev?: number;
         } | null;
@@ -393,7 +400,7 @@ export async function mutateRemoteDoc(
     const next = fn(structuredClone(data));
     if (next === null) return true;
     try {
-      const put = await fetchWithTimeout(
+      const put = await requestRemoteJson(
         url,
         {
           method: 'PUT',
@@ -402,8 +409,8 @@ export async function mutateRemoteDoc(
         },
         REQUEST_TIMEOUT_MS,
       );
-      if (put.ok) return true;
-      if (put.status === 409) {
+      if (put?.ok) return true;
+      if (put?.status === 409) {
         await new Promise((r) => setTimeout(r, 300));
         continue;
       }
@@ -416,10 +423,9 @@ export async function mutateRemoteDoc(
 }
 
 /** Result of a bounded JSON request — the abort timer covers the WHOLE
- * exchange (headers AND body read), unlike fetchWithTimeout which stops
- * at headers and could leave a stalled body hanging the managed save /
- * sync paths forever. `body` is null when the response had no parseable
- * JSON; `null` overall means transport failure / timeout. */
+ * exchange (headers AND body read). Receiving HTTP 200 headers alone must
+ * never acknowledge a write or leave session startup waiting forever.
+ * `body` is null when the response had no parseable JSON; `null` overall means transport failure / timeout. */
 async function requestRemoteJson(
   url: string,
   init: RequestInit,
@@ -430,6 +436,9 @@ async function requestRemoteJson(
   try {
     const res = await fetch(url, { ...init, signal: ctrl.signal });
     const body = await res.json().catch(() => null);
+    // json() also rejects on abort; its parse-error fallback must not turn
+    // a timed-out HTTP 200 into a successfully acknowledged write.
+    if (ctrl.signal.aborted) return null;
     return { status: res.status, ok: res.ok, body };
   } catch {
     return null;
