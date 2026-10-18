@@ -12,6 +12,7 @@ import { steeringDelivery } from '../src/lib/steeringDelivery.ts';
 let client, entries, cached, cacheWrites, sharedReader, notifications;
 let seq = 0;
 let canonicalStatuses = null;
+let remoteEvidence = vue.ref(null);
 globalThis.__replayRuntimeDeps = {
   HISTORY_TAIL_MESSAGES,
   ref: vue.ref, computed: vue.computed, watch: vue.watch, markPromptRecorded, createPromptOutbox, steeringDelivery,
@@ -23,6 +24,9 @@ globalThis.__replayRuntimeDeps = {
   useConfigStore: () => ({ getAgent: () => ({ transport: 'websocket' }) }),
   useSessionStatusStore: () => ({
     forSession: (agent, id) => canonicalStatuses?.value[`${agent}:${id}`],
+    remoteForSession: () => remoteEvidence.value,
+    remoteReadVersion: () => 0,
+    refresh: async () => {},
     record(session, status) { if (canonicalStatuses) canonicalStatuses.value = { ...canonicalStatuses.value, [`${session.agentName}:${session.sessionId}`]: { status, at: Date.now() } }; },
   }),
   useActivityStore: () => ({ recordEntry: entry => entries.push(entry), recordUsage() {} }),
@@ -61,7 +65,7 @@ function live() {
   assert.deepEqual(entries.filter(e => e.kind === 'tool-call' || e.kind === 'sync').map(e => e.title), ['new search', 'new title']);
 }
 beforeEach(() => {
-  canonicalStatuses = null;
+  canonicalStatuses = null; remoteEvidence.value = null; delete saved.lastTurnStatus;
   notifications = 0; entries = []; cached = null; cacheWrites = []; sharedReader = async () => null;
   client = {
     pendingPermissionRequest: vue.ref(null),
@@ -431,3 +435,51 @@ for (const update of [
     } finally { await rt.close(); }
   });
 }
+
+
+test('Queue waits for remote work after reconnect and releases only on fresh terminal evidence', async () => {
+ const rt=createSessionRuntime(deps),sent=[];
+ client.prompt=async request=>{sent.push(request);return {stopReason:'end_turn'};};
+ try {
+  await rt.resume({...saved});
+  emit({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'remote agent still working'}});
+  rt.submitMessage('after response',[],'queue');
+  await vue.nextTick();
+  assert.equal(sent.length,0,'Queue must not become a concurrent prompt/Steer after resume');
+  emit({sessionUpdate:'tool_call',toolCallId:'remote-tool',title:'working',status:'completed'});
+  await vue.nextTick();assert.equal(sent.length,0,'a finished tool does not finish the response');
+  remoteEvidence.value={status:'completed',at:Date.now(),readVersion:1};
+  await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(sent.length,1,'a confirmed response end releases the next turn once');
+ }finally{await rt.close();}
+});
+
+test('accepted prompt surviving a socket drop leaves the queue after replay and never resends',async()=>{
+ const rt=createSessionRuntime(deps);let rejectPrompt,calls=0;
+ client.prompt=()=>{calls++;return new Promise((_,reject)=>rejectPrompt=reject);};
+ try {
+  await rt.resume({...saved});rt.submitMessage('delivered before socket loss');
+  await vue.nextTick();client.onTransportClose('lost after delivery');rejectPrompt(new Error('transport closed'));
+  await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(rt.pendingMessages.value.length,1);
+  client.loadSession=async()=>{replay();emit({sessionUpdate:'user_message_chunk',content:{type:'text',text:'delivered before socket loss'}});emit({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'accepted reply'}});return {};};
+  await rt.tryReconnect();
+  assert.equal(rt.pendingMessages.value.length,0,'remote user turn confirms delivery despite the missing response');
+  assert.equal(calls,1,'reconciliation never reissues the accepted prompt');
+ }finally{await rt.close();}
+});
+
+
+test('a lifecycle read begun before remote work cannot release Queue when its stale result arrives later',async()=>{
+ const rt=createSessionRuntime(deps),sent=[];
+ client.prompt=async request=>{sent.push(request);return {stopReason:'end_turn'};};
+ try{
+  await rt.resume({...saved});
+  emit({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'new remote work'}});
+  rt.submitMessage('wait for new work');
+  remoteEvidence.value={status:'completed',at:1,readVersion:0};
+  await vue.nextTick();assert.equal(sent.length,0,'the older read is not completion of this work');
+  remoteEvidence.value={status:'completed',at:Date.now(),readVersion:1};
+  await new Promise(resolve=>setTimeout(resolve,0));assert.equal(sent.length,1);
+ }finally{await rt.close();}
+});

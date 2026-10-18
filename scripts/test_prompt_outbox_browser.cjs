@@ -18,7 +18,7 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
       base = `http://127.0.0.1:${server.address().port}`;
     }
     browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH, args: ['--no-sandbox'] });
-    for (const width of [390, 1920]) {
+    for (const width of (process.env.RECOVERY_ONLY ? [] : [390, 1920])) {
       const context = await browser.newContext({ ignoreHTTPSErrors: true, hasTouch: width < 800, isMobile: width < 800, viewport: { width, height: 1080 } });
       await context.addInitScript(() => {
         if (sessionStorage.getItem('outbox-fixture')) return;
@@ -151,5 +151,97 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
       assert.deepEqual(errors, []); assert.deepEqual(failed, []);
       await context.close(); console.log(`PASS ${profile} ${width}: Queue default/FIFO/files, Steer boundary/no cancel, session isolation, Stop/remove/failure, reload, theme/focus/touch`);
     }
+    if (!process.env.SKIP_RECOVERY) await verifyRecovery(browser, base);
   } finally { await browser?.close(); if (server) await new Promise(r => server.close(r)); }
 })().catch(e => { console.error(e); process.exitCode = 1; });
+
+// The screenshot regression: an accepted prompt loses its response socket,
+// then the recovered UI queues another message while remote work continues.
+async function verifyRecovery(browser, base) {
+  for (const width of [390, 1440]) {
+    const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width, height: 844 }, hasTouch: width < 800, isMobile: width < 800 });
+    const sid = 'recovery', agent = 'Recovery QA', statusKey = JSON.stringify([agent, sid]);
+    const saved = { id: sid, sessionId: sid, agentName: agent, cwd: '/tmp', title: 'Recovery', lastUpdated: 1, supportsLoadSession: true };
+    const docs = new Map([['sessions.json', { rev: 1, updatedAt: 1, data: { sessions: [saved], openTabs: [{ agentName: agent, sessionId: sid }] } }]]);
+    let phase = 'completed', at = 1, loads = 0, socket;
+    const history = ['prior question'], calls = [], errors = [], pending = [];
+    await context.addInitScript(() => localStorage.setItem('acp-ui:agents', JSON.stringify({ agents: { 'Recovery QA': { transport: 'websocket', url: 'ws://127.0.0.1:25993/' } } })));
+    await context.route('**/health', r => r.fulfill({ json: { ok: true } }));
+    await context.route('**/api/**', r => {
+      const pathname = new URL(r.request().url()).pathname;
+      if (pathname === '/api/chat-session-statuses') return r.fulfill({ json: { statuses: phase === 'working' ? {} : { [statusKey]: { status: phase, at } } } });
+      if (pathname.startsWith('/api/state/')) {
+        const name = decodeURIComponent(pathname.split('/').pop()), current = docs.get(name);
+        if (r.request().method() === 'PUT') {
+          const body = r.request().postDataJSON();
+          if (body.rev !== (current?.rev ?? 0)) return r.fulfill({ status: 409, json: { code: 'rev_conflict' } });
+          const next = { rev: (current?.rev ?? 0) + 1, updatedAt: Date.now(), data: body.data }; docs.set(name, next);
+          return r.fulfill({ json: next });
+        }
+        return current ? r.fulfill({ json: current }) : r.fulfill({ status: 404, json: {} });
+      }
+      return r.fulfill({ json: { root: '/tmp', dirs: [], projects: [], sessions: [] } });
+    });
+    function update(ws, kind, text) { ws.send(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: sid, update: { sessionUpdate: kind, content: { type: 'text', text } } } })); }
+    await context.routeWebSocket(/wss?:\/\//, ws => ws.onMessage(raw => {
+      for (const line of String(raw).trim().split('\n')) {
+        const q = JSON.parse(line);
+        if (q.method === '$/ping') { ws.send(JSON.stringify({ jsonrpc: '2.0', method: '$/pong', params: q.params })); continue; }
+        if (!q.method || q.id == null) continue;
+        if (q.method === 'session/prompt' || q.method === '_session/steering') calls.push(q);
+        const reply = result => ws.send(JSON.stringify({ jsonrpc: '2.0', id: q.id, result }));
+        if (q.method === 'initialize') reply({ protocolVersion: 1, agentCapabilities: { loadSession: true }, _meta: { steering: { supported: true } }, authMethods: [] });
+        else if (q.method === 'session/load') {
+          loads++; socket = ws;
+          for (const text of history) { update(ws, 'user_message_chunk', text); update(ws, 'agent_message_chunk', 'Answer for ' + text); }
+          reply({});
+        } else if (q.method === 'session/prompt') {
+          history.push(q.params.prompt[0].text); phase = 'working'; at = Date.now(); pending.push({ ws, id: q.id });
+        } else if (q.method === '_session/steering') reply({ outcome: 'injected' }); else reply({});
+      }
+    }));
+    const page = await context.newPage(); page.on('pageerror', e => errors.push(e.message));
+    await page.goto(base + '/chat?s=Recovery%20QA%3A%3Arecovery');
+    await page.waitForFunction(() => window.__session?.activeRuntime?.isConnected);
+    const field = page.locator('.chat-view:visible textarea');
+    await field.fill('sent before socket loss'); await page.locator('.chat-view:visible .composer-primary').click();
+    while (!pending.length) await page.waitForTimeout(10);
+    socket.close({ code: 1012, reason: 'accepted prompt lost its socket' });
+    await page.waitForFunction(() => window.__session.activeRuntime.pendingMessages.length === 1);
+    await page.waitForFunction(() => window.__session.activeRuntime.isConnected && !window.__session.activeRuntime.isReconnecting && !window.__session.activeRuntime.isRestoringHistory, {}, { timeout: 10000 });
+    assert.equal(loads, 2); assert.equal(calls.length, 1);
+    assert.equal(await page.locator('[data-pending-id]').count(), 0, 'delivered message leaves the queue after confirmed replay');
+    await field.fill('wait until response ends'); await page.locator('.chat-view:visible .composer-primary').click();
+    await page.waitForTimeout(100); assert.equal(calls.length, 1, 'Queue never injects into the recovered running turn');
+    assert.equal(await page.locator('[data-pending-id]').count(), 1);
+    socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: sid, update: { sessionUpdate: 'tool_call', toolCallId: 'boundary', title: 'Read', status: 'completed' } } }));
+    await page.waitForTimeout(100); assert.equal(calls.length, 1, 'tool completion is not response completion');
+    phase = 'completed'; at = Date.now();
+    await page.evaluate(() => document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('session-status').refresh());
+    await page.waitForFunction(() => window.__session.activeRuntime.pendingMessages.length === 0);
+    assert.equal(calls.length, 2); assert.equal(calls[1].method, 'session/prompt');
+    assert.equal(calls[1].params.prompt[0].text, 'wait until response ends');
+    const next = pending.at(-1); phase = 'completed'; at = Date.now();
+    next.ws.send(JSON.stringify({ jsonrpc: '2.0', id: next.id, result: { stopReason: 'end_turn' } }));
+    await page.waitForFunction(() => !window.__session.activeRuntime.isLoading);
+    // Upgrade while the remote agent is still working: a restored older
+    // error is acknowledged, but subsequent Queue input must still wait.
+    phase = 'working'; at = Date.now();
+    // Upgrade path: the screenshot's older error has no delivery anchor.
+    await page.evaluate(() => { sessionStorage.setItem('acp-ui:outbox:Recovery QA::recovery', JSON.stringify([{ id: 'legacy', text: 'sent before socket loss', attachments: [], mode: 'queue', error: 'transport closed' }])); });
+    await page.reload(); await page.waitForFunction(() => window.__session?.activeRuntime?.isConnected);
+    assert.equal(await page.locator('[data-pending-id]').count(), 0, 'older delivered error also reconciles after upgrading');
+    assert.equal(calls.length, 2, 'replay and reload never resend the accepted message');
+    await field.fill('after upgraded remote turn'); await page.locator('.chat-view:visible .composer-primary').click();
+    await page.waitForTimeout(100); assert.equal(calls.length, 2, 'upgrading must not mistake a running remote turn for idle');
+    phase = 'completed'; at = Date.now();
+    await page.evaluate(() => document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('session-status').refresh());
+    await page.waitForFunction(() => window.__session.activeRuntime.pendingMessages.length === 0);
+    assert.equal(calls.length, 3); assert.equal(calls[2].params.prompt[0].text, 'after upgraded remote turn');
+    const final = pending.at(-1); final.ws.send(JSON.stringify({jsonrpc:'2.0',id:final.id,result:{stopReason:'end_turn'}}));
+    await page.waitForFunction(() => !window.__session.activeRuntime.isLoading);
+    assert.deepEqual(errors, []);
+    await page.unrouteAll({ behavior: 'ignoreErrors' }); await context.close();
+    console.log(`PASS recovery ${width}: accepted message cleared after drop/replay, Queue waits for remote end, no Steer or resend, legacy upgrade`);
+  }
+}

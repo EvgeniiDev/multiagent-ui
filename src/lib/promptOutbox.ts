@@ -8,6 +8,7 @@ export interface PendingMessage {
   attachments: Attachment[];
   mode: DeliveryMode;
   error?: string;
+  delivery?: { userTurn: number; text: string };
 }
 type StorageLike = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -17,6 +18,7 @@ export function createPromptOutbox(deps: {
   connected: () => boolean;
   send: (text: string, files: Attachment[]) => Promise<void>;
   steer: (text: string, files: Attachment[], failed: (error: unknown) => void) => Promise<'injected' | 'startedNewTurn'>;
+  deliveryAnchor?: (text: string, files: Attachment[], mode: DeliveryMode) => PendingMessage['delivery'];
   storage?: StorageLike | null;
 }) {
   const messages = ref<PendingMessage[]>([]);
@@ -90,6 +92,7 @@ export function createPromptOutbox(deps: {
     const item = messages.value[0];
     sending = true;
     try {
+      item.delivery = deps.deliveryAnchor?.(item.text, item.attachments, item.mode);
       commit(messages.value.slice(1));
       eligibleSteers.delete(item.id);
       await deps.send(item.text, item.attachments);
@@ -131,5 +134,33 @@ export function createPromptOutbox(deps: {
       if (canSend() && deps.busy()) void deliverSteer();
     }
   }
-  return { messages, paused, notice, restore, submit, remove, pause, resume, ready, toolBoundary };
+  /** Only a successfully loaded remote transcript can acknowledge an
+   * uncertain send. Optimistic local text and matching older turns cannot. */
+  function reconcile(history: { role: string; content: string }[], cached?: {
+    userTurnBase: number; messages: { role: string; content: string }[];
+  } | null) {
+    const users = history.filter(m => m.role === 'user');
+    const claimed = new Set<number>();
+    const next = messages.value.filter(item => {
+      if (!item.error || item.attachments.length || item.mode !== 'queue') return true;
+      let anchor = item.delivery;
+      if (!anchor && cached) {
+        const previous = cached.messages.filter(m => m.role === 'user');
+        const matches = previous.map((m, i) => m.content === item.text ? i : -1).filter(i => i >= 0);
+        if (matches.length === 1) anchor = { userTurn: cached.userTurnBase + matches[0] + 1, text: item.text };
+      }
+      if (!anchor || !Number.isInteger(anchor.userTurn) || anchor.userTurn < 1
+        || anchor.text !== item.text || claimed.has(anchor.userTurn)
+        || users[anchor.userTurn - 1]?.content !== anchor.text) return true;
+      claimed.add(anchor.userTurn);
+      return false;
+    });
+    const confirmed = messages.value.length - next.length;
+    if (confirmed) {
+      commit(next);
+      if (!next.length) notice.value = '';
+    }
+    return confirmed;
+  }
+  return { messages, paused, notice, restore, submit, remove, pause, resume, ready, toolBoundary, reconcile };
 }

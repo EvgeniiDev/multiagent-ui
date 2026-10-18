@@ -212,12 +212,32 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   let acpClient: AcpClientBridge | null = null;
   /** Ordinary prompts own the complete turn; steering only acknowledges injection. */
   let inFlightPrompts = 0;
+  // Losing our socket loses a response promise, not the agent's running turn.
+  // A fresh provider lifecycle result must release work observed remotely.
+  const remoteWorkAfter = ref<number | null>(null);
+  const agentBusy = () => isLoading.value || inFlightPrompts > 0 || remoteWorkAfter.value !== null
+    || turnStatus.value === 'working' || turnStatus.value === 'output';
   const outbox = createPromptOutbox({
-    busy: () => isLoading.value || inFlightPrompts > 0,
+    busy: agentBusy,
     connected: () => isConnected.value && !isReconnecting.value && !connectionAborted,
     send: sendPrompt,
     steer: deliverNativeSteer,
+    deliveryAnchor: (text, files, mode) => mode === 'queue' && !files.length
+      ? { userTurn: messages.value.filter(m => m.role === 'user').length + 1, text }
+      : undefined,
   });
+  watch(() => {
+    const target = session.value ?? descriptor.value;
+    return target && statusStore.remoteForSession?.(target.agentName, target.sessionId);
+  }, evidence => {
+    if (remoteWorkAfter.value !== null && evidence && evidence.readVersion > remoteWorkAfter.value
+      && ['completed', 'cancelled', 'error'].includes(evidence.status ?? '')) {
+      remoteWorkAfter.value = null;
+      setTurnStatus(evidence.status, false);
+    }
+    outbox.ready();
+  }, { flush: 'sync' });
+  watch(turnStatus, () => outbox.ready(), { flush: 'sync' });
 
   // ---- History tail cache (localStorage, write-through) -------------------
   // `session/load` can only replay the WHOLE transcript top-down (no tail
@@ -330,6 +350,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     // If `acpClient` is already null, this fired during a voluntary
     // disconnect that's tearing down anyway — nothing to do.
     if (!acpClient) return;
+    if (inFlightPrompts > 0 || (!isRestoringHistory.value
+      && (turnStatus.value === 'working' || turnStatus.value === 'output'))) remoteWorkAfter.value = statusStore.remoteReadVersion?.() ?? 0;
     outbox.pause();
     acpClient = null;
     isConnected.value = false;
@@ -882,6 +904,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     // Live work after reconnect invalidates the previous result in both stores.
     // Replay never invents a result; only a prompt response confirms completion.
     if (!loadingHistory && inFlightPrompts === 0) {
+      if (['user_message_chunk', 'agent_message_chunk', 'tool_call', 'tool_call_update', 'plan'].includes(update.sessionUpdate)
+        && remoteWorkAfter.value === null) remoteWorkAfter.value = statusStore.remoteReadVersion?.() ?? 0;
       if (update.sessionUpdate === 'user_message_chunk' && turnStatus.value !== 'working') setTurnStatus('working', false);
       else if ((update.sessionUpdate === 'agent_message_chunk'
           || update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update'
@@ -1119,7 +1143,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         console.log('Unhandled session update:', update);
     }
 
-    if (!loadingHistory && inFlightPrompts > 0 && completedLiveTool) outbox.toolBoundary();
+    if (!loadingHistory && agentBusy() && completedLiveTool) outbox.toolBoundary();
 
     // Write-through: the tail cache follows the stream (throttled), so a
     // reload mid-replay still lands on the newest chunk seen so far.
@@ -1443,6 +1467,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     savedSession: SavedSession,
     options?: { autonomous?: boolean }
   ): Promise<void> {
+    const previousHistory = readHistoryCache(savedSession.agentName, savedSession.sessionId);
     const retainTranscript = session.value?.sessionId === savedSession.sessionId
       && session.value.agentName === savedSession.agentName && messages.value.length > 0;
     isRestoringHistory.value = true;
@@ -1599,6 +1624,11 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       }
 
       outbox.restore(attachmentScope(session.value!.sessionId));
+      const confirmedDelivery = outbox.reconcile(messages.value, previousHistory);
+      if (confirmedDelivery || savedSession.lastTurnStatus === 'working' || savedSession.lastTurnStatus === 'output') {
+        remoteWorkAfter.value ??= statusStore.remoteReadVersion?.() ?? 0;
+      }
+      void statusStore.refresh?.();
       isConnected.value = true;
       error.value = null;
       autoReconnectAttempts = 0;

@@ -48,6 +48,9 @@ export function sessionStatusesFromActivity(entries: ActivityEntry[]): Records {
 export const useSessionStatusStore = defineStore('session-status', () => {
   const records = shallowRef<Records>({});
   const nativeRecords = shallowRef<Records>({});
+  const remoteEvidence = shallowRef<Record<string, SessionStatusSnapshot & { readVersion: number }>>({});
+  let nativeRead: Promise<void> | null = null;
+  let readVersion = 0;
   const localDecisions = new Map<string, number>();
   let store: KVStore | null = null;
   let remote = false;
@@ -93,18 +96,27 @@ export const useSessionStatusStore = defineStore('session-status', () => {
     void flush();
   }
 
-  async function syncNative() {
-    if (!remote) return;
-    try {
-      const response = await fetch(`${stateServerBase()}/api/chat-session-statuses`, { signal: AbortSignal.timeout(5000) });
-      if (!response.ok) return;
-      const evidence = mergeSessionStatuses((await response.json()).statuses);
-      const next: Records = {};
-      for (const [key, row] of Object.entries(evidence)) {
-        if (row.at >= (localDecisions.get(key) ?? 0)) next[key] = row;
-      }
-      nativeRecords.value = mergeSessionStatuses(next);
-    } catch { /* An unavailable provider is not evidence of completion or work. */ }
+  function remoteReadVersion() { return readVersion; }
+  function remoteForSession(agent: string, sessionId: string) { return remoteEvidence.value[keyFor(agent, sessionId)]; }
+
+  function syncNative(): Promise<void> {
+    if (!remote) return Promise.resolve();
+    if (nativeRead) return nativeRead;
+    const version = ++readVersion;
+    nativeRead = (async () => {
+      try {
+        const response = await fetch(`${stateServerBase()}/api/chat-session-statuses`, { signal: AbortSignal.timeout(5000) });
+        if (!response.ok) return;
+        const evidence = mergeSessionStatuses((await response.json()).statuses);
+        remoteEvidence.value = Object.fromEntries(Object.entries(evidence).map(([key, row]) => [key, { ...row, readVersion: version }]));
+        const next: Records = {};
+        for (const [key, row] of Object.entries(evidence)) {
+          if (row.at >= (localDecisions.get(key) ?? 0)) next[key] = row;
+        }
+        nativeRecords.value = mergeSessionStatuses(next);
+      } catch { /* An unavailable provider is not evidence of completion or work. */ }
+    })().finally(() => { nativeRead = null; });
+    return nativeRead;
   }
 
   async function sync() {
@@ -144,5 +156,5 @@ export const useSessionStatusStore = defineStore('session-status', () => {
     if (typeof window !== 'undefined' && !timer) timer = setInterval(() => void sync(), 5000);
   }
   onScopeDispose(() => { if (timer) clearInterval(timer); });
-  return { forSession, record, init, flush };
+  return { forSession, remoteForSession, remoteReadVersion, refresh: syncNative, record, init, flush };
 });

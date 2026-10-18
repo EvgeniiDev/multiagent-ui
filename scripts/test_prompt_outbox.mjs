@@ -136,3 +136,23 @@ test('a concurrent prompt failure after acceptance retains its failed message', 
   assert.match(box.messages.value[0].error, /Late transport failure/);
   assert.equal(box.paused.value, true);
 });
+
+test('a failed delivery is removed only when authoritative history confirms its exact user-turn position', async () => {
+  const box = createPromptOutbox({ busy: () => false, connected: () => true, storage: null,
+    deliveryAnchor: () => ({ userTurn: 3, text: 'repeat' }),
+    send: async () => { throw new Error('transport closed'); }, steer: async () => 'injected' });
+  box.submit('repeat'); await tick();
+  box.reconcile([{role:'user',content:'repeat'},{role:'assistant',content:'old reply'},{role:'user',content:'different'}]);
+  assert.equal(box.messages.value.length,1,'an older identical message is not delivery proof');
+  box.reconcile([{role:'user',content:'old'},{role:'user',content:'different'},{role:'user',content:'repeat'}]);
+  assert.equal(box.messages.value.length,0,'confirmed delivery is no longer pending');
+});
+
+test('an old failed queue entry can be reconciled against its cached ordinal without matching arbitrary history text', async () => {
+  const saved=[{id:'old',text:'Ну как',mode:'queue',attachments:[],error:'transport closed'}];
+  const box=createPromptOutbox({busy:()=>false,connected:()=>true,storage:{getItem:()=>JSON.stringify(saved),setItem(){},removeItem(){}},send:async()=>assert.fail('must not resend'),steer:async()=> 'injected'});
+  box.restore('agent::old');
+  const cached={userTurnBase:2,messages:[{role:'user',content:'Ну как'},{role:'assistant',content:'answer'}]};
+  box.reconcile([{role:'user',content:'a'},{role:'user',content:'b'},{role:'user',content:'Ну как'},{role:'assistant',content:'answer'}],cached);
+  assert.equal(box.messages.value.length,0);assert.equal(box.notice.value,'');
+});
