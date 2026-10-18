@@ -33,7 +33,7 @@ with sync_playwright() as playwright:
         Codex: {transport: 'websocket', url: location.protocol === 'https:'
           ? 'wss://127.0.0.1:25917/' : 'ws://127.0.0.1:25907/'}
       }}));
-      localStorage.setItem('acp-ui:sessions.json', JSON.stringify({sessions: [saved],
+      if (!localStorage.getItem('acp-ui:sessions.json')) localStorage.setItem('acp-ui:sessions.json', JSON.stringify({sessions: [saved],
         openTabs: [{agentName:saved.agentName,sessionId:saved.sessionId}],
         activeTab:{agentName:saved.agentName,sessionId:saved.sessionId}}));
       window.replayLongTasks = [];
@@ -125,5 +125,19 @@ with sync_playwright() as playwright:
         monitor.get_by_role('button', name='Close', exact=True).click()
         assert not errors, errors
         emit(event='traffic-monitor/verified')
+        # Restore both the historical tab and the new tab concurrently. The
+        # active URL and enabled composer must survive a fresh navigation.
+        active_url = page.url
+        load_count = sum(r['method'] == 'session/load' for r in responses)
+        page.reload(wait_until='domcontentloaded')
+        deadline = time.monotonic() + 75
+        while time.monotonic() < deadline and sum(r['method'] == 'session/load' for r in responses) < load_count + 2:
+            page.wait_for_timeout(100)
+        reloaded = [r for r in responses if r['method'] == 'session/load'][load_count:]
+        assert len(reloaded) == 2 and all(not r['error'] for r in reloaded), reloaded
+        page.wait_for_function("document.querySelector('.chat-view:not([style*=\"display: none\"]) textarea')?.disabled === false", timeout=15000)
+        assert page.url == active_url
+        assert not errors, errors
+        emit(event='reload/two-sessions-ready')
     finally:
         browser.close()
