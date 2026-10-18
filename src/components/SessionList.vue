@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import UiButton from './ui/UiButton.vue';
+import UiActionRow from './ui/UiActionRow.vue';
 import { useSessionStore } from '../stores/session';
 import { useUiStore } from '../stores/ui';
 import { useProjectsStore } from '../features/scope/registry';
@@ -168,15 +169,17 @@ async function setArchived(session: SavedSession, archived: boolean) {
     </div>
 
     <ul v-else>
-      <li
+      <UiActionRow as="li"
+        :selected="isSelected(session, runtime)"
+        :density="isPage ? 'comfortable' : 'compact'"
         v-for="{ session, runtime, status, transient } in rows"
         :key="session.id"
         :data-session-id="session.id"
-        class="session-row ui-action-group"
+        class="session-row"
         :class="{ active: isSelected(session, runtime) }"
         :title="`${session.title}\n${session.agentName} · ${session.cwd || '—'}`"
       >
-        <UiButton variant="row" class="session-open"
+        <UiButton variant="row-primary" class="session-open"
           :aria-pressed="isPage ? undefined : isSelected(session, runtime)"
           @click="openRow(session, runtime, transient)">
         <div class="row-content">
@@ -201,6 +204,7 @@ async function setArchived(session: SavedSession, archived: boolean) {
           </div>
         </div>
         </UiButton>
+        <template #actions>
         <UiButton
           v-if="showArchived"
           variant="ghost" icon size="xs"
@@ -220,7 +224,8 @@ async function setArchived(session: SavedSession, archived: boolean) {
           <svg v-if="isPage && !transient" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true"><path d="M4 8v12h16V8M3 4h18v4H3zM9 12h6" /></svg>
           <svg v-else viewBox="0 0 24 24" :width="isPage ? 18 : 12" :height="isPage ? 18 : 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 4l16 16M20 4L4 20" /></svg>
         </UiButton>
-      </li>
+        </template>
+      </UiActionRow>
     </ul>
   </div>
 </template>
@@ -293,15 +298,6 @@ ul {
 }
 
 /* Title first; agent and timestamp share the quieter line below. */
-.session-row {
-  display: flex;
-  align-items: center;
-  gap: 0.4375rem;
-  min-height: 44px;
-  padding: 0.375rem 0.375rem 0.375rem 0.5rem;
-  border-radius: var(--radius-md, 6px);
-  cursor: pointer;
-}
 
 .row-content {
   flex: 1;
@@ -418,7 +414,6 @@ ul {
 }
 @media (max-width: 800px) {
   .list-create { display: inline-flex; }
-  .session-row { min-height: 72px; padding: 0.625rem 0.5rem; }
   .row-title { font-size: 0.9375rem; white-space: normal; overflow-wrap: anywhere; }
   .row-agent, .row-status, .row-stamp { font-size: 0.6875rem; }
   .row-tag { display: none; }

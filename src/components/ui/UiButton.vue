@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** Shared native button: attributes, listeners, aria state and focus stay on the button. */
 withDefaults(defineProps<{
-  variant?: 'secondary' | 'primary' | 'danger' | 'ghost' | 'image' | 'select' | 'option' | 'row' | 'tab' | 'chip' | 'transcript' | 'session-tab' | 'meter';
+  variant?: 'secondary' | 'primary' | 'danger' | 'ghost' | 'image' | 'select' | 'option' | 'row' | 'tab' | 'chip' | 'transcript' | 'session-tab' | 'meter' | 'row-primary';
   tone?: 'default' | 'danger' | 'success' | 'warning' | 'muted' | 'info';
   size?: 'sm' | 'xs';
   icon?: boolean;
@@ -70,6 +70,16 @@ withDefaults(defineProps<{
 .ds-button--option[aria-selected='true'] { border-color: transparent; }
 .ds-button--option:focus-visible { outline-offset: -2px; }
 .ds-button--row { white-space: normal; width: 100%; justify-content: flex-start; text-align: left; border-color: transparent; }
+/* UiActionRow owns the tile; its primary action stays visually joined. */
+.ds-button--row-primary {
+  width: 100%; min-width: 0; justify-content: flex-start; text-align: left;
+  white-space: normal; padding: .25rem .5rem;
+  border: 0; border-color: transparent; border-radius: 0; background: transparent;
+}
+.ds-button--row-primary[aria-pressed='true'],
+.ds-button--row-primary:hover:not(:disabled) { background: transparent; border-color: transparent; }
+.ds-button.ds-button--row-primary:focus-visible { outline-offset: -2px; }
+
 .ds-button--tab { border-color: transparent; border-radius: 0; color: var(--text-secondary); }
 .ds-button--tab[aria-selected='true'] {
   background: transparent; color: var(--text-primary); border-color: transparent;
