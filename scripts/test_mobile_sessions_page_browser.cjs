@@ -256,6 +256,12 @@ const assert = require('node:assert/strict');
         }
       } else {
         assert.equal(await page.locator('.tab-strip [role="tab"]').count(), 2, 'desktop tabs retained');
+        const desktopClose = page.locator('.row-close').first();
+        const glyph = await desktopClose.locator('svg').boundingBox();
+        assert.equal(glyph.width, 12, 'desktop session close glyph stays small beside session text');
+        assert.equal(glyph.height, 12);
+        const target = await desktopClose.boundingBox();
+        assert(target.width >= 24 && target.height >= 24, 'a smaller glyph retains its button target');
         assert.equal(await page.locator('.session-navigation [aria-label="New session"]').count(), 1, 'desktop creation stays in its tab bar');
         assert.equal(await page.locator('.session-open[aria-pressed="true"]').count(), 1, 'desktop keeps its current-tab selection');
         assert.equal(await page.locator('.row-open').count(), 2, 'desktop keeps open-tab indicators');

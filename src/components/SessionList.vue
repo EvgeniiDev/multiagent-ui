@@ -218,7 +218,7 @@ async function setArchived(session: SavedSession, archived: boolean) {
           @click.stop="transient && runtime ? sessionStore.closeTab(runtime.id) : setArchived(session, true)"
         >
           <svg v-if="isPage && !transient" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true"><path d="M4 8v12h16V8M3 4h18v4H3zM9 12h6" /></svg>
-          <svg v-else viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 4l16 16M20 4L4 20" /></svg>
+          <svg v-else viewBox="0 0 24 24" :width="isPage ? 18 : 12" :height="isPage ? 18 : 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 4l16 16M20 4L4 20" /></svg>
         </UiButton>
       </li>
     </ul>
