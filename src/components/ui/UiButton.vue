@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** Shared native button: attributes, listeners, aria state and focus stay on the button. */
 withDefaults(defineProps<{
-  variant?: 'secondary' | 'primary' | 'danger' | 'ghost' | 'image' | 'select' | 'option' | 'row' | 'tab' | 'chip' | 'transcript' | 'session-tab';
+  variant?: 'secondary' | 'primary' | 'danger' | 'ghost' | 'image' | 'select' | 'option' | 'row' | 'tab' | 'chip' | 'transcript' | 'session-tab' | 'meter';
   tone?: 'default' | 'danger' | 'success' | 'warning' | 'muted' | 'info';
   size?: 'sm' | 'xs';
   icon?: boolean;
@@ -50,6 +50,7 @@ withDefaults(defineProps<{
 .ds-button--danger { color: var(--bg-danger, #b3402e); }
 .ds-button--danger:hover:not(:disabled) { border-color: var(--bg-danger, #b3402e); }
 .ds-button--ghost { border-color: transparent; color: var(--text-secondary, #6b6259); }
+.ds-button--meter { border-color: transparent; color: var(--text-muted); font-family: var(--font-mono); font-size: .7rem; padding: 0 .375rem; }
 .ds-button--image { padding: 0; border-color: transparent; overflow: hidden; cursor: zoom-in; }
 .ds-button--image:hover:not(:disabled) { border-color: var(--text-accent, #b04a28); }
 .ds-button[aria-selected='true'], .ds-button[aria-pressed='true'], .ds-button[aria-checked='true'] {

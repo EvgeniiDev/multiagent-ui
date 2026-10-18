@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, useId } from 'vue';
 import UiButton from './ui/UiButton.vue';
 import { stateServerBase } from '../lib/host/storage';
 
 interface Window { id: string; label: string; usedPercent: number; resetsAt: number | null }
 interface Provider { id: string; name: string; status: string; message: string | null; windows: Window[] }
+const props = defineProps<{ providerId?: string; compact?: boolean }>();
+const titleId = useId();
 const data = ref<{ updatedAt: number; providers: Provider[] } | null>(null);
+const providers = computed(() => data.value?.providers.filter(provider => !props.providerId || provider.id === props.providerId) ?? []);
 const loading = ref(false);
 const error = ref('');
 const now = ref(Date.now());
@@ -38,15 +41,15 @@ onUnmounted(() => { disposed = true; clearInterval(timer); controller?.abort(); 
 </script>
 
 <template>
-  <section class="subscription-limits" aria-labelledby="subscription-title" data-testid="subscription-limits">
+  <section class="subscription-limits" :class="{ compact }" :aria-labelledby="titleId" data-testid="subscription-limits">
     <div class="limits-heading">
-      <div><h3 id="subscription-title">Subscription limits</h3><p>Account limits across all apps and sessions. Updates every minute.</p></div>
-      <UiButton :disabled="loading" :aria-busy="loading" @click="refresh">{{ loading ? 'Refreshing…' : 'Refresh limits' }}</UiButton>
+      <div><h3 :id="titleId">Subscription limits</h3><p v-if="!compact">Account limits across all apps and sessions. Updates every minute.</p></div>
+      <UiButton :size="compact ? 'xs' : 'sm'" :disabled="loading" :aria-busy="loading" @click="refresh">{{ loading ? 'Refreshing…' : compact ? 'Refresh' : 'Refresh limits' }}</UiButton>
     </div>
     <p v-if="loading && !data" role="status" class="ui-note">Loading subscription limits…</p>
     <p v-if="error" role="alert" class="limits-error">{{ error }}{{ data ? ' Previous values are shown below.' : '' }}</p>
     <div v-if="data" class="provider-grid">
-      <article v-for="provider in data.providers" :key="provider.id" class="provider" :data-testid="`limits-${provider.id}`">
+      <article v-for="provider in providers" :key="provider.id" class="provider" :data-testid="`limits-${provider.id}`">
         <h4>{{ provider.name }}</h4>
         <p v-if="provider.message" class="ui-note">{{ provider.message }}</p>
         <div v-for="window in provider.windows" :key="window.id" class="limit-window">
@@ -55,9 +58,10 @@ onUnmounted(() => { disposed = true; clearInterval(timer); controller?.abort(); 
           <p v-if="window.resetsAt">{{ window.resetsAt <= now ? 'Reported reset' : 'Resets' }} {{ stamp(window.resetsAt) }}</p>
           <p v-else>Reset time unavailable</p>
         </div>
-        <p v-if="provider.status === 'ready'" class="ui-note">Only windows reported by the provider are shown.</p>
+        <p v-if="provider.status === 'ready' && !compact" class="ui-note">Only windows reported by the provider are shown.</p>
       </article>
     </div>
+    <p v-if="data && !providers.length" class="ui-note">No subscription limits reported for this agent.</p>
     <p v-if="data" class="updated ui-note">Updated {{ stamp(data.updatedAt) }}{{ error || now - data.updatedAt > 120000 ? ' · May be out of date' : '' }}</p>
   </section>
 </template>
@@ -81,6 +85,12 @@ progress.warning::-webkit-progress-value { background: var(--bg-danger); }
 progress.warning::-moz-progress-bar { background: var(--bg-danger); }
 .limits-error { color: var(--bg-danger); font-size: .8rem; margin-bottom: 1rem; }
 .updated { margin-top: .75rem; }
+.subscription-limits.compact { margin: 0; padding: 0; border: 0; }
+.compact .limits-heading { align-items: center; margin-bottom: .75rem; }
+.compact h3 { font-size: .8rem; font-weight: 500; }
+.compact .provider-grid { grid-template-columns: 1fr; gap: .75rem; }
+.compact .provider { padding: 0; border: 0; background: transparent; }
+.compact h4 { font-size: .75rem; margin-bottom: .5rem; }
 @media (max-width: 800px) { .provider-grid { grid-template-columns: 1fr; } }
-@media (max-width: 480px) { .subscription-limits { padding: 1rem; } .limits-heading { flex-direction: column; } }
+@media (max-width: 480px) { .subscription-limits { padding: 1rem; } .limits-heading { flex-direction: column; } .compact .limits-heading { flex-direction: row; } }
 </style>

@@ -13,6 +13,7 @@ import ToolCallChip from './ToolCallChip.vue';
 import MessageAttachment from './MessageAttachment.vue';
 import ChatFilePreviews from './ChatFilePreviews.vue';
 import UiComposerSettings from './ui/UiComposerSettings.vue';
+import SessionUsageMeter from './SessionUsageMeter.vue';
 import UiButton from './ui/UiButton.vue';
 import UiImagePreview from './ui/UiImagePreview.vue';
 import UiFilePreview from './ui/UiFilePreview.vue';
@@ -357,6 +358,10 @@ const contextLabel = computed(() => {
 const contextTitle = computed(() => {
   const pct = rt.contextUsed != null && rt.contextSize ? Math.round((rt.contextUsed / rt.contextSize) * 100) : null;
   return pct != null ? `Context: ${pct}% of the window used` : 'Context used';
+});
+const subscriptionProvider = computed(() => {
+  const name = (rt.agentName || currentSession.value?.agentName || '').toLowerCase();
+  return name.includes('codex') ? 'codex' : /open.?code/.test(name) ? 'opencode' : name.includes('claude') ? 'claude' : undefined;
 });
 const availableCommands = computed(() => rt.availableCommands);
 const isAutonomous = computed(() => rt.autonomous);
@@ -1161,11 +1166,11 @@ function planGlyph(status: string): string {
       <div v-if="isLoading" class="loading-indicator">
         <span class="spinner" aria-hidden="true"></span>
         <span class="turn-status-text" :title="turnStatusText">{{ turnStatusText }}</span>
-        <span
-          v-if="contextLabel && isNarrowLayout"
-          class="context-meter"
-          :title="contextTitle"
-        >{{ contextLabel }}</span>
+        <SessionUsageMeter
+          v-if="(contextLabel || subscriptionProvider) && isNarrowLayout"
+          :label="contextLabel" :context-title="contextTitle" :provider-id="subscriptionProvider" :anchor="inputContainer || undefined"
+          :active="sessionStore.activeTabId === rt.id && uiStore.activeView === 'chat'"
+        />
       </div>
       <!-- Update nag: the agent's own npm update notice from stderr. Desktop
            only; the × persists the offered version, so this exact nag stays
@@ -1313,11 +1318,11 @@ function planGlyph(status: string): string {
               :title="voiceStatusText || undefined"
             ><span v-if="voicePhase === 'listening'" class="voice-recording-label">Listening… </span><span>{{ voicePhase === 'listening' ? voiceElapsedText : voiceStatusText }}</span></span>
             <span v-else class="composer-spacer" aria-hidden="true"></span>
-            <span
-              v-if="contextLabel && (!isNarrowLayout || !isLoading)"
-              class="context-meter"
-              :title="contextTitle"
-            >{{ contextLabel }}</span>
+            <SessionUsageMeter
+              v-if="(contextLabel || subscriptionProvider) && (!isNarrowLayout || !isLoading)"
+              :label="contextLabel" :context-title="contextTitle" :provider-id="subscriptionProvider" :anchor="inputContainer || undefined"
+              :active="sessionStore.activeTabId === rt.id && uiStore.activeView === 'chat'"
+            />
             <div class="composer-actions">
               <UiButton
                 v-if="isLoading && !composerStopsGeneration"
@@ -1800,14 +1805,6 @@ function planGlyph(status: string): string {
   flex: 1;
 }
 
-.context-meter {
-  flex: 0 0 auto;
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 0.7rem;
-  color: var(--text-muted, #a39a8e);
-  white-space: nowrap;
-  padding: 0 0.375rem;
-}
 
 
 /* One geometry for every composer button: a square stroke-icon hit area.
