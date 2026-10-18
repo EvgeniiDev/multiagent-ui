@@ -96,6 +96,8 @@ export interface RuntimeDeps {
   requestAuth(methods: AuthMethod[], agentName: string): Promise<string | null>;
   /** Persist sessions.json (inventory + open-tab pointers). */
   persistSessions(): Promise<void>;
+  /** Refresh agent-owned titles after a turn, scoped to this workspace. */
+  refreshSessionMetadata?(agentName: string, cwd: string): Promise<unknown>;
   /** A `session/update` landed on this runtime — the store marks tabs unread. */
   notifyActivity(runtime: SessionRuntime): void;
 }
@@ -1163,6 +1165,13 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       // ---- ledger: everything below feeds Timeline / Events / Dashboard ----
       case 'session_info_update': {
         const info = update as { title?: string | null; updatedAt?: string | null };
+        const target = session.value ?? descriptor.value;
+        const title = info.title?.trim();
+        if (target && target.sessionId === notification.sessionId && title && target.title !== title) {
+          target.title = title;
+          // Metadata-only events may have no transcript to trigger a history flush.
+          void deps.persistSessions();
+        }
         if (!loadingHistory) useActivityStore().recordEntry({
           kind: 'sync',
           agentName: agentName.value || session.value?.agentName || 'unknown',
@@ -1373,14 +1382,13 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       }
 
       // Save session
-      // Name the session after its workspace folder — an auto-generated
-      // "Session <date>" title is noise next to the sidebar timestamp.
-      const folder = cwd.split(/[\\/]/).filter(Boolean).pop() || cwd;
+      // The agent owns the title; keep an honest placeholder until it reports one.
+      const initialTitle = 'New session';
       const saved: SavedSession = {
         id: uuid(),
         agentName: agent,
         sessionId: sessionResponse.sessionId,
-        title: folder,
+        title: initialTitle,
         lastUpdated: Date.now(),
         cwd,
         supportsLoadSession,
@@ -1409,14 +1417,14 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         agentName: agent,
         sessionId: sessionResponse.sessionId,
         cwd,
-        title: folder,
+        title: initialTitle,
       });
       activity.recordEntry({
         kind: 'session-open',
         agentName: agent,
         sessionId: sessionResponse.sessionId,
         cwd,
-        title: folder,
+        title: initialTitle,
         detail: 'new session',
       });
 
@@ -1694,6 +1702,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
 
       // Opening a session preserves its last message time.
       await deps.persistSessions();
+      void deps.refreshSessionMetadata?.(savedSession.agentName, savedSession.cwd);
 
     } catch (e) {
       // A replay that died mid-flight leaves the cached tail rendered —
@@ -1824,10 +1833,10 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       });
 
 
-      // Update session title if it's the first message
-      if (messages.value.length === 2 && session.value) {
-        session.value.title = text.slice(0, 50) + (text.length > 50 ? '...' : '');
-        sessionMetadataDirty = true;
+      // Some agents publish the title only through session/list. Request the
+      // actual workspace: Pi otherwise defaults to its most recently opened cwd.
+      if (generation === promptGeneration) {
+        void deps.refreshSessionMetadata?.(session.value.agentName, session.value.cwd);
       }
     } catch (e) {
       if (generation === promptGeneration) {

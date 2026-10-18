@@ -553,3 +553,50 @@ test('banner-only replay preserves work independently confirmed by the provider'
     assert.equal(sent, 1);
   } finally { await rt.close(); }
 });
+
+test('agent title updates rename the session, persist without messages and ignore empty/foreign titles', async () => {
+  let persisted = 0;
+  client.loadSession = async () => ({});
+  const rt = createSessionRuntime({ ...deps, async persistSessions() { persisted++; } });
+  try {
+    await rt.resume({ ...saved, title: 'acp-ui' });
+    const baseline = persisted;
+    emit({ sessionUpdate: 'session_info_update', title: '  Agent-generated title  ' });
+    assert.equal(rt.session.value.title, 'Agent-generated title');
+    assert(persisted > baseline, 'metadata-only title updates must be persisted');
+    emit({ sessionUpdate: 'session_info_update', title: null });
+    emit({ sessionUpdate: 'session_info_update', title: '  ' });
+    client.onSessionUpdate({sessionId:'another-session',update:{sessionUpdate:'session_info_update',title:'Foreign title'}});
+    assert.equal(rt.session.value.title, 'Agent-generated title');
+  } finally { await rt.close(); }
+});
+
+test('replay title updates use the descriptor before the session is attached', async () => {
+  client.loadSession = async () => {
+    emit({ sessionUpdate: 'session_info_update', title: 'Agent replay title' });
+    return {};
+  };
+  const rt = createSessionRuntime(deps);
+  try {
+    await rt.resume({ ...saved, title: 'acp-ui' });
+    assert.equal(rt.session.value.title, 'Agent replay title');
+    assert.deepEqual(entries.filter(e => e.kind === 'sync'), [], 'replay metadata is not live activity');
+  } finally { await rt.close(); }
+});
+
+test('prompt completion refreshes titles in the session cwd and keeps the agent title', async () => {
+  client.loadSession = async () => ({});
+  client.prompt = async () => {
+    emit({ sessionUpdate:'session_info_update', title:'Actual agent title' });
+    emit({ sessionUpdate:'agent_message_chunk', content:{type:'text',text:'Answer'} });
+    return {stopReason:'end_turn'};
+  };
+  const refreshed = [];
+  const rt = createSessionRuntime({ ...deps, async refreshSessionMetadata(agent,cwd) { refreshed.push([agent,cwd]); } });
+  try {
+    await rt.resume({ ...saved, title:'acp-ui' });
+    await rt.sendPrompt('Do not use this prompt as the title');
+    assert.equal(rt.session.value.title,'Actual agent title');
+    assert.deepEqual(refreshed, [['Pi','/work'], ['Pi','/work']]);
+  } finally { await rt.close(); }
+});

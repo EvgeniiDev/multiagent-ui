@@ -97,11 +97,6 @@ export const useSessionStore = defineStore('session', () => {
     return `${agentName}::${sessionId}`;
   }
 
-  /** Last path segment — used as a title when the agent reports none. */
-  function folderName(path: string): string {
-    return path.split(/[\\/]/).filter(Boolean).pop() || '';
-  }
-
   // ---- Tab management ------------------------------------------------------
 
   const activeRuntime = computed<SessionTab | null>(
@@ -133,6 +128,7 @@ export const useSessionStore = defineStore('session', () => {
     return createSessionRuntime({
       requestAuth: (methods, agent) => requestAuthMethod(methods, agent),
       persistSessions: saveSessionsToStore,
+      refreshSessionMetadata: (agent, cwd) => syncOneAgentSessions(agent, cwd),
       notifyActivity: (rt) => {
         // Background work counts as unread on its tab. The active tab is on
         // screen already; marking it would just light a stale dot.
@@ -190,9 +186,6 @@ export const useSessionStore = defineStore('session', () => {
       // can retry by clicking the sidebar row again or just close the tab.
       console.error('Failed to resume session:', e);
     }
-    // Resume surfaced the agent's inventory the old way — keep that habit so
-    // the sidebar mirrors whatever this agent holds.
-    void syncAgentSessions(savedSession.agentName);
     return asTab(rt);
   }
 
@@ -239,7 +232,7 @@ export const useSessionStore = defineStore('session', () => {
       // Auto-load the agent's session inventory once connected, so sessions
       // created outside this client (CLI, Telegram, another device) show up
       // in the sidebar without a manual refresh.
-      void syncAgentSessions(agentName);
+      void syncAgentSessions(agentName, cwd);
     } catch (e) {
       console.error('Failed to create session:', e);
       throw e;
@@ -341,8 +334,8 @@ export const useSessionStore = defineStore('session', () => {
       const key = sessionKey(agentName, info.sessionId);
       if (dismissedSessions.includes(key)) continue;
       const stamp = info.updatedAt ? Date.parse(info.updatedAt) : NaN;
-      const title = (info.title || '').trim() || folderName(info.cwd || '') || 'Session';
       const existing = known.get(key);
+      const title = (info.title || '').trim() || existing?.title || 'New session';
       if (existing) {
         existing.title = title;
         if (info.cwd) existing.cwd = info.cwd;
@@ -415,7 +408,19 @@ export const useSessionStore = defineStore('session', () => {
       }
 
       const infos = await listAllAgentSessions(client, cwd);
-      const added = mergeAgentSessions(agentName, infos);
+      let added = mergeAgentSessions(agentName, infos);
+      if (cwd === undefined) {
+        // Pi defaults an unscoped list to the last opened workspace. Repair
+        // known folder placeholders by querying their actual workspaces too.
+        const pendingCwds = new Set(savedSessions.value.filter(s => {
+          if (s.agentName !== agentName || !s.cwd) return false;
+          const folder = s.cwd.split(/[\\/]/).filter(Boolean).pop();
+          return s.title === folder || s.title === 'New session';
+        }).map(s => s.cwd));
+        for (const pendingCwd of pendingCwds) {
+          added += mergeAgentSessions(agentName, await listAllAgentSessions(client, pendingCwd));
+        }
+      }
       await saveSessionsToStore();
 
       return { added, error: null };
