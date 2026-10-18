@@ -8,7 +8,7 @@ import type { SessionTab } from '../lib/sessionRuntime';
 // IDE-style tab strip over the chat area: one tab per open session, ordered
 // by open time. A tab stays live in the background — the badges surface what
 // needs attention without switching: spinner while a turn/connect runs, "!"
-// for a pending permission or a dead transport, a dot for unread output.
+// for a pending permission or error, a check for a completed turn.
 const sessionStore = useSessionStore();
 
 const tabs = computed(() => sessionStore.openTabs);
@@ -90,7 +90,7 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
         @click="activate(rt)"
         @mousedown="onMiddleClick(rt, $event)"
       >
-        <!-- status: working > permission > error > completed > unread -->
+        <!-- status: working > permission > error > completed -->
         <span
           v-if="rt.isConnecting || (rt.isLoading && rt.isConnected)"
           class="tab-spin"
@@ -118,12 +118,6 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
           title="Completed — the agent finished its turn"
           aria-label="Completed — the agent finished its turn"
         >✓</span>
-        <span
-          v-else-if="rt.unread || rt.turnStatus === 'output'"
-          class="tab-dot"
-          :title="rt.unread ? 'Unread reply' : 'Reply received'"
-          :aria-label="rt.unread ? 'Unread reply' : 'Reply received'"
-        ></span>
         <span
           v-else-if="!rt.isConnected && !rt.isConnecting"
           class="tab-dot dead"

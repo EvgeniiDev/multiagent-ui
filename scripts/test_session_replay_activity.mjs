@@ -20,6 +20,7 @@ globalThis.__replayRuntimeDeps = {
   getTransportKind: () => 'websocket',
   isDesktop: () => false,
   useConfigStore: () => ({ getAgent: () => ({ transport: 'websocket' }) }),
+  useSessionStatusStore: () => ({ forSession: () => undefined, record() {} }),
   useActivityStore: () => ({ recordEntry: entry => entries.push(entry), recordUsage() {} }),
   createAcpClient: async () => client,
   AcpClientBridge: class {},

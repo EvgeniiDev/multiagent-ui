@@ -21,6 +21,7 @@ import { onAgentStderr, spawnAgent, killAgent } from './host';
 import { isDesktop } from './platform';
 import { useConfigStore } from '../stores/config';
 import { useActivityStore } from '../stores/activity';
+import { useSessionStatusStore } from '../stores/sessionStatus';
 import type { SessionNotification, AuthMethod, ContentBlock } from '@agentclientprotocol/sdk';
 
 const PROTOCOL_VERSION = 1;
@@ -143,7 +144,12 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   /** New content arrived while this tab wasn't active (or while hidden). */
   const unread = ref(false);
   // Result belongs to the saved session, not the tab's unread/connection state.
-  const turnStatus = computed(() => (session.value ?? descriptor.value)?.lastTurnStatus ?? null);
+  const statusStore = useSessionStatusStore();
+  const turnStatus = computed(() => {
+    const saved = session.value ?? descriptor.value;
+    const known = saved && statusStore.forSession(saved.agentName, saved.sessionId);
+    return known ? known.status : saved?.lastTurnStatus ?? null;
+  });
   const turnCompleted = computed(() => turnStatus.value === 'completed');
   const turnIssue = computed(() => turnStatus.value === 'cancelled' || turnStatus.value === 'error' ? turnStatus.value : null);
 
@@ -151,6 +157,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     const target = session.value ?? descriptor.value;
     if (!target) return;
     target.lastTurnStatus = status;
+    if (status !== 'output' && status !== undefined) statusStore.record(target, status);
     void deps.persistSessions();
   }
   let promptGeneration = 0;

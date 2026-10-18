@@ -5,6 +5,7 @@ import { isTauriHost } from './lib/platform';
 import { standalone } from './lib/pwa';
 import { useConfigStore } from './stores/config';
 import { useSessionStore } from './stores/session';
+import { useSessionStatusStore } from './stores/sessionStatus';
 import NewSessionMenu from './components/NewSessionMenu.vue';
 import SessionList from './components/SessionList.vue';
 import SessionTabs from './components/SessionTabs.vue';
@@ -263,6 +264,7 @@ onMounted(async () => {
   await configStore.setupHotReload();
   await sessionStore.initStore();
   await activityStore.initActivityStore();
+  await useSessionStatusStore().init(activityStore.entries, sessionStore.savedSessions);
   await claimsStore.initClaimsStore();
   // e2e seam — same shape as window.__projects / __pipeline: the ledger
   // write path tests use to append facts (recordEntry) on a live page.

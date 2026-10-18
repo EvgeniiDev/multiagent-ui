@@ -105,7 +105,7 @@ export function stateServerBase(): string {
 // `loadKvStore` call on this page — no re-probing per store.
 let healthProbe: Promise<boolean> | null = null;
 
-function probeStateServer(): Promise<boolean> {
+export function probeStateServer(): Promise<boolean> {
   if (!healthProbe) {
     healthProbe = (async () => {
       try {
