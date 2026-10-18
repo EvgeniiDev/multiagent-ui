@@ -10,6 +10,7 @@ import { readAttachments, formatBytes, extractReplayedAttachments, MAX_IMAGE_ATT
 import ModePicker from './ModePicker.vue';
 import ModelPicker from './ModelPicker.vue';
 import ToolCallChip from './ToolCallChip.vue';
+import ToolCallGroup from './ToolCallGroup.vue';
 import MessageAttachment from './MessageAttachment.vue';
 import ChatFilePreviews from './ChatFilePreviews.vue';
 import UiComposerSettings from './ui/UiComposerSettings.vue';
@@ -249,6 +250,7 @@ const windowOffset = computed(() =>
 type RenderItem =
   | { kind: 'text'; text: string; last: boolean }
   | { kind: 'tool'; tc: ToolCallInfo; last: boolean }
+  | { kind: 'tool-group'; id: string; tools: ToolCallInfo[]; last: boolean }
   | { kind: 'attachment'; att: AttachmentMeta; index: number; last: boolean }
   | { kind: 'plan'; last: boolean };
 
@@ -292,8 +294,18 @@ function assistantItems(message: ChatMessage): RenderItem[] {
     if (message.content)
       items.push({ kind: 'text', text: message.content, last: false });
   }
-  if (items.length) items[items.length - 1].last = true;
-  return items;
+  const grouped: RenderItem[] = [];
+  for (let i = 0; i < items.length;) {
+    const start = i;
+    while (i < items.length && items[i].kind === 'tool') i++;
+    if (i - start > 3) {
+      const tools = items.slice(start, i).map(item => (item as Extract<RenderItem, { kind: 'tool' }>).tc);
+      grouped.push({ kind: 'tool-group', id: tools[0].toolCallId, tools, last: false });
+    } else if (i > start) grouped.push(...items.slice(start, i));
+    else grouped.push(items[i++]);
+  }
+  if (grouped.length) grouped[grouped.length - 1].last = true;
+  return grouped;
 }
 
 
@@ -986,6 +998,12 @@ function toggleThought(messageId: string): void {
 // Expanded tool-call argument disclosures, keyed by toolCallId (not index)
 // so the state survives the windowed render (FEED_WINDOW_*) above.
 const expandedToolCalls = ref<Set<string>>(new Set());
+const expandedToolGroups = ref<Set<string>>(new Set());
+
+function toggleToolGroup(key: string): void {
+  if (expandedToolGroups.value.has(key)) expandedToolGroups.value.delete(key);
+  else expandedToolGroups.value.add(key);
+}
 
 function isToolCallExpanded(toolCallId: string): boolean {
   return expandedToolCalls.value.has(toolCallId);
@@ -1142,13 +1160,21 @@ function planGlyph(status: string): string {
              calls that separated it, chips where the calls ran, plan cards
              and file blocks at their own positions. -->
         <div v-if="message.role === 'assistant'" class="message-parts">
-          <template v-for="(item, i) in assistantItems(message)" :key="i">
+          <template v-for="(item, i) in assistantItems(message)" :key="item.kind === 'tool-group' ? 'tools:' + item.id : i">
             <template v-if="item.kind === 'text'">
               <div class="message-content" :class="{ 'stream-tail': item.last }" v-chat-markdown v-html="renderMarkdown(item.text)" />
               <ChatFilePreviews :text="item.text" :cwd="currentSession?.cwd"
                 :active="sessionStore.activeTabId === rt.id && uiStore.activeView === 'chat'"
                 @open="filePreview = $event" />
             </template>
+            <ToolCallGroup
+              v-else-if="item.kind === 'tool-group'"
+              :tools="item.tools"
+              :expanded="expandedToolGroups.has(message.id + ':' + item.id)"
+              :expanded-tools="expandedToolCalls"
+              @toggle="toggleToolGroup(message.id + ':' + item.id)"
+              @toggle-tool="toggleToolCall"
+            />
             <ToolCallChip
               v-else-if="item.kind === 'tool'"
               :tc="item.tc"

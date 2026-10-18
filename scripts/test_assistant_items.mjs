@@ -48,7 +48,33 @@ test('a long replay inspects tools linearly rather than scanning the whole turn 
     return Reflect.get(target, key, receiver);
   }});
   const items = assistantItems({ toolCalls: observed, segments: tools.map(t => ({kind:'tool', toolCallId:t.toolCallId})) });
-  assert.equal(items.length, count);
-  assert.equal(items.at(-1).tc, tools.at(-1));
+  assert.equal(items.length, 1);
+  assert.equal(items[0].kind, 'tool-group');
+  assert.equal(items[0].tools.length, count);
+  assert.equal(items[0].tools.at(-1), tools.at(-1));
   assert.ok(reads <= count * 2, `${reads} tool reads for ${count} segments blocked the browser during replay`);
+});
+
+
+test('only runs longer than three tools fold; text, attachment and plan split runs', () => {
+  const tools = Array.from({ length: 12 }, (_, i) => ({ toolCallId: String(i), title: `Tool ${i}` }));
+  for (const length of [1, 2, 3]) {
+    assert.deepEqual(assistantItems({ toolCalls: tools.slice(0, length) }).map(i => i.kind), Array(length).fill('tool'));
+  }
+  const message = { toolCalls: tools, attachments: [{}], plan: [{}], segments: [
+    ...tools.slice(0, 4).map(t => ({ kind: 'tool', toolCallId: t.toolCallId })),
+    { kind: 'text', text: 'between groups' },
+    ...tools.slice(4, 8).map(t => ({ kind: 'tool', toolCallId: t.toolCallId })),
+    { kind: 'attachment', index: 0 },
+    ...tools.slice(8, 10).map(t => ({ kind: 'tool', toolCallId: t.toolCallId })),
+    { kind: 'plan' },
+    ...tools.slice(10).map(t => ({ kind: 'tool', toolCallId: t.toolCallId })),
+  ] };
+  const items = assistantItems(message);
+  assert.deepEqual(items.map(i => i.kind), ['tool-group', 'text', 'tool-group', 'attachment', 'tool', 'tool', 'plan', 'tool', 'tool']);
+  assert.deepEqual(items[0].tools, tools.slice(0, 4));
+  assert.deepEqual(items[2].tools, tools.slice(4, 8));
+  assert.equal(items[0].id, '0');
+  assert.equal(items[2].id, '4');
+  assert.equal(items.at(-1).last, true);
 });
