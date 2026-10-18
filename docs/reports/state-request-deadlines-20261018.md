@@ -57,4 +57,31 @@ index.html последним и сохранением старых hashed asse
 `/home/hermes/projects/acp-ui/dist-web` → `/repo/dist-web` контейнера
 `acp-ui-web-1`. Backend и мосты не перезапускаются.
 
-Результаты проверки фактической выкладки добавляются после публикации.
+Runtime commit: `65340b7368a87ad6c2f6cc898429efdcd0ed4c66`.
+Контейнер web: `46b4add2fcbc`, image `sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9` (без пересоздания).
+Asset: `/assets/index-CjNDCqkX.js`.
+SHA256 asset: `a8e0cf3a9aa045ced57636734db497eaa274210cc1a31d0cb0c88add46fa2d77`.
+SHA256 index: `ed2029255282c65ccdd350fca8afbac3555eb5f92bf7bf84435f88b4e3d6b6dd`.
+HTTPS `https://127.0.0.1:25809` отдаёт ровно эти байты.
+
+Браузер на фактически опубликованных HTTPS assets, настоящий Codex ACP,
+изолированный state fixture (включая health), без prompt:
+
+| Сценарий | Start → готовый чат | Reload / второе окно |
+|---|---:|---|
+| Без искусственной задержки | 673 мс | PASS / PASS |
+| Preferences body задержан на 60 с | 8540 мс | PASS / PASS |
+| Sessions body задержан на 60 с | 8335 мс | PASS / PASS |
+
+Ни одного pageerror или ошибочного ACP-ответа. На запуск ровно один
+session/new; после reload и во втором окне — успешный session/load.
+Проверка требует наличия сохранённого списка sessions в fixture и события
+введённой задержки: случайный переход в local-only больше не даст ложный PASS.
+Для HTTPS fixture использует собственный временный TLS-сертификат: Playwright
+не позволяет менять протокол запроса через route.continue_. Первые прогоны
+тестового инструмента с HTTP перенаправлением исключены из результатов.
+
+State backend в этих браузерных сценариях изолирован; цифра 673 мс не является
+замером записи в реальный production state. Его настоящий health дополнительно
+прочитан без изменений: HTTP 200, тело 64 байта, три запроса 582–830 мс целиком.
+Мосты и backend не перезапускались. Старым открытым страницам нужен reload.

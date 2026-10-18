@@ -8,6 +8,9 @@ Production documents are never written. Requires Python Playwright.
 """
 import json
 import os
+import ssl
+import subprocess
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -47,13 +50,16 @@ class StateFixture(BaseHTTPRequestHandler):
             time.sleep(delay)
         try:
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
             pass
 
     def do_OPTIONS(self):
         self.reply({}, 204)
 
     def do_GET(self):
+        if urlsplit(self.path).path == '/health':
+            self.reply({'ok': True})
+            return
         name = unquote(urlsplit(self.path).path.split('/')[-1])
         with lock:
             doc = documents.setdefault(name, {'rev': 1, 'updatedAt': 1, 'data': {}})
@@ -113,7 +119,20 @@ def wait_ready(page):
     """, timeout=15000)
 
 
+base = os.environ.get('UI_TEST_URL', 'http://127.0.0.1:25808').rstrip('/')
+protocol = urlsplit(base).scheme
+certificates = tempfile.TemporaryDirectory(prefix='acp-state-fixture-')
 server = ThreadingHTTPServer(('127.0.0.1', 0), StateFixture)
+if protocol == 'https':
+    cert = certificates.name + '/cert.pem'
+    key = certificates.name + '/key.pem'
+    subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                    '-days', '1', '-subj', '/CN=127.0.0.1',
+                    '-addext', 'subjectAltName=IP:127.0.0.1',
+                    '-keyout', key, '-out', cert], check=True, capture_output=True)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(cert, key)
+    server.socket = tls.wrap_socket(server.socket, server_side=True)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 try:
     with sync_playwright() as playwright:
@@ -125,8 +144,8 @@ try:
 
         def route(request):
             path = urlsplit(request.request.url).path
-            if '/api/state/' in path:
-                request.continue_(url=f'http://127.0.0.1:{server.server_port}' + path)
+            if '/api/state/' in path or path == '/health':
+                request.continue_(url=f'{protocol}://127.0.0.1:{server.server_port}' + path)
             elif request.request.method not in ['GET', 'HEAD', 'OPTIONS']:
                 emit(event='unexpected-write-blocked', path=path)
                 request.abort()
@@ -137,7 +156,6 @@ try:
         page = context.new_page()
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.on('websocket', websocket)
-        base = os.environ.get('UI_TEST_URL', 'http://127.0.0.1:25808').rstrip('/')
         try:
             page.goto(base + '/chat', wait_until='domcontentloaded')
             page.locator('.nsm > button').click()
@@ -149,6 +167,9 @@ try:
             elapsed = round((time.monotonic() - clicked) * 1000)
             emit(event='chat/ready', elapsedMs=elapsed)
             assert elapsed < int(os.environ.get('MAX_START_MS', '11500')), elapsed
+            assert documents.get('sessions.json', {}).get('data', {}).get('sessions'), 'state fixture was bypassed'
+            if float(os.environ.get('STALL_SECONDS', '60')) > 0:
+                assert any(e.get('event') == 'state/body-stalled' for e in events), 'fault was not injected'
             assert count_rpc('session/new') == 1
             assert not page.locator('.nsm-error:visible').count()
             assert not errors, errors
@@ -173,3 +194,5 @@ try:
             browser.close()
 finally:
     server.shutdown()
+    server.server_close()
+    certificates.cleanup()
