@@ -55,6 +55,7 @@ class FakeSocket {
     this.listeners = {};
     this.sent = [];
     this.autoPong = false;
+    this.pongDelayMs = 0;
     lastSocket = this;
     queueMicrotask(() => {
       if (this.readyState !== 0) return;
@@ -75,7 +76,9 @@ class FakeSocket {
   send(data) {
     this.sent.push(data);
     if (this.autoPong && data.includes('$/ping')) {
-      this.receive('{"jsonrpc":"2.0","method":"$/pong","params":{"ts":1}}');
+      const nonce = JSON.parse(data).params?.nonce;
+      const respond = () => this.receive(JSON.stringify({ jsonrpc: '2.0', method: '$/pong', params: { ts: 1, nonce } }));
+      if (this.pongDelayMs) setTimeout(respond, this.pongDelayMs); else respond();
     }
   }
   close() {
@@ -163,9 +166,34 @@ async function scenarioNativeAgent() {
   await t.close();
 }
 
+async function scenarioAdaptiveForeground() {
+  const t = await WebSocketTransport.connect({ url: 'ws://fake', WebSocketCtor: FakeSocket, heartbeatMs: 0 });
+  const ws = lastSocket;
+  ws.autoPong = true;
+  await t.probe(3000); // correlated pong establishes this peer's fast RTT
+  ws.autoPong = false;
+  const started = performance.now();
+  const alive = await t.probe(3000);
+  const elapsed = performance.now() - started;
+  check('a previously fast peer does not cost a fixed three-second foreground timeout', !alive && elapsed < 900 && elapsed >= 450, `elapsed=${Math.round(elapsed)}ms`);
+  await t.close();
+}
+
+async function scenarioSlowForeground() {
+  const t = await WebSocketTransport.connect({ url: 'ws://fake', WebSocketCtor: FakeSocket, heartbeatMs: 0 });
+  const ws = lastSocket;
+  ws.autoPong = true; ws.pongDelayMs = 300;
+  await t.probe(2000);
+  ws.pongDelayMs = 800;
+  check('measured slow networks keep a larger probe budget instead of being cut at 500ms', await t.probe(3000));
+  await t.close();
+}
+
 await scenarioPonging();
 await scenarioProbeTimeout();
 await scenarioNativeAgent();
+await scenarioAdaptiveForeground();
+await scenarioSlowForeground();
 
 const failed = results.filter(([, ok]) => !ok);
 console.log(`\n${results.length - failed.length}/${results.length} assertions passed`);

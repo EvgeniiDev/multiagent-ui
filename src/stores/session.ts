@@ -263,14 +263,15 @@ export const useSessionStore = defineStore('session', () => {
     activateTab(next.id);
   }
 
-  /** Reconnect every tab whose transport dropped (foreground path). */
+  /** Check the visible chat first; background probes and history replays
+   * must not hold it behind their timeouts when the browser resumes. */
   async function tryReconnect(): Promise<boolean> {
-    let attempted = false;
-    for (const rt of openTabs.value) {
-      const tried = await rt.tryReconnect();
-      attempted = attempted || tried;
-    }
-    return attempted;
+    const active = activeRuntime.value;
+    const targets = active
+      ? [active, ...openTabs.value.filter(rt => rt.id !== active.id)]
+      : [...openTabs.value];
+    const results = await Promise.allSettled(targets.map(rt => rt.tryReconnect()));
+    return results.some(result => result.status === 'fulfilled' && result.value);
   }
 
   // ---- Auth method picker (shared dialog, serialized across tabs) ---------

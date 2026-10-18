@@ -48,6 +48,11 @@ const HEARTBEAT_PONG_METHOD = '$/pong';
  */
 const MAX_MISSED_PONGS = 2;
 
+// A fast LAN peer need not spend three seconds proving it disappeared.
+// Keep room for jitter, and retain the caller's ceiling on slower networks.
+const MIN_PROBE_TIMEOUT_MS = 500;
+const PROBE_RTT_MULTIPLIER = 4;
+
 /**
  * Pings sent without ANY inbound frame before we conclude the peer simply
  * never answers `$/ping` (native ACP-over-WS agent, or an old bridge) and
@@ -110,6 +115,8 @@ export class WebSocketTransport implements AcpTransport {
   private awaitingPong = false;
   /** Consecutive heartbeat intervals with zero inbound frames. */
   private missedPongs = 0;
+  private lastPing: { nonce: string; startedAt: number } | null = null;
+  private recentPongRttMs: number | null = null;
   /** Dedupes concurrent probe() callers onto one in-flight ping. */
   private probePromise: Promise<boolean> | null = null;
   /** Resolver for the in-flight probe, called by any inbound frame. */
@@ -230,6 +237,11 @@ export class WebSocketTransport implements AcpTransport {
     try {
       const msg = JSON.parse(line);
       if (msg && typeof msg.method === 'string' && msg.method === HEARTBEAT_PONG_METHOD) {
+        if (this.lastPing && msg.params?.nonce === this.lastPing.nonce) {
+          const elapsed = performance.now() - this.lastPing.startedAt;
+          this.recentPongRttMs = Math.max(elapsed, (this.recentPongRttMs ?? 0) * 0.8);
+          this.lastPing = null;
+        }
         this.pongCapable = true;
         return false;
       }
@@ -260,6 +272,13 @@ export class WebSocketTransport implements AcpTransport {
     this.ws = null;
   }
 
+  private sendPing(): void {
+    const nonce = Math.random().toString(36).slice(2);
+    this.lastPing = { nonce, startedAt: performance.now() };
+    this.awaitingPong = true;
+    this.ws!.send(JSON.stringify({ jsonrpc: '2.0', method: HEARTBEAT_METHOD, params: { nonce } }) + '\n');
+  }
+
   /**
    * Send a JSON-RPC `$/ping` notification on a fixed interval to keep the
    * connection alive across NAT / reverse-proxy idle timeouts. The frame is
@@ -277,8 +296,7 @@ export class WebSocketTransport implements AcpTransport {
    * TCP on its own.
    */
   private startHeartbeat(intervalMs: number): void {
-    const frame = `{"jsonrpc":"2.0","method":"${HEARTBEAT_METHOD}"}\n`;
-    this.heartbeatTimer = setInterval(() => {
+    const heartbeat = () => {
       if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
         this.stopHeartbeat();
         return;
@@ -299,13 +317,14 @@ export class WebSocketTransport implements AcpTransport {
         }
       }
       try {
-        this.ws.send(frame);
-        this.awaitingPong = true;
+        this.sendPing();
       } catch (e) {
         console.warn('WebSocketTransport heartbeat send failed:', e);
         this.stopHeartbeat();
       }
-    }, intervalMs);
+    };
+    this.heartbeatTimer = setInterval(heartbeat, intervalMs);
+    heartbeat(); // establish pong capability/RTT before the first tab switch
   }
 
   private stopHeartbeat(): void {
@@ -336,7 +355,8 @@ export class WebSocketTransport implements AcpTransport {
   /**
    * Prove the socket is alive within `timeoutMs`. Rides the heartbeat wire
    * format: sends a `$/ping` and resolves true on ANY inbound frame — a
-   * `$/pong` or ordinary traffic either way proves the peer. On timeout:
+   * `$/pong` or ordinary traffic either way proves the peer. Fast,
+   * nonce-echoing peers use a measured RTT budget within that ceiling. On timeout,
    * a pong-capable peer is convicted (the socket is aborted, which drives
    * the normal close path); a never-ponged peer resolves with its socket
    * state — silence proves nothing there. Concurrent probes share one ping.
@@ -350,27 +370,26 @@ export class WebSocketTransport implements AcpTransport {
       return Promise.resolve(true);
     }
     if (this.probePromise) return this.probePromise;
+    const budgetMs = this.pongCapable === true && this.recentPongRttMs !== null
+      ? Math.min(timeoutMs, Math.max(MIN_PROBE_TIMEOUT_MS, Math.ceil(this.recentPongRttMs * PROBE_RTT_MULTIPLIER)))
+      : timeoutMs;
     const ws = this.ws;
     this.probePromise = new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         this.probeResolve = null;
         if (this.pongCapable === true) {
-          this.abortSocket(`liveness probe timed out after ${timeoutMs}ms`);
+          this.abortSocket(`liveness probe timed out after ${budgetMs}ms`);
           resolve(false);
         } else {
           resolve(ws.readyState === WebSocket.OPEN);
         }
-      }, timeoutMs);
+      }, budgetMs);
       this.probeResolve = (alive) => {
         clearTimeout(timer);
         resolve(alive);
       };
       try {
-        const nonce = Math.random().toString(36).slice(2);
-        ws.send(
-          `{"jsonrpc":"2.0","method":"${HEARTBEAT_METHOD}","params":{"nonce":${JSON.stringify(nonce)}}}\n`
-        );
-        this.awaitingPong = true;
+        this.sendPing();
       } catch {
         this.probeResolve = null;
         clearTimeout(timer);
