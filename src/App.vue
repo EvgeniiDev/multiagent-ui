@@ -565,10 +565,9 @@ function clearError() {
         <div class="section drawer-project-scope">
           <ProjectScopeSelector />
         </div>
-        <!-- Startup progress while a session is being created/resumed.
-             New sessions start from the "+" on the tab strip — the sidebar
-             is pure inventory now (project scope + merged session list). -->
-        <div v-if="isConnecting" class="section">
+        <!-- Desktop startup details; the mobile directory keeps connection state
+             on the relevant row instead of showing the current tab's panel. -->
+        <div v-if="!isNarrowLayout && isConnecting" class="section">
           <StartupProgress
             :agent-name="connectingAgentName"
             :phase="sessionStore.startupPhase"
@@ -583,6 +582,7 @@ function clearError() {
         <!-- Session List -->
         <div class="section session-section">
           <SessionList
+            :presentation="isNarrowLayout ? 'page' : 'sidebar'"
             @resume="handleResumeSession"
             @create="showWelcomeNewSession = true"
             @activate="handleActivateSession"

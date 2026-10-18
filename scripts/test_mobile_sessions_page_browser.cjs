@@ -70,6 +70,18 @@ const assert = require('node:assert/strict');
         const rect = await sidebar.boundingBox();
         assert.equal(Math.round(rect.width), width, 'session page fills the viewport');
         assert.equal(rect.x, 0);
+        async function assertPlainSessionList() {
+          await page.mouse.move(0, 0);
+          assert.equal(await sidebar.locator('.session-row.active').count(), 0, 'mobile list has no selected/current row');
+          assert.equal(await sidebar.locator('.session-open[aria-pressed],.session-open[aria-current],.session-open[aria-selected]').count(), 0, 'mobile rows are navigation actions, not selected tabs');
+          assert.equal(await sidebar.locator('.row-open,.row-status.open').count(), 0, 'mobile list has no open-tab dots or Open label');
+          assert.equal(await sidebar.getByRole('button', { name: 'Close session', exact: true }).count(), 0, 'mobile has no close-tab action');
+          for (const row of await sidebar.locator('.session-open').all()) {
+            assert.equal(await row.evaluate(e => getComputedStyle(e).backgroundColor), 'rgba(0, 0, 0, 0)', 'no persistent current-session fill');
+            assert.equal(await row.evaluate(e => getComputedStyle(e).borderTopColor), 'rgba(0, 0, 0, 0)', 'no current-session outline');
+          }
+        }
+        await assertPlainSessionList();
         assert(await page.locator('.main-area').evaluate(e => e.inert), 'covered chat cannot receive focus');
         assert.equal(await page.locator('.drawer-backdrop').isVisible(), false);
         assert.deepEqual(await page.locator('.row-title').allTextContents(), ['newer', 'older'], 'opening and replay preserve message ordering');
@@ -125,6 +137,7 @@ const assert = require('node:assert/strict');
           const glyphBox = await glyph.boundingBox();
           assert.equal(glyphBox.width, 18, 'close icon stays compact');
           assert.equal(glyphBox.height, 18, 'close icon stays compact');
+          assert.match(await glyph.locator('path').getAttribute('d'), /M4 8v12/, 'mobile archive uses an archive icon instead of a tab-close X');
           await close.focus();
           await page.keyboard.press('Tab');
           await close.focus();
@@ -151,6 +164,7 @@ const assert = require('node:assert/strict');
         await sidebar.waitFor();
         await page.waitForFunction(() => window.__session?.openTabs.length === 2 && window.__session.openTabs.every(t => t.isConnected));
         assert.equal(Math.round((await sidebar.boundingBox()).width), width, 'session page survives reload');
+        await assertPlainSessionList();
         await page.evaluate(() => {
           window.qaOriginalArchive = window.__session.archiveSession;
           window.__session.archiveSession = async () => { await new Promise(resolve => setTimeout(resolve, 300)); throw new Error('Test archive failure'); };
@@ -211,6 +225,7 @@ const assert = require('node:assert/strict');
         await page.evaluate(() => { window.qaCreation = window.__session.createSession('E2E', '/tmp').catch(() => {}); });
         const creating = page.locator('.session-row').filter({ hasText: 'New session' });
         await creating.locator('.row-status.working').waitFor();
+        assert.equal(await sidebar.locator('.startup-progress').count(), 0, 'mobile list does not show a current-tab startup panel');
         await creating.locator('.row-status.error').waitFor();
         assert.equal(await creating.locator('.row-status').getAttribute('title'), 'Test creation failure');
         await page.locator('.session-row').filter({ hasText: 'older' }).locator('.row-title').click();
@@ -218,7 +233,7 @@ const assert = require('node:assert/strict');
         await creating.locator('.row-title').click();
         assert.equal(await page.locator('.main-area .error-text').innerText(), 'Test creation failure', 'failed new runtime can be opened again');
         await menu.click();
-        await creating.getByRole('button', { name: 'Close session', exact: true }).click();
+        await creating.getByRole('button', { name: 'Cancel session creation', exact: true }).click();
         assert.equal(await creating.count(), 0, 'failed unsaved session remains closable');
         assert(await page.getByRole('button', { name: 'New session', exact: true }).isVisible());
         await page.getByRole('button', { name: 'New session', exact: true }).click();
@@ -242,7 +257,16 @@ const assert = require('node:assert/strict');
       } else {
         assert.equal(await page.locator('.tab-strip [role="tab"]').count(), 2, 'desktop tabs retained');
         assert.equal(await page.locator('.session-navigation [aria-label="New session"]').count(), 1, 'desktop creation stays in its tab bar');
+        assert.equal(await page.locator('.session-open[aria-pressed="true"]').count(), 1, 'desktop keeps its current-tab selection');
+        assert.equal(await page.locator('.row-open').count(), 2, 'desktop keeps open-tab indicators');
+        assert(await page.locator('.row-status.open').count() >= 1, 'desktop keeps open-tab status');
         assert((await page.locator('#app-sidebar').boundingBox()).width < 600);
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.waitForFunction(() => document.querySelector('.app-container.narrow-layout') && !document.querySelector('.session-open[aria-pressed]'));
+        assert.equal(await page.locator('.session-row.active,.row-open,.row-status.open').count(), 0, 'switching to narrow layout removes all tab markers');
+        await page.setViewportSize({ width, height: 844 });
+        await page.waitForFunction(() => !!document.querySelector('.session-open[aria-pressed="true"]'));
+        assert.equal(await page.locator('.row-open').count(), 2, 'desktop tab markers return after widening');
         await page.locator('.session-row').first().hover();
         await page.getByRole('button', { name: 'Archive session', exact: true }).first().click();
         assert.equal(await page.locator('.session-row').count(), 1, 'desktop X also archives');

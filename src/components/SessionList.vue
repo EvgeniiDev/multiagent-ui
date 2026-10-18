@@ -7,6 +7,10 @@ import { useProjectsStore } from '../features/scope/registry';
 import type { SavedSession } from '../lib/types';
 import type { SessionTab } from '../lib/sessionRuntime';
 
+// A full-page session directory navigates to chats; desktop keeps tab selection.
+const props = withDefaults(defineProps<{ presentation?: 'sidebar' | 'page' }>(), { presentation: 'sidebar' });
+const isPage = computed(() => props.presentation === 'page');
+
 const emit = defineEmits<{
   resume: [session: SavedSession];
   activate: [tabId: string];
@@ -38,6 +42,10 @@ function isUnassigned(session: SavedSession): boolean {
 }
 
 const activeSessionId = computed(() => sessionStore.currentSession?.id ?? '');
+function isSelected(session: SavedSession, runtime?: SessionTab): boolean {
+  return !isPage.value && (runtime ? runtime.id === sessionStore.activeTabId : session.id === activeSessionId.value);
+}
+
 // Include descriptors so connecting and failed restores retain their status.
 const openRuntimes = computed(() => new Map(sessionStore.openTabs.map(runtime => {
   const target = runtime.session ?? runtime.descriptor;
@@ -51,7 +59,7 @@ function sessionStatus(runtime?: SessionTab, session?: SavedSession) {
   if (runtime.isLoading && runtime.isConnected) return { kind: 'working', label: 'Working' };
   if (runtime.unread) return { kind: 'unread', label: 'Unread reply' };
   if (!runtime.isConnected) return { kind: 'disconnected', label: 'Disconnected' };
-  return { kind: 'open', label: 'Open' };
+  return isPage.value ? null : { kind: 'open', label: 'Open' };
 }
 const rows = computed(() => {
   const savedRows = sessions.value.map(session => {
@@ -165,16 +173,16 @@ async function setArchived(session: SavedSession, archived: boolean) {
         :key="session.id"
         :data-session-id="session.id"
         class="session-row ui-action-group"
-        :class="{ active: runtime ? runtime.id === sessionStore.activeTabId : session.id === activeSessionId }"
+        :class="{ active: isSelected(session, runtime) }"
         :title="`${session.title}\n${session.agentName} · ${session.cwd || '—'}`"
       >
         <UiButton variant="row" class="session-open"
-          :aria-pressed="runtime ? runtime.id === sessionStore.activeTabId : session.id === activeSessionId"
+          :aria-pressed="isPage ? undefined : isSelected(session, runtime)"
           @click="openRow(session, runtime, transient)">
         <div class="row-content">
           <div class="row-heading">
             <span
-              v-if="runtime"
+              v-if="runtime && !isPage"
               class="row-open"
               title="Open in a tab"
               aria-hidden="true"
@@ -202,13 +210,16 @@ async function setArchived(session: SavedSession, archived: boolean) {
         ><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 111 8M4 4v6h6" /></svg></UiButton>
         <UiButton
           v-else
-          class="row-close" :reveal="!(runtime ? runtime.id === sessionStore.activeTabId : session.id === activeSessionId)"
+          class="row-close" :reveal="!isPage && !isSelected(session, runtime)"
           variant="ghost" icon size="xs"
-          :aria-label="transient ? 'Close session' : 'Archive session'"
-          :title="transient ? 'Close session' : 'Archive session (keep history)'"
+          :aria-label="transient ? (isPage ? 'Cancel session creation' : 'Close session') : 'Archive session'"
+          :title="transient ? (isPage ? 'Cancel session creation' : 'Close session') : 'Archive session (keep history)'"
           :disabled="actionBusy"
           @click.stop="transient && runtime ? sessionStore.closeTab(runtime.id) : setArchived(session, true)"
-        ><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 4l16 16M20 4L4 20" /></svg></UiButton>
+        >
+          <svg v-if="isPage && !transient" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true"><path d="M4 8v12h16V8M3 4h18v4H3zM9 12h6" /></svg>
+          <svg v-else viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 4l16 16M20 4L4 20" /></svg>
+        </UiButton>
       </li>
     </ul>
   </div>
