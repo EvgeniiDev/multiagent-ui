@@ -1,5 +1,6 @@
 """Static web bundle with explicit SPA entry routes; assets retain real 404s."""
 import os
+import re
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -12,6 +13,16 @@ class PanelHandler(SimpleHTTPRequestHandler):
         **SimpleHTTPRequestHandler.extensions_map,
         '.crt': 'application/x-x509-ca-cert',
     }
+
+    def end_headers(self):
+        path = urlsplit(self.path).path
+        if re.fullmatch(r'/assets/[^/]+-[A-Za-z0-9_-]{8,}\.(?:js|css|woff2?|png|svg|webp)', path):
+            self.send_header('Cache-Control', 'public, max-age=31536000, immutable')
+        else:
+            # Always revalidate the entry page, worker and unversioned files.
+            # Vite already gives JS/CSS content hashes; HTML selects the build.
+            self.send_header('Cache-Control', 'no-cache, max-age=0, must-revalidate')
+        super().end_headers()
 
     def do_GET(self):
         self.serve_route(super().do_GET)

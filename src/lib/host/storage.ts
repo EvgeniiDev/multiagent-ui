@@ -13,6 +13,8 @@
 // (`get`, `set`, `save`) so we can swap backends without touching call
 // sites in the session/preferences stores.
 
+import { mergeSessionInventory } from '../sessionInventory';
+
 import { isTauriHost } from '../platform';
 import { toSecureUrl } from './secure';
 
@@ -20,6 +22,8 @@ export interface KVStore {
   get<T>(key: string): Promise<T | null>;
   set(key: string, value: unknown): Promise<void>;
   save(): Promise<void>;
+  /** Observe adopted remote documents without reopening local tabs. */
+  subscribe?(listener: (data: Record<string, unknown>) => void): () => void;
   /** Present only on stores that own resources (the remote store's poll
    * timer). Called by the test teardown seam; production never does. */
   dispose?(): void;
@@ -146,6 +150,15 @@ class RemoteKVStore implements KVStore {
   private readonly base: string;
   private readonly storageKey: string;
   private data: Record<string, unknown> = {};
+  private baseline: Record<string, unknown> = {};
+  private listeners = new Set<(data: Record<string, unknown>) => void>();
+  subscribe(listener: (data: Record<string, unknown>) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+  private notify(): void {
+    for (const listener of this.listeners) listener(this.data);
+  }
   private rev = 0;
   private updatedAt = 0;   // server stamp of the doc we last adopted/wrote
   private touchedAt = 0;   // local clock of the newest `set()`
@@ -166,6 +179,7 @@ class RemoteKVStore implements KVStore {
       clearInterval(this.poll);
       this.poll = null;
     }
+    this.listeners.clear();
   }
 
   private constructor(name: string, base: string) {
@@ -268,6 +282,7 @@ class RemoteKVStore implements KVStore {
       );
       if (!res) this.unacknowledgedData.add(candidate);
       if (res?.ok) {
+        if (this.name === 'sessions.json') this.baseline = JSON.parse(snapshot);
         this.unacknowledgedData.clear();
         const r = res.body as {
           rev?: number;
@@ -286,12 +301,14 @@ class RemoteKVStore implements KVStore {
 
   private adopt(doc: RemoteDoc): void {
     this.data = doc.data;
+    if (this.name === 'sessions.json') this.baseline = JSON.parse(JSON.stringify(doc.data));
     this.rev = doc.rev;
     this.updatedAt = doc.updatedAt;
     this.touchedAt = doc.updatedAt;
     this.dirty = false;
     this.unacknowledgedData.clear();
     writeLocalData(this.storageKey, this.data);
+    this.notify();
   }
 
   // Push the local document. On a rev conflict the later `updatedAt` wins:
@@ -315,6 +332,12 @@ class RemoteKVStore implements KVStore {
         // latest snapshot against this exact revision, preserving CAS.
         this.rev = remote.rev;
         res = await this.putRemote();
+      } else if (this.name === 'sessions.json' && remote !== 'missing') {
+        this.data = mergeSessionInventory(this.baseline, this.data, remote.data);
+        this.rev = remote.rev;
+        res = await this.putRemote();
+        writeLocalData(this.storageKey, this.data);
+        this.notify();
       } else if (remote !== 'missing' && remote.updatedAt > this.touchedAt) {
         this.adopt(remote);
         return;

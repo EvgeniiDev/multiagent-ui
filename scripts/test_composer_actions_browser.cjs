@@ -46,7 +46,7 @@ assert.equal(await mic.getAttribute('aria-pressed'),'false','a short empty tap n
 const held=await voicePress(p,mic,{lock:false});
 assert.equal(await group.locator('button').count(),1,'held recording uses the single primary action');
 await p.waitForTimeout(1400);await held.release();
-await p.waitForFunction(n=>window.__session.activeRuntime.messages.some(m=>m.role==='user')&&document.querySelector('.chat-view:not([style*="display: none"]) textarea').value==='',{},{timeout:20000});
+await p.waitForFunction(n=>!window.__session.activeRuntime.isLoading&&window.__session.activeRuntime.messages.some(m=>m.role==='user')&&document.querySelector('.chat-view:not([style*="display: none"]) textarea').value==='',{},{timeout:20000});
 assert.equal(rpcCalls.filter(q=>q.method==='session/prompt').length,promptsBeforeVoice+1,'release sends exactly one voice message');
 await voicePress(p,mic);
 assert.equal(await mic.getAttribute('aria-label'),'Send voice message','upward swipe locks recording');

@@ -30,6 +30,22 @@ await p.waitForFunction(()=>!!document.querySelector('.chat-view:not([style*="di
 const first=await p.locator('.chat-view:visible .voice-commit').innerText();
 assert.equal(await mic.getAttribute('aria-pressed'),'true','first phrase arrives before Stop');
 assert.equal(await field.inputValue(),'До После','live speech overlay never overwrites typed draft');
+const cancel=p.getByRole('button',{name:'Cancel voice recording',exact:true});
+const cancelBox=await cancel.boundingBox(),fieldBox=await field.boundingBox();
+assert(cancelBox.y>=fieldBox.y+fieldBox.height,'cancel is in the toolbar, never over dictated text');
+if(width<800)assert(cancelBox.height>=44,'cancel has a touch-sized target');
+for(const colorScheme of ['light','dark']){
+  await p.emulateMedia({colorScheme});
+  assert(await cancel.evaluate(e=>getComputedStyle(e).borderTopStyle==='solid'),'cancel uses shared button styling');
+}
+await p.keyboard.press('Tab');await cancel.focus();
+assert(await cancel.evaluate(e=>e.matches(':focus-visible')&&getComputedStyle(e).outlineStyle==='solid'),'cancel has visible keyboard focus');
+for (let click=0;click<2;click++) {
+  if(width<800) await field.tap(); else await field.click();
+  assert.equal(await field.inputValue(),'До После','clicking the draft preserves typed text');
+  assert((await p.locator('.chat-view:visible .voice-commit').innerText()).startsWith(first),'clicking the draft preserves recognized text');
+  assert.equal(await mic.getAttribute('aria-pressed'),'true','clicking the draft keeps recording');
+}
 await field.fill('Ручное До После');await p.waitForTimeout(100);
 await p.waitForFunction(first=>document.querySelector('.chat-view:not([style*="display: none"]) .voice-commit')?.textContent.startsWith(first+' '),first,{timeout:25000});
 const committed=await p.locator('.chat-view:visible .voice-commit').innerText();assert(committed.length>first.length);
@@ -44,6 +60,27 @@ assert.equal(await p.locator('.chat-view:visible .voice-status.is-error').count(
 assert(requests.length>=2,'recognition starts during recording');assert(requests.every(r=>r.status===200));assert.deepEqual(errors,[]);
 const palette=await p.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue('--bg-main').trim());assert.equal(palette,'#202020');
 console.log(JSON.stringify({width,realStt:!!process.env.STT_REAL,requests,first,final,errors}));
+if(!process.env.STT_REAL) {
+  let releaseTail, pendingTail=0;
+  const gate=new Promise(resolve=>releaseTail=resolve);
+  await p.route('**/v1/audio/transcriptions',async r=>{pendingTail++;await gate;return r.fulfill({contentType:'text/plain',body:'Последний сегмент'});});
+  const beforeTail=await field.inputValue();
+  await voicePress(p,mic);
+  await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) .voice-btn.listening'));
+  for(let i=0;i<250&&!pendingTail;i++)await p.waitForTimeout(100);
+  assert(pendingTail,'last recognition request is pending');
+  await p.locator('.chat-view:visible .send-btn').click();
+  await p.waitForFunction(()=>document.querySelector('.chat-view:not([style*="display: none"]) .voice-btn.working'));
+  assert(await mic.isDisabled(),'final recognition disables the send button');
+  if(width<800)await field.tap();else await field.click();
+  releaseTail();
+  await p.waitForFunction(()=>!document.querySelector('.chat-view:not([style*="display: none"]) .voice-overlay'),{},{timeout:25000});
+  assert((await field.inputValue()).includes(beforeTail),'touching draft during final recognition must keep the existing draft');
+  assert((await field.inputValue()).includes('Последний сегмент'),'last segment finishes into the draft');
+  assert.equal(rpcCalls.filter(q=>q.method==='session/prompt').length,0,'editing while recognition finishes cancels pending send');
+  await p.unroute('**/v1/audio/transcriptions');
+  await p.route('**/v1/audio/transcriptions',r=>r.fulfill({contentType:'text/plain',body:'Фраза'}));
+}
 if(width===390&&!process.env.STT_REAL){
   const beforeFailure=await field.inputValue();let failureCalls=0,releaseFailure;const failureGate=new Promise(resolve=>releaseFailure=resolve);
   await p.route('**/v1/audio/transcriptions',async r=>{const call=++failureCalls;if(call>2)await failureGate;return r.fulfill({status:call<=2?200:503,contentType:'text/plain',body:call<=2?'Сохранённая фраза':'inference unavailable'});});

@@ -18,4 +18,12 @@ class Routes(unittest.TestCase):
  def test_assets_and_unknown_routes_are_not_rewritten(self):
   for path in ['/assets/missing.js','/unknown','/board/missing','/']:
    self.assertEqual(self.route(path),path)
+ def test_entry_and_worker_revalidate_but_hashed_assets_are_immutable(self):
+  from unittest.mock import patch
+  for path, expected in [('/chat','no-cache'),('/index.html','no-cache'),('/sw.js','no-cache'),('/manifest.webmanifest','no-cache'),('/assets/index-B1234567.js','immutable')]:
+   handler=object.__new__(module.PanelHandler);handler.path=path;headers={}
+   handler.send_header=lambda k,v:headers.__setitem__(k.lower(),v)
+   with patch.object(module.SimpleHTTPRequestHandler,'end_headers'):
+    handler.end_headers()
+   self.assertIn(expected,headers.get('cache-control',''),path)
 if __name__=='__main__':unittest.main()

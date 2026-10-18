@@ -112,12 +112,12 @@ onBeforeUnmount(clearTimer);
 
 <template>
   <div class="send-voice-control">
-    <div v-if="recording && (held || locked)" class="voice-gesture-hint" role="status">
+    <div v-if="recording && held" class="voice-gesture-hint" role="status">
       <span>{{ phase === 'connecting' ? 'Starting microphone…' : locked ? 'Recording locked · Tap to send' : '↑ Slide up to lock' }}</span>
-      <UiButton v-if="locked" variant="ghost" icon aria-label="Cancel voice recording" title="Cancel recording" @click.stop="emit('cancel-recording')">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
-      </UiButton>
     </div>
+    <UiButton v-if="recording && locked" variant="ghost" icon aria-label="Cancel voice recording" title="Cancel recording" @click.stop="emit('cancel-recording')">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+    </UiButton>
     <UiButton
       icon
       class="voice-btn composer-primary"
@@ -145,11 +145,11 @@ onBeforeUnmount(clearTimer);
 </template>
 
 <style scoped>
-.send-voice-control { position: relative; flex: 0 0 auto; }
+.send-voice-control { position: relative; flex: 0 0 auto; display: flex; align-items: center; gap: 0.375rem; }
 .voice-btn { position: relative; touch-action: none; user-select: none; -webkit-touch-callout: none; }
 .voice-btn svg { display: block; }
 .voice-dot { position: absolute; top: 4px; right: 4px; width: 5px; height: 5px; border-radius: 50%; background: var(--bg-danger); animation: voice-blink 1.2s steps(1) infinite; }
-.voice-gesture-hint { position: absolute; bottom: calc(100% + 0.5rem); right: 0; z-index: 10; display: flex; align-items: center; gap: 0.375rem; width: max-content; max-width: min(240px, calc(100vw - 32px)); padding: 0.375rem 0.5rem; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-sidebar); color: var(--text-primary); font-size: 0.75rem; line-height: 1.4; }
+.voice-gesture-hint { pointer-events: none; position: absolute; bottom: calc(100% + 0.5rem); right: 0; z-index: 10; display: flex; align-items: center; gap: 0.375rem; width: max-content; max-width: min(240px, calc(100vw - 32px)); padding: 0.375rem 0.5rem; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-sidebar); color: var(--text-primary); font-size: 0.75rem; line-height: 1.4; }
 @keyframes voice-blink { 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) { .voice-dot { animation: none; } }
 </style>

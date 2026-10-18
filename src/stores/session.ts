@@ -481,6 +481,12 @@ export const useSessionStore = defineStore('session', () => {
   // Initialize store
   async function initStore() {
     store = await loadKvStore(STORE_PATH);
+    // The shared KV poll must update the visible inventory too. Do not adopt
+    // another device's open tabs or reconnect its chats on this device.
+    store.subscribe?.((data) => {
+      if (Array.isArray(data.sessions)) savedSessions.value = data.sessions as SavedSession[];
+      if (Array.isArray(data.dismissedSessions)) dismissedSessions = data.dismissedSessions as string[];
+    });
     const saved = await store.get<SavedSession[]>('sessions');
     if (saved) {
       savedSessions.value = saved;

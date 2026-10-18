@@ -777,10 +777,18 @@ onBeforeUnmount(() => {
   }
 });
 
+// Editing while a final voice segment is pending keeps the finished text as
+// a draft. The recognition request continues; only the queued send is revoked.
+let sendIntent = 0;
+function keepDictationDraft() {
+  if (preparingSend.value) sendIntent++;
+}
+
 async function handleSend() {
   if (preparingSend.value) return;
   if (!inputText.value.trim() && attachments.value.length === 0 && !voiceActive.value) return;
 
+  const intent = ++sendIntent;
   preparingSend.value = true;
   let text: string;
   let files: Attachment[];
@@ -790,7 +798,7 @@ async function handleSend() {
     if (voiceActive.value) {
       await voiceInputRef.value?.finish();
       // Keep a visibly incomplete dictation for review instead of sending it.
-      if (voiceError.value) return;
+      if (voiceError.value || intent !== sendIntent) return;
     }
     if (!isConnected.value || isReconnecting.value) return;
     text = inputText.value.trim();
@@ -1294,6 +1302,8 @@ function planGlyph(status: string): string {
             <textarea class="ui-input ui-input--composer"
               ref="composerEl"
               v-model="inputText"
+              @pointerdown="keepDictationDraft"
+              @input="keepDictationDraft"
               :class="{ 'voice-ghost': voiceActive }"
               :placeholder="composerPlaceholder"
               :disabled="isReconnecting || !isConnected"
