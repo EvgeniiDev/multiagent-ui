@@ -361,7 +361,11 @@ ul {
   letter-spacing: -0.005em;
   line-height: 1.2;
   color: var(--text-primary, #2b2723);
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  white-space: normal;
+  overflow-wrap: anywhere;
   overflow: hidden;
   text-overflow: ellipsis;
 }
