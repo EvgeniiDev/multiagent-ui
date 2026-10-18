@@ -11,6 +11,7 @@ import { steeringDelivery } from '../src/lib/steeringDelivery.ts';
 
 let client, entries, cached, cacheWrites, sharedReader, notifications;
 let seq = 0;
+let canonicalStatuses = null;
 globalThis.__replayRuntimeDeps = {
   HISTORY_TAIL_MESSAGES,
   ref: vue.ref, computed: vue.computed, watch: vue.watch, markPromptRecorded, createPromptOutbox, steeringDelivery,
@@ -20,7 +21,10 @@ globalThis.__replayRuntimeDeps = {
   getTransportKind: () => 'websocket',
   isDesktop: () => false,
   useConfigStore: () => ({ getAgent: () => ({ transport: 'websocket' }) }),
-  useSessionStatusStore: () => ({ forSession: () => undefined, record() {} }),
+  useSessionStatusStore: () => ({
+    forSession: (agent, id) => canonicalStatuses?.value[`${agent}:${id}`],
+    record(session, status) { if (canonicalStatuses) canonicalStatuses.value = { ...canonicalStatuses.value, [`${session.agentName}:${session.sessionId}`]: { status, at: Date.now() } }; },
+  }),
   useActivityStore: () => ({ recordEntry: entry => entries.push(entry), recordUsage() {} }),
   createAcpClient: async () => client,
   AcpClientBridge: class {},
@@ -57,6 +61,7 @@ function live() {
   assert.deepEqual(entries.filter(e => e.kind === 'tool-call' || e.kind === 'sync').map(e => e.title), ['new search', 'new title']);
 }
 beforeEach(() => {
+  canonicalStatuses = null;
   notifications = 0; entries = []; cached = null; cacheWrites = []; sharedReader = async () => null;
   client = {
     pendingPermissionRequest: vue.ref(null),
@@ -407,3 +412,22 @@ test('retained replay materializes update-only tools instead of matching the old
     assert.equal(rt.messages.value.at(-1).toolCalls[0].status, 'completed');
   } finally { await rt.close(); }
 });
+
+for (const update of [
+  { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'still working' } },
+  { sessionUpdate: 'tool_call', toolCallId: 'new-work', title: 'execute', kind: 'execute', status: 'pending' },
+  { sessionUpdate: 'tool_call_update', toolCallId: 'new-work', status: 'in_progress' },
+  { sessionUpdate: 'plan', entries: [{ content: 'work', priority: 'high', status: 'in_progress' }] },
+]) {
+  test(`live ${update.sessionUpdate} clears canonical completion after reconnect, replay does not`, async () => {
+    canonicalStatuses = vue.ref({ [`${saved.agentName}:${saved.sessionId}`]: { status: 'completed', at: 1 } });
+    const rt = createSessionRuntime(deps);
+    try {
+      await rt.resume({ ...saved, lastTurnStatus: 'completed' });
+      assert.equal(rt.turnCompleted.value, true, 'history replay must retain the confirmed result');
+      emit(update);
+      assert.equal(rt.turnCompleted.value, false, 'live work must invalidate canonical completion');
+      assert.equal(canonicalStatuses.value[`${saved.agentName}:${saved.sessionId}`].status, null, 'reset must survive reload');
+    } finally { await rt.close(); }
+  });
+}

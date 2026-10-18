@@ -157,7 +157,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     const target = session.value ?? descriptor.value;
     if (!target) return;
     target.lastTurnStatus = status;
-    if (status !== 'output' && status !== undefined) statusStore.record(target, status);
+    if (status !== undefined) statusStore.record(target, status === 'output' ? null : status);
     void deps.persistSessions();
   }
   let promptGeneration = 0;
@@ -879,11 +879,14 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     }
 
     if (!loadingHistory) deps.notifyActivity(runtimeApi);
-    // Reading live output clears unread, but must leave a visible receipt.
+    // Live work after reconnect invalidates the previous result in both stores.
     // Replay never invents a result; only a prompt response confirms completion.
     if (!loadingHistory && inFlightPrompts === 0) {
       if (update.sessionUpdate === 'user_message_chunk' && turnStatus.value !== null) setTurnStatus(null);
-      else if (update.sessionUpdate === 'agent_message_chunk' && turnStatus.value !== 'output') setTurnStatus('output');
+      else if ((update.sessionUpdate === 'agent_message_chunk'
+          || update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update'
+          || update.sessionUpdate === 'plan')
+          && turnStatus.value !== null && turnStatus.value !== 'output') setTurnStatus('output');
     }
     // Replayed history and service notifications must not reorder the list.
     if (!loadingHistory && (update.sessionUpdate === 'agent_message_chunk'

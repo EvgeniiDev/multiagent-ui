@@ -56,12 +56,13 @@ const assert = require('node:assert/strict');
     if (u.pathname.startsWith('/api/state/')) return route.fulfill({ response: await route.fetch({ url: stateBase + u.pathname }) });
     return route.fulfill({ json: { root: '/tmp', dirs: [], projects: [], cards: [], usage: [], sources: [] } });
    });
-   let pending;
+   let pending, liveSocket;
    await context.routeWebSocket(/wss?:\/\//, ws => ws.onMessage(message => {
     const q = JSON.parse(String(message)); if (!q.method || q.id == null) return;
     if (q.method === 'session/prompt') { pending = { ws, q }; return; }
     let result = {};
     if (q.method === 'initialize') result = { protocolVersion: 1, agentCapabilities: { loadSession: true }, authMethods: [] };
+    if (q.method === 'session/load') liveSocket = ws;
     if (q.method === 'session/load') ws.send(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'remote', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Existing transcript' } } } }));
     ws.send(JSON.stringify({ jsonrpc: '2.0', id: q.id, result }));
     if (q.method === 'session/load') setTimeout(() => ws.send(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'remote', update: { sessionUpdate: 'available_commands_update', availableCommands: [] } } })), 40);
@@ -90,6 +91,16 @@ const assert = require('node:assert/strict');
    assert.equal(await page.locator('[title="Unread reply"]').count(), 0);
    const durable = await read('session-statuses.json');
    assert.equal(durable.data.statuses[JSON.stringify(['E2E', 'remote'])].status, 'completed');
+   liveSocket.send(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'remote', update: { sessionUpdate: 'tool_call', toolCallId: 'continued-work', title: 'Working after reconnect', kind: 'execute', status: 'in_progress' } } }));
+   await page.waitForFunction(() => window.__session.activeRuntime.turnCompleted === false);
+   assert.equal(await row.locator('.row-status.completed').count(), 0);
+   assert.equal(await page.locator('.tab-completed').count(), 0);
+   await page.waitForTimeout(300);
+   const live = await read('session-statuses.json');
+   assert.equal(live.data.statuses[JSON.stringify(['E2E', 'remote'])].status, null);
+   await page.reload({ waitUntil: 'domcontentloaded' });
+   await page.waitForFunction(() => window.__session?.activeRuntime?.isConnected);
+   assert.equal(await page.evaluate(() => window.__session.activeRuntime.turnCompleted), false, 'live reset survives reload');
    await put('session-statuses.json', { statuses: { [JSON.stringify(['E2E', 'remote'])]: { status: 'cancelled', at: 1 } } });
    await page.evaluate(() => localStorage.clear());
    await page.reload({ waitUntil: 'domcontentloaded' });
@@ -104,7 +115,7 @@ const assert = require('node:assert/strict');
    assert.equal(recovered.data.statuses[JSON.stringify(['E2E', 'remote'])].status, 'completed');
 
    assert.deepEqual(errors, []);
-   console.log(`PASS ${width}px: real state HTTP/CAS, completed survives stale inventory and reload, no unread status`);
+   console.log(`PASS ${width}px: real state HTTP/CAS, completion survives reload, live work clears completion durably, no unread status`);
    await context.unrouteAll({ behavior: 'ignoreErrors' });
    await context.close();
   }
