@@ -104,10 +104,12 @@ export function createChatSessionStatusReader({ bridges = BRIDGES, fetcher = fet
     ]);
     // Old native starts cannot establish that a process is still alive.
     // Only the live bridge may report Working; history can recover results.
+    const activity = Object.fromEntries(Object.entries(historical.statuses).map(([key, row]) => [key, { at: row.at }]));
     const statuses = Object.fromEntries(Object.entries(historical.statuses).filter(([, row]) => row.status !== 'working'));
     for (const snapshot of live) for (const [key, row] of Object.entries(snapshot)) {
       if (!statuses[key] || row.at >= statuses[key].at) statuses[key] = row;
+      if (!activity[key] || row.at >= activity[key].at) activity[key] = { at: row.at };
     }
-    return { statuses };
+    return { statuses, activity };
   };
 }

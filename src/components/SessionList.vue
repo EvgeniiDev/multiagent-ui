@@ -166,13 +166,13 @@ async function setArchived(session: SavedSession, archived: boolean) {
     </div>
 
     <div v-if="actionError" class="sync-note error" role="alert">{{ actionError }}</div>
-    <div v-if="syncError" class="sync-note error" :title="syncError">Couldn&rsquo;t load agent sessions</div>
+    <div v-if="syncError" class="sync-note error" role="alert">{{ syncError }}</div>
     <div v-else-if="sessionStore.sessionListUnsupported" class="sync-note">
       None of the configured agents can list sessions.
     </div>
 
     <div v-if="rows.length === 0" class="empty-state">
-      {{ showArchived ? 'No archived sessions.' : 'No sessions yet — start a new session.' }}
+      {{ sessionStore.inventoryError ? 'Session list is unavailable.' : showArchived ? 'No archived sessions.' : 'No sessions yet — start a new session.' }}
     </div>
 
     <ul v-else>
@@ -207,7 +207,7 @@ async function setArchived(session: SavedSession, archived: boolean) {
               title="Not inside any registered project"
             >unassigned</span>
             <span v-if="status" class="row-status" :class="status.kind" :title="status.detail || status.label">{{ status.label }}</span>
-            <span class="row-stamp">{{ formatStamp(session.lastUpdated) }}</span>
+            <span class="row-stamp">{{ formatStamp(sessionStore.activityAt(session)) }}</span>
           </div>
         </div>
         </UiButton>

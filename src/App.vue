@@ -177,6 +177,7 @@ function scheduleReconnect() {
     // Skip if the browser still thinks we're offline; we'll be re-triggered
     // by the `online` event when connectivity returns.
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    void sessionStore.refreshSharedSessions();
     void sessionStore.tryReconnect();
   }, 250);
 }
@@ -194,7 +195,7 @@ const isConnected = computed(() => sessionStore.isConnected);
 const isLoading = computed(() => sessionStore.isLoading);
 const isConnecting = computed(() => sessionStore.isConnecting);
 const isReconnecting = computed(() => sessionStore.isReconnecting);
-const error = computed(() => sessionStore.error || configStore.error);
+const error = computed(() => sessionStore.inventoryError || sessionStore.error || configStore.error);
 const hasAgents = computed(() => configStore.hasAgents);
 
 // Name of the agent the reconnect banner refers to. Falls back to the
@@ -414,6 +415,7 @@ const drawerSwipe = createDrawerSwipe({
 
 async function openDrawer() {
   showSidebar.value = true;
+  void sessionStore.refreshSharedSessions();
   await nextTick();
   document.getElementById('app-sidebar')?.querySelector<HTMLButtonElement>('[aria-label="Collapse sidebar"]')?.focus();
 }

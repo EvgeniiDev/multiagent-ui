@@ -1,3 +1,5 @@
+import type { SavedSession } from './types';
+
 type Doc = Record<string, unknown>;
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 const rows = (value: unknown): Doc[] => Array.isArray(value) ? value : [];
@@ -27,4 +29,25 @@ export function mergeSessionInventory(base: Doc, local: Doc, remote: Doc): Doc {
   }
   result.sessions = [...merged.values()];
   return result;
+}
+
+/** Reuse rows held by live runtimes when a newer server directory arrives. */
+export function adoptSessionInventory(current: SavedSession[], incoming: SavedSession[]): SavedSession[] {
+  const known = new Map(current.map(row => [key(row as unknown as Doc), row]));
+  return incoming.map(row => {
+    const existing = known.get(key(row as unknown as Doc));
+    if (!existing) return row;
+    const lastMessageAt = Math.max(existing.lastMessageAt ?? 0, row.lastMessageAt ?? 0);
+    for (const field of Object.keys(existing) as (keyof SavedSession)[]) {
+      if (!(field in row)) delete existing[field];
+    }
+    Object.assign(existing, row);
+    if (lastMessageAt) existing.lastMessageAt = lastMessageAt;
+    return existing;
+  });
+}
+
+/** File/metadata writes are not conversation activity. */
+export function sessionActivityTime(session: SavedSession, remote?: { at: number }): number {
+  return Math.max(session.lastMessageAt ?? 0, remote?.at ?? session.lastMessageAt ?? session.lastUpdated);
 }

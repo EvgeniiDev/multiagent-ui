@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { shallowRef, onScopeDispose } from 'vue';
-import { loadKvStore, mutateRemoteDoc, probeStateServer, stateServerBase, type KVStore } from '../lib/host/storage';
+import { loadKvStore, mutateRemoteDoc, probeStateServer, stateHttpBase, type KVStore } from '../lib/host/storage';
 import { isTauriHost } from '../lib/platform';
 import type { SavedSession } from '../lib/types';
 import type { ActivityEntry } from './activity';
@@ -48,6 +48,7 @@ export function sessionStatusesFromActivity(entries: ActivityEntry[]): Records {
 export const useSessionStatusStore = defineStore('session-status', () => {
   const records = shallowRef<Records>({});
   const nativeRecords = shallowRef<Records>({});
+  const activityRecords = shallowRef<Record<string, { at: number }>>({});
   const remoteEvidence = shallowRef<Record<string, SessionStatusSnapshot & { readVersion: number }>>({});
   let nativeRead: Promise<void> | null = null;
   let readVersion = 0;
@@ -96,18 +97,28 @@ export const useSessionStatusStore = defineStore('session-status', () => {
     void flush();
   }
 
+  function activityForSession(agent: string, sessionId: string) { return activityRecords.value[keyFor(agent, sessionId)]; }
+
   function remoteReadVersion() { return readVersion; }
   function remoteForSession(agent: string, sessionId: string) { return remoteEvidence.value[keyFor(agent, sessionId)]; }
 
   function syncNative(): Promise<void> {
-    if (!remote) return Promise.resolve();
+    // Reading server activity must recover even if the initial health probe failed.
+    if (isTauriHost()) return Promise.resolve();
     if (nativeRead) return nativeRead;
     const version = ++readVersion;
     nativeRead = (async () => {
       try {
-        const response = await fetch(`${stateServerBase()}/api/chat-session-statuses`, { signal: AbortSignal.timeout(5000) });
+        const response = await fetch(`${stateHttpBase()}/api/chat-session-statuses`, { signal: AbortSignal.timeout(5000) });
         if (!response.ok) return;
-        const evidence = mergeSessionStatuses((await response.json()).statuses);
+        const payload = await response.json();
+        const evidence = mergeSessionStatuses(payload.statuses);
+        const activity: Record<string, { at: number }> = { ...evidence };
+        for (const [key, value] of Object.entries(payload.activity ?? {})) {
+          const row = value as { at?: number } | null;
+          if (row && typeof row.at === 'number' && Number.isFinite(row.at) && row.at > (activity[key]?.at ?? 0)) activity[key] = { at: row.at };
+        }
+        activityRecords.value = activity;
         remoteEvidence.value = Object.fromEntries(Object.entries(evidence).map(([key, row]) => [key, { ...row, readVersion: version }]));
         const next: Records = {};
         for (const [key, row] of Object.entries(evidence)) {
@@ -156,5 +167,5 @@ export const useSessionStatusStore = defineStore('session-status', () => {
     if (typeof window !== 'undefined' && !timer) timer = setInterval(() => void sync(), 5000);
   }
   onScopeDispose(() => { if (timer) clearInterval(timer); });
-  return { forSession, remoteForSession, remoteReadVersion, refresh: syncNative, record, init, flush };
+  return { forSession, activityForSession, remoteForSession, remoteReadVersion, refresh: syncNative, record, init, flush };
 });

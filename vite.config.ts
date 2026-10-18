@@ -70,6 +70,8 @@ export default defineConfig(async ({ mode }) => {
           // proxies / Dev Tunnels without the strict-port behaviour Tauri
           // requires.
           port: 5173,
+          // Preview inherits these rules too; match the production web proxy.
+          proxy: { '/health': 'http://127.0.0.1:25900', '/api/': 'http://127.0.0.1:25900' },
         }
       : {
           port: 1420,

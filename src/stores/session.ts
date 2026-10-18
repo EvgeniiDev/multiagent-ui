@@ -7,6 +7,8 @@ import { defineStore } from 'pinia';
 import { ref, computed, watch, onScopeDispose } from 'vue';
 import { loadKvStore, type KVStore } from '../lib/host/storage';
 import { uuid } from '../lib/uuid';
+import { adoptSessionInventory, sessionActivityTime } from '../lib/sessionInventory';
+import { useSessionStatusStore } from './sessionStatus';
 import type { SavedSession, AgentConfig } from '../lib/types';
 import { loadAttachmentHistory, forgetSessionAttachments } from '../lib/attachmentHistory';
 import { evictHistoryCaches } from '../lib/historyCache';
@@ -72,6 +74,7 @@ export const useSessionStore = defineStore('session', () => {
   // merged — there is no per-agent scope any more.
   const isSyncingSessions = ref(false);
   const syncError = ref<string | null>(null);
+  const inventoryError = ref<string | null>(null);
   /**
    * Agents that answered initialize without the `session/list` capability.
    * Tracked per agent — a merged list can't carry one global flag. Known only
@@ -485,9 +488,10 @@ export const useSessionStore = defineStore('session', () => {
     // The shared KV poll must update the visible inventory too. Do not adopt
     // another device's open tabs or reconnect its chats on this device.
     store.subscribe?.((data) => {
-      if (Array.isArray(data.sessions)) savedSessions.value = data.sessions as SavedSession[];
+      if (Array.isArray(data.sessions)) savedSessions.value = adoptSessionInventory(savedSessions.value, data.sessions as SavedSession[]);
       if (Array.isArray(data.dismissedSessions)) dismissedSessions = data.dismissedSessions as string[];
     });
+    store.subscribeError?.(error => { inventoryError.value = error; });
     const saved = await store.get<SavedSession[]>('sessions');
     if (saved) {
       savedSessions.value = saved;
@@ -578,6 +582,11 @@ export const useSessionStore = defineStore('session', () => {
       toOpen.map(({ saved }) => runtimes.get(sessionKey(saved.agentName, saved.sessionId))!.resume(saved))
     );
     void saveSessionsToStore();
+  }
+
+  async function refreshSharedSessions(): Promise<void> {
+    await Promise.all([store?.refresh?.(), useSessionStatusStore().refresh()]);
+    updateSessionOrder();
   }
 
   async function saveSessionsToStore() {
@@ -722,16 +731,21 @@ export const useSessionStore = defineStore('session', () => {
   const sessionOrder = ref(new Map<string, number>());
   let lastSortAt = -Infinity;
   let sortTimer: ReturnType<typeof setTimeout> | null = null;
+  function activityAt(session: SavedSession): number {
+    return sessionActivityTime(session, useSessionStatusStore().activityForSession(session.agentName, session.sessionId));
+  }
   function updateSessionOrder() {
+    if (sortTimer !== null) clearTimeout(sortTimer);
     sortTimer = null;
     lastSortAt = performance.now();
     sessionOrder.value = new Map(
       [...savedSessions.value]
-        .sort((a, b) => b.lastUpdated - a.lastUpdated)
+        .sort((a, b) => activityAt(b) - activityAt(a))
         .map((session, index) => [session.id, index] as const)
     );
   }
-  watch(() => savedSessions.value.map(s => [s.id, s.lastUpdated] as const), () => {
+  watch(() => savedSessions.value.map(s => [s.id, activityAt(s)] as const), (next, previous) => {
+    if (previous && next.length === previous.length && next.every(([id, at], i) => id === previous[i][0] && at === previous[i][1])) return;
     if (sessionOrder.value.size === 0) {
       updateSessionOrder();
       return;
@@ -837,7 +851,10 @@ export const useSessionStore = defineStore('session', () => {
     startupElapsed,
     supportsImages,
     isSyncingSessions,
-    syncError,
+    syncError: computed(() => inventoryError.value || syncError.value),
+    inventoryError,
+    activityAt,
+    refreshSharedSessions,
     sessionListUnsupported,
     lastAgentName,
     historyCacheNote,

@@ -24,6 +24,8 @@ export interface KVStore {
   save(): Promise<void>;
   /** Observe adopted remote documents without reopening local tabs. */
   subscribe?(listener: (data: Record<string, unknown>) => void): () => void;
+  subscribeError?(listener: (error: string | null) => void): () => void;
+  refresh?(): Promise<void>;
   /** Present only on stores that own resources (the remote store's poll
    * timer). Called by the test teardown seam; production never does. */
   dispose?(): void;
@@ -105,6 +107,12 @@ export function stateServerBase(): string {
   return toSecureUrl(`http://${hostname}:${STATE_SERVER_PORT}`);
 }
 
+/** HTTP state reads use the panel's proxy; bridge WebSockets keep their own base. */
+export function stateHttpBase(): string {
+  if (!import.meta.env?.VITE_STATE_URL && typeof location !== 'undefined' && /^https?:$/.test(location.protocol)) return location.origin;
+  return stateServerBase();
+}
+
 // The probe is session-scoped: one answer decides the backend for every
 // `loadKvStore` call on this page — no re-probing per store.
 let healthProbe: Promise<boolean> | null = null;
@@ -114,7 +122,7 @@ export function probeStateServer(): Promise<boolean> {
     healthProbe = (async () => {
       try {
         const res = await requestRemoteJson(
-          `${stateServerBase()}/health`, {}, HEALTH_TIMEOUT_MS,
+          `${stateHttpBase()}/health`, {}, HEALTH_TIMEOUT_MS,
         );
         if (!res?.ok) return false;
         const body = res.body as { ok?: boolean } | null;
@@ -159,6 +167,25 @@ class RemoteKVStore implements KVStore {
   private notify(): void {
     for (const listener of this.listeners) listener(this.data);
   }
+  private errorListeners = new Set<(error: string | null) => void>();
+  private get syncError(): string | null {
+    return this.down ? 'Cannot reach the session server. Retrying…' : null;
+  }
+  subscribeError(listener: (error: string | null) => void): () => void {
+    this.errorListeners.add(listener);
+    listener(this.syncError);
+    return () => { this.errorListeners.delete(listener); };
+  }
+  private setUnavailable(unavailable: boolean): void {
+    if (this.down === unavailable) return;
+    this.down = unavailable;
+    for (const listener of this.errorListeners) listener(this.syncError);
+  }
+  private mirror(): void {
+    // The web session directory comes from the server, never browser storage.
+    if (this.name !== 'sessions.json') writeLocalData(this.storageKey, this.data);
+  }
+  async refresh(): Promise<void> { await this.reload(); }
   private rev = 0;
   private updatedAt = 0;   // server stamp of the doc we last adopted/wrote
   private touchedAt = 0;   // local clock of the newest `set()`
@@ -167,7 +194,7 @@ class RemoteKVStore implements KVStore {
   // Expected revision + snapshot for writes whose response was lost. Clear
   // only after an acknowledged write or adoption of authoritative state.
   private readonly unacknowledgedData = new Set<string>();
-  private down = false;    // server unreachable — localStorage-only mode
+  private down = false;    // last remote operation failed
   private queue: Promise<unknown> = Promise.resolve();
   private poll: ReturnType<typeof setInterval> | null = null;
 
@@ -180,6 +207,7 @@ class RemoteKVStore implements KVStore {
       this.poll = null;
     }
     this.listeners.clear();
+    this.errorListeners.clear();
   }
 
   private constructor(name: string, base: string) {
@@ -194,12 +222,12 @@ class RemoteKVStore implements KVStore {
     if (remote === 'error') {
       // The server died between the health probe and the first read —
       // start from the localStorage copy; the poll re-syncs on recovery.
-      store.down = true;
-      store.data = readLocalData(store.storageKey);
+      store.setUnavailable(true);
+      if (name !== 'sessions.json') store.data = readLocalData(store.storageKey);
     } else if (remote === 'missing') {
       // Migration: nothing on the server yet but the browser may hold a
       // document — push it up so no device loses its state.
-      store.data = readLocalData(store.storageKey);
+      if (name !== 'sessions.json') store.data = readLocalData(store.storageKey);
       if (Object.keys(store.data).length > 0) {
         store.dirty = true;
         store.touchedAt = Date.now();
@@ -224,9 +252,9 @@ class RemoteKVStore implements KVStore {
   }
 
   async save(): Promise<void> {
-    // The mirror is always written first: if the server is gone the edits
-    // still survive a reload, and the next poll ships them.
-    writeLocalData(this.storageKey, this.data);
+    // Other documents retain their offline mirror; the session directory
+    // stays server-backed and retries pending edits in memory.
+    this.mirror();
     await this.enqueue(() => this.push());
   }
 
@@ -306,8 +334,9 @@ class RemoteKVStore implements KVStore {
     this.updatedAt = doc.updatedAt;
     this.touchedAt = doc.updatedAt;
     this.dirty = false;
+    this.setUnavailable(false);
     this.unacknowledgedData.clear();
-    writeLocalData(this.storageKey, this.data);
+    this.mirror();
     this.notify();
   }
 
@@ -323,7 +352,7 @@ class RemoteKVStore implements KVStore {
     if (res === 'conflict') {
       const remote = await this.fetchDoc();
       if (remote === 'error') {
-        this.down = true;
+        this.setUnavailable(true);
         return;
       }
       if (remote !== 'missing' && this.unacknowledgedData.has(`${remote.rev}:${JSON.stringify(remote.data)}`)) {
@@ -336,7 +365,7 @@ class RemoteKVStore implements KVStore {
         this.data = mergeSessionInventory(this.baseline, this.data, remote.data);
         this.rev = remote.rev;
         res = await this.putRemote();
-        writeLocalData(this.storageKey, this.data);
+        this.mirror();
         this.notify();
       } else if (remote !== 'missing' && remote.updatedAt > this.touchedAt) {
         this.adopt(remote);
@@ -347,12 +376,12 @@ class RemoteKVStore implements KVStore {
       }
     }
     if (res === 'ok') {
-      this.down = false;
+      this.setUnavailable(false);
       // Compare the acknowledged snapshot, including edits made in the same
       // millisecond while the PUT was pending. Timestamps cannot prove this.
       if (JSON.stringify(this.data) === this.lastAttemptedData) this.dirty = false;
     } else if (res === 'error') {
-      this.down = true;
+      this.setUnavailable(true);
     }
   }
 
@@ -362,10 +391,10 @@ class RemoteKVStore implements KVStore {
     await this.enqueue(async () => {
       const remote = await this.fetchDoc();
       if (remote === 'error') {
-        this.down = true;
+        this.setUnavailable(true);
         return;
       }
-      this.down = false;
+      this.setUnavailable(false);
       if (this.dirty) {
         // Push unconditionally — the conflict path inside push() resolves
         // a newer remote by adopting it (or retries with CAS when the local edit
@@ -375,7 +404,7 @@ class RemoteKVStore implements KVStore {
         await this.push();
         return;
       }
-      if (remote !== 'missing' && remote.updatedAt > this.updatedAt) {
+      if (remote !== 'missing' && (this.name === 'sessions.json' ? remote.rev !== this.rev : remote.updatedAt > this.updatedAt)) {
         this.adopt(remote);
       }
     });
@@ -396,7 +425,7 @@ export async function mutateRemoteDoc(
   tries = 6,
 ): Promise<boolean> {
   if (isTauriHost() || !(await probeStateServer())) return false;
-  const base = stateServerBase();
+  const base = stateHttpBase();
   const url = `${base}/api/state/${encodeURIComponent(name)}`;
   for (let i = 0; i < tries; i++) {
     let data: Record<string, unknown> = {};
@@ -457,7 +486,7 @@ async function requestRemoteJson(
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
   try {
-    const res = await fetch(url, { ...init, signal: ctrl.signal });
+    const res = await fetch(url, { ...init, cache: 'no-store', signal: ctrl.signal });
     const body = await res.json().catch(() => null);
     // json() also rejects on abort; its parse-error fallback must not turn
     // a timed-out HTTP 200 into a successfully acknowledged write.
@@ -478,7 +507,7 @@ export async function fetchRemoteDoc(
   name: string,
 ): Promise<RemoteDoc | 'missing' | 'error'> {
   if (isTauriHost() || !(await probeStateServer())) return 'error';
-  const base = stateServerBase();
+  const base = stateHttpBase();
   const url = `${base}/api/state/${encodeURIComponent(name)}`;
   const r = await requestRemoteJson(url, {}, REQUEST_TIMEOUT_MS);
   if (!r) return 'error';
@@ -524,7 +553,7 @@ export async function mutateRemoteDocChecked(
   if (isTauriHost() || !(await probeStateServer())) {
     return { ok: false, reason: 'unavailable', error: 'state server unreachable' };
   }
-  const base = stateServerBase();
+  const base = stateHttpBase();
   const url = `${base}/api/state/${encodeURIComponent(name)}`;
   let lastRev: number | null = null;
   for (let i = 0; i < tries; i++) {
@@ -636,8 +665,8 @@ export async function loadKvStore(name: string): Promise<KVStore> {
   let pending = webStores.get(name);
   if (!pending) {
     pending = (async (): Promise<KVStore> =>
-      (await probeStateServer())
-        ? RemoteKVStore.open(name, stateServerBase())
+      (name === 'sessions.json' || await probeStateServer())
+        ? RemoteKVStore.open(name, stateHttpBase())
         : new WebKVStore(name))();
     webStores.set(name, pending);
   }

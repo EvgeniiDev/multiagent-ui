@@ -53,3 +53,82 @@ test('a remote deletion is not resurrected by saving unchanged local metadata',a
  const original={sessions:[session('old')]};
  assert.deepEqual(mergeSessionInventory(original,original,{sessions:[]}).sessions,[]);
 });
+
+test('session inventory ignores a failed health probe and reads the server instead of stale browser data', async () => {
+ const server=backend(), originalLocal=globalThis.localStorage;
+ globalThis.localStorage={getItem:()=>JSON.stringify({sessions:[session('stale-phone')]}),setItem:()=>{}};
+ const fetcher=globalThis.fetch;
+ globalThis.fetch=(url,init)=>String(url).endsWith('/health')?Promise.reject(new Error('temporary health failure')):fetcher(url,init);
+ try {
+  const store=await loadKvStore('sessions.json');
+  assert.deepEqual((await store.get('sessions')).map(s=>s.id),['old']);
+  server.add('desktop'); await poll(); await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal((await store.get('sessions')).length,2);
+ } finally {globalThis.localStorage=originalLocal;}
+});
+test('unavailable session inventory does not display a stale browser copy and recovers without reload',async()=>{
+ const server=backend(),originalLocal=globalThis.localStorage,fetcher=globalThis.fetch;
+ globalThis.localStorage={getItem:()=>JSON.stringify({sessions:[session('stale-phone')]}),setItem:()=>{}};
+ let down=true;
+ globalThis.fetch=(url,init)=>down&&!String(url).endsWith('/health')?Promise.reject(new Error('offline')):fetcher(url,init);
+ try {
+  const store=await loadKvStore('sessions.json');
+  assert.equal(await store.get('sessions'),null);
+  down=false;server.add('desktop');await poll();await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal((await store.get('sessions')).length,2);
+ }finally{globalThis.localStorage=originalLocal;}
+});
+test('missing server inventory never migrates an old browser list back to the server',async()=>{
+ const originalLocal=globalThis.localStorage;
+ globalThis.localStorage={getItem:()=>JSON.stringify({sessions:[session('stale-phone')]}),setItem:()=>{}};
+ let writes=0;
+ globalThis.fetch=async(url,init={})=>{
+  if(String(url).endsWith('/health'))return Response.json({ok:true});
+  if(init.method==='PUT'){writes++;return Response.json({rev:1,updatedAt:1});}
+  return Response.json({}, {status:404});
+ };
+ try{const store=await loadKvStore('sessions.json');assert.equal(await store.get('sessions'),null);assert.equal(writes,0);}
+ finally{globalThis.localStorage=originalLocal;}
+});
+test('session reads and writes do not persist a browser inventory cache',async()=>{
+ backend();const originalLocal=globalThis.localStorage,writes=[];
+ globalThis.localStorage={getItem:()=>null,setItem:(key)=>writes.push(key)};
+ try{
+  const store=await loadKvStore('sessions.json');await store.set('sessions',[session('new')]);await store.save();
+  assert.deepEqual(writes,[]);
+ }finally{globalThis.localStorage=originalLocal;}
+});
+
+test('server refresh keeps the session object used by a live runtime so later messages persist',async()=>{
+ const {adoptSessionInventory}=await import('../src/lib/sessionInventory.ts');
+ const active={...session('active'),lastMessageAt:10,lastUpdated:10};
+ const next=adoptSessionInventory([active],[{...active,title:'Server title'},session('desktop')]);
+ assert.equal(next[0],active);
+ active.lastMessageAt=active.lastUpdated=100;
+ assert.equal(next[0].lastMessageAt,100,'runtime message updates the directory row');
+ assert.equal(next[0].title,'Server title');
+});
+test('server refresh cannot roll back live message time before the throttled save',async()=>{
+ const {adoptSessionInventory}=await import('../src/lib/sessionInventory.ts');
+ const active={...session('active'),lastMessageAt:100,lastUpdated:100};
+ const next=adoptSessionInventory([active],[{...active,lastMessageAt:10,lastUpdated:10}]);
+ assert.equal(next[0].lastMessageAt,100);
+});
+test('directory recency uses server conversation activity instead of metadata file updates',async()=>{
+ const {sessionActivityTime}=await import('../src/lib/sessionInventory.ts');
+ const old={...session('old'),lastUpdated:900,lastMessageAt:100};
+ const recent={...session('recent'),lastUpdated:50,lastMessageAt:200};
+ assert.equal(sessionActivityTime(old,{at:120}),120);
+ assert.equal(sessionActivityTime(recent,{at:300}),300);
+ assert.equal(sessionActivityTime(recent,{at:150}),200,'live message time wins over an earlier completion');
+ assert.equal(sessionActivityTime(old),100,'known message time wins over metadata');
+ assert.equal(sessionActivityTime(session('unknown')),1,'metadata remains a fallback without conversation evidence');
+});
+
+test('browser state HTTP uses the site origin while the direct bridge base remains separate',async()=>{
+ const {stateHttpBase,stateServerBase}=await import('../src/lib/host/storage.ts');
+ const original=globalThis.location;
+ globalThis.location={protocol:'https:',hostname:'example.test',origin:'https://example.test:25809'};
+ try{assert.equal(stateHttpBase(),'https://example.test:25809');assert.equal(stateServerBase(),'https://example.test:25910');}
+ finally{if(original===undefined)delete globalThis.location;else globalThis.location=original;}
+});

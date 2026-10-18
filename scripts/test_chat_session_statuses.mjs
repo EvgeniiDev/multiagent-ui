@@ -38,6 +38,10 @@ test('reader follows native start/end changes and returns no invented status for
 
   await appendFile(file, line('task_started', '2026-10-18T08:13:00Z', 'next'));
   assert.equal((await read(sessions)).statuses[key].status, 'working');
+  const offlineBridge = createChatSessionStatusReader({ root, indexMs: 0, bridges: {} });
+  const directory = await offlineBridge(sessions);
+  assert.deepEqual(directory.statuses, {}, 'a historical start is not proof the agent is working');
+  assert.equal(directory.activity?.[key]?.at, Date.parse('2026-10-18T08:13:00Z'), 'recent conversations must stay discoverable without a live bridge');
   bridgeRow = { status: null, at: Date.parse('2026-10-18T08:13:00Z') };
   assert.equal((await aggregate(sessions)).statuses[key].status, null, 'a restarted bridge must not revive an interrupted native start');
   await rm(file); await symlink('/etc/passwd', file);
