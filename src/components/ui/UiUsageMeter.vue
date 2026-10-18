@@ -75,7 +75,7 @@ onBeforeUnmount(() => { cancelHover(); window.removeEventListener('resize', clos
   <div ref="root" class="usage-meter" @focusout="focusOut" @keydown.esc.stop.prevent="close(true)">
     <UiButton class="context-meter" variant="meter" aria-label="Context and subscription limits"
       aria-haspopup="dialog" :aria-expanded="opened" :aria-controls="id"
-      @click="toggle" @pointerenter="enter" @pointerleave="leave">{{ label || 'Limits' }}</UiButton>
+      @click="toggle" @pointerenter="enter" @pointerleave="leave">{{ label || '— tokens' }}</UiButton>
     <div ref="panel" :id="id" popover="auto" role="dialog" aria-label="Session usage"
       class="usage-popover" :style="position" @toggle="syncOpen" @pointerenter="cancelHover" @pointerleave="leave">
       <template v-if="opened">
