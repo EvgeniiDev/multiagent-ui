@@ -1,6 +1,8 @@
 // Actual browser/worker, mocked notification subscription and state/ACP.
 // BUILD tests a candidate on an ephemeral localhost HTTP server. UI_TEST_URL
 // tests published assets. No model prompts or user-state writes are performed.
+// This UI harness bypasses TLS errors and does not establish installability.
+// Run check_pwa_installability.cjs separately against the device-facing origin.
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const { createServer } = require('node:http');
 const fs = require('node:fs');
@@ -87,7 +89,12 @@ const key = webpush.generateVAPIDKeys().publicKey;
         data: JSON.stringify({ title: 'PWA worker check', body: 'Response ready', url: '/chat?s=Pi%3A%3Atest', tag: 'pwa-browser-test' }) });
       await page.waitForFunction(async () => (await (await navigator.serviceWorker.ready).getNotifications()).some(n => n.title === 'PWA worker check'));
       await page.evaluate(async () => { for (const notification of await (await navigator.serviceWorker.ready).getNotifications()) notification.close(); });
-      if (width < 800) await page.getByRole('button', { name: /Expand sidebar|Open menu/, exact: true }).first().click();
+      await ensureSidebar();
+      async function ensureSidebar() {
+        if (width >= 800) return;
+        await page.getByRole('button', { name: /^(Settings|Expand sidebar|Open menu)$/ }).first().waitFor();
+        if (!await page.locator('#app-sidebar').isVisible()) await page.getByRole('button', { name: /Expand sidebar|Open menu/, exact: true }).first().click();
+      }
       await page.getByRole('button', { name: 'Settings', exact: true }).click();
       const section = page.locator('.pwa-settings');
       await section.waitFor();
@@ -114,7 +121,7 @@ const key = webpush.generateVAPIDKeys().publicKey;
       await section.getByRole('button', { name: 'Reload app', exact: true }).waitFor();
       await test.waitFor({ state: 'visible' });
       await page.reload({ waitUntil: 'domcontentloaded' });
-      if (width < 800) await page.getByRole('button', { name: /Expand sidebar|Open menu/, exact: true }).first().click();
+      await ensureSidebar();
       await page.getByRole('button', { name: 'Settings', exact: true }).click();
       await test.waitFor();
       await page.waitForFunction(() => !document.querySelector('.pwa-settings button[disabled]'));
@@ -150,13 +157,13 @@ const key = webpush.generateVAPIDKeys().publicKey;
       assert(await reload.isVisible(), 'reload remains available after disabling notifications');
       await context.addInitScript(() => Object.defineProperty(window, 'isSecureContext', { value: false }));
       await page.reload({ waitUntil: 'domcontentloaded' });
-      if (width < 800) await page.getByRole('button', { name: /Expand sidebar|Open menu/, exact: true }).first().click();
+      await ensureSidebar();
       await page.getByRole('button', { name: 'Settings', exact: true }).click();
       await section.getByText('Push notifications require HTTPS', { exact: false }).waitFor();
       assert(await reload.isVisible(), 'reload is independent of push support');
       assert(await reload.isEnabled(), 'reload works without push support');
       await Promise.all([page.waitForEvent('domcontentloaded'), reload.click()]);
-      if (width < 800) await page.getByRole('button', { name: /Expand sidebar|Open menu/, exact: true }).first().click();
+      await ensureSidebar();
       await page.getByRole('button', { name: 'Settings', exact: true }).click();
       assert(await reload.isVisible(), 'reload button navigates and remains available');
       assert.deepEqual(errors, []);

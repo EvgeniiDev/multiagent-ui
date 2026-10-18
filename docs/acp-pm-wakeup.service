@@ -1,5 +1,5 @@
 [Unit]
-Description=ACP UI pm wakeup — one guarded pm-graph review run
+Description=Multiagent UI pm wakeup — one guarded pm-graph review run
 After=acp-state.service
 Requires=acp-state.service
 

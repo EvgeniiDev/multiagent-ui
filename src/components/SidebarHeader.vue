@@ -13,7 +13,7 @@ defineEmits<{ traffic: []; settings: []; collapse: [] }>();
         <circle cx="6" cy="6" r="2.5" fill="currentColor" stroke="none" /><circle cx="18" cy="6" r="2.5" fill="currentColor" stroke="none" />
         <circle cx="6" cy="18" r="2.5" fill="currentColor" stroke="none" /><circle cx="18" cy="18" r="2.5" fill="currentColor" stroke="none" />
       </svg>
-      <h1>ACP UI</h1>
+      <h1>Multiagent UI</h1>
     </div>
     <div class="header-actions">
       <UiButton variant="ghost" icon aria-label="ACP Traffic Monitor" title="ACP Traffic Monitor" :aria-pressed="trafficActive" @click="$emit('traffic')">

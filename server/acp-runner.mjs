@@ -1,4 +1,4 @@
-// acp-runner.mjs — thin "board -> CLI" host service for the ACP UI panel.
+// acp-runner.mjs — thin "board -> CLI" host service for the Multiagent UI panel.
 //
 // The runner is deliberately dumb: it knows no prompts and does no planning.
 // For every card whose stage is bound to a role (roles.json `stageRoles`)

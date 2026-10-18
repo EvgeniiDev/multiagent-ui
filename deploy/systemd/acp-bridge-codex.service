@@ -1,6 +1,6 @@
 [Unit]
 Description=ACP bridge: Codex (via codex-acp adapter) (WebSocket on :25907)
-Documentation=https://github.com/EvgeniiDev/acp-ui/blob/main/docs/lan-deployment.md
+Documentation=https://github.com/EvgeniiDev/multiagent-ui/blob/main/docs/lan-deployment.md
 After=network-online.target
 
 [Service]

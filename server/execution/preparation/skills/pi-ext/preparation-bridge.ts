@@ -1,5 +1,5 @@
 /**
- * preparation-bridge.ts — ACP UI idea-preparation bridge extension for pi.
+ * preparation-bridge.ts — Multiagent UI idea-preparation bridge extension for pi.
  *
  * Loaded with `pi --mode rpc -e <this file>` by scripts/preparation_binding_probe.mjs.
  * Three jobs, all configured by env (the probe is the policy owner):

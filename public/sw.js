@@ -4,8 +4,8 @@ self.addEventListener('activate', event => event.waitUntil(self.clients.claim())
 self.addEventListener('push', event => {
   let payload = {};
   try { payload = event.data?.json() || {}; } catch {}
-  event.waitUntil(self.registration.showNotification(payload.title || 'ACP UI', {
-    body: payload.body || 'Open ACP UI to continue.',
+  event.waitUntil(self.registration.showNotification(payload.title || 'Multiagent UI', {
+    body: payload.body || 'Open Multiagent UI to continue.',
     icon: '/pwa-192.png',
     tag: payload.tag,
     data: { url: payload.url || '/chat' },

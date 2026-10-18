@@ -96,7 +96,7 @@ export async function createPushService({ stateDir, bridgePorts = BRIDGES,
       return ok({ enabled: false });
     }
     if (method === 'POST' && path === '/api/push/test') {
-      return await notify(token, { title: 'ACP UI', body: 'Notifications are working.', url: '/chat', tag: 'acp-test' })
+      return await notify(token, { title: 'Multiagent UI', body: 'Notifications are working.', url: '/chat', tag: 'acp-test' })
         ? ok({ sent: true }) : fail(502, 'Push delivery failed. Try enabling notifications again.');
     }
     return fail(404, 'Not found');

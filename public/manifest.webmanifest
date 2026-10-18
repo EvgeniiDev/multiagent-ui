@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "ACP UI",
-  "short_name": "ACP UI",
+  "name": "Multiagent UI",
+  "short_name": "Multiagent UI",
   "description": "Your coding agents, in one app.",
   "lang": "en",
   "start_url": "/chat",

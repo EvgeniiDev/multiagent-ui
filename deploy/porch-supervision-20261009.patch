@@ -1,0 +1,483 @@
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -151,6 +151,11 @@
+   preserved through follow-ups. Inspect the actual work and relevant checks first,
+   then reconcile the entire journal; obtain a missing journal before acceptance.
+   For read-only work, require a `Deviations` answer section instead of a file write.
++- **Keep observation incremental.** Use `delegate observe RUN_ID --consumer NAME`
++  for routine progress: it retains the cursor and waits up to 60 seconds when quiet.
++  Keep early review of the real contract/first runnable slice and steer on new
++  material risks. See [delegate.md](references/delegate.md#bounded-implementation-and-early-evidence)
++  for targeted fixture, false-positive and ownership checks.
+ - **Stay active until the result is collected.** Continue useful parent work or
+   resume the same wait handle while required work runs. Detached workers do not
+   arrange a future parent turn; an observation timeout is not worker failure.
+--- a/references/delegate.md
++++ b/references/delegate.md
+@@ -49,6 +49,34 @@
+ Report any necessary scope change with evidence and a proposed adjustment.
+ Return changed files, verification results, and remaining limitations or blockers.
+ ```
++
++## Bounded implementation and early evidence
++
++For implementation tasks, include only the following checks relevant to the
++changed flow; do not append a universal test catalogue to every task:
++
++- Name the source of each changed API/schema and a real valid request/response.
++  Before building downstream fixtures, run one small path through the actual
++  handler/client. Do not invent flattened responses, projection fields or ID
++  formats. Test doubles must preserve the source contract.
++- After one initial context map, request the first small runnable vertical slice
++  and explicit unresolved questions. Read wider for a concrete dependency or
++  risk; do not repeatedly reread whole plans without a new question.
++- For each acceptance-critical check, name the trigger, observed transition,
++  exact result and false-positive it must reject. Validate fixtures first:
++  earlier input rejection must not stand in for the intended test; missing
++  launches, skipped assertions, empty output and error text are not success.
++- For process ownership/recovery, use alive/dead/unknown with evidence for each
++  transition. A new environment, missing PID or probe error is not proof that
++  the old owner terminated. Test the uncertain cases before permitting a
++  replacement, slot release or signals.
++- After fixing a failure, recheck its original trigger and affected regressions.
++  A successful unrelated retry does not explain or close the original failure.
++  Preserve accepted checks and report only new decisions, diffs and failures.
++
++Review the proposed contract/first runnable slice early, while correction is
++cheap. Continue immediate steering on material new decisions or blockers; do not
++wait for the entire stage merely to save tokens.
+ 
+ ## Steerable and detached runs
+ 
+@@ -111,11 +139,31 @@
+ 
+ | Need | Interface |
+ |---|---|
+-| Substantive progress | `events RUN_ID --max-events 50`; save `next_cursor` and pass it as `--cursor` next time |
++| Routine new progress | `observe RUN_ID --consumer lead --timeout 60`; durable cursor, compact events, no thinking deltas by default |
++| Explicit history/detail | `events RUN_ID --cursor N --max-events 50`; deliberate page/replay; save returned `next_cursor` |
+ | Delivery state after a steer | Query `status RUN_ID --json` once and inspect that message's lifecycle/error |
+ | Lifecycle/liveness stream | `watch RUN_ID`; it does not show active tools, file changes, or task progress |
+ | Completion or bounded waiting | `wait RUN_ID --timeout 300 --json`; use `wait` for the complete final answer |
+ | Several workers | Read [group waiting](delegate-runtime.md#bounded-and-group-waiting), then use `wait-any` |
++
++`observe` saves its cursor per run and consumer after flushing the JSON response.
++Use the same consumer for a reader across calls and distinct names for independent
++readers. It starts at raw cursor 0 on the first call, advances without replay,
++and returns at most 20 events with 500-character data previews. Drain `remaining`
++before waiting. Omitted thinking still advances the cursor; use explicit `events
++--cursor N` or `observe --include-thinking --cursor N` for a justified inspection.
++After a journal reset it fails explicitly; `--cursor N` authorizes deliberate
++replay. A crash between delivery and checkpoint can replay the last page, so this
++is at-least-once delivery. An unreadable checkpoint is a blocker, never a reset.
++
++When quiet, `observe` waits in code for up to 60 seconds and wakes earlier on new
++non-thinking events, lifecycle changes or terminal state. Exit 124 with `quiet`
++means no relevant update before the deadline, not worker failure. Do not follow
++an empty page with a new status query, history dump, or a separate short sleep.
++Resume existing tool handles using waits up to 60 seconds. Quiet observations
++must not produce repeated status commentary; use the next risk/checkpoint
++rather than full model analysis of unchanged state. This command does not
++schedule a future model turn or change cancellation/steering behavior.
+ 
+ Use the public interfaces, not private registry files, `audit.jsonl`, or
+ `supervisor.log`, for routine monitoring. Inspect intermediate artifacts as
+@@ -159,7 +207,11 @@
+ Exit 124 means the observation expired while work continues. Inspect progress
+ and wait again as appropriate; it does not justify restarting or cancelling the
+ worker. On completion, collect the full answer and inspect failures as well as
+-successes. On observation errors, reconcile the run before replacing it. See
++successes. Before ending unfinished supervision, record run ID, observer consumer,
++next checkpoint and resume action; a sentence promising a future check is not
++a scheduled wake-up. Use a verified scheduler/resume facility if one exists,
++otherwise keep the current wait handle active. On observation errors, reconcile
++the run before replacing it. See
+ [exit codes](delegate-runtime.md#wait-and-watch-exits) for failure handling.
+ 
+ ## Changing approach and preserving work
+--- a/references/review-acceptance.md
++++ b/references/review-acceptance.md
+@@ -33,6 +33,17 @@
+ issue needs fixing when it violates the task's latency target. A demonstrated
+ cross-user data leak remains a blocker in an internet-facing MVP.
+ 
++## Avoid expensive correction loops
++
++Label a finding as observed defect, supported code-path conclusion, or hypothesis,
++with its source and acceptance impact. Verify a hypothesis against the actual
++code/runtime before ordering a rewrite; model confidence is not evidence.
++Require assertions for the claimed positive result, not a success-shaped string
++or exit code alone. Check a fixture reaches the intended production boundary.
++For recovery/ownership checks, retain an explicit unknown result instead of
++substituting an optimistic terminal verdict. Preserve accepted checks and only
++rerun affected flows after new changes or evidence.
++
+ ## Verify and finish
+ 
+ Review the actual result and relevant surrounding behavior against the contract.
+--- a/scripts/porch
++++ b/scripts/porch
+@@ -44,6 +44,7 @@
+   porch delegate wait-any RUN_ID [RUN_ID ...] [--timeout SEC]
+   porch delegate watch RUN_ID [--heartbeat SEC] [--json]
+   porch delegate events RUN_ID [--cursor N] [--max-events N]
++  porch delegate observe RUN_ID --consumer NAME [--timeout SEC] [--max-events N]
+   porch delegate list [--active|--all] [--reap] [--json]
+   porch quota [all|codex|grok]
+   porch sessions roots [-a harness[,harness...]] [--store SUBSTR]
+--- a/scripts/lib/delegate.sh
++++ b/scripts/lib/delegate.sh
+@@ -27,7 +27,7 @@
+ # `list` takes no run id. There is no ambiguity with a start invocation —
+ # starting always requires -a <agent-id>, so an agent id never lands here.
+ case "${1:-}" in
+-    steer|status|cancel|wait|wait-any|watch|events|list)
++    steer|status|cancel|wait|wait-any|watch|events|observe|list)
+         sub="$1"
+         shift
+         exec python3 -m steer.control "$sub" "$@"
+@@ -114,6 +114,7 @@
+   porch delegate wait-any RUN_ID [RUN_ID ...] [--acknowledged RUN_ID] [--timeout SEC]
+   porch delegate watch RUN_ID [--heartbeat SEC] [--json]
+   porch delegate events RUN_ID [--cursor N] [--max-events N]
++  porch delegate observe RUN_ID --consumer NAME [--timeout SEC] [--max-events N]
+   porch delegate list [--active|--all] [--reap] [--json]
+ 
+ Full-YOLO delegation to exactly one agent in the current working directory.
+--- a/scripts/lib/steer/control.py
++++ b/scripts/lib/steer/control.py
+@@ -903,6 +903,9 @@
+     wt.add_argument("--json", action="store_true")
+     wt.set_defaults(func=cmd_watch)
+ 
++    from .observation import add_observe_command
++    add_observe_command(sub)
++
+     ev = sub.add_parser(
+         "events",
+         description=(
+--- /dev/null
++++ b/scripts/lib/steer/observation.py
+@@ -0,0 +1,149 @@
++"""Cursor-owning, bounded progress observation without model-level polling."""
++from __future__ import annotations
++
++import argparse
++import json
++import math
++import re
++import sys
++import time
++from pathlib import Path
++
++from .registry import Registry, RegistryError
++from .util import atomic_write_json, ensure_dir, flock_exclusive, utc_now_iso
++
++
++def consumer_name(value):
++    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", value):
++        raise argparse.ArgumentTypeError("consumer must be 1–64 safe characters, starting with a letter or digit")
++    return value
++
++
++def timeout_seconds(value):
++    try:
++        result = float(value)
++    except ValueError as exc:
++        raise argparse.ArgumentTypeError("timeout must be a number between 0 and 60") from exc
++    if not math.isfinite(result) or not 0 <= result <= 60:
++        raise argparse.ArgumentTypeError("timeout must be between 0 and 60 seconds")
++    return result
++
++
++def nonnegative_cursor(value):
++    try:
++        result = int(value)
++    except ValueError as exc:
++        raise argparse.ArgumentTypeError("cursor must be a nonnegative integer") from exc
++    if result < 0:
++        raise argparse.ArgumentTypeError("cursor must be a nonnegative integer")
++    return result
++
++
++def page_size(value):
++    result = nonnegative_cursor(value)
++    if not 1 <= result <= 100:
++        raise argparse.ArgumentTypeError("max-events must be between 1 and 100")
++    return result
++
++
++def observe(reg, run_id, consumer, *, timeout=60, max_events=20,
++            cursor=None, include_thinking=False, emit=None):
++    # Local import avoids a cycle with the CLI parser in control.
++    from .control import event_page
++
++    consumer_name(consumer)
++    reg.load_meta(run_id)  # Validate ownership/existence before creating state.
++    directory = ensure_dir(reg.run_path(run_id) / "observers")
++    state_path = directory / f"{consumer}.json"
++    # This is a consumer lock, never the worker lifecycle lock. Fail fast on a
++    # second reader rather than wait outside the requested observation deadline.
++    try:
++        with flock_exclusive(directory / f"{consumer}.lock", blocking=False):
++            saved = {}
++            if state_path.exists():
++                try:
++                    saved = json.loads(state_path.read_text(encoding="utf-8"))
++                    if (not isinstance(saved, dict) or saved.get("version") != 1
++                            or saved.get("run_id") != run_id
++                            or saved.get("consumer") != consumer
++                            or type(saved.get("next_cursor")) is not int
++                            or saved["next_cursor"] < 0):
++                        raise ValueError("invalid checkpoint")
++                except (ValueError, OSError) as exc:
++                    raise RegistryError("observer checkpoint is unreadable/invalid; restore it or use a new consumer", exit_code=1) from exc
++            start = saved.get("next_cursor", 0) if cursor is None else cursor
++            deadline = time.monotonic() + timeout
++            current = start
++            omitted = 0
++            while True:
++                page = event_page(reg, run_id, current, max_events)
++                if page.get("cursor_reset"):
++                    raise RegistryError("event journal shrank; choose an explicit --cursor for deliberate replay", exit_code=1)
++                current = page["next_cursor"]
++                events = []
++                for item in page["events"]:
++                    if item.get("type") == "thinking_delta" and not include_thinking:
++                        omitted += 1
++                        continue
++                    event = dict(item)
++                    data = event.get("data")
++                    if isinstance(data, str) and len(data) > 500:
++                        event["data"] = data[:500]
++                        event["data_truncated"] = True
++                    events.append(event)
++                changed = (bool(saved) and (page["status"], page["exit_code"])
++                           != (saved.get("status"), saved.get("exit_code")))
++                timed_out = time.monotonic() >= deadline
++                if events or page["terminal"] or changed or timed_out:
++                    result = {**page, "cursor": start, "events": events,
++                              "consumer": consumer, "observed_at": utc_now_iso(),
++                              "quiet": not events,
++                              "timed_out": timed_out and not (events or page["terminal"] or changed),
++                              "thinking_omitted": omitted}
++                    # Flush delivery before checkpointing. A failed stdout write
++                    # must not silently consume unseen events. Crash after delivery
++                    # but before checkpoint can replay: this is at-least-once.
++                    if emit is not None:
++                        emit(result)
++                    atomic_write_json(state_path, {
++                        "version": 1, "run_id": run_id, "consumer": consumer,
++                        "next_cursor": current, "status": page["status"],
++                        "exit_code": page["exit_code"],
++                        "observed_at": result["observed_at"],
++                    })
++                    return result
++                if page["remaining"]:
++                    continue  # Drain pages of omitted thinking before waiting.
++                time.sleep(min(1.0, max(0, deadline - time.monotonic())))
++    except BlockingIOError as exc:
++        raise RegistryError("another observer owns this consumer; retry later or use a distinct consumer", exit_code=5) from exc
++
++
++def cmd_observe(args):
++    reg = Registry(Path(args.registry_root) if args.registry_root else None)
++
++    def deliver(payload):
++        print(json.dumps(payload, ensure_ascii=False), flush=True)
++
++    try:
++        result = observe(reg, args.run_id, args.consumer, timeout=args.timeout,
++                         max_events=args.max_events, cursor=args.cursor,
++                         include_thinking=args.include_thinking, emit=deliver)
++    except (RegistryError, OSError) as exc:
++        sys.stderr.write(f"Error: {exc}\n")
++        return getattr(exc, "exit_code", 1)
++    # This command observes progress, not acceptance or the final answer.
++    return 124 if result["timed_out"] and result["quiet"] and not result["terminal"] else 0
++
++
++def add_observe_command(sub):
++    parser = sub.add_parser("observe", description="Read only new progress with a durable per-consumer cursor; wait up to 60s when quiet.")
++    parser.add_argument("run_id")
++    parser.add_argument("--consumer", required=True, type=consumer_name,
++                        help="stable, distinct observer identity across calls")
++    parser.add_argument("--timeout", type=timeout_seconds, default=60)
++    parser.add_argument("--max-events", type=page_size, default=20)
++    parser.add_argument("--cursor", type=nonnegative_cursor,
++                        help="explicit raw-line cursor override for deliberate replay")
++    parser.add_argument("--include-thinking", action="store_true")
++    parser.set_defaults(func=cmd_observe)
+--- /dev/null
++++ b/scripts/tests/steer/test_observation.py
+@@ -0,0 +1,170 @@
++"""Offline regressions: cursor continuity and substantive progress delivery."""
++import json
++import os
++import subprocess
++import tempfile
++import threading
++import time
++import unittest
++from pathlib import Path
++
++from steer.control import event_page
++from steer.observation import observe
++from steer.registry import Registry, RegistryError
++from steer.util import atomic_write_json, flock_exclusive
++
++PORCH = Path(__file__).resolve().parents[2] / "porch"
++
++
++class ObservationTests(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory(prefix="porch-observe-")
++        self.addCleanup(self.tmp.cleanup)
++        self.root = Path(self.tmp.name)
++        self.reg = Registry(self.root / "registry")
++        artifacts = self.root / "artifacts"
++        self.run = self.reg.create_run(agent_id="devin", backend="fake", model="fake",
++                                   cwd=str(self.root), artifacts_dir=str(artifacts))
++        self.events = artifacts / "normalized" / "devin.jsonl"
++        self.events.parent.mkdir(parents=True)
++        self.events.write_text("")
++        self.checkpoint = self.reg.run_path(self.run) / "observers" / "lead.json"
++
++    def append(self, kind, data=""):
++        with self.events.open("a") as stream:
++            stream.write(json.dumps({"type": kind, "data": data}) + "\n")
++
++    def read(self, **kwargs):
++        return observe(self.reg, self.run, "lead", timeout=0, **kwargs)
++
++    def cli(self, *args):
++        env = {**os.environ, "PORCH_STEER_DIR": str(self.reg.root), "PYTHONDONTWRITEBYTECODE": "1"}
++        return subprocess.run([str(PORCH), "delegate", "observe", self.run,
++                               "--consumer", "lead", *args], env=env,
++                              text=True, capture_output=True, timeout=10)
++
++    def test_no_replay_and_new_events_after_restart(self):
++        self.append("tool_started", "contract")
++        self.assertEqual(self.read()["events"][0]["data"], "contract")
++        self.assertEqual(self.read()["events"], [])
++        self.append("answer_delta", "first slice ready")
++        again = observe(Registry(self.reg.root), self.run, "lead", timeout=0)
++        self.assertEqual([x["data"] for x in again["events"]], ["first slice ready"])
++        self.assertEqual(again["cursor"], 1)
++
++    def test_pagination_preserves_errors_after_thinking(self):
++        self.append("thinking_delta", "private stream")
++        self.append("error", "invalid response")
++        first = self.read(max_events=1)
++        self.assertEqual(first["events"], [])
++        self.assertEqual(first["remaining"], 1)
++        second = self.read(max_events=1)
++        self.assertEqual(second["events"][0]["type"], "error")
++        self.assertEqual(second["next_cursor"], 2)
++
++    def test_omitted_thinking_does_not_wake_waiter(self):
++        self.append("thinking_delta", "still thinking")
++        started = time.monotonic()
++        result = observe(self.reg, self.run, "lead", timeout=0.03)
++        self.assertGreaterEqual(time.monotonic() - started, 0.025)
++        self.assertTrue(result["timed_out"])
++        self.assertEqual(result["next_cursor"], 1)
++        self.assertEqual(result["thinking_omitted"], 1)
++
++    def test_real_new_event_wakes_before_deadline(self):
++        producer = threading.Thread(target=lambda: (time.sleep(0.03), self.append("tool_finished", "test failed")))
++        producer.start()
++        result = observe(self.reg, self.run, "lead", timeout=2)
++        producer.join()
++        self.assertFalse(result["timed_out"])
++        self.assertEqual(result["events"][0]["data"], "test failed")
++
++    def test_independent_consumers(self):
++        self.append("error", "new failure")
++        self.read()
++        other = observe(self.reg, self.run, "review", timeout=0)
++        self.assertEqual(other["events"][0]["data"], "new failure")
++
++    def test_partial_line_is_delivered_after_completion(self):
++        self.events.write_text('{"type":"error","data":"crash"}')
++        self.assertEqual(self.read()["next_cursor"], 0)
++        with self.events.open("a") as stream:
++            stream.write("\n")
++        self.assertEqual(self.read()["events"][0]["data"], "crash")
++
++    def test_shrunk_journal_requires_explicit_replay(self):
++        self.append("error", "first")
++        self.read()
++        self.events.write_text("")
++        with self.assertRaisesRegex(RegistryError, "shrank"):
++            self.read()
++        self.assertEqual(json.loads(self.checkpoint.read_text())["next_cursor"], 1)
++        self.append("error", "replacement")
++        self.assertEqual(self.read(cursor=0)["events"][0]["data"], "replacement")
++
++    def test_corrupt_checkpoint_does_not_silently_replay(self):
++        self.read()
++        self.checkpoint.write_text("broken")
++        with self.assertRaisesRegex(RegistryError, "checkpoint"):
++            self.read()
++        self.assertEqual(self.checkpoint.read_text(), "broken")
++
++    def test_failed_delivery_preserves_cursor(self):
++        self.read()
++        before = self.checkpoint.read_bytes()
++        self.append("error", "must not disappear")
++
++        def fail(_):
++            raise BrokenPipeError("delivery failed")
++
++        with self.assertRaises(BrokenPipeError):
++            self.read(emit=fail)
++        self.assertEqual(self.checkpoint.read_bytes(), before)
++        self.assertEqual(self.read()["events"][0]["data"], "must not disappear")
++
++    def test_compact_preview_and_legacy_detail(self):
++        self.append("answer_delta", "x" * 1200)
++        compact = self.read()["events"][0]
++        self.assertEqual(len(compact["data"]), 500)
++        self.assertTrue(compact["data_truncated"])
++        detail = event_page(self.reg, self.run, 0)["events"][0]
++        self.assertEqual(len(detail["data"]), 1200)
++
++    def test_busy_consumer_does_not_block_lifecycle(self):
++        self.read()
++        lock = self.checkpoint.with_suffix(".lock")
++        with flock_exclusive(lock):
++            with self.assertRaisesRegex(RegistryError, "another observer"):
++                self.read()
++
++    def test_status_change_and_terminal_without_events(self):
++        self.read()
++        meta = self.reg.load_meta(self.run)
++        meta["status"] = "running"
++        atomic_write_json(self.reg.run_path(self.run) / "meta.json", meta)
++        changed = self.read()
++        self.assertFalse(changed["timed_out"])
++        meta.update(status="failed", exit_code=1)
++        atomic_write_json(self.reg.run_path(self.run) / "meta.json", meta)
++        result = self.read()
++        self.assertTrue(result["terminal"])
++        self.assertEqual(result["exit_code"], 1)
++
++    def test_cli_continuity_and_quiet_exit(self):
++        self.append("tool_started", "contract check")
++        first = self.cli("--timeout", "0")
++        self.assertEqual(first.returncode, 0, first.stderr)
++        self.assertEqual(json.loads(first.stdout)["next_cursor"], 1)
++        second = self.cli("--timeout", "0")
++        self.assertEqual(second.returncode, 124, second.stderr)
++        self.assertEqual(json.loads(second.stdout)["events"], [])
++
++    def test_cli_rejects_invalid_limits_and_consumer(self):
++        for args in [("--timeout", "nan"), ("--timeout", "61"),
++                     ("--max-events", "0"), ("--consumer", "../other")]:
++            result = self.cli(*args)
++            self.assertNotEqual(result.returncode, 0)
++
++
++if __name__ == "__main__":
++    unittest.main()

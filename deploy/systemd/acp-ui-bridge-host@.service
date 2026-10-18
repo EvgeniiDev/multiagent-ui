@@ -1,5 +1,5 @@
 [Unit]
-Description=ACP UI host bridge %i (exclusive mode-managed owner)
+Description=Multiagent UI host bridge %i (exclusive mode-managed owner)
 After=network-online.target
 
 [Service]

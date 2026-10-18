@@ -1,5 +1,5 @@
 [Unit]
-Description=ACP UI shared state server (panel KV store on the host)
+Description=Multiagent UI shared state server (panel KV store on the host)
 After=network.target
 
 [Service]

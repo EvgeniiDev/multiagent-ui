@@ -6,7 +6,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed, watch, onScopeDispose } from 'vue';
 import { loadKvStore, type KVStore } from '../lib/host/storage';
-import { trackEvent } from '../lib/telemetry';
 import { uuid } from '../lib/uuid';
 import type { SavedSession, AgentConfig } from '../lib/types';
 import { loadAttachmentHistory, forgetSessionAttachments } from '../lib/attachmentHistory';
@@ -414,7 +413,7 @@ export const useSessionStore = defineStore('session', () => {
       const infos = await listAllAgentSessions(client, cwd);
       const added = mergeAgentSessions(agentName, infos);
       await saveSessionsToStore();
-      trackEvent('SessionsListed', { agentName, total: String(infos.length) });
+
       return { added, error: null };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

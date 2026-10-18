@@ -5,7 +5,6 @@ import { isTauriHost } from './lib/platform';
 import { standalone } from './lib/pwa';
 import { useConfigStore } from './stores/config';
 import { useSessionStore } from './stores/session';
-import { initTelemetry } from './lib/telemetry';
 import NewSessionMenu from './components/NewSessionMenu.vue';
 import SessionList from './components/SessionList.vue';
 import SessionTabs from './components/SessionTabs.vue';
@@ -50,6 +49,7 @@ const mobileMenuHistory = createMobileMenuHistory({
     }
   },
 });
+
 
 const configStore = useConfigStore();
 const sessionStore = useSessionStore();
@@ -257,10 +257,6 @@ onMounted(async () => {
 
   // Load persisted preferences first
   prefsStore = await loadKvStore('preferences.json');
-  
-  // Initialize telemetry (check user preference)
-  const telemetryEnabled = await prefsStore.get<boolean>('telemetryEnabled') ?? true;
-  await initTelemetry(telemetryEnabled);
   
   // Initialize stores
   await configStore.loadConfig();
@@ -704,7 +700,7 @@ function clearError() {
              dialog is reachable here too — a session start must not depend
              on an existing connection. -->
         <div v-if="uiStore.activeView === 'chat' && sessionStore.openTabs.length === 0" class="welcome-screen">
-          <h2>Welcome to ACP UI</h2>
+          <h2>Welcome to Multiagent UI</h2>
           <p>Select an agent and create a new session to get started.</p>
           <UiButton variant="primary"
             v-if="!isNarrowLayout"
@@ -865,6 +861,7 @@ html.sessions-page { overflow: hidden; }
 .session-section {
   padding: 0.75rem 0.375rem;
 }
+
 
 .cwd-picker {
   margin-top: 0.75rem;
