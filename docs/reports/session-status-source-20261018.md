@@ -30,7 +30,7 @@ Verification:
   after reload, with zero page errors. No test prompts were sent to them.
 - Frontend build includes UI policy/type checks. Served asset hashes are recorded
   in `/tmp/acp-native-status-publish.json`; actual state mount and image are
-  recorded in `/tmp/acp-native-status-state-release.json`.
+  recorded in `/tmp/acp-bridge-status-state-release.json`.
 
 ## Activation boundary
 
