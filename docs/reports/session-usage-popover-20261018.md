@@ -83,3 +83,15 @@ No services were restarted or rebuilt. Bridges and agent CLI children were not
 stopped. The web image remained
 `sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9`.
 Open pages need a reload to receive the new frontend bundle.
+
+## Final shared-release check
+
+During report finalization another release advanced `main` to `93f2cb6` and
+published its frontend. It includes `bd66b43` unchanged in all five affected
+components. The newer release was preserved rather than overwritten.
+`LIVE_LIMITS=1 node scripts/test_session_usage_browser.cjs` was repeated against
+those served assets and passed all three widths. Final served index SHA256:
+`3212f64685087c494cded097d064a5de1b486efa1ff265d73723577699008538`.
+
+- `/assets/index-CdGEVnLx.js`: `2af1c3bb70d097517938626792e4d33c6024421d98310dd7eaa8a0db812b004b`.
+- `/assets/index-CzLyIOMm.css`: `f13eb142e45dddbb5076a921c3124925286d38a8d7842ce7f31159cd18989302`.
