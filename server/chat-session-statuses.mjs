@@ -23,7 +23,7 @@ export function parseCodexTurnStatus(text) {
   return result;
 }
 
-export function createChatSessionStatusReader({ root = join(homedir(), '.codex', 'sessions'), indexMs = 15000 } = {}) {
+export function createNativeCodexStatusReader({ root = join(homedir(), '.codex', 'sessions'), indexMs = 15000 } = {}) {
   let files = new Map(), indexedAt = 0, indexing;
   const cache = new Map();
   async function inventory() {
@@ -76,6 +76,37 @@ export function createChatSessionStatusReader({ root = join(homedir(), '.codex',
         const result = await read(file);
         if (result) statuses[JSON.stringify([session.agentName, session.sessionId])] = result;
       } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    return { statuses };
+  };
+}
+
+const BRIDGES = { 'Hermes Agent': 25901, OpenCode: 25902, Devin: 25903, Pi: 25904, Codex: 25907 };
+export function createChatSessionStatusReader({ bridges = BRIDGES, fetcher = fetch, ...nativeOptions } = {}) {
+  const native = createNativeCodexStatusReader(nativeOptions);
+  return async sessions => {
+    const wanted = new Set(sessions.map(s => JSON.stringify([s.agentName, s.sessionId])));
+    const providers = new Set(sessions.map(s => s.agentName));
+    const [historical, ...live] = await Promise.all([
+      native(sessions),
+      ...Object.entries(bridges).filter(([agent]) => providers.has(agent)).map(async ([agent, port]) => {
+        try {
+          const response = await fetcher(`http://127.0.0.1:${port}/api/sessions/status`, { signal: AbortSignal.timeout(2000) });
+          if (!response.ok) return {};
+          const { statuses } = await response.json(), result = {};
+          for (const [sid, row] of Object.entries(statuses ?? {})) {
+            const key = JSON.stringify([agent, sid]);
+            if (wanted.has(key) && row && [null, 'working', 'completed', 'cancelled', 'error'].includes(row.status) && Number.isFinite(row.at)) result[key] = row;
+          }
+          return result;
+        } catch { return {}; } // An unavailable bridge never implies Working.
+      }),
+    ]);
+    // Old native starts cannot establish that a process is still alive.
+    // Only the live bridge may report Working; history can recover results.
+    const statuses = Object.fromEntries(Object.entries(historical.statuses).filter(([, row]) => row.status !== 'working'));
+    for (const snapshot of live) for (const [key, row] of Object.entries(snapshot)) {
+      if (!statuses[key] || row.at >= statuses[key].at) statuses[key] = row;
     }
     return { statuses };
   };

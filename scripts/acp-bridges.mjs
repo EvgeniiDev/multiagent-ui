@@ -76,7 +76,7 @@ function assertCanonicalCheckout() {
 }
 
 function help() {
-  console.log(`ACP bridge mode controller (only Hermes/OpenCode/Devin/Pi/Codex)\n\nUsage:\n  scripts/acp-bridges.mjs status\n  scripts/acp-bridges.mjs preflight --mode docker|host\n  scripts/acp-bridges.mjs guard-start --mode docker|host --bridge <name>\n  scripts/acp-bridges.mjs switch --mode docker|host [--accept-interruption]\n  scripts/acp-bridges.mjs reconcile\n\nDocker is the fresh-install default. A host switch prebuilds and normalizes legacy Docker launches one bridge at a time before handoff. A switch that would stop live bridges requires --accept-interruption; it never falls back to the other mode.`);
+  console.log(`ACP bridge mode controller (only Hermes/OpenCode/Devin/Pi/Codex)\n\nUsage:\n  scripts/acp-bridges.mjs status\n  scripts/acp-bridges.mjs preflight --mode docker|host\n  scripts/acp-bridges.mjs guard-start --mode docker|host --bridge <name>\n  scripts/acp-bridges.mjs switch --mode docker|host [--accept-interruption]\n  scripts/acp-bridges.mjs reconcile\n  scripts/acp-bridges.mjs restart --bridge <name> --accept-interruption\n\nDocker is the fresh-install default. A host switch prebuilds and normalizes legacy Docker launches one bridge at a time before handoff. A switch that would stop live bridges requires --accept-interruption; it never falls back to the other mode.`);
 }
 
 // Inventory is evidence, never a cleanup instruction. Keep unknown records
@@ -499,6 +499,35 @@ async function reconcile() {
   await waitForTarget(desired);
 }
 
+export async function assertRestartCallerOutside(pid, { procRoot = '/proc', callerPid = process.pid } = {}) {
+  let current = callerPid;
+  for (let step = 0; current > 0 && step < 128; step++) {
+    if (current === pid) throw new Error('cannot restart the bridge hosting this session; run the controller from a separate terminal or another bridge');
+    const status = await readFile(path.join(procRoot, String(current), 'status'), 'utf8');
+    const parent = status.match(/^PPid:\s*(\d+)/m);
+    if (!parent) throw new Error('cannot verify restart caller ancestry');
+    current = Number(parent[1]);
+  }
+}
+
+async function restartBridge(name, acceptInterruption) {
+  const bridge = BRIDGES.find(item => item.name === name);
+  if (!bridge) throw new Error('restart requires --bridge hermes|opencode|devin|pi|codex');
+  const state = await observe();
+  assertNoMixedOwners(state);
+  const owners = state.mode === 'host' ? state.host : state.docker;
+  const owner = owners.find(item => item.name === name);
+  if (!owner) throw new Error(`selected ${state.mode} bridge ${name} is not running`);
+  if (state.mode === 'host') await assertRestartCallerOutside(owner.pid);
+  if (!acceptInterruption) throw new Error('bridge restart interrupts its sessions; drain work and repeat with --accept-interruption');
+  if (state.mode === 'host') run('systemctl', ['--user', 'restart', bridge.unit]);
+  else run('docker', ['compose', '-p', PROJECT, '-f', 'compose.yaml', 'restart', bridge.service]);
+  await waitForTarget(state.mode);
+  const response = await fetch(`http://127.0.0.1:${bridge.port}/api/sessions/status`, { signal: AbortSignal.timeout(3000) });
+  if (!response.ok) throw new Error(`restarted ${name} is missing the session status API`);
+  console.log(`PASS ${name} restarted in ${state.mode} mode; session status API available.`);
+}
+
 async function switchMode(target, acceptInterruption) {
   assertCanonicalCheckout();
   if (!['docker', 'host'].includes(target)) throw new Error('switch requires --mode docker or --mode host');
@@ -594,9 +623,10 @@ async function main() {
     console.log(`PASS ${parsed.mode} start gate for ${parsed.bridge}; selected mode and live ownership agree.`);
     return;
   }
-  if (!['switch', 'reconcile'].includes(parsed.action)) throw new Error(`unknown action: ${parsed.action}`);
+  if (!['switch', 'reconcile', 'restart'].includes(parsed.action)) throw new Error(`unknown action: ${parsed.action}`);
   assertCanonicalCheckout();
   await mkdir(MODE_DIR, { recursive: true, mode: 0o700 });
+  if (parsed.action === 'restart') return withLock(() => restartBridge(parsed.bridge, parsed.flags.has('--accept-interruption')));
   if (parsed.action === 'switch') {
     return withLock(() => switchMode(parsed.mode, parsed.flags.has('--accept-interruption')));
   }

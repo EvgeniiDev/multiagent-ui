@@ -36,7 +36,7 @@ export async function testEnv(dir, mode = 'host', { lockDir = path.join(dir, 'lo
   await chmod(lockFile, 0o660);
   await writeFile(path.join(dir, 'selected'), `${mode}\n`);
   return { ...process.env, HOME: dir, PATH: path.join(dir, 'bin'), NODE_PATH: nodePath,
-    ACP_TOKEN_METER: '0', ACP_BRIDGE_MODE_FILE: path.join(dir, 'selected'),
+    ACP_TOKEN_METER: '0', ACP_BRIDGE_STATUS_PERSISTENCE: '0', ACP_BRIDGE_MODE_FILE: path.join(dir, 'selected'),
     ACP_BRIDGE_LOCK_DIR: lockDir };
 }
 export function runCommand(bin, args, env) {

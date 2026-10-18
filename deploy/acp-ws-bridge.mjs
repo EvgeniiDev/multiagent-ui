@@ -65,6 +65,7 @@
 //        ACP_STATE_URL=http://127.0.0.1:25900 state server for the ledger,
 //        ACP_TOKEN_METER_INTERVAL_MS=10000 min write interval per session.
 import { BridgeProcessOwner } from './bridge-process-owner.mjs';
+import { BridgeSessionStatuses, bridgeStatusPersistence } from './bridge-session-statuses.mjs';
 import { assertBridgeMode, assertBridgeModeSync } from './bridge-mode.mjs';
 import { createRequire } from 'node:module';
 import http from 'node:http';
@@ -138,6 +139,14 @@ const AGENT_NAME_BY_CMD = {
 const METER_AGENT_NAME = String(
   argValue('--agent-name', AGENT_NAME_BY_CMD[command.split(/\s+/)[0]] ?? command.split(/\s+/)[0])
 );
+
+const sessionStatuses = new BridgeSessionStatuses({
+  ...(process.env.ACP_BRIDGE_STATUS_PERSISTENCE === '0' ? {} : bridgeStatusPersistence(METER_STATE_URL, METER_AGENT_NAME)),
+  commandSteering: path.basename(command.split(/\s+/)[0]) === 'hermes',
+});
+await sessionStatuses.restore();
+const statusRetry = setInterval(() => void sessionStatuses.flush(), 5000);
+statusRetry.unref?.();
 
 /** sessionId -> { cwd?, chars, lastWriteAt, lastWrittenUsed, lastWrittenModel, writing, agentReports, model? } */
 const meterSessions = new Map();
@@ -429,6 +438,13 @@ function handleHttp(req, res) {
     return;
   }
   const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+
+  if (req.method === 'GET' && u.pathname === '/api/sessions/status') {
+    const body = JSON.stringify({ agent: METER_AGENT_NAME, statuses: sessionStatuses.snapshot() });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
+    res.end(body);
+    return;
+  }
 
   // POST /api/fs/mkdir  { path } -> create a directory tree inside root.
   // The panel's project registry needs this: a project is just a folder, and the
@@ -808,6 +824,7 @@ function noteOutbound(payload, ws) {
         sid: typeof sid === 'string' ? sid : undefined,
       });
       msg.id = bridged;
+      sessionStatuses.outbound(msg);
       if (typeof sid === 'string' &&
           (msg.method === 'session/load' || msg.method === 'session/prompt')) {
         sessionOwner.set(sid, ws);
@@ -825,6 +842,7 @@ function noteOutbound(payload, ws) {
       // — the agent's own id, passed through untouched.
       pendingAgentReqs.delete(msg.id);
     }
+    sessionStatuses.outbound(msg);
     try {
       meterOutbound(msg);
     } catch {
@@ -850,6 +868,7 @@ function noteInbound(line) {
   } catch {
     return { msg: null, dest: null };
   }
+  const trackedPromptResponse = sessionStatuses.inbound(msg);
   try {
     meterInbound(msg);
   } catch {
@@ -865,6 +884,9 @@ function noteInbound(line) {
   }
   const req = pendingClientReqs.get(msg.id) ?? null;
   pendingClientReqs.delete(msg.id);
+  // The originating socket may be gone. Its result updates bridge state,
+  // but its old request id must never be broadcast to a newer socket.
+  if (!req && trackedPromptResponse) return { discard: true };
   if (req) {
     msg.id = req.origId;
     // A `session/new` response names the fresh sessionId — claim it for the
@@ -885,6 +907,7 @@ function noteInbound(line) {
  * is attributable per-request, not just a bare socket close. Each error goes
  * to the socket that asked, carrying its original request id. */
 function failPending(message) {
+  sessionStatuses.failAll();
   for (const [bridged, req] of [...pendingClientReqs]) {
     pendingClientReqs.delete(bridged);
     const ws = req.ws;
@@ -911,7 +934,7 @@ function closeClients(reason) {
 }
 
 const watchdog = setInterval(() => {
-  if (pendingClientReqs.size === 0 || pendingAgentReqs.size > 0) return;
+  if ((pendingClientReqs.size === 0 && sessionStatuses.pendingCount === 0) || pendingAgentReqs.size > 0) return;
   const idleFor = Date.now() - lastTrafficAt;
   if (idleFor < IDLE_TIMEOUT_MS) return;
   const message =
@@ -1053,6 +1076,7 @@ function spawnChild() {
       buffer = buffer.slice(idx + 1);
       if (line) {
         const inb = noteInbound(line);
+        if (inb?.discard) continue;
         // A routed response carries the caller's original id — re-serialize
         // so the socket sees its own numbering, not the bridged one.
         broadcast(inb?.rewritten ? JSON.stringify(inb.msg) : line,
@@ -1100,6 +1124,7 @@ function shutdownBridge(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   log(`shutting down on ${signal}`);
+  clearInterval(statusRetry);
   clearInterval(modeGuard);
   clearInterval(watchdog);
   if (wsSweep) clearInterval(wsSweep);

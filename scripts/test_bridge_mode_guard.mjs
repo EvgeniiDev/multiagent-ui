@@ -15,7 +15,7 @@ try {
     path.join(root, 'deploy/acp-ws-bridge.mjs'), '--port', String(port),
     '--bind', '127.0.0.1', '--cmd', `${process.execPath} ${path.join(root, 'scripts/e2e_bridge_shutdown_agent.mjs')}`,
     '--required-mode', 'host',
-  ], { env: { ...process.env, NODE_PATH: process.env.NODE_PATH || '/home/hermes/.local/lib/node_modules', ACP_TOKEN_METER: '0', PATH: temp, ACP_BRIDGE_LOCK_DIR: path.join(temp, 'locks'), ACP_BRIDGE_MODE_FILE: modeFile }, stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { env: { ...process.env, NODE_PATH: process.env.NODE_PATH || '/home/hermes/.local/lib/node_modules', ACP_TOKEN_METER: '0', ACP_BRIDGE_STATUS_PERSISTENCE: '0', PATH: temp, ACP_BRIDGE_LOCK_DIR: path.join(temp, 'locks'), ACP_BRIDGE_MODE_FILE: modeFile }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   child.stdout.on('data', (chunk) => { output += chunk; });
   child.stderr.on('data', (chunk) => { output += chunk; });
