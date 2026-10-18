@@ -22,7 +22,7 @@ import { isDesktop } from './platform';
 import { useConfigStore } from '../stores/config';
 import { useActivityStore } from '../stores/activity';
 import { useSessionStatusStore } from '../stores/sessionStatus';
-import type { SessionNotification, AuthMethod, ContentBlock } from '@agentclientprotocol/sdk';
+import type { SessionNotification, AuthMethod, ContentBlock, SessionConfigOption } from '@agentclientprotocol/sdk';
 
 const PROTOCOL_VERSION = 1;
 
@@ -181,6 +181,37 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   // Session models
   const availableModels = ref<ModelInfo[]>([]);
   const currentModelId = ref<string>('');
+  const configOptions = ref<SessionConfigOption[]>([]);
+  const configPending = ref(false);
+  const modelOption = computed(() => configOptions.value.find(o => o.type === 'select' && o.category === 'model'));
+  const thoughtOption = computed(() => configOptions.value.find(o => o.type === 'select' && o.category === 'thought_level'));
+
+  function applyConfigOptions(options: SessionConfigOption[] | null | undefined) {
+    if (!options) return;
+    configOptions.value = options;
+    const model = modelOption.value;
+    if (model?.type === 'select') {
+      availableModels.value = model.options.flatMap(o => 'group' in o ? o.options : [o])
+        .map(o => ({ modelId: o.value, name: o.name, description: o.description ?? undefined }));
+      currentModelId.value = model.currentValue;
+    }
+  }
+
+  async function setSessionConfig(configId: string, value: string): Promise<void> {
+    if (!acpClient || !session.value) throw new Error('No active session');
+    if (configPending.value) return;
+    const client = acpClient;
+    const sessionId = session.value.sessionId;
+    configPending.value = true;
+    try {
+      const response = await client.setConfigOption({ sessionId, configId, value }) as { configOptions?: SessionConfigOption[] };
+      if (acpClient === client && session.value?.sessionId === sessionId) {
+        applyConfigOptions(response.configOptions);
+      }
+    } finally {
+      configPending.value = false;
+    }
+  }
 
   // Live context meter — the agent's own `usage_update` (tokens used against
   // the window); null until the agent reports. Ledger writes elsewhere also
@@ -1101,8 +1132,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       }
 
       case 'config_option_update':
-        // Experimental ACP surface — no picker UI consumes it yet. Ledger
-        // entry keeps the frame observable instead of silently dropped.
+        applyConfigOptions(update.configOptions);
         if (!loadingHistory) useActivityStore().recordEntry({
           kind: 'sync',
           agentName: agentName.value || session.value?.agentName || 'unknown',
@@ -1425,6 +1455,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         currentModelId.value = '';
       }
 
+      applyConfigOptions(sessionResponse.configOptions);
+
       return saved;
 
     } catch (e) {
@@ -1643,6 +1675,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         remoteWorkAfter.value ??= statusStore.remoteReadVersion?.() ?? 0;
       }
       void statusStore.refresh?.();
+      applyConfigOptions(loadResponse?.configOptions);
+
       isConnected.value = true;
       error.value = null;
       autoReconnectAttempts = 0;
@@ -1951,6 +1985,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     availableModes.value = [];
     currentModeId.value = '';
     availableCommands.value = [];
+    configOptions.value = [];
     availableModels.value = [];
     currentModelId.value = '';
     contextUsed.value = null;
@@ -2029,6 +2064,11 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   async function setModel(modelId: string): Promise<void> {
     if (!acpClient || !session.value) {
       throw new Error('No active session');
+    }
+
+    if (modelOption.value) {
+      await setSessionConfig(modelOption.value.id, modelId);
+      return;
     }
 
     await acpClient.unstable_setSessionModel({
@@ -2132,6 +2172,9 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     currentModeId,
     availableCommands,
     availableModels,
+    thoughtOption,
+    configPending,
+    setSessionConfig,
     currentModelId,
     contextUsed,
     contextSize,

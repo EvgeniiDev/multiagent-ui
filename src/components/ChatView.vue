@@ -376,6 +376,21 @@ const currentSession = computed(() => rt.session);
 const availableModes = computed(() => rt.availableModes);
 const currentModeId = computed(() => rt.currentModeId);
 const availableModels = computed(() => rt.availableModels);
+const thoughtOption = computed(() => rt.thoughtOption);
+const thoughtChoices = computed(() => {
+  const option = thoughtOption.value;
+  return option?.type === 'select'
+    ? option.options.flatMap(o => 'group' in o ? o.options : [o]).map(o => ({ value: o.value, label: o.name, description: o.description ?? undefined }))
+    : [];
+});
+async function handleThoughtChange(value: string) {
+  if (!thoughtOption.value) return;
+  try { await rt.setSessionConfig(thoughtOption.value.id, value); }
+  catch (e) { rt.error = `Failed to change reasoning: ${e instanceof Error ? e.message : String(e)}`; }
+}
+// Pi's legacy modes are thinking levels; avoid rendering the same setting twice.
+const showModePicker = computed(() => availableModes.value.length > 0 &&
+  !(thoughtOption.value && availableModes.value.every(m => thoughtChoices.value.some(o => o.value === m.id))));
 const currentModelId = computed(() => rt.currentModelId);
 
 // Context meter ("45k/200k") from the agent's usage_update frames; hidden
@@ -987,7 +1002,7 @@ async function handleModelChange(modelId: string) {
   try {
     await rt.setModel(modelId);
   } catch (e) {
-    console.error('Failed to change model:', e);
+    rt.error = `Failed to change model: ${e instanceof Error ? e.message : String(e)}`;
   }
 }
 
@@ -1359,15 +1374,24 @@ function planGlyph(status: string): string {
                 v-if="availableModels.length > 0"
                 :models="availableModels"
                 :current-model-id="currentModelId"
-                :disabled="isReconnecting || !isConnected"
+                :disabled="isReconnecting || !isConnected || rt.configPending"
                 compact
                 @change="handleModelChange"
               />
+              <UiSelect
+                v-if="thoughtOption?.type === 'select'"
+                :model-value="thoughtOption.currentValue"
+                :options="thoughtChoices"
+                :label="thoughtOption.name"
+                :disabled="isReconnecting || !isConnected || rt.configPending"
+                compact
+                @update:model-value="handleThoughtChange"
+              />
               <ModePicker
-                v-if="availableModes.length > 0"
+                v-if="showModePicker"
                 :modes="availableModes"
                 :current-mode-id="currentModeId"
-                :disabled="isReconnecting || !isConnected"
+                :disabled="isReconnecting || !isConnected || rt.configPending"
                 compact
                 @change="handleModeChange"
               />
