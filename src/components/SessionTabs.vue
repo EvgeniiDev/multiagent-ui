@@ -36,6 +36,7 @@ function tooltip(rt: SessionTab): string {
   if (rt.error) lines.push(rt.error);
   else if (rt.pendingPermission) lines.push('Waiting for permission');
   else if (!rt.isConnected && !rt.isConnecting) lines.push('Disconnected — click to reconnect');
+  else if (rt.isLoading || rt.turnStatus === 'working') lines.push('Working');
   else if (rt.turnIssue && !rt.isLoading && !rt.isConnecting) lines.push(rt.turnIssue === 'cancelled' ? 'Cancelled' : 'Error — the agent turn failed');
   else if (rt.turnCompleted && !rt.isLoading && !rt.isConnecting) lines.push('Completed — the agent finished its turn');
   return lines.filter(Boolean).join('\n');
@@ -92,7 +93,7 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
       >
         <!-- status: working > permission > error > completed -->
         <span
-          v-if="rt.isConnecting || (rt.isLoading && rt.isConnected)"
+          v-if="rt.isConnecting || (rt.isLoading && rt.isConnected) || (rt.turnStatus === 'working' && !rt.error && !rt.pendingPermission)"
           class="tab-spin"
           aria-hidden="true"
         ></span>

@@ -61,6 +61,7 @@ function sessionStatus(runtime?: SessionTab, session?: SavedSession) {
   if (runtime?.isLoading && runtime.isConnected) return { kind: 'working', label: 'Working' };
   const known = session && statusStore.forSession(session.agentName, session.sessionId);
   const status = runtime ? runtime.turnStatus : known ? known.status : session?.lastTurnStatus;
+  if (status === 'working') return { kind: 'working', label: 'Working' };
   if (status === 'cancelled') return { kind: 'error', label: '× Cancelled', detail: 'The agent turn was cancelled' };
   if (status === 'error') return { kind: 'error', label: '! Error', detail: 'The agent turn failed' };
   if (status === 'completed') return { kind: 'completed', label: '✓ Completed', detail: 'The agent finished its turn' };

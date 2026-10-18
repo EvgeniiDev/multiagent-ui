@@ -427,7 +427,7 @@ for (const update of [
       assert.equal(rt.turnCompleted.value, true, 'history replay must retain the confirmed result');
       emit(update);
       assert.equal(rt.turnCompleted.value, false, 'live work must invalidate canonical completion');
-      assert.equal(canonicalStatuses.value[`${saved.agentName}:${saved.sessionId}`].status, null, 'reset must survive reload');
+      assert.equal(canonicalStatuses.value[`${saved.agentName}:${saved.sessionId}`].status, 'working', 'working must survive reload');
     } finally { await rt.close(); }
   });
 }

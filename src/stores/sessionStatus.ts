@@ -5,7 +5,7 @@ import { isTauriHost } from '../lib/platform';
 import type { SavedSession } from '../lib/types';
 import type { ActivityEntry } from './activity';
 
-type Result = 'completed' | 'cancelled' | 'error' | null;
+type Result = 'working' | 'completed' | 'cancelled' | 'error' | null;
 export interface SessionStatusSnapshot { status: Result; at: number; }
 type Records = Record<string, SessionStatusSnapshot>;
 const DOCUMENT = 'session-statuses.json';
@@ -18,7 +18,7 @@ export function mergeSessionStatuses(...sources: unknown[]): Records {
     if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
     for (const [key, value] of Object.entries(source)) {
       const row = value as SessionStatusSnapshot | null;
-      if (!row || ![null, 'completed', 'cancelled', 'error'].includes(row.status) || !Number.isFinite(row.at) || row.at <= 0) continue;
+      if (!row || ![null, 'working', 'completed', 'cancelled', 'error'].includes(row.status) || !Number.isFinite(row.at) || row.at <= 0) continue;
       if (!merged[key] || row.at > merged[key].at) merged[key] = row;
     }
   }
@@ -35,7 +35,7 @@ export function sessionStatusesFromActivity(entries: ActivityEntry[]): Records {
     if (!entry.sessionId || !Number.isFinite(entry.at) || entry.at <= 0) continue;
     const key = keyFor(entry.agentName, entry.sessionId);
     let status: Result;
-    if (entry.kind === 'turn-start') { status = null; active.add(key); }
+    if (entry.kind === 'turn-start') { status = 'working'; active.add(key); }
     else if (entry.kind === 'turn-end') status = entry.detail === 'end_turn' ? 'completed' : entry.detail === 'cancelled' ? 'cancelled' : null;
     else if (entry.kind === 'error' && active.has(key)) status = 'error';
     else continue; // Opening/replaying a session is never a new result.
@@ -112,6 +112,13 @@ export const useSessionStatusStore = defineStore('session-status', () => {
     // turn must never replace an explicitly saved result from the new store.
     const recovered = mergeSessionStatuses(legacy, sessionStatusesFromActivity(entries));
     records.value = { ...recovered, ...mergeSessionStatuses(local, records.value, server) };
+    // Earlier clients used null for an unfinished turn. Recover that state
+    // only when the turn ledger actually has an unmatched start.
+    for (const [key, row] of Object.entries(records.value)) {
+      if (row.status === null && recovered[key]?.status === 'working') {
+        records.value[key] = { status: 'working', at: Math.max(row.at, recovered[key].at) + 1 };
+      }
+    }
     for (const [key, row] of Object.entries(records.value)) {
       if (!server[key] || row.at > server[key].at) pending.set(key, row);
     }
