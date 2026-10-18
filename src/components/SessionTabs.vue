@@ -113,15 +113,16 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
           :aria-label="rt.turnIssue === 'cancelled' ? 'Cancelled' : 'Error — the agent turn failed'"
         >{{ rt.turnIssue === 'cancelled' ? '×' : '!' }}</span>
         <span
-          v-else-if="rt.turnCompleted && rt.isConnected"
+          v-else-if="rt.turnCompleted"
           class="tab-completed"
           title="Completed — the agent finished its turn"
           aria-label="Completed — the agent finished its turn"
         >✓</span>
         <span
-          v-else-if="rt.unread"
+          v-else-if="rt.unread || rt.turnStatus === 'output'"
           class="tab-dot"
-          aria-hidden="true"
+          :title="rt.unread ? 'Unread reply' : 'Reply received'"
+          :aria-label="rt.unread ? 'Unread reply' : 'Reply received'"
         ></span>
         <span
           v-else-if="!rt.isConnected && !rt.isConnecting"

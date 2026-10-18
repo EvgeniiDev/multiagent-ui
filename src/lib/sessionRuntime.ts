@@ -140,9 +140,17 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   const pendingPermission = ref<PermissionRequest | null>(null);
   /** New content arrived while this tab wasn't active (or while hidden). */
   const unread = ref(false);
-  /** Confirmed end_turn for the latest live prompt; replay never implies success. */
-  const turnCompleted = ref(false);
-  const turnIssue = ref<'cancelled' | 'error' | null>(null);
+  // Result belongs to the saved session, not the tab's unread/connection state.
+  const turnStatus = computed(() => (session.value ?? descriptor.value)?.lastTurnStatus ?? null);
+  const turnCompleted = computed(() => turnStatus.value === 'completed');
+  const turnIssue = computed(() => turnStatus.value === 'cancelled' || turnStatus.value === 'error' ? turnStatus.value : null);
+
+  function setTurnStatus(status: SavedSession['lastTurnStatus']): void {
+    const target = session.value ?? descriptor.value;
+    if (!target) return;
+    target.lastTurnStatus = status;
+    void deps.persistSessions();
+  }
   let promptGeneration = 0;
   /**
    * Autonomous run: when true the client answers `session/request_permission`
@@ -862,6 +870,12 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     }
 
     deps.notifyActivity(runtimeApi);
+    // Reading live output clears unread, but must leave a visible receipt.
+    // Replay never invents a result; only a prompt response confirms completion.
+    if (!loadingHistory && inFlightPrompts === 0) {
+      if (update.sessionUpdate === 'user_message_chunk' && turnStatus.value !== null) setTurnStatus(null);
+      else if (update.sessionUpdate === 'agent_message_chunk' && turnStatus.value !== 'output') setTurnStatus('output');
+    }
     // Replayed history and service notifications must not reorder the list.
     if (!loadingHistory && (update.sessionUpdate === 'agent_message_chunk'
         || update.sessionUpdate === 'user_message_chunk')) {
@@ -1106,8 +1120,6 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     cwd: string,
     options?: { autonomous?: boolean }
   ): Promise<SavedSession> {
-    turnCompleted.value = false;
-    turnIssue.value = null;
     promptGeneration += 1;
     isLoading.value = true;
     isConnecting.value = true;
@@ -1419,8 +1431,6 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     savedSession: SavedSession,
     options?: { autonomous?: boolean }
   ): Promise<void> {
-    turnCompleted.value = false;
-    turnIssue.value = null;
     promptGeneration += 1;
     isLoading.value = true;
     // Keep the previous failure until session/load verifies recovery. A
@@ -1664,7 +1674,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     }
 
     session.value.lastUpdated = session.value.lastMessageAt = Date.now();
-    void deps.persistSessions();
+    setTurnStatus(null);
   }
 
   // Send prompt
@@ -1677,8 +1687,6 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     }
 
     recordUserPrompt(text, attachments);
-    turnCompleted.value = false;
-    turnIssue.value = null;
     const generation = ++promptGeneration;
     error.value = null;
     isLoading.value = true;
@@ -1699,8 +1707,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       });
 
       if (generation === promptGeneration) {
-        turnCompleted.value = response.stopReason === 'end_turn';
-        turnIssue.value = response.stopReason === 'cancelled' ? 'cancelled' : null;
+        setTurnStatus(response.stopReason === 'end_turn' ? 'completed' : response.stopReason === 'cancelled' ? 'cancelled' : null);
       }
       console.log('Prompt completed:', response.stopReason);
       activity.recordEntry({
@@ -1720,7 +1727,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       }
     } catch (e) {
       if (generation === promptGeneration) {
-        turnIssue.value = 'error';
+        setTurnStatus('error');
         error.value = `Send failed: ${e instanceof Error ? e.message : String(e)}`;
       }
       outbox.pause();
@@ -1785,8 +1792,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
 
   // Cancel current operation
   async function cancelOperation(): Promise<void> {
-    turnCompleted.value = false;
-    turnIssue.value = 'cancelled';
+    setTurnStatus('cancelled');
     promptGeneration += 1;
     outbox.pause();
     if (!acpClient || !session.value) return;
@@ -1845,8 +1851,6 @@ export function createSessionRuntime(deps: RuntimeDeps) {
    * this only frees the transport.
    */
   async function close(): Promise<void> {
-    turnCompleted.value = false;
-    turnIssue.value = null;
     promptGeneration += 1;
     outbox.pause();
     // Abort an in-flight connect: without this a mid-create close would let
@@ -2050,6 +2054,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     pendingPermission,
     autonomous,
     unread,
+    turnStatus,
     turnCompleted,
     turnIssue,
     availableModes,

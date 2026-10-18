@@ -88,6 +88,8 @@ export interface SavedSession {
   lastUpdated: number;
   /** Latest live user/agent message observed here; protects against stale inventories. */
   lastMessageAt?: number;
+  /** Last observed turn state, independent of whether its output was read. */
+  lastTurnStatus?: 'completed' | 'cancelled' | 'error' | 'output' | null;
   /** Positive timestamp: archived; null: explicitly restored; absent: legacy. */
   archivedAt?: number | null;
   cwd: string;

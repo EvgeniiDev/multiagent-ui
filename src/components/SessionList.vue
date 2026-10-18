@@ -53,15 +53,17 @@ const openRuntimes = computed(() => new Map(sessionStore.openTabs.map(runtime =>
   return [JSON.stringify([target?.agentName, target?.sessionId]), runtime];
 })));
 function sessionStatus(runtime?: SessionTab, session?: SavedSession) {
+  if (runtime?.pendingPermission) return { kind: 'permission', label: 'Waiting for permission' };
+  if (runtime?.error) return { kind: 'error', label: 'Error', detail: runtime.error };
+  if (runtime?.isConnecting) return { kind: 'working', label: 'Connecting' };
+  if (runtime?.isLoading && runtime.isConnected) return { kind: 'working', label: 'Working' };
+  const status = runtime?.turnStatus ?? session?.lastTurnStatus;
+  if (status === 'cancelled') return { kind: 'error', label: '× Cancelled', detail: 'The agent turn was cancelled' };
+  if (status === 'error') return { kind: 'error', label: '! Error', detail: 'The agent turn failed' };
+  if (status === 'completed') return { kind: 'completed', label: '✓ Completed', detail: 'The agent finished its turn' };
+  if (runtime?.unread) return { kind: 'unread', label: 'Unread reply' };
+  if (status === 'output') return { kind: 'received', label: 'Reply received' };
   if (!runtime) return session?.supportsLoadSession ? null : { kind: 'unavailable', label: 'Cannot reopen', detail: 'This agent does not support reopening saved sessions.' };
-  if (runtime.pendingPermission) return { kind: 'permission', label: 'Waiting for permission' };
-  if (runtime.error) return { kind: 'error', label: 'Error', detail: runtime.error };
-  if (runtime.isConnecting) return { kind: 'working', label: 'Connecting' };
-  if (runtime.isLoading && runtime.isConnected) return { kind: 'working', label: 'Working' };
-  if (runtime.turnIssue === 'cancelled') return { kind: 'error', label: '× Cancelled', detail: 'The agent turn was cancelled' };
-  if (runtime.turnIssue === 'error') return { kind: 'error', label: '! Error', detail: 'The agent turn failed' };
-  if (runtime.turnCompleted && runtime.isConnected) return { kind: 'completed', label: '✓ Completed', detail: 'The agent finished its turn' };
-  if (runtime.unread) return { kind: 'unread', label: 'Unread reply' };
   if (!runtime.isConnected) return { kind: 'disconnected', label: 'Disconnected' };
   return isPage.value ? null : { kind: 'open', label: 'Open' };
 }
@@ -403,7 +405,7 @@ ul {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.row-status.working, .row-status.unread, .row-status.permission { color: var(--text-accent); }
+.row-status.working, .row-status.unread, .row-status.received, .row-status.permission { color: var(--text-accent); }
 .row-status.completed { color: var(--bg-success); }
 .row-status.error { color: var(--bg-danger); }
 .row-status.working::before {

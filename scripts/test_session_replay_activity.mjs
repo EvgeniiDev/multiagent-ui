@@ -5,11 +5,13 @@ import { readFileSync } from 'node:fs';
 import * as vue from 'vue';
 import ts from 'typescript';
 import { markPromptRecorded } from '../src/lib/promptError.ts';
+import { createPromptOutbox } from '../src/lib/promptOutbox.ts';
+import { steeringDelivery } from '../src/lib/steeringDelivery.ts';
 
 let client, entries, cached, cacheWrites, sharedReader;
 let seq = 0;
 globalThis.__replayRuntimeDeps = {
-  ref: vue.ref, computed: vue.computed, watch: vue.watch, markPromptRecorded,
+  ref: vue.ref, computed: vue.computed, watch: vue.watch, markPromptRecorded, createPromptOutbox, steeringDelivery,
   uuid: () => `test-${++seq}`,
   getAppVersion: async () => 'test',
   trackEvent() {}, trackError() {},
@@ -307,8 +309,21 @@ test('only a successful latest prompt marks completion, never replay or intermed
     const final = rt.sendPrompt('finish');
     pending.shift().resolve({ stopReason: 'end_turn' }); await final;
     assert.equal(rt.turnCompleted.value, true);
-    await rt.resume({ ...saved });
-    assert.equal(rt.turnCompleted.value, false, 'reloading history cannot imply completion');
+    await rt.resume({ ...rt.session.value });
+    assert.equal(rt.turnCompleted.value, true, 'reopening preserves a confirmed completion');
     assert.equal(rt.turnIssue.value, null);
   } finally { await rt.close(); }
+});
+
+
+test('confirmed outcomes survive history replay and closing without promoting old transcript', async () => {
+  for (const lastTurnStatus of ['completed', 'cancelled', 'error', 'output']) {
+    const record = { ...saved, lastTurnStatus };
+    const rt = createSessionRuntime(deps);
+    await rt.resume(record);
+    assert.equal(rt.turnCompleted.value, lastTurnStatus === 'completed');
+    assert.equal(rt.turnIssue.value, ['error', 'cancelled'].includes(lastTurnStatus) ? lastTurnStatus : null);
+    await rt.close();
+    assert.equal(record.lastTurnStatus, lastTurnStatus, 'close must retain saved outcome');
+  }
 });

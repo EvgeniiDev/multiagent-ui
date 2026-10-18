@@ -63,6 +63,20 @@ const assert = require('node:assert/strict');
       }
       await directory();
       assert.equal(await page.locator('.row-status.completed').count(), 0, 'replay is not completion');
+      await page.locator('.session-row[data-session-id="newer"] .session-open').click();
+      update('older', 'Background output before reading');
+      await directory();
+      await row.locator('.row-status.unread').waitFor();
+      await row.locator('.session-open').click();
+      await directory();
+      await row.locator('.row-status.received').waitFor();
+      assert.equal(await row.locator('.row-status.completed').count(), 0, 'reading output cannot imply completion');
+      if (width >= 800) await page.locator('.tab-dot[title="Reply received"]').waitFor();
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(() => window.__session?.openTabs.length === 2 && window.__session.openTabs.every(t => t.isConnected));
+      await directory();
+      await row.locator('.row-status.received').waitFor();
+
       await row.locator('.session-open').click();
       await page.locator('.chat-view:visible textarea').fill('Complete this test turn');
       await page.getByRole('button', { name: 'Send', exact: true }).click();
@@ -105,6 +119,12 @@ const assert = require('node:assert/strict');
       assert.equal(await issue.textContent(), '× Cancelled');
       assert.equal(await issue.evaluate(e => getComputedStyle(e).color), 'rgb(240, 145, 165)');
       if (width >= 800) await page.locator('.tab-badge.err[aria-label="Cancelled"]').waitFor();
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(() => window.__session?.openTabs.length === 2 && window.__session.openTabs.every(t => t.isConnected));
+      await directory();
+      await issue.waitFor();
+      assert.equal(await issue.textContent(), '× Cancelled', 'cancelled state survives reload');
+
       await row.locator('.session-open').click();
       await directory();
       await issue.waitFor();
@@ -134,16 +154,25 @@ const assert = require('node:assert/strict');
       const retry = pending.shift();
       retry.ws.send(JSON.stringify({ jsonrpc: '2.0', id: retry.q.id, result: { stopReason: 'end_turn' } }));
       await completed.waitFor();
-
+      if (width >= 800) {
+        await page.locator('.session-tab').filter({ has: page.locator('.tab-completed') }).locator('.tab-close').click();
+        await completed.waitFor();
+        assert.equal(await page.locator('.tab-completed').count(), 0, 'closed tab keeps result in session list');
+        await row.locator('.session-open').click();
+        await page.locator('.tab-completed').waitFor();
+        await directory();
+        await completed.waitFor();
+      }
       assert.equal(await page.locator('.session-row[data-session-id="newer"] .row-status.completed').count(), 0, 'other session stays independent');
       await page.reload({ waitUntil: 'domcontentloaded' });
       await page.waitForFunction(() => window.__session?.openTabs.length === 2 && window.__session.openTabs.every(t => t.isConnected));
       await directory();
-      assert.equal(await page.locator('.row-status.completed').count(), 0, 'restored history has no false completion');
+      await row.locator('.row-status.completed').waitFor();
+      assert.equal(await page.locator('.row-status.completed').count(), 1, 'confirmed completion survives reload');
       assert.equal(await page.locator('.row-status.error').count(), 0, 'reload has no stale errors');
       assert.deepEqual(errors, []);
       assert.deepEqual(failed, []);
-      console.log(`PASS ${width}px: replay, intermediate output, background completion, green/red computed styles, reading, restart, cancellation, RPC error, successful retry, reload, session isolation`);
+      console.log(`PASS ${width}px: replay, intermediate output, background completion, green/red computed styles, reading, restart, cancellation, RPC error, successful retry, persistent read/close/reopen/reload, session isolation`);
       await context.close();
     }
   } finally { await browser?.close(); if (server) await new Promise(resolve => server.close(resolve)); }
