@@ -483,3 +483,73 @@ test('a lifecycle read begun before remote work cannot release Queue when its st
   await new Promise(resolve=>setTimeout(resolve,0));assert.equal(sent.length,1);
  }finally{await rt.close();}
 });
+
+test('Pi startup banner leaves a new session idle and delivers its first queued message', async () => {
+  client.newSession = async () => ({ sessionId: saved.sessionId });
+  const prompts = [];
+  client.prompt = async p => { prompts.push(p); return { stopReason: 'end_turn' }; };
+  const rt = createSessionRuntime(deps);
+  try {
+    await rt.create('Pi', '/tmp');
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'pi v0.85.1\n---\n\n## Skills\nStartup info' } });
+    assert.equal(rt.turnStatus.value, null, 'startup info is not a model turn');
+    assert.match(rt.messages.value.at(-1).content, /Startup info/);
+    rt.submitMessage('first question');
+    await vue.nextTick();
+    assert.equal(prompts.length, 1, 'first Queue message must reach Pi without a nonexistent completion');
+    assert.equal(rt.pendingMessages.value.length, 0);
+    await vue.nextTick();
+    assert.equal(rt.turnCompleted.value, true);
+  } finally { await rt.close(); }
+});
+
+test('late Pi startup banner on a resumed empty session does not invent remote work', async () => {
+  client.loadSession = async () => ({});
+  let sent = 0;
+  client.prompt = async () => { sent++; return { stopReason: 'end_turn' }; };
+  const rt = createSessionRuntime(deps);
+  try {
+    await rt.resume({ ...saved });
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Pi startup info' } });
+    assert.equal(rt.turnStatus.value, null);
+    rt.submitMessage('first question');
+    await vue.nextTick();
+    assert.equal(sent, 1);
+  } finally { await rt.close(); }
+});
+
+test('reopening a banner-only Pi session clears the false saved output status', async () => {
+  client.loadSession = async () => {
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Pi startup info' } });
+    return {};
+  };
+  let sent = 0;
+  client.prompt = async () => { sent++; return { stopReason: 'end_turn' }; };
+  const rt = createSessionRuntime(deps);
+  try {
+    await rt.resume({ ...saved, lastTurnStatus: 'output' });
+    assert.equal(rt.turnStatus.value, null, 'banner-only replay must not retain the old synthetic output status');
+    rt.submitMessage('first question');
+    await vue.nextTick();
+    assert.equal(sent, 1, 'reopened session must accept its first message');
+  } finally { await rt.close(); }
+});
+
+test('banner-only replay preserves work independently confirmed by the provider', async () => {
+  client.loadSession = async () => ({});
+  canonicalStatuses = vue.ref({ 'Pi:history': { status: 'working', at: 1 } });
+  remoteEvidence.value = { status: 'working', at: 1, readVersion: 1 };
+  let sent = 0;
+  client.prompt = async () => { sent++; return { stopReason: 'end_turn' }; };
+  const rt = createSessionRuntime(deps);
+  try {
+    await rt.resume({ ...saved, lastTurnStatus: 'working' });
+    rt.submitMessage('wait for actual work');
+    await vue.nextTick();
+    assert.equal(sent, 0, 'provider-confirmed work must still hold Queue');
+    assert.equal(rt.pendingMessages.value.length, 1);
+    remoteEvidence.value = { status: 'completed', at: 2, readVersion: 2 };
+    await vue.nextTick();
+    assert.equal(sent, 1);
+  } finally { await rt.close(); }
+});

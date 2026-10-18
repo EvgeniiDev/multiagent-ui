@@ -903,7 +903,12 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     if (!loadingHistory) deps.notifyActivity(runtimeApi);
     // Live work after reconnect invalidates the previous result in both stores.
     // Replay never invents a result; only a prompt response confirms completion.
-    if (!loadingHistory && inFlightPrompts === 0) {
+    // Pi sends startup information as assistant text after session/new.
+    // Without a user turn that text cannot establish ongoing model work.
+    const startupMessage = !loadingHistory && inFlightPrompts === 0
+      && update.sessionUpdate === 'agent_message_chunk'
+      && !messages.value.some(message => message.role === 'user');
+    if (!loadingHistory && inFlightPrompts === 0 && !startupMessage) {
       if (['user_message_chunk', 'agent_message_chunk', 'tool_call', 'tool_call_update', 'plan'].includes(update.sessionUpdate)
         && remoteWorkAfter.value === null) remoteWorkAfter.value = statusStore.remoteReadVersion?.() ?? 0;
       if (update.sessionUpdate === 'user_message_chunk' && turnStatus.value !== 'working') setTurnStatus('working', false);
@@ -1623,6 +1628,15 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         currentModelId.value = loadResponse.models.currentModelId || '';
       }
 
+      // Older clients treated Pi's startup banner as a live answer. A complete
+      // replay with no user turns cannot sustain that synthetic busy status;
+      // retain it when the provider independently confirms ongoing work.
+      if (inFlightPrompts === 0 && !messages.value.some(message => message.role === 'user')
+        && (turnStatus.value === 'working' || turnStatus.value === 'output')
+        && statusStore.remoteForSession?.(savedSession.agentName, savedSession.sessionId)?.status !== 'working') {
+        remoteWorkAfter.value = null;
+        setTurnStatus(null, false);
+      }
       outbox.restore(attachmentScope(session.value!.sessionId));
       const confirmedDelivery = outbox.reconcile(messages.value, previousHistory);
       if (confirmedDelivery || savedSession.lastTurnStatus === 'working' || savedSession.lastTurnStatus === 'output') {
