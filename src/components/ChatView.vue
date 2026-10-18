@@ -253,11 +253,17 @@ function assistantItems(message: ChatMessage): RenderItem[] {
     (message.attachments ?? []).forEach((att, index) => {
       if (!claimed.has(index)) items.push({ kind: 'attachment', att, index, last: false });
     });
+    // A long turn can contain thousands of tool segments. Index once per
+    // render instead of scanning the turn for each segment; keep first match.
+    const toolsById = new Map<string, ToolCallInfo>();
+    for (const tool of message.toolCalls ?? []) {
+      if (!toolsById.has(tool.toolCallId)) toolsById.set(tool.toolCallId, tool);
+    }
     for (const s of segs) {
       if (s.kind === 'text') {
         if (s.text) items.push({ kind: 'text', text: s.text, last: false });
       } else if (s.kind === 'tool') {
-        const tc = message.toolCalls?.find((t) => t.toolCallId === s.toolCallId);
+        const tc = toolsById.get(s.toolCallId);
         if (tc) items.push({ kind: 'tool', tc, last: false });
       } else if (s.kind === 'attachment') {
         const att = message.attachments?.[s.index];

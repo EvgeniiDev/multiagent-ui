@@ -1,7 +1,7 @@
 // Traffic store for ACP message monitoring
 import { uuid } from '../lib/uuid';
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, shallowRef, computed } from 'vue';
 
 export type TrafficDirection = 'in' | 'out';
 export type TrafficType = 'request' | 'response' | 'notification';
@@ -20,7 +20,7 @@ export interface TrafficEntry {
 const MAX_ENTRIES = 500;
 
 export const useTrafficStore = defineStore('traffic', () => {
-  const entries = ref<TrafficEntry[]>([]);
+  const entries = shallowRef<TrafficEntry[]>([]);
   const isPaused = ref(false);
   const filter = ref<'all' | 'requests' | 'responses' | 'notifications'>('all');
   const searchQuery = ref('');
@@ -62,12 +62,9 @@ export const useTrafficStore = defineStore('traffic', () => {
       timestamp: Date.now(),
     };
     
-    entries.value.push(newEntry);
-    
-    // Limit entries to prevent memory issues
-    if (entries.value.length > MAX_ENTRIES) {
-      entries.value = entries.value.slice(-MAX_ENTRIES);
-    }
+    // Wire snapshots are immutable. Replace only the bounded root array so
+    // replay does not repeatedly proxy and traverse hundreds of old entries.
+    entries.value = [...entries.value.slice(-(MAX_ENTRIES - 1)), newEntry];
   }
 
   function clear() {
