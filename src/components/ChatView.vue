@@ -989,7 +989,7 @@ function toggleToolCall(toolCallId: string): void {
 
 // Diagram fences emit a `.mermaid-src` placeholder (an escaped <pre>, so a
 // source mermaid rejects still shows as an ordinary code block); the
-// v-mermaid directive swaps it for rendered SVG once it lands in the DOM.
+// v-chat-markdown directive swaps it for rendered SVG once it lands in the DOM.
 // A bare fence opening with a diagram keyword counts — agents often skip
 // the language tag.
 const DIAGRAM_RE =
@@ -1027,9 +1027,20 @@ mdRenderer.code = function (this: Renderer, token: Tokens.Code): string {
   return Renderer.prototype.code.call(this, token);
 };
 
-const vMermaid: Directive<HTMLElement> = {
-  mounted: (el) => hydrateMermaid(el),
-  updated: (el) => hydrateMermaid(el),
+function hydrateChatMarkdown(el: HTMLElement): void {
+  for (const link of el.querySelectorAll('a[href]:not([data-chat-file])')) {
+    link.setAttribute('target', '_blank');
+    const rel = new Set((link.getAttribute('rel') ?? '').split(/\s+/).filter(Boolean));
+    rel.add('noopener');
+    rel.add('noreferrer');
+    link.setAttribute('rel', [...rel].join(' '));
+  }
+  hydrateMermaid(el);
+}
+
+const vChatMarkdown: Directive<HTMLElement> = {
+  mounted: hydrateChatMarkdown,
+  updated: hydrateChatMarkdown,
 };
 
 function renderMarkdown(content: string): string {
@@ -1111,7 +1122,7 @@ function planGlyph(status: string): string {
             <span class="thought-label">{{ isThoughtExpanded(message.id) ? 'Hide thinking' : 'Thinking' }}</span>
           </UiButton>
           <div v-if="isThoughtExpanded(message.id)" class="thought-content">
-            <div v-mermaid v-html="renderMarkdown(message.thought)" />
+            <div v-chat-markdown v-html="renderMarkdown(message.thought)" />
           </div>
         </div>
 
@@ -1121,7 +1132,7 @@ function planGlyph(status: string): string {
         <div v-if="message.role === 'assistant'" class="message-parts">
           <template v-for="(item, i) in assistantItems(message)" :key="i">
             <template v-if="item.kind === 'text'">
-              <div class="message-content" :class="{ 'stream-tail': item.last }" v-mermaid v-html="renderMarkdown(item.text)" />
+              <div class="message-content" :class="{ 'stream-tail': item.last }" v-chat-markdown v-html="renderMarkdown(item.text)" />
               <ChatFilePreviews :text="item.text" :cwd="currentSession?.cwd"
                 :active="sessionStore.activeTabId === rt.id && uiStore.activeView === 'chat'"
                 @open="filePreview = $event" />
@@ -1157,7 +1168,7 @@ function planGlyph(status: string): string {
         <div
           v-else-if="message.content"
           class="message-content"
-          v-mermaid
+          v-chat-markdown
           v-html="renderMarkdown(message.content)"
         />
       </div>
