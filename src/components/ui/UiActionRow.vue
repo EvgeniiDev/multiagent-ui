@@ -2,13 +2,14 @@
 /** One visual tile with separate native primary and trailing actions. */
 withDefaults(defineProps<{
   as?: 'div' | 'li';
+  variant?: 'row' | 'tab';
   selected?: boolean;
   density?: 'compact' | 'comfortable';
-}>(), { as: 'div', selected: false, density: 'compact' });
+}>(), { as: 'div', variant: 'row', selected: false, density: 'compact' });
 </script>
 
 <template>
-  <component :is="as" class="ui-action-row ui-action-group" :class="{ 'is-selected': selected, 'is-comfortable': density === 'comfortable' }">
+  <component :is="as" class="ui-action-row ui-action-group" :class="{ 'is-tab': variant === 'tab', 'is-selected': selected, 'is-comfortable': density === 'comfortable' }">
     <div class="ui-action-row__primary"><slot /></div>
     <div v-if="$slots.actions" class="ui-action-row__actions"><slot name="actions" /></div>
   </component>
@@ -32,13 +33,23 @@ withDefaults(defineProps<{
   border-color: var(--text-accent);
   background: var(--accent-soft);
 }
+.ui-action-row.is-tab {
+  width: auto;
+  min-height: 28px;
+  border-radius: var(--radius-md, 6px) var(--radius-md, 6px) 0 0;
+}
+.ui-action-row.is-tab.is-selected {
+  background: var(--bg-main);
+  border-color: var(--border-faint);
+  border-bottom-color: transparent;
+  margin-bottom: -1px;
+}
 .ui-action-row.is-comfortable { min-height: 72px; }
 .ui-action-row__primary { display: flex; flex: 1; min-width: 0; }
 .ui-action-row__actions {
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  padding-inline-end: 4px;
 }
 @media (hover: hover) and (pointer: fine) {
   .ui-action-row:hover:not(.is-selected) { background: var(--tint-hover); }

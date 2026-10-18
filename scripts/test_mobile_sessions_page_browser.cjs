@@ -20,7 +20,7 @@ const assert = require('node:assert/strict');
       base = `http://127.0.0.1:${server.address().port}`;
     }
     browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH, args: ['--no-sandbox'] });
-    for (const width of [320, 390, 780, 1440]) {
+    for (const width of [320, 390, 780, 1440, 1920]) {
       const context = await browser.newContext({ ignoreHTTPSErrors: true, hasTouch: width < 800, isMobile: width < 800, viewport: { width, height: 844 } });
       await context.addInitScript(() => {
         if (sessionStorage.getItem('sessions-fixture')) return;
@@ -256,6 +256,19 @@ const assert = require('node:assert/strict');
         }
       } else {
         assert.equal(await page.locator('.tab-strip [role="tab"]').count(), 2, 'desktop tabs retained');
+        const activeTab = page.locator('.session-tab').filter({ has: page.locator('[role="tab"][aria-selected="true"]') });
+        assert(await activeTab.evaluate(e => e.classList.contains('ui-action-row')), 'tab title and close share the library tile');
+        assert.equal(await activeTab.evaluate(e => getComputedStyle(e).borderTopStyle), 'solid', 'the whole tab owns the frame');
+        assert.equal(await activeTab.locator('[role="tab"]').evaluate(e => getComputedStyle(e).backgroundColor), 'rgba(0, 0, 0, 0)', 'tab title has no independent fill');
+        await page.evaluate(() => { window.__session.activeRuntime.session.title = 'A long session title '.repeat(20); });
+        await page.waitForFunction(() => document.querySelector('.tab[aria-selected="true"] .tab-title')?.textContent.length > 100);
+        assert(await activeTab.locator('.tab-title').evaluate(e => e.scrollWidth > e.clientWidth), 'long tab titles truncate before the close action');
+        const tabBox = await activeTab.boundingBox(), tabClose = await activeTab.locator('.tab-close').boundingBox();
+        assert(tabBox.width <= 220, 'the width limit includes the close action');
+        assert(tabClose.x >= tabBox.x && tabClose.x + tabClose.width <= tabBox.x + tabBox.width - 1, 'tab cross is inside its frame');
+        assert.equal(await page.locator('.session-tab button button').count(), 0, 'tab and close remain separate buttons');
+        await page.locator('.tab-strip').screenshot({ path: `/tmp/acp-session-tabs-${width}.png` });
+        await page.evaluate(() => { window.__session.activeRuntime.session.title = 'older'; });
         const desktopClose = page.locator('.row-close').first();
         const glyph = await desktopClose.locator('svg').boundingBox();
         assert.equal(glyph.width, 12, 'desktop session close glyph stays small beside session text');
@@ -271,16 +284,61 @@ const assert = require('node:assert/strict');
         const tile = await selectedRow.boundingBox(), trailing = await selectedRow.locator('.row-close').boundingBox();
         assert(trailing.x >= tile.x && trailing.x + trailing.width <= tile.x + tile.width - 1, 'the cross is inside the selected tile');
         assert(tile.x + tile.width - trailing.x - trailing.width <= 6, 'no empty strip to the right of the action');
+        const insets = await selectedRow.evaluate(row => {
+          const tile = row.getBoundingClientRect();
+          const content = row.querySelector('.row-content').getBoundingClientRect();
+          const svg = row.querySelector('.row-close svg');
+          const path = svg.querySelector('path').getBBox();
+          const icon = svg.getBoundingClientRect();
+          const paintedRight = icon.left + (path.x + path.width) * icon.width / svg.viewBox.baseVal.width;
+          return { left: content.left - tile.left, right: tile.right - paintedRight };
+        });
+        assert(Math.abs(insets.left - insets.right) <= 0.5, `session contents have equal horizontal insets: ${JSON.stringify(insets)}`);
         const stamp = await selectedRow.locator('.row-stamp').boundingBox();
         assert(trailing.x - stamp.x - stamp.width <= 10, 'metadata and trailing action stay close');
         await page.locator('#app-sidebar').screenshot({ path: `/tmp/acp-session-tile-${width}.png` });
+        // A classic scrollbar consumes layout width; overlay scrollbars do not.
+        // Force overflow to cover long histories even with this two-row fixture.
+        const scrollArea = page.locator('#app-sidebar .sidebar-content');
+        await scrollArea.evaluate(e => e.style.maxHeight = '100px');
+        await selectedRow.scrollIntoViewIfNeeded();
+        const outer = await selectedRow.evaluate(row => {
+          const sidebar = document.querySelector('#app-sidebar');
+          const box = sidebar.getBoundingClientRect(), tile = row.getBoundingClientRect();
+          const border = parseFloat(getComputedStyle(sidebar).borderRightWidth);
+          const scroll = row.closest('.sidebar-content');
+          return { left: tile.left - box.left, right: box.right - border - tile.right,
+            overflowing: scroll.scrollHeight > scroll.clientHeight };
+        });
+        assert(outer.overflowing, 'the spacing check includes an overflowing history');
+        assert(Math.abs(outer.left - outer.right) <= 0.5, `outer session margins match with a scrollbar: ${JSON.stringify(outer)}`);
+        await scrollArea.evaluate(e => e.style.removeProperty('max-height'));
         const primary = selectedRow.locator('.session-open');
         await page.keyboard.press('Tab'); await primary.focus();
         assert.equal(await primary.evaluate(e => getComputedStyle(e).outlineOffset), '-2px', 'primary focus stays visible inside the shared tile');
+        await selectedRow.locator('.row-close').focus();
+        assert.equal(await selectedRow.locator('.row-close').evaluate(e => getComputedStyle(e).outlineOffset), '-2px', 'trailing focus stays inside the tile after removing its extra inset');
         assert.equal(await page.locator('.session-row button button').count(), 0, 'tile actions remain separate native buttons');
         assert.equal(await page.locator('.row-open').count(), 2, 'desktop keeps open-tab indicators');
         assert(await page.locator('.row-status.open').count() >= 1, 'desktop keeps open-tab status');
         assert((await page.locator('#app-sidebar').boundingBox()).width < 600);
+        const newerTab = page.locator('.session-tab').filter({ has: page.getByRole('tab', { name: 'newer', exact: true }) });
+        await newerTab.hover();
+        assert.equal(await newerTab.locator('.tab-close').evaluate(e => getComputedStyle(e).opacity), '1', 'hover reveals the close action inside the whole tab');
+        await newerTab.locator('.tab-close').focus();
+        assert.equal(await newerTab.locator('.tab-close').evaluate(e => getComputedStyle(e).outlineOffset), '-2px', 'tab close focus is not clipped');
+        await newerTab.locator('.tab-close').click();
+        assert.equal(await page.getByRole('tab').count(), 1);
+        assert.equal(await page.getByRole('tab', { name: 'older', exact: true }).getAttribute('aria-selected'), 'true', 'closing an inactive tab preserves the active tab');
+        const newerRow = page.locator('.session-row[data-session-id="newer"] .session-open');
+        assert(await newerRow.isVisible(), 'closing a tab keeps its session in history');
+        await newerRow.click();
+        await page.getByRole('tab', { name: 'newer', exact: true }).waitFor();
+        await newerTab.locator('.tab-close').click();
+        assert.equal(await page.getByRole('tab', { name: 'older', exact: true }).getAttribute('aria-selected'), 'true', 'closing the active tab selects the remaining tab');
+        await newerRow.click();
+        await page.getByRole('tab', { name: 'newer', exact: true }).waitFor();
+        await page.getByRole('tab', { name: 'older', exact: true }).click();
         await page.setViewportSize({ width: 390, height: 844 });
         await page.waitForFunction(() => document.querySelector('.app-container.narrow-layout') && !document.querySelector('.session-open[aria-pressed]'));
         assert.equal(await page.locator('.session-row.active,.row-open,.row-status.open').count(), 0, 'switching to narrow layout removes all tab markers');

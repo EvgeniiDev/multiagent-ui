@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import UiButton from './ui/UiButton.vue';
+import UiActionRow from './ui/UiActionRow.vue';
 import { useSessionStore } from '../stores/session';
 import type { SessionTab } from '../lib/sessionRuntime';
 
@@ -69,10 +70,12 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
 
 <template>
   <div class="tab-strip" role="tablist" aria-label="Open sessions">
-    <div
+    <UiActionRow
+      variant="tab"
+      :selected="rt.id === activeId"
       v-for="rt in tabs"
       :key="rt.id"
-      class="session-tab ui-action-group"
+      class="session-tab"
     >
       <UiButton variant="session-tab" class="tab"
         :class="{
@@ -116,25 +119,27 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
         <span v-if="severalAgents" class="tab-agent">{{ agent(rt) }}</span>
 
       </UiButton>
-      <UiButton
-        class="tab-close" :reveal="rt.id !== activeId"
-        variant="ghost"
-        size="xs"
-        icon
-        title="Close tab (the session stays in the list)"
-        aria-label="Close tab"
-        @click="close(rt, $event)"
-      >
-        <svg class="tab-close-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-          <path d="m6 6 12 12M18 6 6 18" />
-        </svg>
-      </UiButton>
-    </div>
+      <template #actions>
+        <UiButton
+          class="tab-close" :reveal="rt.id !== activeId"
+          variant="ghost"
+          size="xs"
+          icon
+          title="Close tab (the session stays in the list)"
+          aria-label="Close tab"
+          @click="close(rt, $event)"
+        >
+          <svg class="tab-close-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="m6 6 12 12M18 6 6 18" />
+          </svg>
+        </UiButton>
+      </template>
+    </UiActionRow>
   </div>
 </template>
 
 <style scoped>
-.session-tab { display: flex; align-items: center; flex: 0 0 auto; min-width: 0; max-width: 220px; }
+.session-tab { flex: 0 0 auto; min-width: 0; max-width: 220px; }
 /* Pure scroll container: the bar chrome (background, border, padding) lives
  * on .session-navigation in App.vue so the "+" menu and the tabs share one
  * strip. */
@@ -148,8 +153,7 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
   overflow-y: hidden;
   scrollbar-width: thin;
 }
-.tab { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 220px; user-select: none; white-space: nowrap; }
-.tab.active { margin-bottom: -1px; }
+.tab { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 220px; user-select: none; white-space: nowrap; }
 
 .tab.disconnected:not(.active) .tab-title {
   opacity: 0.7;

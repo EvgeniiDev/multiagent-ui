@@ -862,6 +862,12 @@ html.sessions-page { overflow: hidden; }
   padding: 0.75rem 0.375rem;
 }
 
+@media (min-width: 801px) {
+  /* Reserve the same scrollbar gutter on both sides of the session tiles. */
+  .sidebar-content { scrollbar-gutter: stable both-edges; }
+  .session-section { padding-inline: 0; }
+}
+
 
 .cwd-picker {
   margin-top: 0.75rem;

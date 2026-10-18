@@ -85,10 +85,10 @@ withDefaults(defineProps<{
   background: transparent; color: var(--text-primary); border-color: transparent;
   border-bottom-color: var(--text-accent);
 }
-.ds-button--session-tab { border-color: transparent; border-radius: var(--radius-md) var(--radius-md) 0 0; color: var(--text-secondary); }
-.ds-button--session-tab[aria-selected='true'] {
-  background: var(--bg-main); color: var(--text-primary);
-  border-color: var(--border-faint); border-bottom-color: transparent;
+.ds-button--session-tab { border: 0; border-radius: 0; background: transparent; color: var(--text-secondary); }
+.ds-button--session-tab[aria-selected='true'],
+.ds-button--session-tab:hover:not(:disabled) {
+  background: transparent; color: var(--text-primary); border-color: transparent;
 }
 .ds-button--chip { border-radius: var(--radius-sm); white-space: normal; overflow-wrap: anywhere; }
 .ds-button--tone-danger { color: var(--bg-danger); }
@@ -101,6 +101,7 @@ withDefaults(defineProps<{
 .ds-button--icon { width: 28px; padding: 0; flex-shrink: 0; }
 .ds-button--icon.ds-button--xs { width: 24px; }
 .ds-button:focus-visible { outline: 2px solid var(--text-accent, #b04a28); outline-offset: 2px; }
+:global(.ui-action-row .ds-button:focus-visible) { outline-offset: -2px; }
 .ds-button:disabled { opacity: 0.5; cursor: not-allowed; }
 @media (max-width: 800px), (pointer: coarse) {
   .ds-button, .ds-button--xs { min-height: 44px; min-width: 44px; }
