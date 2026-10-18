@@ -4,11 +4,12 @@ import { test, beforeEach } from 'node:test';
 import { readFileSync } from 'node:fs';
 import * as vue from 'vue';
 import ts from 'typescript';
+import { markPromptRecorded } from '../src/lib/promptError.ts';
 
 let client, entries, cached, cacheWrites, sharedReader;
 let seq = 0;
 globalThis.__replayRuntimeDeps = {
-  ref: vue.ref, computed: vue.computed, watch: vue.watch,
+  ref: vue.ref, computed: vue.computed, watch: vue.watch, markPromptRecorded,
   uuid: () => `test-${++seq}`,
   getAppVersion: async () => 'test',
   trackEvent() {}, trackError() {},
@@ -255,5 +256,46 @@ test('session ordering follows messages, never opening, replay, or service event
     client.prompt = async () => ({ stopReason: 'end_turn' });
     await rt.sendPrompt('New question');
     assert(session.lastUpdated > 100, 'sending a user message updates ordering');
+  } finally { await rt.close(); }
+});
+
+
+test('only a successful latest prompt marks completion, never replay or intermediate output', async () => {
+  const rt = createSessionRuntime(deps);
+  const pending = [];
+  client.prompt = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  client.cancel = async () => {};
+  try {
+    await rt.resume({ ...saved });
+    assert.equal(rt.turnCompleted.value, false, 'history is not a live completion');
+    const first = rt.sendPrompt('work');
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'working...' } });
+    assert.equal(rt.turnCompleted.value, false);
+    pending.shift().resolve({ stopReason: 'end_turn' }); await first;
+    assert.equal(rt.turnCompleted.value, true);
+    const next = rt.sendPrompt('continue');
+    assert.equal(rt.turnCompleted.value, false, 'new prompt clears completion');
+    pending.shift().resolve({ stopReason: 'cancelled' }); await next;
+    assert.equal(rt.turnCompleted.value, false);
+    for (const stopReason of ['max_tokens', 'max_turn_requests', 'refusal']) {
+      const limited = rt.sendPrompt('work');
+      pending.shift().resolve({ stopReason }); await limited;
+      assert.equal(rt.turnCompleted.value, false, stopReason);
+    }
+    const old = rt.sendPrompt('old');
+    const latest = rt.sendPrompt('latest');
+    pending.shift().resolve({ stopReason: 'end_turn' }); await old;
+    assert.equal(rt.turnCompleted.value, false, 'older request cannot finish a newer turn');
+    pending.shift().reject(new Error('failed')); await assert.rejects(latest, /failed/);
+    assert.equal(rt.turnCompleted.value, false);
+    const cancelled = rt.sendPrompt('cancel');
+    await rt.cancelOperation();
+    pending.shift().resolve({ stopReason: 'end_turn' }); await cancelled;
+    assert.equal(rt.turnCompleted.value, false, 'ignored cancel cannot show success');
+    const final = rt.sendPrompt('finish');
+    pending.shift().resolve({ stopReason: 'end_turn' }); await final;
+    assert.equal(rt.turnCompleted.value, true);
+    await rt.resume({ ...saved });
+    assert.equal(rt.turnCompleted.value, false, 'reloading history cannot imply completion');
   } finally { await rt.close(); }
 });

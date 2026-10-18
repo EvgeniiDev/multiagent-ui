@@ -36,6 +36,7 @@ function tooltip(rt: SessionTab): string {
   if (rt.error) lines.push(rt.error);
   else if (rt.pendingPermission) lines.push('Waiting for permission');
   else if (!rt.isConnected && !rt.isConnecting) lines.push('Disconnected — click to reconnect');
+  else if (rt.turnCompleted && !rt.isLoading && !rt.isConnecting) lines.push('Completed — the agent finished its turn');
   return lines.filter(Boolean).join('\n');
 }
 
@@ -88,7 +89,7 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
         @click="activate(rt)"
         @mousedown="onMiddleClick(rt, $event)"
       >
-        <!-- status: working > permission > error > unread -->
+        <!-- status: working > permission > error > completed > unread -->
         <span
           v-if="rt.isConnecting || (rt.isLoading && rt.isConnected)"
           class="tab-spin"
@@ -104,6 +105,12 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
           class="tab-badge err"
           title="Error"
         >!</span>
+        <span
+          v-else-if="rt.turnCompleted && rt.isConnected"
+          class="tab-completed"
+          title="Completed — the agent finished its turn"
+          aria-label="Completed — the agent finished its turn"
+        >✓</span>
         <span
           v-else-if="rt.unread"
           class="tab-dot"
@@ -189,6 +196,11 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
 
 @keyframes tab-spin {
   to { transform: rotate(360deg); }
+}
+
+.tab-completed {
+  flex: 0 0 auto;
+  color: var(--bg-success);
 }
 
 .tab-dot {

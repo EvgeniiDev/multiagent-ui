@@ -58,6 +58,7 @@ function sessionStatus(runtime?: SessionTab, session?: SavedSession) {
   if (runtime.error) return { kind: 'error', label: 'Error', detail: runtime.error };
   if (runtime.isConnecting) return { kind: 'working', label: 'Connecting' };
   if (runtime.isLoading && runtime.isConnected) return { kind: 'working', label: 'Working' };
+  if (runtime.turnCompleted && runtime.isConnected) return { kind: 'completed', label: '✓ Completed', detail: 'The agent finished its turn' };
   if (runtime.unread) return { kind: 'unread', label: 'Unread reply' };
   if (!runtime.isConnected) return { kind: 'disconnected', label: 'Disconnected' };
   return isPage.value ? null : { kind: 'open', label: 'Open' };
@@ -401,6 +402,7 @@ ul {
   white-space: nowrap;
 }
 .row-status.working, .row-status.unread, .row-status.permission { color: var(--text-accent); }
+.row-status.completed { color: var(--bg-success); }
 .row-status.error { color: var(--bg-danger); }
 .row-status.working::before {
   content: '';

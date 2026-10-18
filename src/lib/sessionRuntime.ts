@@ -138,6 +138,9 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   const pendingPermission = ref<PermissionRequest | null>(null);
   /** New content arrived while this tab wasn't active (or while hidden). */
   const unread = ref(false);
+  /** Confirmed end_turn for the latest live prompt; replay never implies success. */
+  const turnCompleted = ref(false);
+  let promptGeneration = 0;
   /**
    * Autonomous run: when true the client answers `session/request_permission`
    * itself with the allow-once option the agent offered (no dialog) and
@@ -1083,6 +1086,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     cwd: string,
     options?: { autonomous?: boolean }
   ): Promise<SavedSession> {
+    turnCompleted.value = false;
+    promptGeneration += 1;
     isLoading.value = true;
     isConnecting.value = true;
     connectionAborted = false;
@@ -1391,6 +1396,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     savedSession: SavedSession,
     options?: { autonomous?: boolean }
   ): Promise<void> {
+    turnCompleted.value = false;
+    promptGeneration += 1;
     isLoading.value = true;
     // Keep the previous failure until session/load verifies recovery. A
     // reconnect attempt alone is not evidence that the fault disappeared.
@@ -1639,6 +1646,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
 
     session.value.lastUpdated = session.value.lastMessageAt = Date.now();
     void deps.persistSessions();
+    turnCompleted.value = false;
+    const generation = ++promptGeneration;
     isLoading.value = true;
     inFlightPrompts += 1;
     const activity = useActivityStore();
@@ -1656,6 +1665,9 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         prompt: promptContentBlocks(text, attachments),
       });
 
+      if (generation === promptGeneration) {
+        turnCompleted.value = response.stopReason === 'end_turn';
+      }
       console.log('Prompt completed:', response.stopReason);
       activity.recordEntry({
         kind: 'turn-end',
@@ -1723,6 +1735,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
 
   // Cancel current operation
   async function cancelOperation(): Promise<void> {
+    turnCompleted.value = false;
+    promptGeneration += 1;
     if (!acpClient || !session.value) return;
 
     await acpClient.cancel({
@@ -1778,6 +1792,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
    * this only frees the transport.
    */
   async function close(): Promise<void> {
+    turnCompleted.value = false;
+    promptGeneration += 1;
     // Abort an in-flight connect: without this a mid-create close would let
     // `session/new` land on a tab that's already gone.
     connectionAborted = true;
@@ -1979,6 +1995,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     pendingPermission,
     autonomous,
     unread,
+    turnCompleted,
     availableModes,
     currentModeId,
     availableCommands,
