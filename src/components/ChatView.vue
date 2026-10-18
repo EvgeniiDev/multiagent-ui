@@ -15,6 +15,8 @@ import ChatFilePreviews from './ChatFilePreviews.vue';
 import UiComposerSettings from './ui/UiComposerSettings.vue';
 import SessionUsageMeter from './SessionUsageMeter.vue';
 import UiButton from './ui/UiButton.vue';
+import UiSelect from './ui/UiSelect.vue';
+import UiPendingMessages from './ui/UiPendingMessages.vue';
 import UiImagePreview from './ui/UiImagePreview.vue';
 import UiFilePreview from './ui/UiFilePreview.vue';
 import { chatFileFromLink, type ChatFile } from '../lib/chatFiles';
@@ -66,6 +68,15 @@ const voiceInputRef = ref<InstanceType<typeof VoiceInput> | null>(null);
 const voiceOverlayEl = ref<HTMLElement | null>(null);
 const rt = props.runtime;
 const supportsImages = computed(() => rt.supportsImages);
+const sendModes = computed(() => [
+  { value: 'queue', label: 'Queue', description: 'Send after the current response finishes' },
+  { value: 'steer', label: 'Steer', disabled: !rt.supportsSteer || (!rt.steerSupportsImages && attachments.value.some(a => a.kind === 'image')),
+    description: rt.supportsSteer ? 'Send after the next tool call without interrupting' : 'This agent does not support non-interrupting Steer' },
+]);
+const pendingMessages = computed(() => rt.pendingMessages.map(m => ({
+  id: m.id, text: m.text, mode: m.mode, error: m.error, attachmentNames: m.attachments.map(a => a.name),
+})));
+
 const imageHint = computed(
   () => `Images and text files (max ${formatBytes(MAX_IMAGE_ATTACHMENT_BYTES)} / ${formatBytes(MAX_TEXT_ATTACHMENT_BYTES)}) — Ctrl+V pastes a copied image`
 );
@@ -778,9 +789,7 @@ async function handleSend() {
     preparingSend.value = false;
   }
   try {
-    // A send while a turn is running is a steer; further drafts stay editable.
-    if (isLoading.value) await rt.steer(text, files);
-    else await rt.sendPrompt(text, files);
+    rt.submitMessage(text, files, rt.messageDeliveryMode);
   } catch (e) {
     console.error('Failed to send prompt:', e);
     rt.error = `Send failed: ${e instanceof Error ? e.message : String(e)}`;
@@ -1216,6 +1225,9 @@ function planGlyph(status: string): string {
       </div>
 
       <!-- Staged files: one dense chip each, with a thumbnail for images. -->
+      <UiPendingMessages :messages="pendingMessages" :paused="rt.queuePaused" :notice="rt.queueNotice"
+        :disabled="isReconnecting || !isConnected" @remove="rt.removePendingMessage" @resume="rt.resumeMessageQueue" />
+
       <div v-if="attachments.length" class="attach-tray">
         <div v-for="att in attachments" :key="att.id" class="attach-chip">
           <UiImagePreview
@@ -1340,6 +1352,9 @@ function planGlyph(status: string): string {
               :label="contextLabel" :context-title="contextTitle" :provider-id="subscriptionProvider" :anchor="inputContainer || undefined"
               :active="sessionStore.activeTabId === rt.id && uiStore.activeView === 'chat'"
             />
+            <UiSelect compact label="Send mode" :model-value="rt.messageDeliveryMode" :options="sendModes"
+              :disabled="preparingSend || isReconnecting || !isConnected"
+              @update:model-value="value => rt.messageDeliveryMode = value === 'steer' ? 'steer' : 'queue'" />
             <div class="composer-actions">
               <UiButton
                 v-if="isLoading && !composerStopsGeneration"

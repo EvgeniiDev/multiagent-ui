@@ -12,6 +12,8 @@ import type { SavedSession, ChatMessage, ToolCallInfo, PermissionRequest, Sessio
 import { getTransportKind } from './types';
 import { attachmentFromContentBlock } from './attachments';
 import { markPromptRecorded } from './promptError';
+import { createPromptOutbox, type DeliveryMode } from './promptOutbox';
+import { steeringDelivery, type SteeringDelivery } from './steeringDelivery';
 import { recordTurnAttachments, turnAttachments, resolveCachedBytes } from './attachmentHistory';
 import { readHistoryCache, storeHistoryCacheEntry, type HistoryCacheEntry, writeHistoryCache, dropHistoryCache } from './historyCache';
 import { AcpClientBridge, createAcpClient } from './acp-bridge';
@@ -173,6 +175,10 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   const supportsListSessions = ref(false);
   /** Agent accepts ACP `image` content blocks (promptCapabilities.image). */
   const supportsImages = ref(false);
+  const steerDelivery = ref<SteeringDelivery>(null);
+  const supportsSteer = computed(() => steerDelivery.value !== null);
+  const steerSupportsImages = computed(() => supportsImages.value && steerDelivery.value !== 'hermes-command');
+  const messageDeliveryMode = ref<DeliveryMode>('queue');
   const sessionListUnsupported = ref(false);
 
   // Connection cancellation
@@ -187,12 +193,14 @@ export function createSessionRuntime(deps: RuntimeDeps) {
 
   // Current ACP client — one transport per tab.
   let acpClient: AcpClientBridge | null = null;
-  /**
-   * Turns in flight on this tab. Normally 0-or-1; `steer` briefly overlaps
-   * the cancelled turn with its replacement, so `isLoading` is lifted by a
-   * count, not a boolean — the Stop button must survive the handoff.
-   */
+  /** Ordinary prompts own the complete turn; steering only acknowledges injection. */
   let inFlightPrompts = 0;
+  const outbox = createPromptOutbox({
+    busy: () => isLoading.value || inFlightPrompts > 0,
+    connected: () => isConnected.value && !isReconnecting.value && !connectionAborted,
+    send: sendPrompt,
+    steer: deliverNativeSteer,
+  });
 
   // ---- History tail cache (localStorage, write-through) -------------------
   // `session/load` can only replay the WHOLE transcript top-down (no tail
@@ -254,6 +262,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     // Agents announce whether they accept image content blocks; attaching an
     // image to an agent that doesn't is a silent no-op on its side.
     supportsImages.value = !!initResponse.agentCapabilities?.promptCapabilities?.image;
+    steerDelivery.value = steeringDelivery(initResponse);
     return initResponse;
   }
 
@@ -304,6 +313,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     // If `acpClient` is already null, this fired during a voluntary
     // disconnect that's tearing down anyway — nothing to do.
     if (!acpClient) return;
+    outbox.pause();
     acpClient = null;
     isConnected.value = false;
     isLoading.value = false;
@@ -844,6 +854,13 @@ export function createSessionRuntime(deps: RuntimeDeps) {
 
     if (foreign) return;
 
+    let completedLiveTool = false;
+    if ((update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update')
+      && (update.status === 'completed' || update.status === 'failed')) {
+      const previous = toolCalls.value.get(update.toolCallId)?.status;
+      completedLiveTool = previous !== 'completed' && previous !== 'failed';
+    }
+
     deps.notifyActivity(runtimeApi);
     // Replayed history and service notifications must not reorder the list.
     if (!loadingHistory && (update.sessionUpdate === 'agent_message_chunk'
@@ -1076,6 +1093,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         console.log('Unhandled session update:', update);
     }
 
+    if (!loadingHistory && inFlightPrompts > 0 && completedLiveTool) outbox.toolBoundary();
+
     // Write-through: the tail cache follows the stream (throttled), so a
     // reload mid-replay still lands on the newest chunk seen so far.
     throttledHistoryFlush();
@@ -1295,6 +1314,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       // The caller adds this row to the inventory and persists it together
       // with its open-tab pointer after create() returns.
 
+      outbox.restore(attachmentScope(session.value!.sessionId));
       isConnected.value = true;
       autoReconnectAttempts = 0;
       messages.value = [];
@@ -1381,6 +1401,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       // create finishing while a prompt is in flight must not hide Stop.
       if (inFlightPrompts === 0) isLoading.value = false;
       isConnecting.value = false;
+      outbox.ready();
       // Clean up startup progress tracking
       if (startupTimer) {
         clearInterval(startupTimer);
@@ -1542,6 +1563,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         currentModelId.value = loadResponse.models.currentModelId || '';
       }
 
+      outbox.restore(attachmentScope(session.value!.sessionId));
       isConnected.value = true;
       error.value = null;
       autoReconnectAttempts = 0;
@@ -1604,18 +1626,12 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     } finally {
       // Same ownership rule as create(): a prompt in flight keeps `isLoading`.
       if (inFlightPrompts === 0) isLoading.value = false;
+      outbox.ready();
     }
   }
 
-  // Send prompt
-  async function sendPrompt(text: string, attachments: Attachment[] = []): Promise<void> {
-    if (!acpClient || !session.value) {
-      throw new Error('No active session');
-    }
-    if (!text && attachments.length === 0) {
-      return;
-    }
-
+  function recordUserPrompt(text: string, attachments: Attachment[]) {
+    if (!session.value) throw new Error('No active session');
     // Add user message (attachments kept as metadata so the transcript shows
     // what went out, including a thumbnail for images). No `segments` here —
     // the replayed twin carries only a text part (agents echo files as
@@ -1649,6 +1665,18 @@ export function createSessionRuntime(deps: RuntimeDeps) {
 
     session.value.lastUpdated = session.value.lastMessageAt = Date.now();
     void deps.persistSessions();
+  }
+
+  // Send prompt
+  async function sendPrompt(text: string, attachments: Attachment[] = [], options?: { steering?: boolean }): Promise<void> {
+    if (!acpClient || !session.value) {
+      throw new Error('No active session');
+    }
+    if (!text && attachments.length === 0) {
+      return;
+    }
+
+    recordUserPrompt(text, attachments);
     turnCompleted.value = false;
     turnIssue.value = null;
     const generation = ++promptGeneration;
@@ -1667,7 +1695,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     try {
       const response = await acpClient.prompt({
         sessionId: session.value.sessionId,
-        prompt: promptContentBlocks(text, attachments),
+        prompt: promptContentBlocks(options?.steering ? `Steering update:\n\n${text}` : text, attachments),
       });
 
       if (generation === promptGeneration) {
@@ -1691,7 +1719,11 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         sessionMetadataDirty = true;
       }
     } catch (e) {
-      if (generation === promptGeneration) turnIssue.value = 'error';
+      if (generation === promptGeneration) {
+        turnIssue.value = 'error';
+        error.value = `Send failed: ${e instanceof Error ? e.message : String(e)}`;
+      }
+      outbox.pause();
       activity.recordEntry({
         kind: 'error',
         agentName: session.value.agentName,
@@ -1706,38 +1738,49 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     } finally {
       inFlightPrompts = Math.max(0, inFlightPrompts - 1);
       if (inFlightPrompts === 0) isLoading.value = false;
+      outbox.ready();
     }
   }
 
-  /**
-   * Mid-run steer: the user typed a message while a turn was still running.
-   * Cancel the in-flight turn first — `session/cancel` is a notification and
-   * ordering with the next write is guaranteed on the single socket — then
-   * send the text as a fresh turn. The cancelled prompt resolves with
-   * `stopReason:'cancelled'` on agents that honor it; its ledger entry
-   * records `cancelled` honestly. The cancel is best-effort (§R4): an agent
-   * that ignores it still gets the new prompt, and we never block on it.
-   */
+  function submitMessage(text: string, attachments: Attachment[] = [], mode: DeliveryMode = 'queue') {
+    if (!acpClient || !session.value || !isConnected.value || isReconnecting.value) throw new Error('Not connected');
+    if (mode === 'steer' && !supportsSteer.value) throw new Error('This agent does not support non-interrupting Steer');
+    if (mode === 'steer' && !steerSupportsImages.value && attachments.some(a => a.kind === 'image')) throw new Error('This agent supports text-only Steer; use Queue for images');
+    if (!text.trim() && attachments.length === 0) return;
+    return outbox.submit(text, attachments, mode);
+  }
+
+  /** Wait for the next live tool boundary; never cancel the running turn. */
   async function steer(text: string, attachments: Attachment[] = []): Promise<void> {
-    if (!acpClient || !session.value) {
-      throw new Error('No active session');
+    submitMessage(text, attachments, 'steer');
+  }
+
+  async function deliverNativeSteer(text: string, attachments: Attachment[], failed: (error: unknown) => void): Promise<'injected' | 'startedNewTurn'> {
+    if (!acpClient || !session.value || !isConnected.value) throw new Error('Not connected');
+    if (!supportsSteer.value) throw new Error('This agent does not support non-interrupting Steer');
+    if (steerDelivery.value === 'concurrent-prompt') {
+      // These adapters merge the prompt into the running loop. The response is
+      // the COMPLETE turn, so keep it in inFlightPrompts without blocking later
+      // tool-boundary injections on that long-running response.
+      void sendPrompt(text, attachments, { steering: true }).catch(failed);
+      return 'injected';
     }
-    // `isConnected` flips only after `session/new`/`session/load` resolves —
-    // gate every prompt path below on it so a programmatic steer during a
-    // resume can't fire `session/prompt` mid-load. (The composer can't reach
-    // this today: it's disabled while `!isConnected`.)
-    if (!isConnected.value) {
-      throw new Error('Not connected');
-    }
-    if (!isLoading.value || inFlightPrompts === 0) {
-      return sendPrompt(text, attachments);
-    }
+    const context = attachments.filter(a => a.kind === 'text')
+      .map(a => `\n\n[Attached text file: ${a.name}]\n${a.data}`).join('');
+    const guidance = text + context;
+    recordUserPrompt(text, attachments);
     try {
-      await acpClient.cancel({ sessionId: session.value.sessionId });
-    } catch (e) {
-      console.warn('steer: session/cancel failed, sending prompt anyway:', e);
-    }
-    await sendPrompt(text, attachments);
+      if (steerDelivery.value === 'hermes-command') {
+        if (attachments.some(a => a.kind === 'image')) throw new Error('Hermes supports text-only Steer');
+        await acpClient.prompt({ sessionId: session.value.sessionId,
+          prompt: [{ type: 'text', text: `/steer ${guidance}` }] });
+        return 'injected'; // Command ACK only; the original prompt owns the turn.
+      }
+      const response = await acpClient.steerPrompt({ sessionId: session.value.sessionId,
+        prompt: promptContentBlocks(guidance, attachments.filter(a => a.kind === 'image')) });
+      if (response.outcome !== 'injected' && response.outcome !== 'startedNewTurn') throw new Error('Agent did not accept Steer');
+      return response.outcome;
+    } catch (e) { throw markPromptRecorded(e); }
   }
 
   // Cancel current operation
@@ -1745,6 +1788,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     turnCompleted.value = false;
     turnIssue.value = 'cancelled';
     promptGeneration += 1;
+    outbox.pause();
     if (!acpClient || !session.value) return;
 
     await acpClient.cancel({
@@ -1754,6 +1798,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
 
   // Cancel ongoing connection attempt
   async function cancelConnection(): Promise<void> {
+    outbox.pause();
     connectionAborted = true;
     disarmAutoReconnect();
     isReconnecting.value = false;
@@ -1803,6 +1848,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     turnCompleted.value = false;
     turnIssue.value = null;
     promptGeneration += 1;
+    outbox.pause();
     // Abort an in-flight connect: without this a mid-create close would let
     // `session/new` land on a tab that's already gone.
     connectionAborted = true;
@@ -2018,6 +2064,14 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     startupElapsed,
     supportsListSessions,
     supportsImages,
+    supportsSteer,
+    steerSupportsImages,
+    messageDeliveryMode,
+    pendingMessages: outbox.messages,
+    queuePaused: outbox.paused,
+    queueNotice: outbox.notice,
+    removePendingMessage: outbox.remove,
+    resumeMessageQueue: outbox.resume,
     sessionListUnsupported,
     historyCacheNote,
 
@@ -2030,6 +2084,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     create,
     resume,
     sendPrompt,
+    submitMessage,
     steer,
     cancelOperation,
     cancelConnection,

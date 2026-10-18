@@ -4,9 +4,10 @@ import UiButton from './UiButton.vue';
 
 const props = defineProps<{
   modelValue: string;
-  options: { value: string; label: string }[];
+  options: { value: string; label: string; description?: string; disabled?: boolean }[];
   label: string;
   disabled?: boolean;
+  compact?: boolean;
 }>();
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>();
 const id = useId();
@@ -28,28 +29,31 @@ async function open() {
   const below = window.innerHeight - box.bottom - 12;
   const above = box.top - 12;
   const upwards = below < 220 && above > below;
+  const width = Math.min(props.compact ? 240 : box.width, window.innerWidth - 16);
   position.value = {
-    left: `${Math.max(8, Math.min(box.left, window.innerWidth - box.width - 8))}px`,
-    width: `${Math.min(box.width, window.innerWidth - 16)}px`,
+    left: `${Math.max(8, Math.min(box.left, window.innerWidth - width - 8))}px`,
+    width: `${width}px`,
     maxHeight: `${Math.max(44, upwards ? above : below)}px`,
     ...(upwards ? { bottom: `${window.innerHeight - box.top + 6}px` } : { top: `${box.bottom + 6}px` }),
   };
   menu.value.showPopover();
   opened.value = true;
   await nextTick();
-  const option = menu.value.querySelector<HTMLElement>('[aria-selected="true"]')
-    ?? menu.value.querySelector<HTMLElement>('[role="option"]');
+  const option = menu.value.querySelector<HTMLElement>('[aria-selected="true"]:not(:disabled)')
+    ?? menu.value.querySelector<HTMLElement>('[role="option"]:not(:disabled)');
   option?.focus();
 }
 function choose(value: string) {
+  if (props.options.find(o => o.value === value)?.disabled) return;
   emit('update:modelValue', value);
   close(true);
 }
 function navigate(event: KeyboardEvent) {
   if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(true); return; }
   if (event.key === 'Tab') { close(); return; }
-  const options = [...(menu.value?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])];
+  const options = [...(menu.value?.querySelectorAll<HTMLElement>('[role="option"]:not(:disabled)') ?? [])];
   const current = options.indexOf(document.activeElement as HTMLElement);
+  if (!options.length) return;
   let index: number;
   if (event.key === 'ArrowDown') index = (current + 1) % options.length;
   else if (event.key === 'ArrowUp') index = (current - 1 + options.length) % options.length;
@@ -66,8 +70,8 @@ onUnmounted(() => window.removeEventListener('resize', onResize));
 </script>
 
 <template>
-  <div ref="root" class="ui-select">
-    <UiButton variant="select" :disabled="disabled" :aria-label="`${label}: ${selected?.label ?? ''}`"
+  <div ref="root" class="ui-select" :class="{ 'is-compact': compact }">
+    <UiButton :variant="compact ? 'ghost' : 'select'" :size="compact ? 'xs' : 'sm'" :disabled="disabled" :aria-label="`${label}: ${selected?.label ?? ''}`"
       aria-haspopup="listbox" :aria-expanded="opened" :aria-controls="id"
       @click="open" @keydown.down.prevent="open" @keydown.up.prevent="open">
       <slot name="icon" />
@@ -78,8 +82,8 @@ onUnmounted(() => window.removeEventListener('resize', onResize));
     <div :id="id" ref="menu" class="ui-select-menu" popover="auto" role="listbox" :aria-label="label"
       :style="position" @toggle="syncOpen" @keydown="navigate">
       <UiButton v-for="option in options" :key="option.value" variant="option" role="option" tabindex="-1"
-        :aria-selected="option.value === modelValue" @click="choose(option.value)">
-        <span class="select-label">{{ option.label }}</span>
+        :aria-selected="option.value === modelValue" :disabled="option.disabled" :title="option.description" @click="choose(option.value)">
+        <span class="select-label">{{ option.label }}<span v-if="option.description" class="select-description">{{ option.description }}</span></span>
         <svg class="select-check" :class="{ selected: option.value === modelValue }" viewBox="0 0 20 20"
           width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m4 10 4 4 8-8" /></svg>
       </UiButton>
@@ -89,6 +93,8 @@ onUnmounted(() => window.removeEventListener('resize', onResize));
 
 <style scoped>
 .ui-select { min-width: 0; width: 100%; }
+.ui-select.is-compact { width: auto; flex: 0 0 auto; }
+.select-description { display: block; margin-top: 2px; color: var(--text-muted); font-size: 11px; }
 .select-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .select-chevron, .select-check { flex-shrink: 0; color: var(--text-muted); }
 .select-chevron { transition: transform 120ms ease; }

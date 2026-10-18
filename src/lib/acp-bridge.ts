@@ -428,6 +428,11 @@ export class AcpClientBridge implements Client {
     return this.sendRequest<PromptResponse>('session/prompt', params);
   }
 
+  /** Native, non-interrupting steering, advertised by initialize._meta.steering. */
+  async steerPrompt(params: PromptRequest): Promise<{ outcome: 'injected' | 'startedNewTurn' | 'failed' }> {
+    return this.sendRequest('_session/steering', params);
+  }
+
   async cancel(params: CancelNotification): Promise<void> {
     await this.sendNotification('session/cancel', params);
   }
