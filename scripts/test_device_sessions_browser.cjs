@@ -94,5 +94,5 @@ const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),asse
   const remote=await(await fetch(`${api}/api/state/sessions.json`)).json();
   assert.equal(remote.data.sessions.length,4);assert.deepEqual(prompts,[]);assert.deepEqual(errors,[]);
   console.log('PASS server-only inventory ignores stale local data and failed health, true conversation order, live timestamp persistence; desktop-created Codex session appears on already-open phone, mobile list, reload, independent tabs, no model prompts');
- }catch(error){console.error(error);throw error;}finally{for(const context of browser?.contexts()??[])for(const page of context.pages())await page.unrouteAll({behavior:'wait'});await browser?.close();state?.closeAllConnections();await new Promise(r=>state?state.close(r):r());fs.rmSync(dir,{recursive:true,force:true});}
+ }catch(error){console.error(error);throw error;}finally{for(const context of browser?.contexts()??[])for(const page of context.pages())await page.unrouteAll({behavior:'ignoreErrors'});await browser?.close();state?.closeAllConnections();await new Promise(r=>state?state.close(r):r());fs.rmSync(dir,{recursive:true,force:true});}
 })().catch(e=>{console.error(e);process.exit(1)});

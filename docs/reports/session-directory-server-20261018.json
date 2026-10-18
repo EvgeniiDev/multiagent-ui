@@ -1,0 +1,73 @@
+{
+  "date": "2026-10-18",
+  "code_commit": "59deae9",
+  "branch": "main",
+  "checkout": "/tmp/acp-device-sync",
+  "problem": "Phone showed stale session inventory and old metadata timestamps hid recent desktop conversations.",
+  "causes": [
+    "One failed 1.5-second health probe permanently selected a browser-only KV store for the page.",
+    "Cross-port browser local-network permission blocked state reads.",
+    "Remote adoption replaced objects still held by live runtimes, detaching later activity updates.",
+    "Native metadata update times were used as conversation times; historical starts were omitted with unknown running status."
+  ],
+  "changes": [
+    "Web session directory always reads server state without a localStorage mirror or migration. HTTP requests use no-store.",
+    "Same-origin fixed loopback HTTP proxy for state; Vite development and preview use matching proxy rules. Direct WebSocket and file bases are unchanged.",
+    "Server adoption retains live row identity. New activity is not rolled back before its throttled save.",
+    "Independent server activity timestamps sort and label rows without claiming that historical starts prove an agent is running.",
+    "Explicit failure and automatic retry; refresh when returning to foreground or opening the session list."
+  ],
+  "verification": {
+    "red": [
+      "Four old-cache unit regressions failed before the storage fix.",
+      "Old deployed frontend failed the two-device stale-cache/failed-health browser scenario.",
+      "Same-origin HTTP roundtrip returned404 before the web proxy.",
+      "Native start without a live bridge had no discoverable activity timestamp before the reader fix."
+    ],
+    "green": [
+      "52 focused inventory/status/replay/storage timeout checks.",
+      "13 inventory checks including same-origin/direct-base separation.",
+      "4 web routing/proxy checks, including actual HTTP requests and CAS409 preservation.",
+      "npm run build:web (UI policy, typecheck, production build).",
+      "Two independent browsers against temporary real state HTTP/CAS with ACP fixture: stale local cache, failed health, desktop-to-phone additions, sorting, outage/recovery, live activity persistence after adoption, reload, no prompts. Passed on deployed frontend.",
+      "Read-only actual production inventory and native activity on390/1440px, fresh load and reload; user writes blocked and ACP restoration stubbed.",
+      "Actual Vite development and preview health requests return state JSON.",
+      "git diff --check."
+    ],
+    "limits": [
+      "Two-device creation uses ACP fixture and temporary state; no model prompts were submitted.",
+      "Actual production list reads use real server/native data, but suppress writes and real session restoration.",
+      "The browser harness observed an expected404 for absent optional history cache; missing history cache is not a session-list failure.",
+      "Automated context logged service-worker certificate errors separately; state HTTP reads succeeded on the same site origin."
+    ]
+  },
+  "deployment": {
+    "url": "https://192.168.1.222:25809/chat",
+    "web_mount": "/home/hermes/projects/acp-ui/dist-web",
+    "state_source_mount": "/home/hermes/projects/acp-ui-releases/bridge-status-ba4b04c6292e",
+    "source_publish": "Only task-owned web-server.py and chat-session-statuses.mjs were copied after proving each live source matched pre-fix commit a600b76.",
+    "restarted": [
+      "acp-ui-state-1",
+      "acp-ui-web-1"
+    ],
+    "bridge_processes": "All five bridge PIDs remained unchanged. No bridge lifecycle operation.",
+    "asset_publish": "Older hashed assets retained; index.html replaced last.",
+    "entry_js": "/assets/index-CGnShC3N.js",
+    "js_sha256": "59543198ea1cf5af3b1c6825b690ec09ee82ab79c925eaa48ee06319d2b40ad8",
+    "entry_css": "/assets/index-CYqamJ2w.css",
+    "css_sha256": "00f38ccf5a1bd6a501043fef19a7069ccbeca8930a25625858a9e39011dd557c",
+    "web_script_sha256": "cbca6002acfe3b7444e3ff55f1fc2ae9a99da05db3c7ad1afb982dc1292c8156",
+    "state_module_sha256": "2d7efd97576746cec9b4e4cbb062bca4f11bdbc3d8d4b1c942e0592d502d4b51",
+    "images_unchanged": {
+      "web": "sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9",
+      "state": "sha256:66ec5b5f1e7db15f82f0bcde10ab1ae655e9484551e7575ae2cb6d318f22f9bd"
+    },
+    "headers": "/health, /api/state/sessions.json, /api/chat-session-statuses returned200 and Cache-Control:no-store through the panel origin."
+  },
+  "review": {
+    "receipt": "/tmp/acp-session-sync-review-20261018/final-incremental-review.json",
+    "retained_findings": [],
+    "resolved": "Development/preview proxy regression found during review was fixed and checked."
+  },
+  "client_update": "Reload phone and desktop once; clearing browser cache is unnecessary."
+}
