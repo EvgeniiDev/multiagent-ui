@@ -36,6 +36,7 @@ function tooltip(rt: SessionTab): string {
   if (rt.error) lines.push(rt.error);
   else if (rt.pendingPermission) lines.push('Waiting for permission');
   else if (!rt.isConnected && !rt.isConnecting) lines.push('Disconnected — click to reconnect');
+  else if (rt.turnIssue && !rt.isLoading && !rt.isConnecting) lines.push(rt.turnIssue === 'cancelled' ? 'Cancelled' : 'Error — the agent turn failed');
   else if (rt.turnCompleted && !rt.isLoading && !rt.isConnecting) lines.push('Completed — the agent finished its turn');
   return lines.filter(Boolean).join('\n');
 }
@@ -105,6 +106,12 @@ function onMiddleClick(rt: SessionTab, e: MouseEvent) {
           class="tab-badge err"
           title="Error"
         >!</span>
+        <span
+          v-else-if="rt.turnIssue"
+          class="tab-badge err"
+          :title="rt.turnIssue === 'cancelled' ? 'Cancelled' : 'Error — the agent turn failed'"
+          :aria-label="rt.turnIssue === 'cancelled' ? 'Cancelled' : 'Error — the agent turn failed'"
+        >{{ rt.turnIssue === 'cancelled' ? '×' : '!' }}</span>
         <span
           v-else-if="rt.turnCompleted && rt.isConnected"
           class="tab-completed"

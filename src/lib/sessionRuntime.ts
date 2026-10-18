@@ -140,6 +140,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   const unread = ref(false);
   /** Confirmed end_turn for the latest live prompt; replay never implies success. */
   const turnCompleted = ref(false);
+  const turnIssue = ref<'cancelled' | 'error' | null>(null);
   let promptGeneration = 0;
   /**
    * Autonomous run: when true the client answers `session/request_permission`
@@ -1087,6 +1088,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     options?: { autonomous?: boolean }
   ): Promise<SavedSession> {
     turnCompleted.value = false;
+    turnIssue.value = null;
     promptGeneration += 1;
     isLoading.value = true;
     isConnecting.value = true;
@@ -1397,6 +1399,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     options?: { autonomous?: boolean }
   ): Promise<void> {
     turnCompleted.value = false;
+    turnIssue.value = null;
     promptGeneration += 1;
     isLoading.value = true;
     // Keep the previous failure until session/load verifies recovery. A
@@ -1647,7 +1650,9 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     session.value.lastUpdated = session.value.lastMessageAt = Date.now();
     void deps.persistSessions();
     turnCompleted.value = false;
+    turnIssue.value = null;
     const generation = ++promptGeneration;
+    error.value = null;
     isLoading.value = true;
     inFlightPrompts += 1;
     const activity = useActivityStore();
@@ -1667,6 +1672,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
 
       if (generation === promptGeneration) {
         turnCompleted.value = response.stopReason === 'end_turn';
+        turnIssue.value = response.stopReason === 'cancelled' ? 'cancelled' : null;
       }
       console.log('Prompt completed:', response.stopReason);
       activity.recordEntry({
@@ -1685,6 +1691,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         sessionMetadataDirty = true;
       }
     } catch (e) {
+      if (generation === promptGeneration) turnIssue.value = 'error';
       activity.recordEntry({
         kind: 'error',
         agentName: session.value.agentName,
@@ -1736,6 +1743,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   // Cancel current operation
   async function cancelOperation(): Promise<void> {
     turnCompleted.value = false;
+    turnIssue.value = 'cancelled';
     promptGeneration += 1;
     if (!acpClient || !session.value) return;
 
@@ -1793,6 +1801,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
    */
   async function close(): Promise<void> {
     turnCompleted.value = false;
+    turnIssue.value = null;
     promptGeneration += 1;
     // Abort an in-flight connect: without this a mid-create close would let
     // `session/new` land on a tab that's already gone.
@@ -1996,6 +2005,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     autonomous,
     unread,
     turnCompleted,
+    turnIssue,
     availableModes,
     currentModeId,
     availableCommands,

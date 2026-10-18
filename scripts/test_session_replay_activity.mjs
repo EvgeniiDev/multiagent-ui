@@ -268,17 +268,21 @@ test('only a successful latest prompt marks completion, never replay or intermed
   try {
     await rt.resume({ ...saved });
     assert.equal(rt.turnCompleted.value, false, 'history is not a live completion');
+    assert.equal(rt.turnIssue.value, null);
     const first = rt.sendPrompt('work');
     emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'working...' } });
     assert.equal(rt.turnCompleted.value, false);
     pending.shift().resolve({ stopReason: 'end_turn' }); await first;
     assert.equal(rt.turnCompleted.value, true);
+    assert.equal(rt.turnIssue.value, null);
     const next = rt.sendPrompt('continue');
     assert.equal(rt.turnCompleted.value, false, 'new prompt clears completion');
     pending.shift().resolve({ stopReason: 'cancelled' }); await next;
+    assert.equal(rt.turnIssue.value, 'cancelled');
     assert.equal(rt.turnCompleted.value, false);
     for (const stopReason of ['max_tokens', 'max_turn_requests', 'refusal']) {
       const limited = rt.sendPrompt('work');
+      assert.equal(rt.turnIssue.value, null, 'new work clears issue');
       pending.shift().resolve({ stopReason }); await limited;
       assert.equal(rt.turnCompleted.value, false, stopReason);
     }
@@ -287,15 +291,24 @@ test('only a successful latest prompt marks completion, never replay or intermed
     pending.shift().resolve({ stopReason: 'end_turn' }); await old;
     assert.equal(rt.turnCompleted.value, false, 'older request cannot finish a newer turn');
     pending.shift().reject(new Error('failed')); await assert.rejects(latest, /failed/);
+    assert.equal(rt.turnIssue.value, 'error');
     assert.equal(rt.turnCompleted.value, false);
     const cancelled = rt.sendPrompt('cancel');
     await rt.cancelOperation();
+    assert.equal(rt.turnIssue.value, 'cancelled');
     pending.shift().resolve({ stopReason: 'end_turn' }); await cancelled;
     assert.equal(rt.turnCompleted.value, false, 'ignored cancel cannot show success');
+    const stale = rt.sendPrompt('stale');
+    const fresh = rt.sendPrompt('fresh');
+    const staleReply = pending.shift();
+    pending.shift().resolve({ stopReason: 'end_turn' }); await fresh;
+    staleReply.reject(new Error('old failure')); await assert.rejects(stale, /old failure/);
+    assert.equal(rt.turnIssue.value, null, 'old failure cannot replace newer success');
     const final = rt.sendPrompt('finish');
     pending.shift().resolve({ stopReason: 'end_turn' }); await final;
     assert.equal(rt.turnCompleted.value, true);
     await rt.resume({ ...saved });
     assert.equal(rt.turnCompleted.value, false, 'reloading history cannot imply completion');
+    assert.equal(rt.turnIssue.value, null);
   } finally { await rt.close(); }
 });
