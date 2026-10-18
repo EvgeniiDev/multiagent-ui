@@ -4,13 +4,15 @@ import { test, beforeEach } from 'node:test';
 import { readFileSync } from 'node:fs';
 import * as vue from 'vue';
 import ts from 'typescript';
+import { HISTORY_TAIL_MESSAGES } from '../src/lib/historyCache.ts';
 import { markPromptRecorded } from '../src/lib/promptError.ts';
 import { createPromptOutbox } from '../src/lib/promptOutbox.ts';
 import { steeringDelivery } from '../src/lib/steeringDelivery.ts';
 
-let client, entries, cached, cacheWrites, sharedReader;
+let client, entries, cached, cacheWrites, sharedReader, notifications;
 let seq = 0;
 globalThis.__replayRuntimeDeps = {
+  HISTORY_TAIL_MESSAGES,
   ref: vue.ref, computed: vue.computed, watch: vue.watch, markPromptRecorded, createPromptOutbox, steeringDelivery,
   uuid: () => `test-${++seq}`,
   getAppVersion: async () => 'test',
@@ -39,7 +41,7 @@ const { createSessionRuntime } = await import('data:text/javascript;base64,' + B
   `const {${Object.keys(globalThis.__replayRuntimeDeps).join(',')}} = globalThis.__replayRuntimeDeps;\n${js}`
 ).toString('base64'));
 const saved = { agentName: 'Pi', sessionId: 'history', cwd: '/work', title: 'existing', supportsLoadSession: true };
-const deps = { async requestAuth() { return 'token'; }, async persistSessions() {}, notifyActivity() {} };
+const deps = { async requestAuth() { return 'token'; }, async persistSessions() {}, notifyActivity() { notifications++; } };
 function emit(update) { client.onSessionUpdate({ sessionId: saved.sessionId, update }); }
 function replay() {
   emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'old question' } });
@@ -54,7 +56,7 @@ function live() {
   assert.deepEqual(entries.filter(e => e.kind === 'tool-call' || e.kind === 'sync').map(e => e.title), ['new search', 'new title']);
 }
 beforeEach(() => {
-  entries = []; cached = null; cacheWrites = []; sharedReader = async () => null;
+  notifications = 0; entries = []; cached = null; cacheWrites = []; sharedReader = async () => null;
   client = {
     pendingPermissionRequest: vue.ref(null),
     async initialize() { return {}; },
@@ -70,6 +72,7 @@ for (const cache of [false, true]) {
     try {
       await rt.resume({ ...saved });
       assert.deepEqual(entries.map(e => e.kind), ['session-open']);
+      assert.equal(notifications, 0, 'replay must not signal unread live work');
       assert.equal(rt.messages.value[0].content, 'old question');
       assert.equal(rt.messages.value[1].content, 'old answer');
       assert.equal(rt.toolCallList.value[0].status, 'completed');
@@ -103,6 +106,7 @@ test('asynchronous frames remain historical until the load promise settles', asy
     assert.equal(rt.isConnected.value, false);
     finish({});
     await restoring;
+    assert.equal(rt.isRestoringHistory.value, false);
     assert.deepEqual(entries.map(e => e.kind), ['session-open']);
     live();
   } finally { await rt.close(); }
@@ -326,4 +330,79 @@ test('confirmed outcomes survive history replay and closing without promoting ol
     await rt.close();
     assert.equal(record.lastTurnStatus, lastTurnStatus, 'close must retain saved outcome');
   }
+});
+test('reconnect retains the already visible transcript instead of rolling back to an older cache', async () => {
+  const rt = createSessionRuntime(deps);
+  let finish, restoring;
+  try {
+    await rt.resume({ ...saved });
+    emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'today question' } });
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'today answer' } });
+    const visible = rt.messages.value.map(m => ({ id: m.id, content: m.content }));
+    cached = { version: 1, savedAt: 1, userTurnBase: 0, messages: [
+      { id: 'yesterday-cache', role: 'assistant', content: 'yesterday answer', timestamp: 1 },
+    ] };
+    sharedReader = async () => ({ ...cached, savedAt: Date.now() + 1000 });
+    let begin;
+    const begun = new Promise(resolve => { begin = resolve; });
+    client.loadSession = () => { begin(); return new Promise(resolve => { finish = resolve; }); };
+    client.onTransportClose('test disconnected');
+    restoring = rt.resume({ ...saved });
+    await begun;
+    await vue.nextTick();
+    assert.deepEqual(rt.messages.value.map(m => ({ id: m.id, content: m.content })), visible,
+      'reconnecting an open tab must not replace today with an older local/shared snapshot');
+    replay();
+    assert.equal(rt.messages.value.at(-1).content, 'today answer', 'old replay prefix remains buffered');
+    emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'today question' } });
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'today answer' } });
+    finish({});
+    await restoring;
+    assert.equal(rt.messages.value.at(-1).id, visible.at(-1).id);
+    assert.equal(rt.messages.value.at(-1).content, 'today answer');
+  } finally {
+    finish?.({});
+    await restoring?.catch(() => {});
+    await rt.close();
+  }
+});
+
+test('updates after replay settles stay live while metadata persistence is pending', async () => {
+  let release, begin;
+  const begun = new Promise(resolve => { begin = resolve; });
+  const pendingSave = new Promise(resolve => { release = resolve; });
+  const rt = createSessionRuntime({ ...deps, persistSessions: () => {
+    begin(); return pendingSave;
+  } });
+  const restoring = rt.resume({ ...saved });
+  try {
+    await begun;
+    assert.equal(rt.isConnected.value, true);
+    assert.equal(rt.isRestoringHistory.value, true, 'UI still owns a pending restore operation');
+    assert.ok(cacheWrites.length > 0, 'settled history must refresh the cache before metadata save finishes');
+    entries = []; notifications = 0;
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'genuine live continuation' } });
+    live();
+    assert.equal(notifications, 3);
+    assert.ok(rt.session.value.lastMessageAt > 0);
+    release(); await restoring;
+    assert.equal(rt.isRestoringHistory.value, false);
+  } finally { release?.(); await restoring.catch(() => {}); await rt.close(); }
+});
+
+test('retained replay materializes update-only tools instead of matching the old index', async () => {
+  const rt = createSessionRuntime(deps);
+  try {
+    await rt.resume({ ...saved });
+    assert.equal(rt.messages.value.at(-1).toolCalls[0].toolCallId, 'historical-tool');
+    client.loadSession = async () => {
+      emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'old question' } });
+      emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'old answer' } });
+      emit({ sessionUpdate: 'tool_call_update', toolCallId: 'historical-tool', title: 'old search', kind: 'search', status: 'completed' });
+      return {};
+    };
+    await rt.resume({ ...saved });
+    assert.equal(rt.messages.value.at(-1).toolCalls[0].toolCallId, 'historical-tool');
+    assert.equal(rt.messages.value.at(-1).toolCalls[0].status, 'completed');
+  } finally { await rt.close(); }
 });

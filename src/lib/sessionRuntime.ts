@@ -15,7 +15,7 @@ import { markPromptRecorded } from './promptError';
 import { createPromptOutbox, type DeliveryMode } from './promptOutbox';
 import { steeringDelivery, type SteeringDelivery } from './steeringDelivery';
 import { recordTurnAttachments, turnAttachments, resolveCachedBytes } from './attachmentHistory';
-import { readHistoryCache, storeHistoryCacheEntry, type HistoryCacheEntry, writeHistoryCache, dropHistoryCache } from './historyCache';
+import { HISTORY_TAIL_MESSAGES, readHistoryCache, storeHistoryCacheEntry, type HistoryCacheEntry, writeHistoryCache, dropHistoryCache } from './historyCache';
 import { AcpClientBridge, createAcpClient } from './acp-bridge';
 import { onAgentStderr, spawnAgent, killAgent } from './host';
 import { isDesktop } from './platform';
@@ -130,6 +130,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   // session/load replays historical frames even when no tail cache exists.
   // Keep them in the transcript without recording them as new live work.
   let loadingHistory = false;
+  // The full reconnect operation is UI-busy even outside the replay RPC.
+  const isRestoringHistory = ref(false);
   const isConnecting = ref(false);
   // True while a foreground reconnect attempt is in flight. Distinct from
   // `isConnecting` (which is the multi-phase initial spawn/connect path):
@@ -869,7 +871,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       completedLiveTool = previous !== 'completed' && previous !== 'failed';
     }
 
-    deps.notifyActivity(runtimeApi);
+    if (!loadingHistory) deps.notifyActivity(runtimeApi);
     // Reading live output clears unread, but must leave a visible receipt.
     // Replay never invents a result; only a prompt response confirms completion.
     if (!loadingHistory && inFlightPrompts === 0) {
@@ -1431,6 +1433,9 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     savedSession: SavedSession,
     options?: { autonomous?: boolean }
   ): Promise<void> {
+    const retainTranscript = session.value?.sessionId === savedSession.sessionId
+      && session.value.agentName === savedSession.agentName && messages.value.length > 0;
+    isRestoringHistory.value = true;
     promptGeneration += 1;
     isLoading.value = true;
     // Keep the previous failure until session/load verifies recovery. A
@@ -1452,14 +1457,24 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     // oldest messages, not the newest tail the user opened this chat to see.
     replayMerge = { sessionId: savedSession.sessionId, cached: [], anchorIdx: -1, buffer: [] };
     historyCacheNote.value = 'loading';
-    const local = readHistoryCache(savedSession.agentName, savedSession.sessionId);
-    hydrateHistoryCache(savedSession.agentName, savedSession.sessionId, local);
-    const pendingMerge = replayMerge;
-    void readSharedHistoryCache(savedSession.agentName, savedSession.sessionId).then((entry) => {
-      if (!entry || replayMerge !== pendingMerge || entry.savedAt <= (local?.savedAt ?? 0)) return;
-      storeHistoryCacheEntry(savedSession.agentName, savedSession.sessionId, entry);
-      hydrateHistoryCache(savedSession.agentName, savedSession.sessionId, entry);
-    });
+    if (retainTranscript) {
+      // An open runtime is fresher than either cache. Keep its visible rows
+      // until the full replay settles, including through failed reconnects.
+      toolCalls.value.clear();
+      const cached = messages.value.slice(-HISTORY_TAIL_MESSAGES);
+      let anchorIdx = -1;
+      for (let i = 0; i < cached.length; i++) if (cached[i].role === 'user') anchorIdx = i;
+      replayMerge = { sessionId: savedSession.sessionId, cached, anchorIdx, buffer: [] };
+    } else {
+      const local = readHistoryCache(savedSession.agentName, savedSession.sessionId);
+      hydrateHistoryCache(savedSession.agentName, savedSession.sessionId, local);
+      const pendingMerge = replayMerge;
+      void readSharedHistoryCache(savedSession.agentName, savedSession.sessionId).then((entry) => {
+        if (!entry || replayMerge !== pendingMerge || entry.savedAt <= (local?.savedAt ?? 0)) return;
+        storeHistoryCacheEntry(savedSession.agentName, savedSession.sessionId, entry);
+        hydrateHistoryCache(savedSession.agentName, savedSession.sessionId, entry);
+      });
+    }
 
     try {
       const configStore = useConfigStore();
@@ -1510,8 +1525,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
             mcpServers: [],
           });
         } finally {
-          // Failed loads and authentication retries must not suppress later
-          // live activity once the historical stream has finished.
+          // Only replay frames are historical; updates after this response
+          // remain live even while the enclosing operation saves metadata.
           loadingHistory = false;
         }
       };
@@ -1634,6 +1649,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
 
       throw e;
     } finally {
+      isRestoringHistory.value = false;
       // Same ownership rule as create(): a prompt in flight keeps `isLoading`.
       if (inFlightPrompts === 0) isLoading.value = false;
       outbox.ready();
@@ -2048,6 +2064,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     messages,
     isConnected,
     isLoading,
+    isRestoringHistory,
     isConnecting,
     isReconnecting,
     error,

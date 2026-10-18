@@ -298,6 +298,8 @@ function assistantItems(message: ChatMessage): RenderItem[] {
 
 
 const isLoading = computed(() => rt.isLoading);
+const isRestoringHistory = computed(() => rt.isRestoringHistory);
+const isGenerating = computed(() => isLoading.value && !isRestoringHistory.value);
 
 // Live turn status: when the agent works without writing text (a long tool
 // call, a slow model), the feed looks frozen — a static "Working…" is
@@ -314,7 +316,7 @@ function stopTurnTimer() {
   }
 }
 
-watch(isLoading, (loading) => {
+watch(isGenerating, (loading) => {
   if (loading) {
     turnStartedAt.value = Date.now();
     turnTick.value = 0;
@@ -346,6 +348,7 @@ const activeToolCall = computed(() => {
 
 /** One-line live status for the loading indicator. */
 const turnStatusText = computed(() => {
+  if (isRestoringHistory.value) return 'Restoring history…';
   const secs = turnElapsedSec.value;
   const when = secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
   const tc = activeToolCall.value;
@@ -1099,7 +1102,7 @@ function planGlyph(status: string): string {
         :class="[
           'message',
           `message-${message.role}`,
-          { streaming: isLoading && windowOffset + idx === messages.length - 1 && message.role === 'assistant' },
+          { streaming: isGenerating && windowOffset + idx === messages.length - 1 && message.role === 'assistant' },
         ]"
       >
         <div class="message-head">

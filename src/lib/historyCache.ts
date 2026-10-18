@@ -26,7 +26,7 @@ const PREFIX = 'acp-ui:history:';
 const VERSION = 1;
 
 /** Keep at most this many tail messages per session (oldest dropped first). */
-const MAX_MESSAGES = 100;
+export const HISTORY_TAIL_MESSAGES = 100;
 const MAX_ENTRY_CHARS = 512 * 1024;
 const MAX_TOOL_DETAIL_CHARS = 16 * 1024;
 /** Entries not opened within this window are evicted on store init. */
@@ -81,7 +81,7 @@ function toCachedMessages(messages: ChatMessage[]): ChatMessage[] {
 }
 
 function tailOf(messages: ChatMessage[]): ChatMessage[] {
-  return messages.slice(-MAX_MESSAGES);
+  return messages.slice(-HISTORY_TAIL_MESSAGES);
 }
 
 function countUser(messages: ChatMessage[]): number {
