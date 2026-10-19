@@ -614,3 +614,94 @@ test('stale inventory Working cannot permanently queue a restored Devin session 
     assert.equal(sent, 1, 'unknown canonical state supersedes an obsolete saved Working flag');
   } finally { await rt.close(); }
 });
+
+test('a message typed while history restores queues instead of failing, then drains on connect', async () => {
+  const rt = createSessionRuntime(deps);
+  let finishLoad, loadStarted;
+  const loadStartedP = new Promise(r => { loadStarted = r; });
+  client.loadSession = () => { loadStarted(); return new Promise(r => { finishLoad = r; }); };
+  let sent = 0;
+  client.prompt = async () => {
+    sent++;
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ok' } });
+    return { stopReason: 'end_turn' };
+  };
+  try {
+    const restoring = rt.resume({ ...saved });
+    await loadStartedP;
+    assert.equal(rt.isRestoringHistory.value, true);
+    rt.submitMessage('typed while restoring');
+    assert.equal(rt.pendingMessages.value.length, 1, 'queued, not refused');
+    assert.equal(sent, 0, 'nothing on the wire while load is in flight');
+    finishLoad({});
+    await restoring;
+    for (let i = 0; i < 20 && !sent; i++) await new Promise(r => setTimeout(r, 0));
+    assert.equal(sent, 1, 'the queue drains when session/load resolves');
+    assert.equal(rt.messages.value.some(m => m.role === 'user' && m.content === 'typed while restoring'), true);
+  } finally { await rt.close(); }
+});
+
+test('a transient session/load failure retries on the same connection instead of dropping the resume', async () => {
+  const rt = createSessionRuntime(deps);
+  let attempts = 0;
+  client.loadSession = async () => {
+    attempts++;
+    if (attempts === 1) throw new Error('thread-store conflict: thread X already has an active writer');
+    replay();
+    return {};
+  };
+  try {
+    await rt.resume({ ...saved });
+    assert.equal(attempts, 2);
+    assert.equal(rt.isConnected.value, true);
+    assert.equal(rt.messages.value[0].content, 'old question');
+  } finally { await rt.close(); }
+});
+
+test('a permanent load failure is not retried', async () => {
+  const rt = createSessionRuntime(deps);
+  let attempts = 0;
+  client.loadSession = async () => { attempts++; throw new Error('session not found'); };
+  try {
+    await assert.rejects(rt.resume({ ...saved }));
+    assert.equal(attempts, 1);
+    assert.equal(rt.isConnected.value, false);
+  } finally { await rt.close(); }
+});
+
+test('the outbox keeps a message submitted before its session scope restores', () => {
+  const memory = new Map();
+  const storage = {
+    getItem: (k) => memory.get(k) ?? null,
+    setItem: (k, v) => { memory.set(k, v); },
+    removeItem: (k) => { memory.delete(k); },
+  };
+  const ob = createPromptOutbox({
+    busy: () => true, connected: () => false,
+    send: async () => {}, steer: async () => 'injected', storage,
+  });
+  ob.submit('typed before restore');
+  ob.restore('history');
+  assert.equal(ob.messages.value.length, 1);
+  assert.equal(ob.messages.value[0].text, 'typed before restore');
+  assert.equal(memory.has('acp-ui:outbox:history'), true, 'carried item persisted under the new scope');
+});
+
+test('a primed tab paints the cached tail before its connection starts', async () => {
+  cached = { userTurnBase: 0, messages: [{ id: 'cached-user', role: 'user', content: 'old question', timestamp: 1 }] };
+  const rt = createSessionRuntime(deps);
+  let loadStarted, finishLoad;
+  const loadStartedP = new Promise(r => { loadStarted = r; });
+  client.loadSession = () => { loadStarted(); return new Promise(r => { finishLoad = r; }); };
+  try {
+    rt.primeHistoryCache({ ...saved });
+    assert.equal(rt.isRestoringHistory.value, true, 'primed tab shows restoring state');
+    assert.equal(rt.messages.value[0]?.content, 'old question', 'cached tail painted before connect');
+    const restoring = rt.resume({ ...saved });
+    await loadStartedP;
+    replay();
+    finishLoad({});
+    await restoring;
+    assert.equal(rt.isConnected.value, true);
+  } finally { await rt.close(); }
+});

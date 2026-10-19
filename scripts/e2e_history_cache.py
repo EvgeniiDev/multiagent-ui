@@ -38,18 +38,28 @@ Prints PASS/FAIL per assertion and exits non-zero on any failure.
 import json
 import re
 import sys
+import tempfile
 import threading
 import time
+import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright
 
-from _e2e_harness import serve_web, stop
+from _e2e_harness import serve_state, serve_web, stop
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist-web"
 PORT = 25977
 BASE = f"http://127.0.0.1:{PORT}/"
+
+# The session directory is server-backed only (never a localStorage mirror),
+# so the suite needs its own state server; the production :25900 may hold
+# real documents on a shared host.
+STATE_PREFERRED = 25978
+STATE_PORT = STATE_PREFERRED  # rebased by serve_state() in main()
+STATE_DIR = Path(tempfile.mkdtemp(prefix="e2e-cache-state-"))
 
 AGENT_NAME = "E2E Mock"
 SID = "e2e-cache-session"
@@ -228,14 +238,14 @@ SAVED = {
 
 
 def seed(context):
-    """localStorage: ws agent + prefs + the saved session + two junk cache
-    entries (8-day-old tail, corrupt JSON) that init-time eviction must drop."""
+    """localStorage: ws agent + prefs + two junk cache entries (8-day-old
+    tail, corrupt JSON) that init-time eviction must drop. The saved session
+    lives in the suite's state server — see put_doc() in main()."""
     agents = {"agents": {AGENT_NAME: {"transport": "websocket",
                                      "url": f"ws://127.0.0.1:{PORT}/"}}}
     prefs = {"telemetryEnabled": False, "lastCwd": "/home/hermes/projects"}
     for key, val in (("acp-ui:agents", agents),
-                     ("acp-ui:preferences.json", prefs),
-                     ("acp-ui:sessions.json", SAVED)):
+                     ("acp-ui:preferences.json", prefs)):
         context.add_init_script(
             f"if (!localStorage.getItem({json.dumps(key)}))"
             f" localStorage.setItem({json.dumps(key)}, {json.dumps(json.dumps(val))});"
@@ -261,8 +271,7 @@ def seed_quota(context):
                                      "url": f"ws://127.0.0.1:{PORT}/"}}}
     prefs = {"telemetryEnabled": False, "lastCwd": "/home/hermes/projects"}
     for key, val in (("acp-ui:agents", agents),
-                     ("acp-ui:preferences.json", prefs),
-                     ("acp-ui:sessions.json", SAVED)):
+                     ("acp-ui:preferences.json", prefs)):
         context.add_init_script(
             f"if (!localStorage.getItem({json.dumps(key)}))"
             f" localStorage.setItem({json.dumps(key)}, {json.dumps(json.dumps(val))});"
@@ -277,9 +286,41 @@ def seed_quota(context):
     )
 
 
+def state_relay(route):
+    """Forward the panel's state calls to the suite's own state server.
+
+    State reads go through the panel's same-origin proxy (storage.ts
+    `stateHttpBase` -> location.origin) and web-server.py forwards /api/*
+    and /health to 127.0.0.1:25900 — on a host where a real state server
+    runs, an unguarded suite would read and overwrite production
+    documents. Relay every /api/* call except the /api/fs stub (later
+    routes win, so it stays reachable) plus /health, on any origin —
+    that also catches direct :25900 hits.
+    """
+    url = urlsplit(route.request.url)
+    target = f"http://127.0.0.1:{STATE_PORT}{url.path}"
+    if url.query:
+        target += f"?{url.query}"
+    route.continue_(url=target)
+
+
+def put_doc(name, data):
+    """Seed a document into the suite's state server (PUT {data, rev:0})."""
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{STATE_PORT}/api/state/{name}",
+        method="PUT", data=json.dumps({"data": data, "rev": 0}).encode(),
+        headers={"content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as res:
+        res.read()
+
+
 def wire(page, tag):
     page.route(re.compile(r"/api/fs/"), fs_api)
-    page.route(re.compile(r":25900/"), lambda r: r.abort())
+    page.route(
+        lambda url: urlsplit(url).path == "/health"
+        or ("/api/" in url and "/api/fs/" not in url),
+        state_relay,
+    )
     page.route_web_socket(re.compile(r"^wss?://"), acp_ws)
     page.on("pageerror", lambda exc: page_errors.append(f"{tag}: {exc}"))
 
@@ -331,7 +372,15 @@ def poll_value(page, expr, timeout=30.0, interval=0.12):
 
 
 def wait_settled(page, timeout=30.0):
-    """Replay done: no loading indicator and no cache marker."""
+    """Replay done: no loading indicator and no cache marker. Two-phase —
+    the restore indicator mounts a tick after load, so waiting only for its
+    absence can pass inside the pre-mount gap and read an unsettled page."""
+    poll_eval(
+        page,
+        "document.querySelector('.history-note')"
+        " || document.querySelector('.loading-indicator')"
+        " || document.querySelectorAll('.messages .message').length > 0",
+        timeout=timeout)
     return poll_eval(
         page,
         "!document.querySelector('.loading-indicator')"
@@ -499,8 +548,16 @@ def run_checks():
         check("killed replay: failure banner instead of a fake 'live' view",
               page.evaluate(
                   "() => !!document.querySelector('.error-banner, .reconnect-banner')"))
-        check("killed replay: composer disabled while offline",
-              page.evaluate("() => document.querySelector('.composer-box textarea').disabled"))
+        # The composer stays usable while offline — sends queue into the
+        # outbox and drain when the session reconnects (that IS the feature,
+        # not a leak of a live send).
+        check("killed replay: composer stays usable — send queues",
+              page.evaluate("() => !document.querySelector('.composer-box textarea').disabled"))
+        page.fill(".composer-box textarea", "queued while offline")
+        page.click(".send-btn")
+        page.wait_for_timeout(300)
+        check("killed replay: message lands in the outbox",
+              page.evaluate("() => !!document.querySelector('.ui-pending .pending-text')"))
         state["mode"] = "full"   # restore before the next reload
 
         # ---- D: reload — agent replays EXTRA newer turns ------------------
@@ -549,10 +606,17 @@ def run_checks():
               and len(entry.get("messages") or []) == 4
               and entry["messages"][-1].get("content") == DIVERGED_LAST,
               repr((entry or {}).get("messages", [{}])[-1:] if isinstance(entry, dict) else entry))
+        # The stale/corrupt bait re-seeds on every load and is re-evicted
+        # during init — poll past that window rather than racing it.
+        one_left = poll_eval(
+            page,
+            "Object.keys(localStorage).filter(k => k.startsWith('acp-ui:history:'))"
+            f".length === 1 && !!localStorage.getItem({json.dumps(CACHE_KEY)})",
+            timeout=10.0)
         keys = page.evaluate(
             "Object.keys(localStorage).filter(k => k.startsWith('acp-ui:history:'))")
         check("cache does not grow unboundedly (one live entry)",
-              keys == [CACHE_KEY], repr(keys))
+              one_left and keys == [CACHE_KEY], repr(keys))
 
         ctx.close()
 
@@ -587,12 +651,15 @@ def main():
     if not (DIST / "index.html").exists():
         print(f"FAIL  {DIST} missing — run `npm run build:web` first")
         sys.exit(1)
-    global BASE
+    global BASE, STATE_PORT
+    state_server, STATE_PORT = serve_state(STATE_PREFERRED, STATE_DIR)
+    put_doc("sessions.json", SAVED)
     server, BASE = serve_web(PORT, DIST)
     try:
         run_checks()
     finally:
         stop(server)
+        stop(state_server)
 
     check("zero pageerror events", len(page_errors) == 0,
           "; ".join(page_errors[:3]) if page_errors else "")

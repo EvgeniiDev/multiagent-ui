@@ -415,7 +415,12 @@ const isAutonomous = computed(() => rt.autonomous);
 
 // The long desktop placeholder wraps to a second line and clips vertically
 // on a phone; CSS can't swap placeholder text, so pick the short form here.
+// The composer accepts text while a restore/reconnect is in flight — the
+// outbox holds the message and drains the moment session/load lands. Only a
+// genuinely dead session disables input.
+const composerUsable = computed(() => isConnected.value || isRestoringHistory.value || isReconnecting.value);
 const composerPlaceholder = computed(() => {
+  if (isRestoringHistory.value || isReconnecting.value) return 'Restoring… message queues and sends on connect';
   if (!isConnected.value) return 'Offline — cached copy';
   if (isReconnecting.value) return 'Reconnecting…';
   if (isNarrowLayout.value) return 'Message…';
@@ -646,7 +651,7 @@ const voiceError = ref<string | null>(null);
 const voiceActive = computed(() => voicePhase.value !== 'idle');
 const hasComposerDraft = computed(() => !!inputText.value.trim() || attachments.value.length > 0 || voiceActive.value);
 const composerStopsGeneration = computed(() => isLoading.value && !hasComposerDraft.value);
-const composerCanSend = computed(() => hasComposerDraft.value && !preparingSend.value && !isReconnecting.value && isConnected.value);
+const composerCanSend = computed(() => hasComposerDraft.value && !preparingSend.value && composerUsable.value);
 const voicePre = computed(() => inputText.value.slice(0, voiceAt.value));
 const voicePost = computed(() => inputText.value.slice(voiceAt.value));
 // The overlay shows the same separator the final insert will add, so the
@@ -815,7 +820,7 @@ async function handleSend() {
       // Keep a visibly incomplete dictation for review instead of sending it.
       if (voiceError.value || intent !== sendIntent) return;
     }
-    if (!isConnected.value || isReconnecting.value) return;
+    if (!composerUsable.value) return;
     text = inputText.value.trim();
     files = attachments.value;
     if (!text && files.length === 0) return;
@@ -827,7 +832,8 @@ async function handleSend() {
     preparingSend.value = false;
   }
   try {
-    rt.submitMessage(text, files, rt.messageDeliveryMode);
+    // Steer needs a live turn; during restore/reconnect everything queues.
+    rt.submitMessage(text, files, !isConnected.value || isReconnecting.value ? 'queue' : rt.messageDeliveryMode);
   } catch (e) {
     console.error('Failed to send prompt:', e);
     rt.error = `Send failed: ${e instanceof Error ? e.message : String(e)}`;
@@ -1278,7 +1284,7 @@ function planGlyph(status: string): string {
 
       <!-- Staged files: one dense chip each, with a thumbnail for images. -->
       <UiPendingMessages :messages="pendingMessages" :paused="rt.queuePaused" :notice="rt.queueNotice"
-        :disabled="isReconnecting || !isConnected" @remove="rt.removePendingMessage" @resume="rt.resumeMessageQueue" />
+        :disabled="!composerUsable" @remove="rt.removePendingMessage" @resume="rt.resumeMessageQueue" />
 
       <div v-if="attachments.length" class="attach-tray">
         <div v-for="att in attachments" :key="att.id" class="attach-chip">
@@ -1321,7 +1327,7 @@ function planGlyph(status: string): string {
               @input="keepDictationDraft"
               :class="{ 'voice-ghost': voiceActive }"
               :placeholder="composerPlaceholder"
-              :disabled="isReconnecting || !isConnected"
+              :disabled="!composerUsable"
               @keydown="handleKeyDown"
               @scroll="syncVoiceOverlayScroll"
               rows="1"
@@ -1342,7 +1348,7 @@ function planGlyph(status: string): string {
               variant="ghost"
               class="attach-btn"
               :aria-pressed="attachments.length > 0"
-              :disabled="isReconnecting || !isConnected"
+              :disabled="!composerUsable"
               @click="openFilePicker"
               :title="imageHint"
               aria-label="Attach files"
@@ -1431,7 +1437,7 @@ function planGlyph(status: string): string {
               </UiButton>
               <VoiceInput
                 ref="voiceInputRef"
-                :disabled="preparingSend || isReconnecting || !isConnected"
+                :disabled="preparingSend || !composerUsable"
                 :can-send="composerCanSend"
                 :stop-response="composerStopsGeneration"
                 :active="sessionStore.activeTabId === rt.id && uiStore.activeView === 'chat'"

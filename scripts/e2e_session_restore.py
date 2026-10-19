@@ -57,18 +57,28 @@ Prints PASS/FAIL per assertion and exits non-zero on any failure.
 import json
 import re
 import sys
+import tempfile
 import threading
 import time
+import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright
 
-from _e2e_harness import serve_web, stop
+from _e2e_harness import serve_state, serve_web, stop
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist-web"
 PORT = 25987
 BASE = f"http://127.0.0.1:{PORT}/"
+
+# The panel stores the session directory on the state server only — never
+# in localStorage — so the suite needs its own hermetic instance; the
+# production :25900 may hold real documents on a shared host.
+STATE_PREFERRED = 25908
+STATE_PORT = STATE_PREFERRED  # rebased by serve_state() in main()
+STATE_DIR = Path(tempfile.mkdtemp(prefix="e2e-restore-state-"))
 
 AGENT_NAME = "E2E Mock"
 
@@ -152,6 +162,13 @@ def drip_load(ws, sid, rid, pairs, tag, last_text, interval, foreign_every=0):
     threading.Thread(target=run, daemon=True).start()
 
 
+# session/new must mint a FRESH sessionId each time — a repeat id makes the
+# app reuse the existing record, so currentSessionId would never move.
+# Module scope: every runtime opens its own websocket, so a per-socket
+# counter resets on the second session.
+_new_calls = [0]
+
+
 def acp_ws(ws):
     """Mock agent: handshake + new/list + long replayed histories + prompt."""
     def on_message(message):
@@ -177,7 +194,9 @@ def acp_ws(ws):
                     "agentInfo": {"name": "e2e-mock", "version": "0"},
                 }
             elif method == "session/new":
-                result = {"sessionId": SID_A}
+                _new_calls[0] += 1
+                result = {"sessionId": SID_A if _new_calls[0] == 1
+                          else f"{SID_A}-{_new_calls[0]}"}
             elif method == "session/list":
                 stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 result = {"sessions": [
@@ -241,9 +260,40 @@ def seed(context):
         )
 
 
+def state_relay(route):
+    """Forward the panel's state calls to the suite's own state server.
+
+    State reads go through the panel's same-origin proxy (storage.ts
+    `stateHttpBase` -> location.origin) and web-server.py forwards /api/*
+    and /health to 127.0.0.1:25900 — on a host where a real state server
+    runs, an unguarded suite would read and overwrite production
+    documents. Relay every /api/* call except the /api/fs stub (later
+    routes win, so it stays reachable) plus /health, on any origin —
+    that also catches direct :25900 hits.
+    """
+    url = urlsplit(route.request.url)
+    target = f"http://127.0.0.1:{STATE_PORT}{url.path}"
+    if url.query:
+        target += f"?{url.query}"
+    route.continue_(url=target)
+
+
+def remote_doc():
+    """The sessions.json document as the suite's state server holds it —
+    where the app actually persists the open-session pointer."""
+    with urllib.request.urlopen(
+            f"http://127.0.0.1:{STATE_PORT}/api/state/sessions.json",
+            timeout=5) as res:
+        return json.loads(res.read()).get("data", {})
+
+
 def wire(page, tag):
     page.route(re.compile(r"/api/fs/"), fs_api)
-    page.route(re.compile(r":25900/"), lambda r: r.abort())
+    page.route(
+        lambda url: urlsplit(url).path == "/health"
+        or ("/api/" in url and "/api/fs/" not in url),
+        state_relay,
+    )
     page.route_web_socket(re.compile(r"^wss?://"), acp_ws)
     page.on("pageerror", lambda exc: page_errors.append(f"{tag}: {exc}"))
 
@@ -386,12 +436,18 @@ def run_checks():
         page.wait_for_selector(".input-row:visible", timeout=15000)
         check("session connects before reload", True)
 
-        # The agent's own inventory surfaces in the sidebar (session/list).
-        page.wait_for_selector(".session-row", timeout=10000)
+        # The agent's own inventory surfaces in the sidebar (session/list) —
+        # async, so wait for the expected titles, not just the first row.
+        sidebar_synced = poll_eval(
+            page,
+            "(() => { const t = "
+            "[...document.querySelectorAll('.session-row .row-title')]"
+            ".map(e => e.textContent.trim());"
+            " return ['HistA','HistB','HistC'].every(x => t.includes(x)); })()",
+            timeout=10.0)
         titles = page.eval_on_selector_all(
             ".session-row .row-title", "els => els.map(e => e.textContent.trim())")
-        check("sidebar lists the agent's sessions",
-              all(t in titles for t in ("HistA", "HistB", "HistC")), repr(titles))
+        check("sidebar lists the agent's sessions", sidebar_synced, repr(titles))
 
         # F5: the chat must come back by itself, with the replayed history.
         page.reload(wait_until="load")
@@ -404,8 +460,7 @@ def run_checks():
               agent == AGENT_NAME, repr(agent))
         wait_replay_done(page, A_LAST)
         check("replayed transcript visible after reload", True)
-        stored = page.evaluate(
-            "() => JSON.parse(localStorage.getItem('acp-ui:sessions.json') || '{}')")
+        stored = remote_doc()
         check("open-session pointer persisted",
               stored.get("currentSessionId") is not None,
               repr(stored.get("currentSessionId")))
@@ -545,23 +600,31 @@ def run_checks():
         # There is no Disconnect button any more — this is the only manual
         # close left, and it must not leave the reload pointing at the
         # session it replaced.
-        pointer_before = page.evaluate(
-            "() => JSON.parse(localStorage.getItem('acp-ui:sessions.json') || '{}')"
-        ).get("currentSessionId")
+        pointer_before = remote_doc().get("currentSessionId")
         page.wait_for_selector(".tab-new:not([disabled])", timeout=10000)
         page.click(".tab-new")
         page.wait_for_selector(".nsm-start:not([disabled])", timeout=5000)
         page.click(".nsm-start")
         page.wait_for_selector(".input-row:visible", timeout=15000)
+        # .input-row mounts with the tab, BEFORE session/new resolves and the
+        # store.save() lands — reloading on the first visible row races the
+        # persist. Wait for the pointer itself to move in the remote doc.
+        moved = False
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            cur = remote_doc().get("currentSessionId")
+            if cur and cur != pointer_before:
+                moved = True
+                break
+            page.wait_for_timeout(150)
+        stored = remote_doc()
+        check("the persisted pointer follows the new session",
+              moved and stored.get("currentSessionId") not in (None, "", pointer_before),
+              f"{pointer_before!r} -> {stored.get('currentSessionId')!r}")
         page.reload(wait_until="load")
         page.wait_for_selector(".input-row:visible", timeout=15000)
         check("new session + reload comes back connected, not the welcome screen",
               page.locator(".input-row:visible").count() == 1)
-        stored = page.evaluate(
-            "() => JSON.parse(localStorage.getItem('acp-ui:sessions.json') || '{}')")
-        check("the persisted pointer follows the new session",
-              stored.get("currentSessionId") not in (None, "", pointer_before),
-              f"{pointer_before!r} -> {stored.get('currentSessionId')!r}")
 
         ctx.close()
         browser.close()
@@ -571,12 +634,14 @@ def main():
     if not (DIST / "index.html").exists():
         print(f"FAIL  {DIST} missing — run `npm run build:web` first")
         sys.exit(1)
-    global BASE
+    global BASE, STATE_PORT
+    state, STATE_PORT = serve_state(STATE_PREFERRED, STATE_DIR)
     server, BASE = serve_web(PORT, DIST)
     try:
         run_checks()
     finally:
         stop(server)
+        stop(state)
 
     check("zero pageerror events", len(page_errors) == 0,
           "; ".join(page_errors[:3]) if page_errors else "")

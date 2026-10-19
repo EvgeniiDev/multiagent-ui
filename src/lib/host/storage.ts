@@ -279,6 +279,36 @@ class RemoteKVStore implements KVStore {
     return next;
   }
 
+  // `GET /api/state` answers every doc's {rev, updatedAt} without its data —
+  // a tiny reply that decides whether the real fetch is worth it. Servers
+  // without the list endpoint get 'unsupported' once and the store keeps
+  // the old fetch-the-whole-document-every-interval behavior.
+  private metaSupported: boolean | null = null;
+  private async fetchMeta(): Promise<{ rev: number; updatedAt: number } | 'missing' | 'error' | 'unsupported'> {
+    if (this.metaSupported === false) return 'unsupported';
+    const res = await requestRemoteJson(`${this.base}/api/state`, {}, REQUEST_TIMEOUT_MS);
+    if (!res) return 'error';
+    const docs = (res.body as { docs?: unknown } | null)?.docs;
+    if (res.status === 404 || (res.ok && !Array.isArray(docs))) {
+      this.metaSupported = false;
+      return 'unsupported';
+    }
+    if (!res.ok || !Array.isArray(docs)) return 'error';
+    this.metaSupported = true;
+    const mine = docs.find((d) => (d as { name?: unknown }).name === this.name) as
+      { rev?: unknown; updatedAt?: unknown } | undefined;
+    return mine
+      ? { rev: typeof mine.rev === 'number' ? mine.rev : 0,
+          updatedAt: typeof mine.updatedAt === 'number' ? mine.updatedAt : 0 }
+      : 'missing';
+  }
+
+  private docIsNewer(d: { rev: number; updatedAt: number }): boolean {
+    return this.name === 'sessions.json'
+      ? d.rev !== this.rev
+      : d.updatedAt > this.updatedAt;
+  }
+
   private async fetchDoc(): Promise<DocFetch> {
     try {
       const res = await requestRemoteJson(
@@ -396,12 +426,18 @@ class RemoteKVStore implements KVStore {
   }
 
   // Poll body: adopt the remote document when it is newer, unless local
-  // edits are still unsaved — those win until pushed.
+  // edits are still unsaved — those win until pushed. The meta list comes
+  // first so an unchanged multi-megabyte document (activity.json) costs one
+  // small response instead of a download + parse every interval.
   private async reload(): Promise<void> {
     await this.enqueue(async () => {
-      const remote = await this.fetchDoc();
-      if (remote === 'error') {
+      const meta = await this.fetchMeta();
+      if (meta === 'error') {
         this.setUnavailable(true);
+        return;
+      }
+      if (meta === 'unsupported') {
+        await this.reloadFull();
         return;
       }
       this.setUnavailable(false);
@@ -414,10 +450,32 @@ class RemoteKVStore implements KVStore {
         await this.push();
         return;
       }
-      if (remote !== 'missing' && (this.name === 'sessions.json' ? remote.rev !== this.rev : remote.updatedAt > this.updatedAt)) {
-        this.adopt(remote);
+      if (meta === 'missing' || !this.docIsNewer(meta)) return;
+      const remote = await this.fetchDoc();
+      if (remote === 'error') {
+        this.setUnavailable(true);
+        return;
       }
+      // The doc may have moved again between the meta read and this fetch —
+      // re-check against the fetched stamp, never against the stale meta.
+      if (remote !== 'missing' && this.docIsNewer(remote)) this.adopt(remote);
     });
+  }
+
+  private async reloadFull(): Promise<void> {
+    const remote = await this.fetchDoc();
+    if (remote === 'error') {
+      this.setUnavailable(true);
+      return;
+    }
+    this.setUnavailable(false);
+    if (this.dirty) {
+      await this.push();
+      return;
+    }
+    if (remote !== 'missing' && this.docIsNewer(remote)) {
+      this.adopt(remote);
+    }
   }
 }
 

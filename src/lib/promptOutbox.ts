@@ -39,6 +39,10 @@ export function createPromptOutbox(deps: {
   function restore(scope: string) {
     const nextKey = `acp-ui:outbox:${scope}`;
     if (key === nextKey) return;
+    // Items submitted before the first scope existed — typed while the
+    // session was still restoring — belong to it; don't let the restore
+    // wipe them.
+    const carry = key ? [] : messages.value;
     key = nextKey;
     messages.value = []; eligibleSteers.clear();
     try {
@@ -48,10 +52,12 @@ export function createPromptOutbox(deps: {
         && m.attachments.every((a: Partial<Attachment> | null) => a && typeof a.name === 'string'
           && typeof a.data === 'string' && (a.kind === 'text' || a.kind === 'image'))
         && (m.mode === 'queue' || m.mode === 'steer'))) throw new Error('Invalid saved queue');
-      messages.value = saved;
+      messages.value = [...saved, ...carry];
       paused.value = saved.length > 0;
       notice.value = saved.length ? 'Queue restored. Resume when the agent is ready.' : '';
+      if (carry.length) save();
     } catch (e) {
+      messages.value = carry;
       paused.value = true;
       notice.value = `Could not restore queue: ${String(e)}`;
     }

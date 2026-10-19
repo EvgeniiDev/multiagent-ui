@@ -128,6 +128,13 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   const descriptor = ref<SavedSession | null>(null);
   const messages = ref<ChatMessage[]>([]);
   const toolCalls = ref<Map<string, ToolCallInfo>>(new Map());
+  /**
+   * `toolCallId` → the copy living inside a message's `toolCalls` array. The
+   * `toolCalls` map above holds a SECOND object per call by design — but it
+   * makes every `tool_call_update` O(1) instead of a scan over the whole
+   * transcript. During a big replay that scan is the freeze.
+   */
+  const toolCallMessageIndex = new Map<string, ToolCallInfo>();
   const isConnected = ref(false);
   const isLoading = ref(false);
   // session/load replays historical frames even when no tail cache exists.
@@ -743,6 +750,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     // place — that must never write back into the stored copy.
     messages.value = [];
     toolCalls.value.clear();
+    toolCallMessageIndex.clear();
     let anchorIdx = -1;
     const cached: ChatMessage[] = [];
     for (const stored of entry.messages) {
@@ -773,6 +781,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       }
       for (const t of msg.toolCalls ?? []) {
         toolCalls.value.set(t.toolCallId, { ...t });
+        toolCallMessageIndex.set(t.toolCallId, t);
       }
     }
     if (anchorIdx < 0) anchorIdx = cached.length - 1;
@@ -824,9 +833,11 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     }
     messages.value = replayed;
     toolCalls.value.clear();
+    toolCallMessageIndex.clear();
     for (const m of replayed) {
       for (const t of m.toolCalls ?? []) {
         toolCalls.value.set(t.toolCallId, { ...t });
+        toolCallMessageIndex.set(t.toolCallId, t);
       }
     }
     historyCacheNote.value = null;
@@ -1044,7 +1055,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         const callRawInput = (update as { rawInput?: unknown }).rawInput;
         const callFrame = update as unknown as Record<string, unknown>;
         const callOutput = toolOutputText(callFrame)?.text;
-        targetMsg.toolCalls.push({
+        const callInfo: ToolCallInfo = {
           toolCallId: update.toolCallId,
           title: update.title,
           kind: update.kind || 'other',
@@ -1052,18 +1063,13 @@ export function createSessionRuntime(deps: RuntimeDeps) {
           locations: update.locations,
           rawInput: callRawInput,
           rawOutput: callOutput,
-        });
+        };
+        targetMsg.toolCalls.push(callInfo);
+        toolCallMessageIndex.set(update.toolCallId, callInfo);
         (targetMsg.segments ??= []).push({ kind: 'tool', toolCallId: update.toolCallId });
-        // Also keep in the map for updates
-        toolCalls.value.set(update.toolCallId, {
-          toolCallId: update.toolCallId,
-          title: update.title,
-          kind: update.kind || 'other',
-          status: update.status || 'pending',
-          locations: update.locations,
-          rawInput: callRawInput,
-          rawOutput: callOutput,
-        });
+        // Also keep in the map for updates — a separate object, so the map
+        // and the per-message copy merge independently (as they always did).
+        toolCalls.value.set(update.toolCallId, { ...callInfo });
         if (!loadingHistory) useActivityStore().recordEntry({
           kind: 'tool-call',
           agentName: agentName.value || session.value?.agentName || 'unknown',
@@ -1087,15 +1093,24 @@ export function createSessionRuntime(deps: RuntimeDeps) {
           if (update.title) existing.title = update.title;
           if (updateRawInput !== undefined) existing.rawInput = updateRawInput;
           mergeToolOutput(existing, updateFrame);
-          // Also update in the message's toolCalls array
-          for (const msg of sink) {
-            if (msg.toolCalls) {
-              const tc = msg.toolCalls.find(t => t.toolCallId === update.toolCallId);
-              if (tc) {
-                if (update.status) tc.status = update.status;
-                if (update.title) tc.title = update.title;
-                if (updateRawInput !== undefined) tc.rawInput = updateRawInput;
-                mergeToolOutput(tc, updateFrame);
+          // The message's own copy is a different object than the map entry —
+          // indexed by call id so an update doesn't rescan the transcript.
+          const tc = toolCallMessageIndex.get(update.toolCallId);
+          if (tc) {
+            if (update.status) tc.status = update.status;
+            if (update.title) tc.title = update.title;
+            if (updateRawInput !== undefined) tc.rawInput = updateRawInput;
+            mergeToolOutput(tc, updateFrame);
+          } else {
+            for (const msg of sink) {
+              if (msg.toolCalls) {
+                const found = msg.toolCalls.find(t => t.toolCallId === update.toolCallId);
+                if (found) {
+                  if (update.status) found.status = update.status;
+                  if (update.title) found.title = update.title;
+                  if (updateRawInput !== undefined) found.rawInput = updateRawInput;
+                  mergeToolOutput(found, updateFrame);
+                }
               }
             }
           }
@@ -1117,6 +1132,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
           };
           mergeToolOutput(info, updateFrame);
           targetMsg.toolCalls.push(info);
+          toolCallMessageIndex.set(update.toolCallId, info);
           (targetMsg.segments ??= []).push({ kind: 'tool', toolCallId: update.toolCallId });
           toolCalls.value.set(update.toolCallId, { ...info });
         }
@@ -1410,6 +1426,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       autoReconnectAttempts = 0;
       messages.value = [];
       toolCalls.value.clear();
+      toolCallMessageIndex.clear();
 
       const activity = useActivityStore();
       activity.recordEntry({
@@ -1507,25 +1524,20 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     }
   }
 
-  // Resume existing session on this runtime's connection.
-  async function resume(
-    savedSession: SavedSession,
-    options?: { autonomous?: boolean }
-  ): Promise<void> {
-    const previousHistory = readHistoryCache(savedSession.agentName, savedSession.sessionId);
+  /**
+   * The synchronous half of `resume`: bind the tab to its session and paint
+   * the cached tail NOW, before any network work. `restoreTabs` primes every
+   * reopened tab up front and only then connects them — a tab still waiting
+   * for its adapter slot shows its last messages instead of an empty pane,
+   * and the coming `session/load` replay already lands in the merge buffer
+   * instead of duplicating the cache.
+   */
+  function primeHistoryCache(savedSession: SavedSession): void {
+    if (replayMerge && replayMerge.sessionId === savedSession.sessionId) return;
     const retainTranscript = session.value?.sessionId === savedSession.sessionId
       && session.value.agentName === savedSession.agentName && messages.value.length > 0;
     isRestoringHistory.value = true;
-    promptGeneration += 1;
     isLoading.value = true;
-    // Keep the previous failure until session/load verifies recovery. A
-    // reconnect attempt alone is not evidence that the fault disappeared.
-    // A fresh resume supersedes any earlier cancel — without the reset, a
-    // tab resumed after cancelConnection would carry the aborted flag
-    // forever and the auto-reconnect loop would never arm for it.
-    connectionAborted = false;
-    disarmAutoReconnect();
-    autonomous.value = options?.autonomous ?? false;
     agentName.value = savedSession.agentName;
     descriptor.value = savedSession;
     // The tail cache is keyed by agent+session — known before any network
@@ -1541,6 +1553,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       // An open runtime is fresher than either cache. Keep its visible rows
       // until the full replay settles, including through failed reconnects.
       toolCalls.value.clear();
+      toolCallMessageIndex.clear();
       const cached = messages.value.slice(-HISTORY_TAIL_MESSAGES);
       let anchorIdx = -1;
       for (let i = 0; i < cached.length; i++) if (cached[i].role === 'user') anchorIdx = i;
@@ -1555,6 +1568,27 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         hydrateHistoryCache(savedSession.agentName, savedSession.sessionId, entry);
       });
     }
+  }
+
+  // Resume existing session on this runtime's connection.
+  async function resume(
+    savedSession: SavedSession,
+    options?: { autonomous?: boolean }
+  ): Promise<void> {
+    const previousHistory = readHistoryCache(savedSession.agentName, savedSession.sessionId);
+    promptGeneration += 1;
+    // Keep the previous failure until session/load verifies recovery. A
+    // reconnect attempt alone is not evidence that the fault disappeared.
+    // A fresh resume supersedes any earlier cancel — without the reset, a
+    // tab resumed after cancelConnection would carry the aborted flag
+    // forever and the auto-reconnect loop would never arm for it.
+    connectionAborted = false;
+    disarmAutoReconnect();
+    autonomous.value = options?.autonomous ?? false;
+    // Unconditional — a queued prime may have been cleared by cancelConnection.
+    isRestoringHistory.value = true;
+    isLoading.value = true;
+    primeHistoryCache(savedSession);
 
     try {
       const configStore = useConfigStore();
@@ -1591,6 +1625,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       if (!replayMerge) {
         messages.value = [];
         toolCalls.value.clear();
+        toolCallMessageIndex.clear();
       }
 
       // Try to load existing session - may fail with auth_required.
@@ -1598,12 +1633,26 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       // same shape as session/new — captured for the parser below.
       const loadHistory = async () => {
         loadingHistory = true;
+        const params = {
+          sessionId: savedSession.sessionId,
+          cwd: savedSession.cwd,
+          mcpServers: [],
+        };
         try {
-          return await acpClient!.loadSession({
-            sessionId: savedSession.sessionId,
-            cwd: savedSession.cwd,
-            mcpServers: [],
-          });
+          try {
+            return await acpClient!.loadSession(params);
+          } catch (first) {
+            const m = first instanceof Error ? first.message : String(first);
+            // A stale writer lock or transient adapter contention clears on
+            // its own — one retry on the same transport beats dropping the
+            // whole resume into the disconnect+reconnect loop and replaying
+            // the transcript twice.
+            if (!/conflict|active writer|timed out|temporar|busy|overload/i.test(m)) {
+              throw first;
+            }
+            await new Promise((r) => setTimeout(r, 1500));
+            return await acpClient!.loadSession(params);
+          }
         } finally {
           // Only replay frames are historical; updates after this response
           // remain live even while the enclosing operation saves metadata.
@@ -1864,7 +1913,15 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   }
 
   function submitMessage(text: string, attachments: Attachment[] = [], mode: DeliveryMode = 'queue') {
-    if (!acpClient || !session.value || !isConnected.value || isReconnecting.value) throw new Error('Not connected');
+    // A restore or an armed reconnect has a session but no live wire yet —
+    // hold the message in the outbox instead of refusing it; the queue
+    // drains the moment session/load (re)claims the session.
+    if (isRestoringHistory.value || isReconnecting.value) {
+      if (mode === 'steer') throw new Error('Steer needs a live turn — use Queue while the session restores');
+      if (!text.trim() && attachments.length === 0) return;
+      return outbox.submit(text, attachments, 'queue');
+    }
+    if (!acpClient || !session.value || !isConnected.value) throw new Error('Not connected');
     if (mode === 'steer' && !supportsSteer.value) throw new Error('This agent does not support non-interrupting Steer');
     if (mode === 'steer' && !steerSupportsImages.value && attachments.some(a => a.kind === 'image')) throw new Error('This agent supports text-only Steer; use Queue for images');
     if (!text.trim() && attachments.length === 0) return;
@@ -1922,6 +1979,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     connectionAborted = true;
     disarmAutoReconnect();
     isReconnecting.value = false;
+    // A primed-but-queued restore (background tab) stops claiming it restores.
+    isRestoringHistory.value = false;
 
     // Disconnect if client exists
     if (acpClient) {
@@ -1980,6 +2039,9 @@ export function createSessionRuntime(deps: RuntimeDeps) {
 
 
     isConnected.value = false;
+    // A tab closed mid-restore (or while primed, waiting for its slot) must
+    // not carry the restoring flag into whatever reuses the runtime.
+    isRestoringHistory.value = false;
     // Last chance to keep the tail: the transcript is dropped below.
     flushHistoryNow();
     replayMerge = null;
@@ -1987,6 +2049,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     cacheScope = null;
     messages.value = [];
     toolCalls.value.clear();
+    toolCallMessageIndex.clear();
     clearPermissionTimer();
     permissionWatchStop?.();
     permissionWatchStop = null;
@@ -2212,6 +2275,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     // Actions
     create,
     resume,
+    primeHistoryCache,
     sendPrompt,
     submitMessage,
     steer,

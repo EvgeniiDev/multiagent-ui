@@ -534,8 +534,13 @@ export const useSessionStore = defineStore('session', () => {
    * may have dropped them. `focus` overrides which tab ends active (the
    * `?s=` URL param wins over the stored pointer).
    *
-   * Restores run in parallel: the ws bridge multiplexes sessions over
-   * separate sockets, and stdio agents spawn per tab anyway.
+   * Every tab paints its cached tail first (`primeHistoryCache`); only then
+   * do connections start. The focused tab resumes first and alone — each
+   * agent's tabs share ONE adapter process (the ws bridge multiplexes them
+   * over a single child), so `session/load` replays that run in parallel
+   * only contend for the same adapter and the same main thread. Background
+   * tabs of the same agent follow one at a time; other agents connect in
+   * parallel since their bridges are separate processes.
    */
   async function restoreTabs(focus?: StoredTab | null): Promise<void> {
     const target = focus ?? storedActiveTab;
@@ -571,6 +576,7 @@ export const useSessionStore = defineStore('session', () => {
       const rt = spawnRuntime();
       openTabs.value.push(asTab(rt));
       runtimes.set(sessionKey(saved.agentName, saved.sessionId), rt);
+      rt.primeHistoryCache(saved);
     }
     const focusKey = target ? sessionKey(target.agentName, target.sessionId) : null;
     const focusRt = focusKey ? runtimes.get(focusKey) ?? null : null;
@@ -583,9 +589,27 @@ export const useSessionStore = defineStore('session', () => {
       setSessionInUrl(s.agentName, s.sessionId);
     }
 
-    await Promise.allSettled(
-      toOpen.map(({ saved }) => runtimes.get(sessionKey(saved.agentName, saved.sessionId))!.resume(saved))
-    );
+    const resumeOne = (saved: SavedSession): Promise<void> =>
+      runtimes.get(sessionKey(saved.agentName, saved.sessionId))!.resume(saved).catch(() => {
+        // The failure already lives on the runtime's `error` banner.
+      });
+
+    // The focused session resumes alone first: its adapter gets exclusive
+    // bandwidth, and `restoreTabs` returns once it settles — the caller
+    // doesn't wait on background tabs.
+    const focusEntry = focusKey
+      ? toOpen.find(({ saved }) => sessionKey(saved.agentName, saved.sessionId) === focusKey)
+      : undefined;
+    const focusJob = focusEntry ? resumeOne(focusEntry.saved) : Promise.resolve();
+    await focusJob;
+
+    const chains = new Map<string, Promise<void>>();
+    for (const { saved } of toOpen) {
+      if (focusEntry && saved === focusEntry.saved) continue;
+      const prev = chains.get(saved.agentName) ?? Promise.resolve();
+      chains.set(saved.agentName, prev.then(() => resumeOne(saved)));
+    }
+    void Promise.allSettled([...chains.values()]).then(() => saveSessionsToStore());
     void saveSessionsToStore();
   }
 
