@@ -600,3 +600,17 @@ test('prompt completion refreshes titles in the session cwd and keeps the agent 
     assert.deepEqual(refreshed, [['Pi','/work'], ['Pi','/work']]);
   } finally { await rt.close(); }
 });
+
+test('stale inventory Working cannot permanently queue a restored Devin session with unknown canonical status', async () => {
+  canonicalStatuses = vue.ref({ 'Devin:history': { status: null, at: 2 } });
+  let sent = 0;
+  client.prompt = async () => { sent++; return { stopReason: 'end_turn' }; };
+  const rt = createSessionRuntime(deps);
+  try {
+    await rt.resume({ ...saved, agentName: 'Devin', lastTurnStatus: 'working' });
+    assert.equal(rt.turnStatus.value, null);
+    rt.submitMessage('next turn', [], 'queue');
+    await vue.nextTick();
+    assert.equal(sent, 1, 'unknown canonical state supersedes an obsolete saved Working flag');
+  } finally { await rt.close(); }
+});

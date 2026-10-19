@@ -130,10 +130,22 @@ export function writeHistoryCache(
     userTurnBase: countUser(messages) - countUser(tailOf(messages)),
     messages: toCachedMessages(messages),
   };
-  while (entry.messages.length > 1 && JSON.stringify(entry).length > MAX_ENTRY_CHARS) {
-    if (entry.messages.shift()?.role === 'user') entry.userTurnBase++;
+  // Account for each message once; serializing the full suffix after every
+  // dropped row makes large replay caches quadratic in transcript size.
+  const sizes = entry.messages.map(message => JSON.stringify(message).length);
+  let chars = JSON.stringify({ ...entry, messages: [] }).length
+    + sizes.reduce((sum, size) => sum + size, 0) + Math.max(0, sizes.length - 1);
+  let first = 0;
+  while (first < entry.messages.length - 1 && chars > MAX_ENTRY_CHARS) {
+    chars -= sizes[first] + 1;
+    if (entry.messages[first].role === 'user') {
+      chars += String(entry.userTurnBase + 1).length - String(entry.userTurnBase).length;
+      entry.userTurnBase++;
+    }
+    first++;
   }
-  if (JSON.stringify(entry).length > MAX_ENTRY_CHARS) return null;
+  if (chars > MAX_ENTRY_CHARS) return null;
+  entry.messages = entry.messages.slice(first);
   storeHistoryCacheEntry(agentName, sessionId, entry);
   return entry;
 }

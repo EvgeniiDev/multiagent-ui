@@ -1679,7 +1679,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       }
       outbox.restore(attachmentScope(session.value!.sessionId));
       const confirmedDelivery = outbox.reconcile(messages.value, previousHistory);
-      if (confirmedDelivery || savedSession.lastTurnStatus === 'working' || savedSession.lastTurnStatus === 'output') {
+      // Canonical status supersedes stale inventory flags after a successful replay.
+      if (confirmedDelivery || turnStatus.value === 'working' || turnStatus.value === 'output') {
         remoteWorkAfter.value ??= statusStore.remoteReadVersion?.() ?? 0;
       }
       void statusStore.refresh?.();

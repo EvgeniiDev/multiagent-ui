@@ -51,14 +51,22 @@ function readLocalData(key: string): Record<string, unknown> {
   }
 }
 
-function writeLocalData(key: string, data: Record<string, unknown>): void {
+const failedLocalWrites = new Set<string>();
+
+function writeLocalData(key: string, data: Record<string, unknown>, maxChars?: number): void {
   if (typeof localStorage === 'undefined') return;
   try {
-    localStorage.setItem(key, JSON.stringify(data));
+    const snapshot = JSON.stringify(data);
+    // Acknowledged server snapshots are optional caches. Pending/offline
+    // edits keep the full write path until the server acknowledges them.
+    if (maxChars !== undefined && snapshot.length > maxChars) localStorage.removeItem(key);
+    else localStorage.setItem(key, snapshot);
+    failedLocalWrites.delete(key);
   } catch (e) {
     // Quota exceeded, private mode, etc. — surface to the console; the
     // session/preferences code already tolerates a missing store.
-    console.warn(`Failed to persist ${key} to localStorage:`, e);
+    if (!failedLocalWrites.has(key)) console.warn(`Failed to persist ${key} to localStorage:`, e);
+    failedLocalWrites.add(key);
   }
 }
 
@@ -183,7 +191,7 @@ class RemoteKVStore implements KVStore {
   }
   private mirror(): void {
     // The web session directory comes from the server, never browser storage.
-    if (this.name !== 'sessions.json') writeLocalData(this.storageKey, this.data);
+    if (this.name !== 'sessions.json') writeLocalData(this.storageKey, this.data, this.dirty ? undefined : 1024 * 1024);
   }
   async refresh(): Promise<void> { await this.reload(); }
   private rev = 0;

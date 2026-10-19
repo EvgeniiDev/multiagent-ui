@@ -217,3 +217,36 @@ test('a later transport failure cannot erase an earlier possibly committed snaps
   })(), 500);
   assert.deepEqual(remote.data.sessions, ['first', 'new']);
 });
+
+test('oversized server ledger stays available without repeatedly exhausting browser storage', async () => {
+  const data = { entries: [{ detail: 'x'.repeat(3*1024*1024) }] };
+  let attempts = 0;
+  local.set('acp-ui:activity.json', 'obsolete mirror');
+  globalThis.localStorage.removeItem = key => local.delete(key);
+  globalThis.localStorage.setItem = (key, value) => {
+    if (key === 'acp-ui:activity.json') attempts++;
+    if (value.length > 256*1024) throw new DOMException('full', 'QuotaExceededError');
+    local.set(key,value);
+  };
+  globalThis.fetch = async url => String(url).endsWith('/health') ? json({ok:true}) : json({rev:1,updatedAt:1,data});
+  const store = await loadKvStore('activity.json');
+  assert.deepEqual(await store.get('entries'), data.entries, 'the full authoritative ledger remains in memory');
+  assert.equal(attempts,0,'oversized optional mirrors must not attempt quota-sized writes');
+  assert.equal(local.has('acp-ui:activity.json'),false,'remove the obsolete oversized mirror');
+});
+
+test('failed server saves preserve larger pending offline mirrors', async () => {
+  const entries=[{detail:'x'.repeat(300*1024)}];
+  globalThis.fetch=async (url,init={}) => {
+    if(String(url).endsWith('/health'))return json({ok:true});
+    if(init.method==='PUT')throw new Error('offline');
+    return json({rev:1,updatedAt:1,data:{entries:[]}});
+  };
+  const store=await loadKvStore('activity.json');
+  await store.set('entries',entries); await store.save();
+  assert.deepEqual(JSON.parse(local.get('acp-ui:activity.json')).entries,entries);
+  await __resetWebKvForTests();
+  globalThis.fetch=async()=>{throw new Error('offline')};
+  const reopened=await loadKvStore('activity.json');
+  assert.deepEqual(await reopened.get('entries'),entries);
+});
