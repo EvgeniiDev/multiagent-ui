@@ -60,8 +60,10 @@ function writeLocalData(key: string, data: Record<string, unknown>, maxChars?: n
     // Acknowledged server snapshots are optional caches. Pending/offline
     // edits keep the full write path until the server acknowledges them.
     if (maxChars !== undefined && snapshot.length > maxChars) localStorage.removeItem(key);
-    else localStorage.setItem(key, snapshot);
-    failedLocalWrites.delete(key);
+    else {
+      localStorage.setItem(key, snapshot);
+      failedLocalWrites.delete(key);
+    }
   } catch (e) {
     // Quota exceeded, private mode, etc. — surface to the console; the
     // session/preferences code already tolerates a missing store.

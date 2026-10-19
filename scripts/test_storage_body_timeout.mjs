@@ -250,3 +250,23 @@ test('failed server saves preserve larger pending offline mirrors', async () => 
   const reopened=await loadKvStore('activity.json');
   assert.deepEqual(await reopened.get('entries'),entries);
 });
+
+test('quota warnings stay bounded when acknowledged oversized ledgers are adopted again', async () => {
+  let rev=1,warnings=0;
+  const detail='x'.repeat(2*1024*1024), originalWarn=console.warn;
+  globalThis.localStorage.removeItem = key => local.delete(key);
+  globalThis.localStorage.setItem = () => { throw new DOMException('full','QuotaExceededError'); };
+  globalThis.fetch=async (url,init={}) => {
+    if(String(url).endsWith('/health'))return json({ok:true});
+    if(init.method==='PUT')return json({rev:++rev,updatedAt:rev});
+    return json({rev,updatedAt:rev,data:{detail}});
+  };
+  console.warn=()=>warnings++;
+  try {
+    const store=await loadKvStore('activity.json');
+    await store.set('detail',detail);await store.save();
+    rev++;await store.refresh();
+    await store.set('detail',detail+'new');await store.save();
+    assert.equal(warnings,1,'remote cache eviction must not rearm the same quota warning');
+  } finally { console.warn=originalWarn; }
+});
