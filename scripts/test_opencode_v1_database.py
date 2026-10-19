@@ -33,6 +33,15 @@ class Recovery(unittest.TestCase):
         with sqlite3.connect(self.target) as db:
             self.assertEqual(db.execute('select count(*) from session').fetchone()[0], 2)
 
+    def test_wal_source_schema_is_checkpointed_before_atomic_publication(self):
+        source = sqlite3.connect(self.source)
+        self.addCleanup(source.close)
+        source.execute('PRAGMA journal_mode=WAL')
+        self.assertTrue(mod.prepare(self.source, self.target))
+        with sqlite3.connect(self.target) as db:
+            self.assertEqual(mod.columns(db), mod.V1_COLUMNS)
+            self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+
     def test_nonempty_workspaces_refuse_and_leave_no_target(self):
         with sqlite3.connect(self.source) as db:
             db.execute("insert into workspace values('one','local',null,1,1)")

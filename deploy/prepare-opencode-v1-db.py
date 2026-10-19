@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Isolate host ACP V1 history from an OpenCode V2 database, without editing V2."""
 import argparse
+from contextlib import closing
 import os
 from pathlib import Path
 import sqlite3
@@ -19,7 +20,7 @@ def prepare(source, target):
     if source == target:
         raise ValueError('source and ACP database must be different files')
     if target.exists():
-        with sqlite3.connect(target.as_uri() + '?mode=ro', uri=True) as db:
+        with closing(sqlite3.connect(target.as_uri() + '?mode=ro', uri=True)) as db:
             if not V1_COLUMNS.issubset(columns(db)):
                 raise ValueError('existing ACP database is not V1 compatible; refusing to overwrite it')
         return False
@@ -27,8 +28,11 @@ def prepare(source, target):
     fd, tmp = tempfile.mkstemp(prefix='.acp-v1-', suffix='.db', dir=target.parent)
     os.close(fd)
     try:
-        with sqlite3.connect(source.as_uri() + '?mode=ro', uri=True) as src, sqlite3.connect(tmp) as dst:
+        with closing(sqlite3.connect(source.as_uri() + '?mode=ro', uri=True)) as src, closing(sqlite3.connect(tmp)) as dst:
             src.backup(dst)
+            # A WAL-mode source transfers its journal mode to the backup.
+            # Publish a self-contained main file, never a temp-name WAL.
+            dst.execute('PRAGMA journal_mode=DELETE')
             schema = columns(dst)
             if schema == V2_COLUMNS:
                 if dst.execute('SELECT count(*) FROM workspace').fetchone()[0]:
@@ -57,6 +61,6 @@ if __name__ == '__main__':
     data = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')) / 'opencode'
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, default=data / 'opencode.db')
-    parser.add_argument('--target', type=Path, default=data / 'opencode-acp-v1.db')
+    parser.add_argument('--target', type=Path, default=data / 'opencode-acp-legacy.db')
     args = parser.parse_args()
     print('Created isolated ACP V1 database' if prepare(args.source, args.target) else 'Existing ACP V1 database preserved')
