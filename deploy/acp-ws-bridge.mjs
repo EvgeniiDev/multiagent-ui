@@ -687,6 +687,15 @@ let lastTrafficAt = Date.now();
  * reconnecting tab just finishes connecting when the turn ends. */
 const deferredLoads = new Map();
 
+// ACP replay notifications name only a session, not the load request. Two
+// loads of that session must run serially or one window steals both replays.
+function loadInFlight(sid) {
+  for (const req of pendingClientReqs.values()) {
+    if (req.sid === sid && (req.method === 'session/load' || req.method === 'session/resume')) return req;
+  }
+  return undefined;
+}
+
 /** True while a `session/prompt` request for `sid` is unanswered. */
 function promptInFlight(sid) {
   for (const req of pendingClientReqs.values()) {
@@ -703,7 +712,7 @@ function deferLoad(sid, ws, line) {
     deferredLoads.set(sid, q);
   }
   q.push({ ws, line });
-  log(`deferring session load for ${sid} — prompt in flight (${q.length} queued)`);
+  log(`deferring session load for ${sid} — prompt or replay in flight (${q.length} queued)`);
   // The turn may be waiting on an agent->client request (permission prompt,
   // fs/read_text_file) that was broadcast before this socket existed — replay
   // it so the loading client can answer and let the turn finish instead of
@@ -729,8 +738,8 @@ function flushDeferredLoads(sid) {
     const q = deferredLoads.get(s);
     if (!q) continue;
     deferredLoads.delete(s);
-    if (promptInFlight(s)) {
-      // A newer prompt started since this queue formed — keep waiting.
+    if (loadInFlight(s) || (DEFER_LOAD_DURING_PROMPT && promptInFlight(s))) {
+      // A replay or protected prompt still owns this session — keep waiting.
       deferredLoads.set(s, q);
       continue;
     }
@@ -804,10 +813,10 @@ function noteOutbound(payload, ws) {
       }
       continue;
     }
-    if (msg && DEFER_LOAD_DURING_PROMPT &&
+    if (msg &&
         (msg.method === 'session/load' || msg.method === 'session/resume')) {
       const sid = msg.params?.sessionId;
-      if (typeof sid === 'string' && promptInFlight(sid)) {
+      if (typeof sid === 'string' && (loadInFlight(sid) || (DEFER_LOAD_DURING_PROMPT && promptInFlight(sid)))) {
         // Queue, don't forward — the in-flight turn survives; this frame
         // reaches the child when the prompt settles (flushDeferredLoads).
         // Deferral happens BEFORE the request-id rewrite, so the stored line
@@ -826,7 +835,7 @@ function noteOutbound(payload, ws) {
       msg.id = bridged;
       sessionStatuses.outbound(msg);
       if (typeof sid === 'string' &&
-          (msg.method === 'session/load' || msg.method === 'session/prompt')) {
+          (msg.method === 'session/load' || msg.method === 'session/resume' || msg.method === 'session/prompt')) {
         sessionOwner.set(sid, ws);
       }
       try {
@@ -898,6 +907,10 @@ function noteInbound(line) {
     // A settled prompt releases any session/load queued behind it.
     if (req.method === 'session/prompt' && typeof req.sid === 'string') {
       flushDeferredLoads(req.sid);
+    }
+    if ((req.method === 'session/load' || req.method === 'session/resume') && typeof req.sid === 'string') {
+      // Deliver this response before allowing the next replay to start.
+      queueMicrotask(() => flushDeferredLoads(req.sid));
     }
   }
   return { msg, dest: req ? req.ws : null, rewritten: !!req };
@@ -1006,8 +1019,9 @@ const WS_BUFFERED_CAP = 32 * 1024 * 1024;
 function broadcast(line, msg, dest) {
   const sid = msg?.params?.sessionId;
   const owner =
-    (typeof sid === 'string' ? sessionOwner.get(sid) : undefined) ?? dest ?? undefined;
-  const targets = owner && clients.has(owner) ? [owner] : clients;
+    (typeof sid === 'string' ? loadInFlight(sid)?.ws ?? sessionOwner.get(sid) : undefined) ?? dest ?? undefined;
+  // A closed request owner is still an owner; never broadcast its frames.
+  const targets = owner ? [owner] : clients;
   for (const ws of targets) {
     if (ws.readyState === 1) {
       // Backstop for the sweep window: a socket that stopped draining piles
@@ -1234,13 +1248,15 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     clients.delete(ws);
-    // Drop the socket's session claims and pending requests so its sessions
-    // fall back to broadcast instead of routing frames into a dead socket.
+    // Drop idle session claims. Keep in-flight replay ownership until its
+    // response arrives so a closed tab cannot leak history to another tab.
     for (const [sid, owner] of sessionOwner) {
       if (owner === ws) sessionOwner.delete(sid);
     }
     for (const [bid, req] of pendingClientReqs) {
-      if (req.ws === ws) pendingClientReqs.delete(bid);
+      // Keep a replay's lease until its response arrives, even if its socket
+      // closes. Otherwise a queued load overlaps its remaining notifications.
+      if (req.ws === ws && req.method !== 'session/load' && req.method !== 'session/resume') pendingClientReqs.delete(bid);
     }
     // Queued loads owned by this socket die with it; loads blocked on a prompt
     // this socket abandoned can finally go through.

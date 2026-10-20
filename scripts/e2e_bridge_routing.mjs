@@ -214,6 +214,31 @@ async function main() {
     check('A: zero foreign session/update frames (B session)',
       foreignOnA === 0, `${foreignOnA} leaked`);
 
+    // Same session, same original request IDs: each window needs exactly its
+    // own complete replay, including when the first loading socket closes.
+    const sameA = a.call('session/load', { sessionId: 'sess-shared' });
+    await sleep(100);
+    const sameB = b.call('session/load', { sessionId: 'sess-shared' });
+    await Promise.all([sameA, sameB]);
+    await sleep(100);
+    for (const client of [a, b]) {
+      const received = client.sessionUpdates('sess-shared').length;
+      check(`${client.tag}: same-session replay is complete without duplicates`,
+        received === REPLAY_CHUNKS, `${received}/${REPLAY_CHUNKS}`);
+    }
+    const abandoned = new Client(port, 'abandoned');
+    await abandoned.open();
+    const abandonedLoad = tryCall(abandoned.call('session/load', { sessionId: 'sess-disconnect' }, 3000));
+    await sleep(100);
+    const survivingLoad = b.call('session/load', { sessionId: 'sess-disconnect' });
+    abandoned.close();
+    await survivingLoad;
+    const surviving = b.sessionUpdates('sess-disconnect').length;
+    check('closed loading socket cannot leak its replay into the next window',
+      surviving === REPLAY_CHUNKS, `${surviving}/${REPLAY_CHUNKS}`);
+    check('unrelated window receives no abandoned replay', a.sessionUpdates('sess-disconnect').length === 0);
+    await abandonedLoad;
+
     // Unclaimed session -> broadcast fallback for everyone.
     const unclaimedOnA = a.sessionUpdates('sess-nobody').length;
     const unclaimedOnB = b.sessionUpdates('sess-nobody').length;
