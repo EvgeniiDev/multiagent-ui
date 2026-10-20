@@ -20,3 +20,15 @@ test('budget trimming serializes the transcript once instead of once per dropped
   assert.equal(entry.userTurnBase+entry.messages.filter(m=>m.role==='user').length,50);
   assert.ok(fullTranscripts <= 2, `serialized entire transcript ${fullTranscripts} times`);
 });
+
+test('repeated suffix-only cache writes retain the omitted user-turn offset', () => {
+  values.clear();
+  const messages = Array.from({length:124}, (_,i) => ({id:String(i),role:i%2?'assistant':'user',content:`Turn ${i}`,timestamp:i}));
+  let entry = cache.writeHistoryCache('A', 'resume-offset', messages, {seq:124,hh:'chain'});
+  for (let i=0; i<3; i++) {
+    entry = cache.writeHistoryCache('A', 'resume-offset', entry.messages, undefined, entry.userTurnBase);
+    assert.equal(entry.userTurnBase, 12);
+    assert.equal(entry.replaySeq, 124);
+    assert.equal(entry.messages.at(-1).content, 'Turn 123');
+  }
+});

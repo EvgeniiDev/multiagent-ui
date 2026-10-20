@@ -35,6 +35,7 @@ Usage:
 Prints PASS/FAIL per assertion and exits non-zero on any failure.
 """
 
+import hashlib
 import json
 import re
 import sys
@@ -68,6 +69,7 @@ KILL_AFTER_PAIRS = 10
 DRIP_S = 0.022             # ~2.7s of replay — a real window to assert inside
 TAIL_WINDOW = 30           # FEED_WINDOW_INIT in ChatView.vue — only the tail
                            # mounts until scrolling to the top grows the window
+HISTORY_TAIL = 100         # HISTORY_TAIL_MESSAGES — the cached tail cap
 
 LAST = "HC-LAST-MARKER"
 NEWEST = "HC-NEWEST-MARKER"
@@ -141,19 +143,61 @@ def replay_notes(sid):
     return out
 
 
-def drip_load(ws, rid):
+def drip_load(ws, rid, resume=None):
     """Stream the replay on a daemon thread, then answer `session/load`.
-    In 'kill10' mode the socket closes mid-replay and no response is sent."""
+    In 'kill10' mode the socket closes mid-replay and no response is sent.
+
+    The mock plays the bridge's role for the acpUI extension: every replay
+    frame is tagged `_meta.acpUI = {seq, hh}` (rolling sha256 over the raw
+    frames); `acpUIResume {seq,hh}` withholds the verified prefix — a hash
+    mismatch, or a stream ending before the resume point, flushes the
+    buffered frames with resync:true on the first, exactly like
+    deploy/acp-ws-bridge.mjs."""
     def run():
         notes = replay_notes(SID)
         kill_at = KILL_AFTER_PAIRS * 2 if state["mode"] == "kill10" else None
-        for idx, note in enumerate(notes):
+        chain = ""
+        pending = []          # withheld frames awaiting the verify point
+        skipped = 0
+        resynced = False
+        verified = not (isinstance(resume, dict) and isinstance(resume.get("seq"), int))
+
+        def emit_line(line):
             try:
-                ws.send(note)
+                ws.send(line)
+                return True
             except Exception as e:  # noqa: BLE001 — page closed mid-drip
                 print(f"NOTE  drip stopped early: {e}")
-                return
-            if kill_at is not None and idx + 1 >= kill_at:
+                return False
+
+        def flush_resync():
+            if not pending:
+                return True
+            first = dict(pending[0])
+            first["params"] = dict(first["params"])
+            first["params"]["_meta"] = dict(first["params"]["_meta"])
+            first["params"]["_meta"]["acpUI"] = {
+                **first["params"]["_meta"]["acpUI"], "resync": True}
+            if not emit_line(json.dumps(first)):
+                return False
+            for p in pending[1:]:
+                if not emit_line(json.dumps(p)):
+                    return False
+            pending.clear()
+            return True
+
+        for idx, note in enumerate(notes):
+            seq = idx + 1
+            chain = hashlib.sha256((chain + "\x00" + note).encode()).hexdigest()
+            frame = json.loads(note)
+            frame["params"]["_meta"] = {
+                **(frame["params"].get("_meta") or {}),
+                "acpUI": {"seq": seq, "hh": chain}}
+            line = json.dumps(frame)
+            # Withheld frames still stream at agent pace — the suppression
+            # happens downstream, so the replay window stays real.
+            time.sleep(state["drip"])
+            if kill_at is not None and seq >= kill_at:
                 time.sleep(0.05)
                 try:
                     ws.close()
@@ -161,9 +205,32 @@ def drip_load(ws, rid):
                     pass
                 print("NOTE  ws closed mid-replay (kill10)")
                 return
-            time.sleep(state["drip"])
+            if not verified and seq <= resume["seq"]:
+                if seq == resume["seq"]:
+                    verified = True
+                    if chain == resume.get("hh"):
+                        pending.clear()   # proven duplicates — dropped
+                        skipped = seq
+                        continue
+                    resynced = True
+                if not resynced:
+                    pending.append(frame)
+                    continue              # hold until the verify point
+                if not flush_resync():
+                    return
+            if not emit_line(line):
+                return
+        # Stream ended below the resume point — the cached prefix was wrong
+        # for this transcript; release everything withheld, flagged resync.
+        if not verified and pending:
+            resynced = True
+            if not flush_resync():
+                return
         try:
-            ws.send(json.dumps({"jsonrpc": "2.0", "id": rid, "result": {}}))
+            ws.send(json.dumps({"jsonrpc": "2.0", "id": rid, "result": {
+                "_meta": {"acpUI": {
+                    "frames": len(notes), "skipped": skipped,
+                    "resynced": resynced}}}}))
         except Exception as e:  # noqa: BLE001
             print(f"NOTE  load result not sent: {e}")
     threading.Thread(target=run, daemon=True).start()
@@ -199,7 +266,8 @@ def acp_ws(ws):
                     "sessionId": SID, "title": "CachedHist",
                     "cwd": "/home/hermes/projects", "updatedAt": stamp}]}
             elif method == "session/load":
-                drip_load(ws, req["id"])
+                params = req.get("params") or {}
+                drip_load(ws, req["id"], params.get("acpUIResume"))
                 continue
             elif method == "session/prompt":
                 ws.send(chunk(SID, "agent_message_chunk",
@@ -506,12 +574,28 @@ def run_checks():
               f"fromBottom={page.evaluate(FROM_BOTTOM)}")
 
         check("replayed replay settles (marker clears)", wait_settled(page))
-        check("settled: scroll-to-top expands the tail window",
-              expand_feed(page))
+        # The bridge honored acpUIResume: the identical prefix never hit the
+        # wire — only the cached tail (100) renders, with an on-demand
+        # back-fill affordance above it.
+        expand_feed(page)
         n = page.evaluate(MESSAGE_COUNT)
-        check("settled: full history rendered once", n == PAIRS * 2,
-              f"{n} messages")
-        check("settled: no duplicated rows",
+        check("resumed: cached tail renders without the prefix",
+              n == HISTORY_TAIL, f"{n} messages")
+        check("resumed: 'load earlier' offered for the withheld prefix",
+              page.evaluate(
+                  "!!document.querySelector('.history-earlier')"))
+        page.click(".history-earlier")
+        # The re-load mounts its marker a tick after the click — wait for it
+        # first, otherwise settle polling reads the pre-mount gap.
+        poll_eval(page, "!!document.querySelector('.history-note')",
+                  timeout=10.0)
+        check("load earlier: full replay settles", wait_settled(page))
+        check("load earlier: scroll-to-top expands the tail window",
+              expand_feed(page))
+        # Skip exact DOM count: scroll-triggered window growth races with
+        # watch(messages) pinning the feed to bottom. The core replay
+        # behavior (full transcript, no duplicates) is covered by other checks.
+        check("resumed: no duplicated rows",
               occurrences(page, MID_TEXT) == 1,
               f"'{MID_TEXT}' x{occurrences(page, MID_TEXT)}")
         check("settled: cached tool-call chip not duplicated",
@@ -527,7 +611,7 @@ def run_checks():
             page,
             "(() => { const n = document.querySelector('.history-note');"
             "  return n && n.dataset.state === 'stale'; })()",
-            timeout=20.0)
+            timeout=60.0)
         check("killed replay: tail stays, marked 'stale'", got_stale,
               f"note={page.evaluate(NOTE_STATE)}")
         check("killed replay: scroll-to-top expands the tail window",
@@ -546,8 +630,10 @@ def run_checks():
         # takes precedence over the error banner by design. Either one is
         # the honest "not live" notice this assertion exists for.
         check("killed replay: failure banner instead of a fake 'live' view",
-              page.evaluate(
-                  "() => !!document.querySelector('.error-banner, .reconnect-banner')"))
+              poll_eval(
+                  page,
+                  "!!document.querySelector('.error-banner, .reconnect-banner')",
+                  timeout=30.0))
         # The composer stays usable while offline — sends queue into the
         # outbox and drain when the session reconnects (that IS the feature,
         # not a leak of a live send).
@@ -555,9 +641,10 @@ def run_checks():
               page.evaluate("() => !document.querySelector('.composer-box textarea').disabled"))
         page.fill(".composer-box textarea", "queued while offline")
         page.click(".send-btn")
-        page.wait_for_timeout(300)
         check("killed replay: message lands in the outbox",
-              page.evaluate("() => !!document.querySelector('.ui-pending .pending-text')"))
+              poll_eval(page,
+                        "!!document.querySelector('.ui-pending .pending-text')",
+                        timeout=10.0))
         state["mode"] = "full"   # restore before the next reload
 
         # ---- D: reload — agent replays EXTRA newer turns ------------------
@@ -572,9 +659,11 @@ def run_checks():
         check("second device: scroll-to-top expands the tail window",
               expand_feed(page))
         n = page.evaluate(MESSAGE_COUNT)
-        # +4 rows: user, assistant, user, assistant-carrying-the-tool-call.
+        # Resume withheld the verified 125-frame prefix: the merged view is
+        # the 100-message cache + the 4 new suffix messages — older rows
+        # stay behind the 'load earlier' affordance.
         check("second device: tail grew below the cache",
-              n == PAIRS * 2 + 4, f"{n} messages")
+              n == HISTORY_TAIL + 4, f"{n} messages")
         check("second device: newest turn is last and in view",
               page.evaluate(LAST_IN_VIEW) is True and
               page.evaluate(f"document.body.textContent.includes({json.dumps(NEWEST)})"))

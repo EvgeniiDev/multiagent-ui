@@ -51,7 +51,7 @@ const { createSessionRuntime } = await import('data:text/javascript;base64,' + B
 ).toString('base64'));
 const saved = { agentName: 'Pi', sessionId: 'history', cwd: '/work', title: 'existing', supportsLoadSession: true };
 const deps = { async requestAuth() { return 'token'; }, async persistSessions() {}, notifyActivity() { notifications++; } };
-function emit(update) { client.onSessionUpdate({ sessionId: saved.sessionId, update }); }
+function emit(update, meta) { client.onSessionUpdate({ sessionId: saved.sessionId, update, ...(meta ? { _meta: meta } : {}) }); }
 function replay() {
   emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'old question' } });
   emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'old answer' } });
@@ -703,5 +703,114 @@ test('a primed tab paints the cached tail before its connection starts', async (
     finishLoad({});
     await restoring;
     assert.equal(rt.isConnected.value, true);
+  } finally { await rt.close(); }
+});
+
+test('a cached replay cursor is sent as acpUIResume and an honored suffix appends', async () => {
+  cached = {
+    userTurnBase: 0, replaySeq: 4, replayHash: 'chain@4',
+    messages: [{ id: 'cached-user', role: 'user', content: 'old question', timestamp: 1 }],
+  };
+  const rt = createSessionRuntime(deps);
+  let sentParams;
+  client.loadSession = async (p) => {
+    sentParams = p;
+    // The bridge withheld frames 1..4 — only the two new frames arrive.
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'old answer' } },
+      { acpUI: { seq: 5, hh: 'chain@5' } });
+    emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'new question' } },
+      { acpUI: { seq: 6, hh: 'chain@6' } });
+    return { _meta: { acpUI: { frames: 6, skipped: 4, resynced: false } } };
+  };
+  try {
+    await rt.resume({ ...saved });
+    assert.deepEqual(sentParams.acpUIResume, { seq: 4, hh: 'chain@4' }, 'resume token rides session/load');
+    assert.deepEqual(rt.messages.value.map(m => m.content), ['old question', 'old answer', 'new question'],
+      'verified suffix appends to the cached tail');
+    const lastWrite = cacheWrites.at(-1)?.[3];
+    assert.deepEqual(lastWrite, { seq: 6, hh: 'chain@6' }, 'last replay tag persisted for the next load');
+  } finally { await rt.close(); }
+});
+
+test('a resumed load that overlaps cached live turns dedups the seam', async () => {
+  // Cache written after a live turn: tail already holds the post-replay
+  // messages, while the stored cursor still marks the old replay boundary.
+  cached = {
+    userTurnBase: 0, replaySeq: 4, replayHash: 'chain@4',
+    messages: [
+      { id: 'cached-user', role: 'user', content: 'old question', timestamp: 1 },
+      { id: 'cached-live-q', role: 'user', content: 'live question', timestamp: 2 },
+      { id: 'cached-live-a', role: 'assistant', content: 'live answer', timestamp: 3 },
+    ],
+  };
+  const rt = createSessionRuntime(deps);
+  client.loadSession = async () => {
+    emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'live question' } },
+      { acpUI: { seq: 5, hh: 'chain@5' } });
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'live answer' } },
+      { acpUI: { seq: 6, hh: 'chain@6' } });
+    emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'next question' } },
+      { acpUI: { seq: 7, hh: 'chain@7' } });
+    return { _meta: { acpUI: { frames: 7, skipped: 4, resynced: false } } };
+  };
+  try {
+    await rt.resume({ ...saved });
+    assert.deepEqual(rt.messages.value.map(m => m.content),
+      ['old question', 'live question', 'live answer', 'next question'],
+      'seam overlap deduplicated — no doubled live turn');
+  } finally { await rt.close(); }
+});
+
+test('a resync-flagged replay replaces the transcript wholesale', async () => {
+  cached = {
+    userTurnBase: 0, replaySeq: 9, replayHash: 'stale-chain',
+    messages: [{ id: 'cached-user', role: 'user', content: 'wrong history', timestamp: 1 }],
+  };
+  const rt = createSessionRuntime(deps);
+  client.loadSession = async () => {
+    emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'real question' } },
+      { acpUI: { seq: 1, hh: 'fresh@1', resync: true } });
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'real answer' } },
+      { acpUI: { seq: 2, hh: 'fresh@2' } });
+    return { _meta: { acpUI: { frames: 2, skipped: 0, resynced: true } } };
+  };
+  try {
+    await rt.resume({ ...saved });
+    assert.deepEqual(rt.messages.value.map(m => m.content), ['real question', 'real answer'],
+      'diverged cache replaced, not appended');
+    assert.equal(rt.messages.value.some(m => m.content === 'wrong history'), false);
+  } finally { await rt.close(); }
+});
+
+test('an untagged replay (old bridge) still takes the whole-transcript path', async () => {
+  cached = {
+    userTurnBase: 0, replaySeq: 4, replayHash: 'chain@4',
+    messages: [{ id: 'cached-user', role: 'user', content: 'old question', timestamp: 1 }],
+  };
+  const rt = createSessionRuntime(deps);
+  client.loadSession = async () => {
+    replay();
+    return {}; // old bridge: no _meta.acpUI on the result
+  };
+  try {
+    await rt.resume({ ...saved });
+    assert.equal(rt.messages.value.some(m => m.content === 'old question'), true);
+    assert.equal(rt.messages.value.some(m => m.content === 'old answer'), true);
+  } finally { await rt.close(); }
+});
+
+test('resumed cache preserves the omitted user-turn offset for later opens', async () => {
+  cached = {
+    userTurnBase: 12, replaySeq: 4, replayHash: 'chain@4',
+    messages: [{ id: 'tail-user', role: 'user', content: 'tail question', timestamp: 1 }],
+  };
+  const rt = createSessionRuntime(deps);
+  client.loadSession = async () => ({ _meta: { acpUI: { frames: 4, skipped: 4, resynced: false } } });
+  try {
+    await rt.resume({ ...saved });
+    assert.equal(rt.historyIncomplete.value, true);
+    assert.equal(cacheWrites.at(-1)?.[4], 12, 'cache keeps the hidden prefix offset after a zero-delta resume');
+    await rt.loadFullHistory();
+    assert.equal(rt.historyIncomplete.value, false);
   } finally { await rt.close(); }
 });

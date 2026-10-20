@@ -372,6 +372,7 @@ const isReconnecting = computed(() => rt.isReconnecting);
 // Non-null while the feed shows the localStorage tail instead of a settled
 // transcript: 'loading' during the parallel replay, 'stale' when it died.
 const historyCacheNote = computed(() => rt.historyCacheNote);
+const historyIncomplete = computed(() => rt.historyIncomplete);
 const currentSession = computed(() => rt.session);
 const availableModes = computed(() => rt.availableModes);
 const currentModeId = computed(() => rt.currentModeId);
@@ -1141,6 +1142,13 @@ function planGlyph(status: string): string {
           ? 'Couldn’t reach the agent — showing the cached copy'
           : 'Loading history…' }}
       </div>
+      <UiButton
+        v-if="historyIncomplete"
+        variant="ghost"
+        class="history-earlier"
+        :disabled="isRestoringHistory"
+        @click="rt.loadFullHistory()"
+      >Load earlier history</UiButton>
       <!-- Older messages sit outside the render window — scrolling toward
            the top auto-extends it. -->
       <div
@@ -1596,6 +1604,10 @@ function planGlyph(status: string): string {
 .history-note[data-state='stale'] {
   color: var(--text-secondary, #6b6259);
   background: var(--tint-active, rgba(194, 83, 47, 0.10));
+}
+
+.history-earlier {
+  align-self: center;
 }
 
 .message-head {

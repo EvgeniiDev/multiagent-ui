@@ -45,6 +45,15 @@ export interface HistoryCacheEntry {
    */
   userTurnBase: number;
   messages: ChatMessage[];
+  /**
+   * Bridge-assigned replay cursor: the `_meta.acpUI` tag of the last
+   * `session/update` frame applied when this tail was written. Echoed back
+   * as `acpUIResume` on the next `session/load` so the bridge can withhold
+   * frames the client already has. Absent on pre-resume entries or when the
+   * bridge doesn't tag (older builds) — then the load replays in full.
+   */
+  replaySeq?: number;
+  replayHash?: string;
 }
 
 export function historyCacheKey(agentName: string, sessionId: string): string {
@@ -122,13 +131,20 @@ export function storeHistoryCacheEntry(agentName: string, sessionId: string, ent
 export function writeHistoryCache(
   agentName: string,
   sessionId: string,
-  messages: ChatMessage[]
+  messages: ChatMessage[],
+  replay?: { seq?: number; hh?: string } | null,
+  userTurnBase = 0
 ): HistoryCacheEntry | null {
   if (messages.length === 0) return null;
+  // A write with no fresh tag keeps the cursor of the previous entry — live
+  // turns after a replay must not move the verified replay boundary.
+  const prior = replay === undefined ? readHistoryCache(agentName, sessionId) : null;
   const entry: HistoryCacheEntry = {
     version: VERSION, savedAt: Date.now(),
-    userTurnBase: countUser(messages) - countUser(tailOf(messages)),
+    userTurnBase: userTurnBase + countUser(messages) - countUser(tailOf(messages)),
     messages: toCachedMessages(messages),
+    replaySeq: replay?.seq ?? prior?.replaySeq,
+    replayHash: replay?.hh ?? prior?.replayHash,
   };
   // Account for each message once; serializing the full suffix after every
   // dropped row makes large replay caches quadratic in transcript size.

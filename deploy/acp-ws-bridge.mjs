@@ -68,6 +68,7 @@ import { BridgeProcessOwner } from './bridge-process-owner.mjs';
 import { BridgeSessionStatuses, bridgeStatusPersistence } from './bridge-session-statuses.mjs';
 import { assertBridgeMode, assertBridgeModeSync } from './bridge-mode.mjs';
 import { createRequire } from 'node:module';
+import crypto from 'node:crypto';
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -696,6 +697,143 @@ function loadInFlight(sid) {
   return undefined;
 }
 
+// ---------------------------------------------------------------------------
+// History replay resume (acpUI extension)
+// ---------------------------------------------------------------------------
+// `session/load` can only replay the whole transcript top-down — the agent
+// has no notion of "send what the client hasn't seen". The panel keeps a
+// local tail cache, so the bridge gives every replayed `session/update`
+// frame an id: `_meta.acpUI = {seq, hh}` where seq is the frame's ordinal in
+// the replay stream and hh a rolling sha256 over the raw frames up to it.
+// The client stores the last pair it applied and echoes it on the next load
+// as `params.acpUIResume = {seq, hh}`. The bridge still runs the agent's
+// full replay (the agent needs the load for session state), but suppresses
+// frames the client already has — the dominant wire/parse cost of a warm
+// refresh collapses to the delta.
+//
+// Suppression is safe only if the client's prefix is identical to this
+// replay's: frames ≤ seq are buffered (not yet sent) while hashed; at the
+// resume point the rolling hash is compared. Match → the buffer is dropped
+// and only the tail forwards. Mismatch (diverged/compressed history), a
+// stream that ends before seq, or an oversized buffer → the buffered frames
+// flush with `resync: true` on the first one and everything forwards — the
+// client rebuilds wholesale, identical to a cold load. The token is stripped
+// before the request reaches the agent, which never sees it.
+/** sessionId -> active replay gate for an in-flight session/load|resume. */
+const replayGates = new Map();
+/** Cap on frames buffered while waiting for the hash verify point. A replay
+ * that overruns it just flushes with resync — correctness is preserved, the
+ * resume attempt is wasted. */
+const configuredReplayCap = Number(process.env.ACP_REPLAY_BUFFER_CAP_BYTES);
+const REPLAY_BUFFER_CAP = Number.isSafeInteger(configuredReplayCap) && configuredReplayCap > 0
+  ? configuredReplayCap : 64 * 1024 * 1024;
+
+function resumeTokenOf(params) {
+  const t = params?.acpUIResume;
+  if (!t || typeof t !== 'object') return null;
+  const seq = Number(t.seq);
+  const hh = typeof t.hh === 'string' ? t.hh : '';
+  if (!Number.isInteger(seq) || seq < 1 || !hh) return null;
+  return { seq, hh };
+}
+
+function replayChainHash(prev, line) {
+  return crypto.createHash('sha256').update(prev + '\x00' + line).digest('hex');
+}
+
+/** Send every buffered suppressed frame to the loading socket, flagging the
+ * first one resync:true so the client rebuilds instead of appending. */
+function flushReplayBuffer(gate) {
+  if (!gate.buffered.length) return;
+  const first = JSON.parse(gate.buffered[0]);
+  first.params._meta.acpUI.resync = true;
+  const ws = gate.ws;
+  try { ws.send(JSON.stringify(first)); } catch { /* dying socket */ }
+  for (let i = 1; i < gate.buffered.length; i++) {
+    try { ws.send(gate.buffered[i]); } catch { break; }
+  }
+  gate.buffered.length = 0;
+  gate.bufferedBytes = 0;
+}
+
+/**
+ * Apply the replay gate to one inbound frame. Returns the line to forward
+ * (tagged for gated replays, verbatim otherwise) or null when the frame is
+ * suppressed into the verify buffer. Only `session/update` notifications
+ * routed to the socket that owns the loading session are gated.
+ */
+function gateReplayFrame(line, msg) {
+  if (!msg || msg.method !== 'session/update') return line;
+  const sid = msg.params?.sessionId;
+  if (typeof sid !== 'string') return line;
+  const gate = replayGates.get(sid);
+  if (!gate || gate.done || sessionOwner.get(sid) !== gate.ws) return line;
+
+  gate.count++;
+  gate.hash = replayChainHash(gate.hash, line);
+  const acpUI = { seq: gate.count, hh: gate.hash };
+  if (gate.resync) acpUI.resync = true;
+  const tagged = JSON.stringify({
+    ...msg,
+    params: { ...msg.params, _meta: { ...(msg.params._meta ?? {}), acpUI } },
+  });
+
+  if (!gate.verified) {
+    if (gate.count <= gate.resumeSeq) {
+      if (gate.count === gate.resumeSeq) {
+        gate.verified = true;
+        if (gate.hash === gate.resumeHH) {
+          // Prefix proven identical — every buffered frame is a duplicate.
+          gate.buffered.length = 0;
+          gate.bufferedBytes = 0;
+          gate.skipped = gate.resumeSeq;
+          return null;
+        }
+        gate.resync = true;
+      }
+      if (!gate.resync) {
+        gate.buffered.push(tagged);
+        gate.bufferedBytes += tagged.length;
+        if (gate.bufferedBytes <= REPLAY_BUFFER_CAP) return null;
+        // Once any prefix is sent, never switch back to suppression, even
+        // if the eventual resume hash matches. The client is resyncing.
+        gate.verified = true;
+        gate.resync = true;
+        flushReplayBuffer(gate);
+        return null; // current frame was already included in the buffer
+      }
+      flushReplayBuffer(gate);
+      return tagged;
+    }
+    // Stream ended before reaching seq — handled at finalize (the response
+    // branch flushes whatever was withheld).
+  }
+  return tagged;
+}
+
+/** Close out a gate when its load request resolves (result or error). A
+ * stream that never reached the resume point gets the resync flush here —
+ * the cached prefix it claimed was wrong for this transcript. */
+function finalizeReplayGate(sid, msg) {
+  const gate = replayGates.get(sid);
+  if (!gate) return;
+  replayGates.delete(sid);
+  if (!gate.verified && gate.buffered.length) {
+    gate.resync = true;
+    flushReplayBuffer(gate);
+  }
+  if (msg && msg.result && typeof msg.result === 'object' && !Array.isArray(msg.result)) {
+    msg.result._meta = {
+      ...(msg.result._meta ?? {}),
+      acpUI: {
+        frames: gate.count,
+        skipped: gate.skipped,
+        resynced: gate.resync,
+      },
+    };
+  }
+}
+
 /** True while a `session/prompt` request for `sid` is unanswered. */
 function promptInFlight(sid) {
   for (const req of pendingClientReqs.values()) {
@@ -838,6 +976,17 @@ function noteOutbound(payload, ws) {
           (msg.method === 'session/load' || msg.method === 'session/resume' || msg.method === 'session/prompt')) {
         sessionOwner.set(sid, ws);
       }
+      if (typeof sid === 'string' &&
+          (msg.method === 'session/load' || msg.method === 'session/resume')) {
+        // acpUIResume is a bridge-facing extension — the agent never sees it.
+        const resume = resumeTokenOf(msg.params);
+        delete msg.params.acpUIResume;
+        replayGates.set(sid, {
+          ws, count: 0, hash: '', buffered: [], bufferedBytes: 0,
+          resumeSeq: resume?.seq ?? 0, resumeHH: resume?.hh ?? '',
+          verified: !resume, resync: false, skipped: 0, done: false,
+        });
+      }
       try {
         meterOutbound(msg);
       } catch {
@@ -903,6 +1052,13 @@ function noteInbound(line) {
     if (req.method === 'session/new') {
       const sid = msg.result?.sessionId;
       if (typeof sid === 'string') sessionOwner.set(sid, req.ws);
+    }
+    // The replay stream ends with the load response — annotate the result
+    // with how many frames were withheld (or flush them all on a short
+    // stream) and stop gating: later updates are live traffic.
+    if ((req.method === 'session/load' || req.method === 'session/resume') &&
+        typeof req.sid === 'string') {
+      finalizeReplayGate(req.sid, msg);
     }
     // A settled prompt releases any session/load queued behind it.
     if (req.method === 'session/prompt' && typeof req.sid === 'string') {
@@ -1093,8 +1249,10 @@ function spawnChild() {
         if (inb?.discard) continue;
         // A routed response carries the caller's original id — re-serialize
         // so the socket sees its own numbering, not the bridged one.
-        broadcast(inb?.rewritten ? JSON.stringify(inb.msg) : line,
-          inb?.msg ?? null, inb?.dest ?? null);
+        const outLine = inb?.rewritten ? JSON.stringify(inb.msg) : line;
+        const gated = gateReplayFrame(outLine, inb?.msg ?? null);
+        // null = withheld into the resume-verify buffer (duplicate prefix).
+        if (gated !== null) broadcast(gated, inb?.msg ?? null, inb?.dest ?? null);
       }
     }
   });
@@ -1264,6 +1422,11 @@ wss.on('connection', (ws) => {
       const kept = q.filter((e) => e.ws !== ws);
       if (kept.length) deferredLoads.set(sid, kept);
       else deferredLoads.delete(sid);
+    }
+    // Resume gates owned by the dead socket die with it — buffered frames
+    // would otherwise flush into the void.
+    for (const [sid, gate] of replayGates) {
+      if (gate.ws === ws) replayGates.delete(sid);
     }
     flushDeferredLoads();
     log(`client closed (${clients.size} active)`);
