@@ -11,6 +11,7 @@ async function scenario({ mode = 'host', conflict = false, failStart = false, ch
     readUnits: async () => { reads++; return units.map(u => ({ ...u, pid: changedPid && reads > 1 && u.name === 'devin' ? 999 : u.pid })); },
     inspect: async excluded => { calls.push(['inspect', excluded]); if (conflict) throw new Error('unowned listener :25903'); },
     stop: async names => { calls.push(['stop', names]); },
+    reset: async names => { calls.push(['reset', names]); },
     preflight: async () => { calls.push(['preflight']); },
     start: async unit => { calls.push(['start', unit]); if (failStart) throw new Error('start failed'); },
     ready: async bridge => { calls.push(['ready', bridge.name]); },
@@ -21,7 +22,8 @@ const ok = await scenario();
 await ok.run();
 assert.deepEqual(ok.calls, [
   ['inspect', ['hermes', 'opencode', 'devin']], ['preflight'],
-  ['stop', ['hermes.service', 'opencode.service', 'devin.service']], ['inspect', []],
+  ['stop', ['hermes.service', 'opencode.service', 'devin.service']],
+  ['reset', ['hermes.service', 'opencode.service', 'devin.service']], ['inspect', []],
   ['start', 'hermes.service'], ['ready', 'hermes'],
   ['start', 'opencode.service'], ['ready', 'opencode'],
   ['start', 'devin.service'], ['ready', 'devin'],

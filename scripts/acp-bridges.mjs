@@ -490,18 +490,19 @@ async function waitForTarget(mode) {
 export async function recoverHostStarts(actions) {
   if (actions.mode !== 'host') throw new Error('recover-starts requires selected host mode');
   const units = await actions.readUnits();
-  const pending = units.filter(u => ['activating', 'failed'].includes(u.state) && u.pid === 0);
-  if (!pending.length) throw new Error('no failed or pending host starts with MainPID=0 to recover');
+  const pending = units.filter(u => ['inactive', 'activating', 'failed'].includes(u.state) && u.pid === 0);
+  if (!pending.length) throw new Error('no stopped host bridges with MainPID=0 to recover');
   await actions.inspect(pending.map(u => u.name));
   await actions.preflight();
   const fresh = await actions.readUnits();
   for (const unit of pending) {
     const current = fresh.find(u => u.name === unit.name);
-    if (!current || current.pid !== 0 || !['activating', 'failed'].includes(current.state)) {
+    if (!current || current.pid !== 0 || !['inactive', 'activating', 'failed'].includes(current.state)) {
       throw new Error(`${unit.name} ownership changed before recovery; refusing to stop`);
     }
   }
   await actions.stop(pending.map(u => u.unit));
+  await actions.reset(pending.map(u => u.unit));
   await actions.inspect([]);
   for (const unit of pending) {
     await actions.start(unit.unit);
@@ -524,6 +525,7 @@ async function recoverStarts(acceptInterruption) {
     },
     preflight: () => preflight('host'),
     stop: units => run('systemctl', ['--user', 'stop', ...units]),
+    reset: units => run('systemctl', ['--user', 'reset-failed', ...units]),
     start: unit => run('systemctl', ['--user', 'start', unit]),
     ready: async bridge => {
       for (let attempt = 0; attempt < 80; attempt++) {
