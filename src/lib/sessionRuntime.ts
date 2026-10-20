@@ -305,7 +305,36 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     cached: ChatMessage[];
     anchorIdx: number;
     buffer: ChatMessage[];
+    /**
+     * True when the bridge honored `acpUIResume` and withheld the prefix —
+     * the buffer is then the SUFFIX of new frames, merged by seam-overlap
+     * append instead of the whole-transcript alignment path.
+     */
+    resumed?: boolean;
+    /**
+     * The cached tail begins at transcript start (nothing older exists) —
+     * only meaningful for resumed merges: it is what makes the suppressed
+     * prefix "nothing was missed" rather than a hole above the tail.
+     */
+    coversStart?: boolean;
   } | null = null;
+  /** `_meta.acpUI` tag of the last replayed frame seen this load — the
+   * bridge-side frame id + rolling hash, persisted into the tail cache. */
+  let lastReplayTag: { seq: number; hh: string } | null = null;
+  /** Set when a forwarded frame carries the bridge's divergence flag — the
+   * buffer is a full transcript, never a suffix. */
+  let replayResync = false;
+  /** Cached {seq,hh} offered on the next `session/load`. */
+  let pendingResume: { seq: number; hh: string } | null = null;
+  /** The token actually sent with the in-flight load — decides between the
+   * suffix-append and whole-transcript merge at settle. */
+  let requestedResume: { seq: number; hh: string } | null = null;
+  /** Skip the resume token once — the user asked for the complete
+   * transcript via the "load earlier" affordance. */
+  let forceFullLoad = false;
+  /** A resumed merge left un-fetched history above the rendered tail —
+   * `loadFullHistory` fills it on demand. */
+  const historyIncomplete = ref(false);
 
   const HISTORY_FLUSH_MS = 2000;
   let historyFlushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -695,7 +724,12 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       sessionMetadataDirty = false;
       void deps.persistSessions();
     }
-    const entry = writeHistoryCache(cacheScope.agent, cacheScope.sessionId, messages.value);
+    const entry = writeHistoryCache(
+      cacheScope.agent,
+      cacheScope.sessionId,
+      messages.value,
+      lastReplayTag ? { seq: lastReplayTag.seq, hh: lastReplayTag.hh } : undefined
+    );
     if (entry) void writeSharedHistoryCache(cacheScope.agent, cacheScope.sessionId, entry);
   }
 
@@ -785,7 +819,13 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       }
     }
     if (anchorIdx < 0) anchorIdx = cached.length - 1;
-    replayMerge = { sessionId, cached, anchorIdx, buffer: replayMerge?.buffer ?? [] };
+    replayMerge = {
+      sessionId, cached, anchorIdx, buffer: replayMerge?.buffer ?? [],
+      coversStart: entry.userTurnBase === 0 && cached[0]?.role === 'user',
+    };
+    if (typeof entry.replaySeq === 'number' && typeof entry.replayHash === 'string' && entry.replayHash) {
+      pendingResume = { seq: entry.replaySeq, hh: entry.replayHash };
+    }
     historyCacheNote.value = 'loading';
     return true;
   }
@@ -805,6 +845,36 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     if (!merge) return;
     const replayed = merge.buffer;
     const cached = merge.cached;
+    if (merge.resumed) {
+      // The bridge withheld the verified prefix — `replayed` is only the new
+      // suffix. The cached tail may already contain some of it (written
+      // after a live turn), so drop the seam overlap then append the rest.
+      let overlap = 0;
+      if (replayed.length) {
+        for (let i = cached.length - 1; i >= 0; i--) {
+          if (!sameMessage(cached[i], replayed[0])) continue;
+          let k = 0;
+          while (i + k < cached.length && k < replayed.length && sameMessage(cached[i + k], replayed[k])) k++;
+          if (i + k === cached.length) { overlap = k; break; }
+        }
+      }
+      messages.value = [...cached, ...replayed.slice(overlap)];
+      toolCalls.value.clear();
+      toolCallMessageIndex.clear();
+      for (const m of messages.value) {
+        for (const t of m.toolCalls ?? []) {
+          toolCalls.value.set(t.toolCallId, { ...t });
+          toolCallMessageIndex.set(t.toolCallId, t);
+        }
+      }
+      // A suppressed prefix above the tail stays un-fetched — the feed
+      // offers "load earlier" which re-runs the load without the token.
+      historyIncomplete.value = !merge.coversStart;
+      historyCacheNote.value = null;
+      flushHistoryNow();
+      return;
+    }
+    historyIncomplete.value = false;
     const anchor = cached[merge.anchorIdx];
     let base = -1;
     for (let ai = replayed.length - 1; anchor && ai >= 0; ai--) {
@@ -936,6 +1006,18 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     }
 
     if (foreign) return;
+
+    // Bridge-tagged replay frame — capture the cursor while the merge
+    // buffer is armed. `resync` means the withheld prefix diverged and the
+    // stream is actually complete: settle takes the replace path.
+    if (loadingHistory && replayMerge) {
+      const acpUI = (notification as { _meta?: { acpUI?: { seq?: unknown; hh?: unknown; resync?: unknown } } })
+        ._meta?.acpUI;
+      if (typeof acpUI?.seq === 'number') {
+        lastReplayTag = { seq: acpUI.seq, hh: typeof acpUI.hh === 'string' ? acpUI.hh : '' };
+        if (acpUI.resync === true) replayResync = true;
+      }
+    }
 
     let completedLiveTool = false;
     if ((update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update')
@@ -1549,7 +1631,13 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     // oldest messages, not the newest tail the user opened this chat to see.
     replayMerge = { sessionId: savedSession.sessionId, cached: [], anchorIdx: -1, buffer: [] };
     historyCacheNote.value = 'loading';
+    pendingResume = null;
+    requestedResume = null;
     if (retainTranscript) {
+      const stored = readHistoryCache(savedSession.agentName, savedSession.sessionId);
+      if (typeof stored?.replaySeq === 'number' && stored.replayHash) {
+        pendingResume = { seq: stored.replaySeq, hh: stored.replayHash };
+      }
       // An open runtime is fresher than either cache. Keep its visible rows
       // until the full replay settles, including through failed reconnects.
       toolCalls.value.clear();
@@ -1557,7 +1645,10 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       const cached = messages.value.slice(-HISTORY_TAIL_MESSAGES);
       let anchorIdx = -1;
       for (let i = 0; i < cached.length; i++) if (cached[i].role === 'user') anchorIdx = i;
-      replayMerge = { sessionId: savedSession.sessionId, cached, anchorIdx, buffer: [] };
+      replayMerge = {
+        sessionId: savedSession.sessionId, cached, anchorIdx, buffer: [],
+        coversStart: stored?.userTurnBase === 0 && stored?.messages[0]?.role === 'user',
+      };
     } else {
       const local = readHistoryCache(savedSession.agentName, savedSession.sessionId);
       hydrateHistoryCache(savedSession.agentName, savedSession.sessionId, local);
@@ -1633,11 +1724,21 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       // same shape as session/new — captured for the parser below.
       const loadHistory = async () => {
         loadingHistory = true;
+        lastReplayTag = null;
+        replayResync = false;
+        const sentResume = forceFullLoad ? null : (pendingResume ?? requestedResume);
+        forceFullLoad = false;
+        pendingResume = null;
         const params = {
           sessionId: savedSession.sessionId,
           cwd: savedSession.cwd,
           mcpServers: [],
+          // Bridge extension: withhold replay frames already held in the
+          // tail cache. Agents never see it (the bridge strips it) and
+          // unknown-param tolerances make it a no-op everywhere else.
+          ...(sentResume ? { acpUIResume: { seq: sentResume.seq, hh: sentResume.hh } } : {}),
         };
+        requestedResume = sentResume;
         try {
           try {
             return await acpClient!.loadSession(params);
@@ -1692,8 +1793,17 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         }
       }
 
-      // `session/load` resolved — the replay is the truth. Swap the buffered
-      // transcript in (or drop a diverged cache) before going "connected".
+      // `session/load` resolved — the replay is the truth. A bridge that
+      // honored acpUIResume reports how many prefix frames it withheld;
+      // skipped>0 + no resync flag means the buffer is a verified suffix to
+      // append onto the cache, not a full transcript to align.
+      const loadMeta = (loadResponse as { _meta?: { acpUI?: { skipped?: number; resynced?: boolean } } | undefined })
+        ?._meta?.acpUI;
+      if (replayMerge) {
+        replayMerge.resumed =
+          !!requestedResume && !replayResync && !loadMeta?.resynced && (loadMeta?.skipped ?? 0) > 0;
+      }
+      requestedResume = null;
       settleReplayMerge();
 
       session.value = savedSession;
@@ -2221,6 +2331,20 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     }
   }
 
+  /**
+   * The resumed merge kept the verified suffix cheap but left the older
+   * transcript un-fetched. Re-running `resume` with the token suppressed
+   * pulls the whole replay — the ordinary whole-transcript merge path then
+   * restores full scrollback.
+   */
+  async function loadFullHistory(): Promise<void> {
+    const target = session.value ?? descriptor.value;
+    if (!target) return;
+    forceFullLoad = true;
+    historyIncomplete.value = false;
+    await resume(target);
+  }
+
   const runtimeApi = {
     id,
     agentName,
@@ -2266,6 +2390,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     resumeMessageQueue: outbox.resume,
     sessionListUnsupported,
     historyCacheNote,
+    historyIncomplete,
 
     // Computed
     hasSession,
@@ -2276,6 +2401,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     create,
     resume,
     primeHistoryCache,
+    loadFullHistory,
     sendPrompt,
     submitMessage,
     steer,
