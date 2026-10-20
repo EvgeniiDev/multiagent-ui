@@ -193,6 +193,85 @@ class NativeUsageTest(unittest.TestCase):
             self.assertEqual(sum(r['used'] for r in first['usage']), 42)
             self.assertEqual(sum(r['used'] for r in second['usage']), 50)
 
+    def test_appended_session_only_tails_the_new_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            sessions = home / '.pi/agent/sessions'; sessions.mkdir(parents=True)
+            p = sessions / 's.jsonl'
+            record = dict(type='message', id='m', timestamp='2026-10-07T10:00:00Z',
+                          message=dict(role='assistant', usage=dict(totalTokens=42)))
+            p.write_text(json.dumps(record) + '\n')
+            env = {'STATE_DIR': str(home / 'state')}
+            with patch.dict(os.environ, env):
+                native.collect(home, porch_output=home / 'porch')
+                # A grown file must not be re-read from byte 0: the historical
+                # parse is reused and only the appended lines are decoded.
+                cache = native.load_cache(home / 'state')
+                entry = cache['files'][f'Pi:{p}']
+                self.assertEqual(entry['off'], p.stat().st_size)
+                with p.open('a') as stream:
+                    stream.write(json.dumps(dict(record, id='m2', message=dict(
+                        role='assistant', usage=dict(totalTokens=8)))) + '\n')
+                    stream.write('{"partial":')  # in-flight append is not consumed
+                second = native.collect(home, porch_output=home / 'porch')
+                self.assertEqual(sum(r['used'] for r in second['usage']), 50)
+                cache = native.load_cache(home / 'state')
+                entry = cache['files'][f'Pi:{p}']
+                self.assertEqual(entry['off'], p.stat().st_size - len('{"partial":'))
+                # Third scan: cache held rows and offset cover the file as-is.
+                third = native.collect(home, porch_output=home / 'porch')
+                self.assertEqual(sum(r['used'] for r in third['usage']), 50)
+
+    def test_appended_codex_native_file_tails_without_double_counting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            sessions = home / '.codex/sessions'; sessions.mkdir(parents=True)
+            p = sessions / 's.jsonl'
+            def record(rid, total):
+                return dict(type='token_usage_record', timestamp='2026-10-07T10:00:00Z',
+                            payload=dict(response_id=rid, usage=dict(
+                                input_tokens=total - 20, output_tokens=20, total_tokens=total)))
+            p.write_text('\n'.join(map(json.dumps, [
+                dict(type='session_meta', payload=dict(id='s', cwd='/project'))] + [record('r1', 120)])) + '\n')
+            env = {'STATE_DIR': str(home / 'state')}
+            with patch.dict(os.environ, env):
+                first = native.collect(home, porch_output=home / 'porch')
+                with p.open('a') as stream:
+                    stream.write(json.dumps(record('r2', 300)) + '\n')
+                second = native.collect(home, porch_output=home / 'porch')
+            self.assertEqual([r['used'] for r in first['usage']], [120])
+            self.assertEqual([r['used'] for r in second['usage']], [120, 300])
+
+    def test_codex_legacy_files_are_never_tailed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            sessions = home / '.codex/sessions'; sessions.mkdir(parents=True)
+            p = sessions / 's.jsonl'
+            p.write_text(json.dumps(dict(type='event_msg', timestamp='2026-10-07T10:00:00Z',
+                          payload=dict(type='token_count', info=dict(total_token_usage=dict(total_tokens=42))))) + '\n')
+            env = {'STATE_DIR': str(home / 'state')}
+            with patch.dict(os.environ, env):
+                first = native.collect(home, porch_output=home / 'porch')
+                self.assertEqual(sum(r['used'] for r in first['usage']), 42)
+                cache = native.load_cache(home / 'state')
+                entry = cache['files'][f'Codex:{p}']
+                self.assertIsNone(entry.get('off'))  # no native fast path for legacy files
+
+    def test_shrunk_session_file_reparses_from_scratch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            sessions = home / '.pi/agent/sessions'; sessions.mkdir(parents=True)
+            p = sessions / 's.jsonl'
+            record = dict(type='message', id='m', timestamp='2026-10-07T10:00:00Z',
+                          message=dict(role='assistant', usage=dict(totalTokens=42)))
+            p.write_text(json.dumps(record) + '\n' + json.dumps(dict(record, id='m2')) + '\n')
+            env = {'STATE_DIR': str(home / 'state')}
+            with patch.dict(os.environ, env):
+                native.collect(home, porch_output=home / 'porch')
+                p.write_text(json.dumps(record) + '\n')
+                second = native.collect(home, porch_output=home / 'porch')
+            self.assertEqual(sum(r['used'] for r in second['usage']), 42)
+
     def test_finished_porch_runs_are_served_from_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

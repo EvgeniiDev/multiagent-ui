@@ -74,6 +74,44 @@ def json_lines(path):
                 continue  # An in-flight JSONL append can have an incomplete tail.
 
 
+def dict_lines(block):
+    """Same as json_lines over an already-read block of complete lines."""
+    for line in block.splitlines():
+        try:
+            row = json.loads(line)
+            if isinstance(row, dict): yield row
+        except (ValueError, TypeError):
+            continue
+
+
+def tail_block(path, off):
+    """Bytes after `off` up to and including the last complete line, plus
+    the advanced offset — an in-flight trailing append is left unconsumed."""
+    with path.open('rb') as stream:
+        stream.seek(off)
+        block = stream.read()
+    cut = block.rfind(b'\n')
+    if cut < 0: return '', off
+    return block[:cut + 1].decode('utf-8', 'replace'), off + cut + 1
+
+
+def parsed_offset(path):
+    """Byte offset after a full parse: everything before it is complete
+    lines already folded into the returned rows."""
+    try:
+        with path.open('rb') as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            window = min(4096, size)
+            stream.seek(size - window)
+            block = stream.read()
+    except OSError:
+        return 0
+    cut = block.rfind(b'\n')
+    if cut < 0: return max(0, size - window)  # oversized live line: re-read it next scan
+    return size - len(block) + cut + 1
+
+
 def pi_event_id(msg, fallback):
     response = msg.get('responseId')
     if response:
@@ -84,10 +122,10 @@ def pi_event_id(msg, fallback):
     return f'pi:{fallback}'
 
 
-def read_pi_file(path):
-    sid, cwd = path.stem, None
+def parse_pi(lines, state):
     rows, seen = [], set()
-    for data in json_lines(path):
+    sid, cwd = state['sid'], state['cwd']
+    for data in lines:
         if data.get('type') == 'session':
             sid, cwd = data.get('id', sid), data.get('cwd')
         msg = data.get('message') or {}
@@ -103,10 +141,30 @@ def read_pi_file(path):
                            msg.get('model'), msg.get('provider'), (usage.get('cost') or {}).get('total'),
                            tokens=pi_buckets(usage),
                            eventId=pi_event_id(msg, mid or f"{sid}:{data.get('timestamp')}")))
+    state['sid'], state['cwd'] = sid, cwd
     return rows
 
 
-def read_codex_file(path):
+def read_pi_file(path):
+    return parse_pi(json_lines(path), dict(sid=path.stem, cwd=None))
+
+
+def full_pi(path):
+    """Full parse; returns (rows, resumable state, parsed byte offset)."""
+    state = dict(sid=path.stem, cwd=None)
+    return parse_pi(json_lines(path), state), state, parsed_offset(path)
+
+
+def tail_pi(block, state):
+    return parse_pi(dict_lines(block), state)
+
+
+def read_codex_history(path):
+    """Full parse; returns (rows, state, off) for cached_jsonl. `kind`
+    marks whether the file speaks the native token_usage_record dialect
+    (safe to tail-parse: appended records are self-contained deltas) or the
+    legacy cumulative event stream, where the prefix arithmetic spans the
+    whole file — legacy files carry no offset and always reparse whole."""
     sid, cwd, model, provider = path.stem, None, None, None
     records, compat, seen, previous, prefix = [], [], set(), 0, 0
     compat_buckets = {}  # cumulative snapshot of the last emitted compat row
@@ -146,7 +204,9 @@ def read_codex_file(path):
     # A session resumed after an upgrade can have an older compatibility-only
     # prefix. Native thread totals tell us exactly how much preceded the first
     # native call, even if its duplicate compatibility event came first.
-    if not records: return compat
+    if not records:
+        return compat, dict(sid=sid, cwd=cwd, model=model, provider=provider, kind='legacy'), None
+    historical = []
     historical = []
     for row in compat:
         if prefix <= 0: break
@@ -156,7 +216,37 @@ def read_codex_file(path):
         first = records[0]
         historical.append(sample('Codex', sid, first['at'], prefix, cwd, model, provider,
                                  eventId=f'{sid}:historic-prefix', timeBasis='session-last-active'))
-    return historical + records
+    return historical + records, dict(sid=sid, cwd=cwd, model=model, provider=provider, kind='native'), parsed_offset(path)
+
+
+def read_codex_file(path):
+    return read_codex_history(path)[0]
+
+
+def tail_codex_native(block, state):
+    """Continue a native-dialect session from its saved offset state. Compat
+    token_count events are ignored: with native records present the compat
+    stream only matters before the first record (the historical prefix)."""
+    rows = []
+    for data in dict_lines(block):
+        payload = data.get('payload') or {}
+        kind = data.get('type')
+        if kind == 'session_meta':
+            state['sid'] = payload.get('id', state['sid'])
+            state['cwd'] = payload.get('cwd')
+            state['provider'] = payload.get('model_provider')
+        elif kind == 'turn_context':
+            state['model'] = payload.get('model', state['model'])
+        elif kind == 'token_usage_record':
+            usage = payload.get('usage') or {}
+            total = usage.get('total_tokens')
+            if total is None: total = number(usage.get('input_tokens')) + number(usage.get('output_tokens'))
+            rows.append(sample('Codex', state['sid'], data.get('timestamp'), total, state['cwd'],
+                               state['model'], state['provider'],
+                               tokens=codex_buckets(usage),
+                               eventId=payload.get('response_id') or
+                                        f"{state['sid']}:{data.get('timestamp')}:{total}"))
+    return rows
 
 
 def database(path):
@@ -204,6 +294,11 @@ def load_cache(state):
 
 
 def save_cache(state, cache):
+    # The cache is a couple dozen MB of JSON; rewriting it takes seconds of
+    # disk-bound time, so a scan that only revalidated entries must not
+    # touch the file at all. Readers/writers set `_dirty` when they changed
+    # an entry.
+    if not cache.pop('_dirty', False): return
     try:
         for section in ('files', 'roots'):
             cache[section] = {k: v for k, v in cache[section].items()
@@ -222,6 +317,33 @@ def cached_file(cache, section, key, path, sig, parse):
         return entry['rows']
     rows = parse()
     cache[section][key] = {'sig': sig, 'rows': rows, 'path': str(path)}
+    cache['_dirty'] = True
+    return rows
+
+
+def cached_jsonl(cache, key, path, sig, full, tail):
+    """JSONL history cache: rows survive across scans and only appended
+    bytes are decoded. A full parse seeds `off` (end of the last complete
+    line) and the parser `state`; strict growth either tail-parses under
+    the saved state or falls back to a full parse (new cache entries, a
+    shrunk or rewritten file, or a tail step that rejects the state)."""
+    entry = cache['files'].get(key)
+    if entry and entry.get('sig') == sig:
+        return entry['rows']
+    rows, state, off = None, None, None
+    if (entry and entry.get('off') is not None and isinstance(entry.get('state'), dict)
+            and isinstance(sig, list) and sig[2] > entry['off']):
+        try:
+            block, off = tail_block(path, entry['off'])
+            added, state = tail(block, entry['state'])
+            rows = entry['rows'] + added
+        except (OSError, ValueError, TypeError, KeyError):
+            rows = None
+    if rows is None:
+        rows, state, off = full(path)
+    cache['files'][key] = {'sig': sig, 'rows': rows, 'path': str(path),
+                           'off': off, 'state': state}
+    cache['_dirty'] = True
     return rows
 
 
@@ -420,6 +542,7 @@ def read_porch_usage(roots, native_codex_sessions, *, metadata=None, errors=None
                 cache['roots'][str(root)] = {'sig': sig, 'rows': prows,
                                              'snapshots': psnaps, 'unreadable': 0,
                                              'path': str(root)}
+                cache['_dirty'] = True
         if errors is not None: errors.extend(['unreadable-journal'] * unreadable)
         rows.extend(prows)
         snapshots.extend(psnaps)
@@ -491,8 +614,8 @@ def collect(home, *, porch_output=None):
         except (OSError, sqlite3.Error, ValueError, KeyError):
             sources.append(dict(agentName=agent, status='unavailable', samples=0))
     save_cache(state, cache)  # Persist progress: a killed scan resumes cheaper.
-    for agent, directory, reader in [('Pi', home / '.pi/agent/sessions', read_pi_file),
-                                      ('Codex', home / '.codex/sessions', read_codex_file)]:
+    for agent, directory, full, tail in [('Pi', home / '.pi/agent/sessions', full_pi, tail_pi),
+                                          ('Codex', home / '.codex/sessions', read_codex_history, tail_codex_native)]:
         found, errors = [], 0
         files = sorted(directory.rglob('*.jsonl')) if directory.is_dir() else []
         if agent == 'Codex': files.extend((home / '.codex/archived_sessions').rglob('*.jsonl'))
@@ -509,8 +632,8 @@ def collect(home, *, porch_output=None):
         files = sorted(set(files))
         for path in files:
             try:
-                found.extend(cached_file(cache, 'files', f'{agent}:{path}', path,
-                                         file_sig(path), lambda p=path: reader(p)))
+                found.extend(cached_jsonl(cache, f'{agent}:{path}', path,
+                                          file_sig(path), full, tail))
             except (OSError, ValueError, TypeError): errors += 1
         rows.extend(found)
         sources.append(dict(agentName=agent, status='partial' if errors else 'ready' if directory.is_dir() or files else 'unavailable', samples=len(found)))
