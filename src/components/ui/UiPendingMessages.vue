@@ -16,7 +16,7 @@ defineEmits<{ remove: [id: string]; resume: [] }>();
     <div class="pending-heading">
       <span role="status">{{ paused ? 'Queue paused' : 'Pending' }} · {{ messages.length }}</span>
       <UiButton v-if="paused" variant="ghost" size="xs"
-        :disabled="disabled || messages.some(m => m.error)" @click="$emit('resume')">Resume queue</UiButton>
+        :disabled="disabled" @click="$emit('resume')">Resume queue</UiButton>
     </div>
     <p v-if="notice" class="pending-note" role="status">{{ notice }}</p>
     <ul class="pending-list">

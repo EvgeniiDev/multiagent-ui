@@ -64,7 +64,10 @@ export function createPromptOutbox(deps: {
   }
   function pause() { paused.value = true; }
   function resume() {
-    if (messages.value.some(m => m.error)) return;
+    // Explicit resume discards failed items rather than retrying them: a
+    // failed delivery may already have reached the agent, so the operator
+    // decides to drop it. Auto-retry is still forbidden (see drain()).
+    if (messages.value.some(m => m.error)) commit(messages.value.filter(m => !m.error));
     paused.value = false; notice.value = ''; ready();
   }
   function remove(id: string) {
