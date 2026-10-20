@@ -525,7 +525,14 @@ async function recoverStarts(acceptInterruption) {
     },
     preflight: () => preflight('host'),
     stop: units => run('systemctl', ['--user', 'stop', ...units]),
-    reset: units => run('systemctl', ['--user', 'reset-failed', ...units]),
+    reset: units => {
+      for (const unit of units) {
+        // Successful stops can unload template instances; reset only retained failures.
+        if (run('systemctl', ['--user', 'show', '--property=ActiveState', '--value', unit], { quiet: true }) === 'failed') {
+          run('systemctl', ['--user', 'reset-failed', unit]);
+        }
+      }
+    },
     start: unit => run('systemctl', ['--user', 'start', unit]),
     ready: async bridge => {
       for (let attempt = 0; attempt < 80; attempt++) {
