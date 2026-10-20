@@ -130,10 +130,16 @@ export function writeHistoryCache(
     userTurnBase: countUser(messages) - countUser(tailOf(messages)),
     messages: toCachedMessages(messages),
   };
-  while (entry.messages.length > 1 && JSON.stringify(entry).length > MAX_ENTRY_CHARS) {
-    if (entry.messages.shift()?.role === 'user') entry.userTurnBase++;
+  let tooBig = JSON.stringify(entry).length > MAX_ENTRY_CHARS;
+  // Over the cap → drop the oldest half each pass: a per-message shift would
+  // re-stringify the whole tail every time (O(n²) JSON churn on the main
+  // thread during streaming flushes); halving converges in O(log n) passes.
+  while (tooBig && entry.messages.length > 1) {
+    const dropped = entry.messages.splice(0, Math.ceil((entry.messages.length - 1) / 2));
+    entry.userTurnBase += dropped.reduce((n, m) => n + (m.role === 'user' ? 1 : 0), 0);
+    tooBig = JSON.stringify(entry).length > MAX_ENTRY_CHARS;
   }
-  if (JSON.stringify(entry).length > MAX_ENTRY_CHARS) return null;
+  if (tooBig) return null;
   storeHistoryCacheEntry(agentName, sessionId, entry);
   return entry;
 }

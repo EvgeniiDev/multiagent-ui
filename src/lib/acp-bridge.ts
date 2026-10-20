@@ -362,8 +362,6 @@ export class AcpClientBridge implements Client {
     });
     this.pendingMethods.set(id, method);
 
-    console.log('Sending request:', request);
-
     return new Promise((resolve, reject) => {
       this.messageResolvers.set(id, (response) => {
         resolve(response as T);
@@ -511,7 +509,6 @@ export class AcpClientBridge implements Client {
   ): Promise<WriteTextFileResponse> {
     try {
       await hostWriteTextFile(params.path, params.content);
-      console.log('writeTextFile completed:', params.path);
       return {};
     } catch (e) {
       console.error('writeTextFile failed:', params.path, e);
@@ -524,7 +521,6 @@ export class AcpClientBridge implements Client {
   ): Promise<ReadTextFileResponse> {
     try {
       let content = await hostReadTextFile(params.path);
-
       // Handle line/limit parameters if specified
       if (params.line !== undefined || params.limit !== undefined) {
         const lines = content.split('\n');
@@ -533,7 +529,6 @@ export class AcpClientBridge implements Client {
         content = lines.slice(startLine, endLine).join('\n');
       }
 
-      console.log('readTextFile completed:', params.path);
       return { content };
     } catch (e) {
       console.error('readTextFile failed:', params.path, e);

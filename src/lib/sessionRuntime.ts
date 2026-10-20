@@ -915,12 +915,13 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         if (!targetMsg.toolCalls) {
           targetMsg.toolCalls = [];
         }
-        // `rawInput` (parsed call args) is not in the SDK's typed union yet —
-        // forwarded verbatim by the ws bridge, read via safe cast.
         const callRawInput = (update as { rawInput?: unknown }).rawInput;
         const callFrame = update as unknown as Record<string, unknown>;
         const callOutput = toolOutputText(callFrame)?.text;
-        targetMsg.toolCalls.push({
+        // One shared ToolCallInfo object serves both the message's chip and
+        // the updates map: a later tool_call_update mutates the map entry and
+        // the rendered chip is the same object — no transcript-wide scan.
+        const info: ToolCallInfo = {
           toolCallId: update.toolCallId,
           title: update.title,
           kind: update.kind || 'other',
@@ -928,18 +929,11 @@ export function createSessionRuntime(deps: RuntimeDeps) {
           locations: update.locations,
           rawInput: callRawInput,
           rawOutput: callOutput,
-        });
+        };
+        targetMsg.toolCalls.push(info);
         (targetMsg.segments ??= []).push({ kind: 'tool', toolCallId: update.toolCallId });
         // Also keep in the map for updates
-        toolCalls.value.set(update.toolCallId, {
-          toolCallId: update.toolCallId,
-          title: update.title,
-          kind: update.kind || 'other',
-          status: update.status || 'pending',
-          locations: update.locations,
-          rawInput: callRawInput,
-          rawOutput: callOutput,
-        });
+        toolCalls.value.set(update.toolCallId, info);
         if (!loadingHistory) useActivityStore().recordEntry({
           kind: 'tool-call',
           agentName: agentName.value || session.value?.agentName || 'unknown',
@@ -959,22 +953,12 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         const updateFrame = update as unknown as Record<string, unknown>;
         const existing = toolCalls.value.get(update.toolCallId);
         if (existing) {
+          // The map entry IS the message's chip object (see tool_call above) —
+          // merging here updates both at once.
           if (update.status) existing.status = update.status;
           if (update.title) existing.title = update.title;
           if (updateRawInput !== undefined) existing.rawInput = updateRawInput;
           mergeToolOutput(existing, updateFrame);
-          // Also update in the message's toolCalls array
-          for (const msg of sink) {
-            if (msg.toolCalls) {
-              const tc = msg.toolCalls.find(t => t.toolCallId === update.toolCallId);
-              if (tc) {
-                if (update.status) tc.status = update.status;
-                if (update.title) tc.title = update.title;
-                if (updateRawInput !== undefined) tc.rawInput = updateRawInput;
-                mergeToolOutput(tc, updateFrame);
-              }
-            }
-          }
         } else {
           // An update for a call that was never announced (the agent skipped
           // the `tool_call` frame, or frames reordered): materialize the chip
@@ -994,7 +978,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
           mergeToolOutput(info, updateFrame);
           targetMsg.toolCalls.push(info);
           (targetMsg.segments ??= []).push({ kind: 'tool', toolCallId: update.toolCallId });
-          toolCalls.value.set(update.toolCallId, { ...info });
+          toolCalls.value.set(update.toolCallId, info);
         }
         break;
       }
