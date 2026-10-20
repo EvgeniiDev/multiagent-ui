@@ -1126,6 +1126,23 @@ function planGlyph(status: string): string {
           <span class="agent-name">{{ currentSession?.agentName }}<span v-if="isAutonomous" class="auto-badge">auto</span></span>
         </div>
       </div>
+      <!-- Turn failure surfaces in the chat itself: the tab tooltip and the
+           sidebar chip alone hid the cause (e.g. a wedged agent or a
+           rate-limited provider) - the operator watched "Working" flip to
+           "Reconnecting" with no failure text anywhere. Lives through the
+           reconnect banner because it reports the FAILED TURN, not the
+           transport; cleared explicitly. -->
+      <div
+        v-if="rt.error"
+        class="turn-failed"
+        role="alert"
+        data-testid="turn-failed"
+      >
+        <span class="turn-failed-text">{{ rt.error }}</span>
+        <UiButton variant="ghost" size="xs" class="turn-failed-dismiss" @click="rt.clearError()">
+          Dismiss
+        </UiButton>
+      </div>
     
     <div
       ref="messagesContainer"
@@ -1588,6 +1605,32 @@ function planGlyph(status: string): string {
 .message-assistant {
   padding: 0;
 }
+
+/* Turn-failure banner: states the failed-turn reason in the chat area.
+   Own scoped styling (not a shared control); theme tokens only. */
+.turn-failed {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.5rem 1rem 0;
+  padding: 0.375rem 0.625rem;
+  border: 1px solid var(--tint-active, rgba(194, 83, 47, 0.35));
+  border-radius: var(--radius-md, 8px);
+  background: var(--tint-active, rgba(194, 83, 47, 0.10));
+}
+
+.turn-failed-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.75rem;
+  color: var(--text-primary, #2b2723);
+  overflow-wrap: anywhere;
+}
+
+.turn-failed-dismiss {
+  flex: 0 0 auto;
+}
+
 
 /* Cached-tail marker: quiet, centered, reads as provenance not chrome. */
 .history-note {
