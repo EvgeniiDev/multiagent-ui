@@ -17,6 +17,22 @@ export interface TrafficEntry {
   error?: boolean;
 }
 
+/**
+ * Lowercased serialized payload, memoized per entry: payload never mutates,
+ * so a search box keystroke must not re-stringify 500 full frames (some
+ * carry megabyte-sized tool output) on every recompute.
+ */
+const searchTextCache = new WeakMap<TrafficEntry, string>();
+
+function entrySearchText(e: TrafficEntry): string {
+  let text = searchTextCache.get(e);
+  if (text === undefined) {
+    text = JSON.stringify(e.payload ?? '').toLowerCase();
+    searchTextCache.set(e, text);
+  }
+  return text;
+}
+
 const MAX_ENTRIES = 500;
 
 export const useTrafficStore = defineStore('traffic', () => {
@@ -44,9 +60,9 @@ export const useTrafficStore = defineStore('traffic', () => {
     // Apply search filter
     const query = searchQuery.value.trim().toLowerCase();
     if (query) {
-      result = result.filter(e => 
+      result = result.filter(e =>
         e.method.toLowerCase().includes(query) ||
-        JSON.stringify(e.payload).toLowerCase().includes(query)
+        entrySearchText(e).includes(query)
       );
     }
     
