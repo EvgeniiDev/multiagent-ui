@@ -199,6 +199,31 @@ async function main() {
     check('short stream: first flushed frame flagged resync', fourth[0]?.params?._meta?.acpUI?.resync === true);
     check('short stream: result reports resync', r4?._meta?.acpUI?.resynced === true);
 
+    // Runtime metadata is not in the transcript cache and must survive suppression.
+    await c.call('session/load', {sessionId:'sess-state'});
+    const stateFrames = c.updates('sess-state');
+    const stateEnd = stateFrames.at(-1).params._meta.acpUI;
+    const beforeState = c.frames.length;
+    const stateReply = await c.call('session/load', {sessionId:'sess-state',acpUIResume:stateEnd});
+    const warmState = c.updates('sess-state',beforeState);
+    check('warm resume forwards uncached commands once', warmState.length===1 && warmState[0].params.update.sessionUpdate==='available_commands_update');
+    check('warm resume suppresses only transcript frames', stateReply._meta.acpUI.skipped===CHUNKS);
+    const beforeError = c.frames.length;
+    try {await c.call('session/load',{sessionId:'sess-error',acpUIResume:{seq:999,hh:'bad'}});} catch {}
+    check('failed replay discards its unverified buffered prefix',c.updates('sess-error',beforeError).length===0);
+
+    const origin = new Client(port);
+    await origin.open();
+    origin.ws.send(JSON.stringify({jsonrpc:'2.0',id:999,method:'session/prompt',params:{sessionId:'sess-orphan',prompt:[]}}));
+    await new Promise(resolve=>setTimeout(resolve,30));
+    origin.close();
+    await new Promise(resolve=>setTimeout(resolve,30));
+    const observer = new Client(port);
+    await observer.open();
+    const orphan = await observer.call('session/load',{sessionId:'sess-orphan',acpUIResume:{seq:999,hh:'stale'}});
+    check('orphaned live prompt cannot create a replay cursor',orphan?._meta?.acpUI===undefined);
+    observer.close();
+
     // --- The agent never saw the extension param -------------------------
     const seen = (await readFile(paramLog, 'utf8')).trim().split('\n').map(JSON.parse);
     check('agent params never contain acpUIResume', seen.every((p) => p.acpUIResume === undefined),

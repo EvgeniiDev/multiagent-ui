@@ -41,6 +41,7 @@ function transcript(sid, generation) {
       : `${sid} history ${i}`;
     out.push(chunk(sid, kind, text));
   }
+  if (sid === 'sess-state') out.push({jsonrpc:'2.0',method:'session/update',params:{sessionId:sid,update:{sessionUpdate:'available_commands_update',availableCommands:[{name:'review',description:'Review current changes'}]}}});
   return out;
 }
 
@@ -63,12 +64,25 @@ rl.on('line', (line) => {
         },
       });
       break;
+    case 'session/prompt':
+      setTimeout(() => send({jsonrpc:'2.0',id:req.id,result:{stopReason:'end_turn'}}),200);
+      break;
     case 'session/load': {
       if (LOG) fs.appendFileSync(LOG, JSON.stringify(p) + '\n');
       const sid = p.sessionId;
       const gen = (loadCounts.get(sid) ?? 0) + 1;
       loadCounts.set(sid, gen);
-      for (const frame of transcript(sid, gen)) send(frame);
+      const frames = transcript(sid, gen);
+      if (sid === 'sess-failfull' && gen === 3) {
+        send({jsonrpc:'2.0',id:req.id,error:{code:-32000,message:'history unavailable'}});
+        break;
+      }
+      if (sid === 'sess-error') {
+        send(frames[0]);
+        send({jsonrpc:'2.0',id:req.id,error:{code:-32001,message:'temporarily busy'}});
+        break;
+      }
+      for (const frame of frames) send(frame);
       send({ jsonrpc: '2.0', id: req.id, result: {} });
       break;
     }

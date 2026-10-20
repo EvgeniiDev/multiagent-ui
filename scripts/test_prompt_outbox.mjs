@@ -156,3 +156,13 @@ test('an old failed queue entry can be reconciled against its cached ordinal wit
   box.reconcile([{role:'user',content:'a'},{role:'user',content:'b'},{role:'user',content:'Ну как'},{role:'assistant',content:'answer'}],cached);
   assert.equal(box.messages.value.length,0);assert.equal(box.notice.value,'');
 });
+
+test('accepted delivery reconciles against an absolute ordinal in a resumed tail', () => {
+ const data=new Map([['acp-ui:outbox:review-tail',JSON.stringify([{id:'sent',text:'delivered',mode:'queue',attachments:[],error:'connection lost',delivery:{userTurn:8,text:'delivered'}}])]]);
+ const storage={getItem:k=>data.get(k)??null,setItem:(k,v)=>data.set(k,v),removeItem:k=>data.delete(k)};
+ const box=createPromptOutbox({busy:()=>true,connected:()=>false,send:async()=>{},steer:async()=>{},storage});
+ box.restore('review-tail');
+ assert.equal(box.messages.value.length,1);
+ assert.equal(box.reconcile([{role:'user',content:'previous'},{role:'assistant',content:'answer'},{role:'user',content:'delivered'}],null,6),1);
+ assert.equal(box.messages.value.length,0,'the acknowledged turn must never be offered for re-send');
+});

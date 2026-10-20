@@ -687,6 +687,25 @@ let lastTrafficAt = Date.now();
  * turn. Holding the load until the prompt settles keeps the turn alive — the
  * reconnecting tab just finishes connecting when the turn ends. */
 const deferredLoads = new Map();
+const deferredPrompts = new Map();
+
+function flushDeferredPrompts(sid) {
+  if (loadInFlight(sid)) return;
+  const queued = deferredPrompts.get(sid) ?? [];
+  deferredPrompts.delete(sid);
+  for (const { ws, line } of queued) {
+    if (!clients.has(ws) || ws.readyState !== 1) continue;
+    try {
+      const out = noteOutbound(line, ws);
+      if (out) {
+        if (!processOwner.current) spawnChild();
+        processOwner.current.stdin.write(out);
+      }
+    } catch (error) {
+      log('deferred prompt forward failed:', error.message);
+    }
+  }
+}
 
 // ACP replay notifications name only a session, not the load request. Two
 // loads of that session must run serially or one window steals both replays.
@@ -721,6 +740,12 @@ function loadInFlight(sid) {
 // before the request reaches the agent, which never sees it.
 /** sessionId -> active replay gate for an in-flight session/load|resume. */
 const replayGates = new Map();
+// These notifications initialize state that is not stored in the transcript
+// tail. Warm clients still need commands, configuration and usage metadata.
+const REPLAY_STATE_UPDATES = new Set([
+  'available_commands_update', 'config_option_update', 'current_mode_update',
+  'session_info_update', 'usage_update',
+]);
 /** Cap on frames buffered while waiting for the hash verify point. A replay
  * that overruns it just flushes with resync — correctness is preserved, the
  * resume attempt is wasted. */
@@ -778,6 +803,23 @@ function gateReplayFrame(line, msg) {
     params: { ...msg.params, _meta: { ...(msg.params._meta ?? {}), acpUI } },
   });
 
+  if (!gate.verified && gate.count <= gate.resumeSeq &&
+      REPLAY_STATE_UPDATES.has(msg.params?.update?.sessionUpdate)) {
+    gate.forwardedState++;
+    if (gate.count === gate.resumeSeq) {
+      gate.verified = true;
+      if (gate.hash === gate.resumeHH) {
+        gate.buffered.length = 0;
+        gate.bufferedBytes = 0;
+        gate.skipped = gate.resumeSeq - gate.forwardedState;
+      } else {
+        gate.resync = true;
+        flushReplayBuffer(gate);
+      }
+    }
+    return tagged;
+  }
+
   if (!gate.verified) {
     if (gate.count <= gate.resumeSeq) {
       if (gate.count === gate.resumeSeq) {
@@ -786,7 +828,7 @@ function gateReplayFrame(line, msg) {
           // Prefix proven identical — every buffered frame is a duplicate.
           gate.buffered.length = 0;
           gate.bufferedBytes = 0;
-          gate.skipped = gate.resumeSeq;
+          gate.skipped = gate.resumeSeq - gate.forwardedState;
           return null;
         }
         gate.resync = true;
@@ -818,7 +860,7 @@ function finalizeReplayGate(sid, msg) {
   const gate = replayGates.get(sid);
   if (!gate) return;
   replayGates.delete(sid);
-  if (!gate.verified && gate.buffered.length) {
+  if (!msg?.error && !gate.verified && gate.buffered.length) {
     gate.resync = true;
     flushReplayBuffer(gate);
   }
@@ -829,6 +871,7 @@ function finalizeReplayGate(sid, msg) {
         frames: gate.count,
         skipped: gate.skipped,
         resynced: gate.resync,
+        cursor: { seq: gate.count, hh: gate.hash },
       },
     };
   }
@@ -963,6 +1006,14 @@ function noteOutbound(payload, ws) {
         continue;
       }
     }
+    if (msg?.method === 'session/prompt' && typeof msg.params?.sessionId === 'string' &&
+        loadInFlight(msg.params.sessionId)) {
+      const sid = msg.params.sessionId;
+      const queued = deferredPrompts.get(sid) ?? [];
+      queued.push({ ws, line: trimmed });
+      deferredPrompts.set(sid, queued);
+      continue;
+    }
     if (msg && msg.id !== undefined && msg.id !== null && typeof msg.method === 'string') {
       const bridged = nextBridgeId++;
       const sid = msg.params?.sessionId;
@@ -981,10 +1032,12 @@ function noteOutbound(payload, ws) {
         // acpUIResume is a bridge-facing extension — the agent never sees it.
         const resume = resumeTokenOf(msg.params);
         delete msg.params.acpUIResume;
-        replayGates.set(sid, {
+        // Some adapters attach to a live prompt during load. Preserve that
+        // behavior, but never derive a resumable cursor from mixed traffic.
+        if (!promptInFlight(sid)) replayGates.set(sid, {
           ws, count: 0, hash: '', buffered: [], bufferedBytes: 0,
           resumeSeq: resume?.seq ?? 0, resumeHH: resume?.hh ?? '',
-          verified: !resume, resync: false, skipped: 0, done: false,
+          verified: !resume, resync: false, skipped: 0, forwardedState: 0, done: false,
         });
       }
       try {
@@ -1066,7 +1119,10 @@ function noteInbound(line) {
     }
     if ((req.method === 'session/load' || req.method === 'session/resume') && typeof req.sid === 'string') {
       // Deliver this response before allowing the next replay to start.
-      queueMicrotask(() => flushDeferredLoads(req.sid));
+      queueMicrotask(() => {
+        flushDeferredLoads(req.sid);
+        flushDeferredPrompts(req.sid);
+      });
     }
   }
   return { msg, dest: req ? req.ws : null, rewritten: !!req };
@@ -1303,6 +1359,7 @@ function shutdownBridge(signal) {
   buffer = '';
   pendingAgentReqs.clear();
   deferredLoads.clear();
+  deferredPrompts.clear();
   failPending('bridge shutting down');
 
   for (const ws of clients) {
@@ -1412,9 +1469,9 @@ wss.on('connection', (ws) => {
       if (owner === ws) sessionOwner.delete(sid);
     }
     for (const [bid, req] of pendingClientReqs) {
-      // Keep a replay's lease until its response arrives, even if its socket
-      // closes. Otherwise a queued load overlaps its remaining notifications.
-      if (req.ws === ws && req.method !== 'session/load' && req.method !== 'session/resume') pendingClientReqs.delete(bid);
+      // A closed socket does not end its replay or prompt. Keep both leases
+      // until the child responds, so later loads cannot hash mixed live data.
+      if (req.ws === ws && !['session/load', 'session/resume', 'session/prompt'].includes(req.method)) pendingClientReqs.delete(bid);
     }
     // Queued loads owned by this socket die with it; loads blocked on a prompt
     // this socket abandoned can finally go through.
@@ -1427,6 +1484,11 @@ wss.on('connection', (ws) => {
     // would otherwise flush into the void.
     for (const [sid, gate] of replayGates) {
       if (gate.ws === ws) replayGates.delete(sid);
+    }
+    for (const [sid, queued] of deferredPrompts) {
+      const kept = queued.filter(entry => entry.ws !== ws);
+      if (kept.length) deferredPrompts.set(sid, kept);
+      else deferredPrompts.delete(sid);
     }
     flushDeferredLoads();
     log(`client closed (${clients.size} active)`);

@@ -54,6 +54,11 @@ export interface HistoryCacheEntry {
    */
   replaySeq?: number;
   replayHash?: string;
+  /** Absolute user-turn count at this exact reducer checkpoint. Legacy
+   * cursors without it cannot safely resume a bounded or live-updated tail. */
+  replayUserTurns?: number;
+  /** Large tool payloads were omitted; a full replay can restore them. */
+  detailsOmitted?: boolean;
 }
 
 export function historyCacheKey(agentName: string, sessionId: string): string {
@@ -132,7 +137,7 @@ export function writeHistoryCache(
   agentName: string,
   sessionId: string,
   messages: ChatMessage[],
-  replay?: { seq?: number; hh?: string } | null,
+  replay?: { seq?: number; hh?: string; userTurns?: number; detailsOmitted?: boolean } | null,
   userTurnBase = 0
 ): HistoryCacheEntry | null {
   if (messages.length === 0) return null;
@@ -145,6 +150,10 @@ export function writeHistoryCache(
     messages: toCachedMessages(messages),
     replaySeq: replay?.seq ?? prior?.replaySeq,
     replayHash: replay?.hh ?? prior?.replayHash,
+    replayUserTurns: replay?.userTurns ?? prior?.replayUserTurns,
+    detailsOmitted: replay?.detailsOmitted || tailOf(messages).some(m => m.toolCalls?.some(t =>
+      (t.rawOutput?.length ?? 0) > MAX_TOOL_DETAIL_CHARS ||
+      (t.rawInput && JSON.stringify(t.rawInput).length > MAX_TOOL_DETAIL_CHARS))),
   };
   // Account for each message once; serializing the full suffix after every
   // dropped row makes large replay caches quadratic in transcript size.

@@ -144,7 +144,7 @@ export function createPromptOutbox(deps: {
    * uncertain send. Optimistic local text and matching older turns cannot. */
   function reconcile(history: { role: string; content: string }[], cached?: {
     userTurnBase: number; messages: { role: string; content: string }[];
-  } | null) {
+  } | null, historyUserTurnBase = 0) {
     const users = history.filter(m => m.role === 'user');
     const claimed = new Set<number>();
     const next = messages.value.filter(item => {
@@ -157,7 +157,7 @@ export function createPromptOutbox(deps: {
       }
       if (!anchor || !Number.isInteger(anchor.userTurn) || anchor.userTurn < 1
         || anchor.text !== item.text || claimed.has(anchor.userTurn)
-        || users[anchor.userTurn - 1]?.content !== anchor.text) return true;
+        || users[anchor.userTurn - historyUserTurnBase - 1]?.content !== anchor.text) return true;
       claimed.add(anchor.userTurn);
       return false;
     });

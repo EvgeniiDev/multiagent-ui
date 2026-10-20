@@ -1148,7 +1148,7 @@ function planGlyph(status: string): string {
         class="history-earlier"
         :disabled="isRestoringHistory"
         @click="rt.loadFullHistory()"
-      >Load earlier history</UiButton>
+      >Load full history</UiButton>
       <!-- Older messages sit outside the render window — scrolling toward
            the top auto-extends it. -->
       <div

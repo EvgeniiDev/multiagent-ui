@@ -4,12 +4,14 @@ import { test, beforeEach } from 'node:test';
 import { readFileSync } from 'node:fs';
 import * as vue from 'vue';
 import ts from 'typescript';
-import { HISTORY_TAIL_MESSAGES } from '../src/lib/historyCache.ts';
+import { HISTORY_TAIL_MESSAGES, writeHistoryCache as realWriteHistoryCache, readHistoryCache as realReadHistoryCache } from '../src/lib/historyCache.ts';
 import { markPromptRecorded } from '../src/lib/promptError.ts';
 import { createPromptOutbox } from '../src/lib/promptOutbox.ts';
 import { steeringDelivery } from '../src/lib/steeringDelivery.ts';
 
-let client, entries, cached, cacheWrites, sharedReader, notifications;
+let client, entries, cached, cacheWrites, sharedReader, notifications, realCache, recordedAttachments, transportKind;
+const memoryCache = new Map();
+globalThis.localStorage = { getItem: key => memoryCache.get(key) ?? null, setItem: (key, value) => memoryCache.set(key, value), removeItem: key => memoryCache.delete(key) };
 let seq = 0;
 let canonicalStatuses = null;
 let remoteEvidence = vue.ref(null);
@@ -19,7 +21,7 @@ globalThis.__replayRuntimeDeps = {
   uuid: () => `test-${++seq}`,
   getAppVersion: async () => 'test',
   trackEvent() {}, trackError() {},
-  getTransportKind: () => 'websocket',
+  getTransportKind: () => transportKind,
   isDesktop: () => false,
   useConfigStore: () => ({ getAgent: () => ({ transport: 'websocket' }) }),
   useSessionStatusStore: () => ({
@@ -36,9 +38,9 @@ globalThis.__replayRuntimeDeps = {
   readSharedHistoryCache: (...args) => sharedReader(...args),
   writeSharedHistoryCache: async () => {},
   storeHistoryCacheEntry() {},
-  writeHistoryCache: (...args) => { cacheWrites.push(args); return null; },
+  writeHistoryCache: (...args) => { cacheWrites.push(args); if (!realCache) return null; const entry = realWriteHistoryCache(...args); cached = realReadHistoryCache(args[0], args[1]); return entry; },
   dropHistoryCache() {},
-  turnAttachments: () => [], recordTurnAttachments() {},
+  turnAttachments: (_scope, ordinal) => recordedAttachments.get(ordinal) ?? [], recordTurnAttachments(_scope, ordinal, files) { recordedAttachments.set(ordinal, files); },
   resolveCachedBytes: async () => {}, attachmentFromContentBlock: () => null,
   onAgentStderr() {}, spawnAgent() {}, killAgent() {},
 };
@@ -66,7 +68,7 @@ function live() {
 }
 beforeEach(() => {
   canonicalStatuses = null; remoteEvidence.value = null; delete saved.lastTurnStatus;
-  notifications = 0; entries = []; cached = null; cacheWrites = []; sharedReader = async () => null;
+  transportKind = 'websocket'; realCache = false; recordedAttachments = new Map(); memoryCache.clear(); notifications = 0; entries = []; cached = null; cacheWrites = []; sharedReader = async () => null;
   client = {
     pendingPermissionRequest: vue.ref(null),
     async initialize() { return {}; },
@@ -708,7 +710,7 @@ test('a primed tab paints the cached tail before its connection starts', async (
 
 test('a cached replay cursor is sent as acpUIResume and an honored suffix appends', async () => {
   cached = {
-    userTurnBase: 0, replaySeq: 4, replayHash: 'chain@4',
+    userTurnBase: 0, replaySeq: 4, replayHash: 'chain@4', replayUserTurns: 1,
     messages: [{ id: 'cached-user', role: 'user', content: 'old question', timestamp: 1 }],
   };
   const rt = createSessionRuntime(deps);
@@ -728,42 +730,46 @@ test('a cached replay cursor is sent as acpUIResume and an honored suffix append
     assert.deepEqual(rt.messages.value.map(m => m.content), ['old question', 'old answer', 'new question'],
       'verified suffix appends to the cached tail');
     const lastWrite = cacheWrites.at(-1)?.[3];
-    assert.deepEqual(lastWrite, { seq: 6, hh: 'chain@6' }, 'last replay tag persisted for the next load');
+    assert.deepEqual(lastWrite, { seq: 6, hh: 'chain@6', userTurns: 2, detailsOmitted: false }, 'last replay tag persisted for the next load');
   } finally { await rt.close(); }
 });
 
-test('a resumed load that overlaps cached live turns dedups the seam', async () => {
+test('a legacy live-updated cursor falls back to the complete replay', async () => {
   // Cache written after a live turn: tail already holds the post-replay
   // messages, while the stored cursor still marks the old replay boundary.
   cached = {
     userTurnBase: 0, replaySeq: 4, replayHash: 'chain@4',
     messages: [
       { id: 'cached-user', role: 'user', content: 'old question', timestamp: 1 },
+      { id: 'cached-old-a', role: 'assistant', content: 'old answer', timestamp: 1 },
       { id: 'cached-live-q', role: 'user', content: 'live question', timestamp: 2 },
       { id: 'cached-live-a', role: 'assistant', content: 'live answer', timestamp: 3 },
     ],
   };
   const rt = createSessionRuntime(deps);
-  client.loadSession = async () => {
+  client.loadSession = async params => {
+    assert.equal(params.acpUIResume, undefined);
+    emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'old question' } });
+    emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'old answer' } });
     emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'live question' } },
       { acpUI: { seq: 5, hh: 'chain@5' } });
     emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'live answer' } },
       { acpUI: { seq: 6, hh: 'chain@6' } });
     emit({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'next question' } },
       { acpUI: { seq: 7, hh: 'chain@7' } });
-    return { _meta: { acpUI: { frames: 7, skipped: 4, resynced: false } } };
+    return { _meta: { acpUI: { frames: 7, skipped: 0, resynced: false } } };
   };
   try {
     await rt.resume({ ...saved });
     assert.deepEqual(rt.messages.value.map(m => m.content),
-      ['old question', 'live question', 'live answer', 'next question'],
+      ['old question', 'old answer', 'live question', 'live answer', 'next question'],
       'seam overlap deduplicated — no doubled live turn');
   } finally { await rt.close(); }
 });
 
 test('a resync-flagged replay replaces the transcript wholesale', async () => {
   cached = {
-    userTurnBase: 0, replaySeq: 9, replayHash: 'stale-chain',
+    userTurnBase: 0, replaySeq: 9, replayHash: 'stale-chain', replayUserTurns: 1,
     messages: [{ id: 'cached-user', role: 'user', content: 'wrong history', timestamp: 1 }],
   };
   const rt = createSessionRuntime(deps);
@@ -784,7 +790,7 @@ test('a resync-flagged replay replaces the transcript wholesale', async () => {
 
 test('an untagged replay (old bridge) still takes the whole-transcript path', async () => {
   cached = {
-    userTurnBase: 0, replaySeq: 4, replayHash: 'chain@4',
+    userTurnBase: 0, replaySeq: 4, replayHash: 'chain@4', replayUserTurns: 1,
     messages: [{ id: 'cached-user', role: 'user', content: 'old question', timestamp: 1 }],
   };
   const rt = createSessionRuntime(deps);
@@ -801,7 +807,7 @@ test('an untagged replay (old bridge) still takes the whole-transcript path', as
 
 test('resumed cache preserves the omitted user-turn offset for later opens', async () => {
   cached = {
-    userTurnBase: 12, replaySeq: 4, replayHash: 'chain@4',
+    userTurnBase: 12, replaySeq: 4, replayHash: 'chain@4', replayUserTurns: 13,
     messages: [{ id: 'tail-user', role: 'user', content: 'tail question', timestamp: 1 }],
   };
   const rt = createSessionRuntime(deps);
@@ -813,4 +819,87 @@ test('resumed cache preserves the omitted user-turn offset for later opens', asy
     await rt.loadFullHistory();
     assert.equal(rt.historyIncomplete.value, false);
   } finally { await rt.close(); }
+});
+
+const checkpoint = (rows, userTurnBase = 0) => ({ userTurnBase, replaySeq:2, replayHash:'h2', replayUserTurns:userTurnBase + rows.filter(m=>m.role==='user').length, messages:rows });
+const row = (role, content) => ({id:content, role, content, timestamp:1});
+const tagged = (role, text, seq) => emit({sessionUpdate:role==='user'?'user_message_chunk':'agent_message_chunk',content:{type:'text',text}}, {acpUI:{seq,hh:`h${seq}`}});
+const resumed = (frames=2) => ({_meta:{acpUI:{frames,skipped:2,resynced:false}}});
+
+test('review: a suffix continues the cached boundary message', async()=>{
+ cached=checkpoint([row('user','question'),row('assistant','A')]);
+ const rt=createSessionRuntime(deps);
+ client.loadSession=async()=>{tagged('assistant','B',3);return resumed(3)};
+ try {await rt.resume({...saved});assert.deepEqual(rt.messages.value.map(m=>m.content),['question','AB']);}
+ finally{await rt.close()}
+});
+
+test('review: late shared cache cannot replace a cursor snapshot in flight',async()=>{
+ cached=checkpoint([row('user','q1')]);
+ let deliverShared,finish,started;sharedReader=()=>new Promise(r=>deliverShared=r);
+ const began=new Promise(r=>started=r);const rt=createSessionRuntime(deps);
+ client.loadSession=()=>{started();return new Promise(r=>finish=r)};
+ try{const loading=rt.resume({...saved});await began;
+ deliverShared({...checkpoint([row('user','q2'),row('assistant','a2')]),replaySeq:4,replayHash:'h4',savedAt:Date.now()+1000});await Promise.resolve();
+ tagged('assistant','a1',3);tagged('user','q2',4);tagged('assistant','a2',5);finish(resumed(5));await loading;
+ assert.deepEqual(rt.messages.value.map(m=>m.content),['q1','a1','q2','a2']);
+ }finally{await rt.close()}
+});
+
+test('review: retained rows never borrow a cursor from a newer stored snapshot',async()=>{
+ cached=checkpoint([row('user','q1'),row('assistant','a1')]);const rt=createSessionRuntime(deps);let calls=0;
+ client.loadSession=async p=>{if(calls++===0)return resumed();assert.equal(p.acpUIResume?.seq,2);tagged('user','q2',3);tagged('assistant','a2',4);return resumed(4)};
+ try{await rt.resume({...saved});cached={...checkpoint([row('user','q2'),row('assistant','a2')]),replaySeq:4,replayHash:'h4'};await rt.resume({...saved});assert.deepEqual(rt.messages.value.map(m=>m.content),['q1','a1','q2','a2']);}finally{await rt.close()}
+});
+
+test('review: live changes invalidate the older cursor before cache trimming',async()=>{
+ realCache=true;const rt=createSessionRuntime(deps);client.loadSession=async()=>{tagged('user','q1',1);tagged('assistant','a1',2);return {_meta:{acpUI:{frames:2,skipped:0}}}};
+ try{await rt.resume({...saved});for(let i=0;i<60;i++){emit({sessionUpdate:'user_message_chunk',content:{type:'text',text:`q${i+2}`}});emit({sessionUpdate:'agent_message_chunk',content:{type:'text',text:`a${i+2}`}})}
+ await rt.close();assert.equal(cached.replaySeq,undefined,'post-live tail must not advertise an older reducer checkpoint');
+ client.loadSession=async p=>{assert.equal(p.acpUIResume,undefined);for(let i=0;i<61;i++){tagged('user',`q${i+1}`,2*i+1);tagged('assistant',`a${i+1}`,2*i+2)}return {_meta:{acpUI:{frames:122,skipped:0}}}};
+ await rt.resume({...saved});assert.equal(rt.messages.value.length,122);assert.equal(rt.messages.value[0].content,'q1');
+ }finally{await rt.close()}
+});
+
+test('review: suffix attachments use their absolute user-turn ordinal',async()=>{
+ cached=checkpoint([row('user','q7'),row('assistant','a7')],6);
+ recordedAttachments.set(1,[{name:'wrong.txt',kind:'text',mimeType:'text/plain',size:1}]);recordedAttachments.set(8,[{name:'right.txt',kind:'text',mimeType:'text/plain',size:1}]);
+ const rt=createSessionRuntime(deps);client.loadSession=async()=>{tagged('user','q8',3);return resumed(3)};
+ try{await rt.resume({...saved});assert.deepEqual(rt.messages.value.at(-1).attachments?.map(a=>a.name),['right.txt']);}finally{await rt.close()}
+});
+
+test('review: a failed partial replay cannot poison a successful retry',async()=>{
+ cached=checkpoint([row('user','old question'),row('assistant','old answer')]);const rt=createSessionRuntime(deps);let attempts=0;
+ client.loadSession=async()=>{if(attempts++===0){emit({sessionUpdate:'user_message_chunk',content:{type:'text',text:'old question'}},{acpUI:{seq:1,hh:'bad',resync:true}});throw Error('temporarily busy')};tagged('user','new question',3);return resumed(3)};
+ try{await rt.resume({...saved});assert.deepEqual(rt.messages.value.map(m=>m.content),['old question','old answer','new question']);}finally{await rt.close()}
+});
+
+test('review: full-history action restores omitted tool bodies from real cache serialization',async()=>{
+ realCache=true;const rt=createSessionRuntime(deps);let fullLoads=0;const body='x'.repeat(20000);
+ client.loadSession=async p=>{if(p.acpUIResume)return resumed(4);fullLoads++;tagged('user','question',1);tagged('assistant','answer',2);emit({sessionUpdate:'tool_call',toolCallId:'large',title:'large output',kind:'execute',status:'completed',rawOutput:body},{acpUI:{seq:3,hh:'h3'}});return {_meta:{acpUI:{frames:3,skipped:0}}}};
+ try{await rt.resume({...saved});await rt.close();await rt.resume({...saved});assert.equal(rt.historyIncomplete.value,true,'a lossy cached tool must offer complete history');await rt.loadFullHistory();assert.equal(fullLoads,2);assert.equal(rt.toolCallList.value[0].rawOutput,body);assert.equal(rt.historyIncomplete.value,false);}finally{await rt.close()}
+});
+
+test('review: new prompt attachments keep absolute ordinals after resumed truncation',async()=>{
+ cached=checkpoint([row('user','q7'),row('assistant','a7')],6);const rt=createSessionRuntime(deps);
+ client.loadSession=async()=>resumed();client.prompt=async()=>({stopReason:'end_turn'});
+ try{await rt.resume({...saved});await rt.sendPrompt('q8',[{name:'fresh.txt',kind:'text',mimeType:'text/plain',size:1,data:'content'}]);assert(recordedAttachments.has(8));assert.equal(recordedAttachments.has(2),false);}finally{await rt.close()}
+});
+
+test('review: bridge cursor extension never reaches a direct stdio agent',async()=>{
+ transportKind='stdio';cached=checkpoint([row('user','old')]);const rt=createSessionRuntime(deps);
+ client.loadSession=async p=>{assert.equal(p.acpUIResume,undefined);replay();return {}};
+ try{await rt.resume({...saved});assert.equal(rt.messages.value[1].content,'old answer');}finally{await rt.close()}
+});
+
+ test('review: failed full-history action remains retryable without an unhandled rejection',async()=>{
+ cached=checkpoint([row('user','q7'),row('assistant','a7')],6);const rt=createSessionRuntime(deps);let fail=false;
+ client.loadSession=async p=>{if(fail)throw Error('history unavailable');return resumed()};
+ try{await rt.resume({...saved});assert.equal(rt.historyIncomplete.value,true);fail=true;await rt.loadFullHistory();assert.equal(rt.historyIncomplete.value,true);assert.match(rt.error.value,/history unavailable/);fail=false;await rt.loadFullHistory();assert.equal(rt.error.value,null);}finally{await rt.close()}
+});
+
+test('review: old bridge full replay keeps attachment ordinals despite an offered cursor',async()=>{
+ cached=checkpoint([row('user','q1'),row('assistant','a1')]);recordedAttachments.set(1,[{name:'one.txt',kind:'text',mimeType:'text/plain',size:1}]);const rt=createSessionRuntime(deps);
+ client.loadSession=async p=>{assert(p.acpUIResume);emit({sessionUpdate:'user_message_chunk',content:{type:'text',text:'q1'}});emit({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'a1'}});return {}};
+ try{await rt.resume({...saved});assert.deepEqual(rt.messages.value[0].attachments?.map(a=>a.name),['one.txt']);}finally{await rt.close()}
 });

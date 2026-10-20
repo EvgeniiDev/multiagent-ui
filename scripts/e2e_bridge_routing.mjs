@@ -239,6 +239,17 @@ async function main() {
     check('unrelated window receives no abandoned replay', a.sessionUpdates('sess-disconnect').length === 0);
     await abandonedLoad;
 
+    const guardedLoad = a.call('session/load', {sessionId:'sess-prompt-during-replay'});
+    await sleep(100);
+    let loaded = false;
+    guardedLoad.then(() => { loaded = true; });
+    const deferredPrompt = b.call('session/prompt', {sessionId:'sess-prompt-during-replay',prompt:[{type:'text',text:'after replay'}]});
+    await deferredPrompt;
+    check('a prompt cannot interrupt another window replay',loaded);
+    await guardedLoad;
+    check('loading window receives replay without interleaved prompt',a.sessionUpdates('sess-prompt-during-replay').length === REPLAY_CHUNKS);
+    check('prompting window receives its own live response',b.sessionUpdates('sess-prompt-during-replay').length === PROMPT_CHUNKS);
+
     // Unclaimed session -> broadcast fallback for everyone.
     const unclaimedOnA = a.sessionUpdates('sess-nobody').length;
     const unclaimedOnB = b.sessionUpdates('sess-nobody').length;

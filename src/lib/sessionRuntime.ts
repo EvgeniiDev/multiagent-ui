@@ -263,7 +263,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     send: sendPrompt,
     steer: deliverNativeSteer,
     deliveryAnchor: (text, files, mode) => mode === 'queue' && !files.length
-      ? { userTurn: messages.value.filter(m => m.role === 'user').length + 1, text }
+      ? { userTurn: transcriptUserTurnBase + messages.value.filter(m => m.role === 'user').length + 1, text }
       : undefined,
   });
   watch(() => {
@@ -318,10 +318,15 @@ export function createSessionRuntime(deps: RuntimeDeps) {
      */
     coversStart?: boolean;
     userTurnBase?: number;
+    cursorUserTurns?: number;
+    seeded?: boolean;
+    snapshot?: ChatMessage[];
+    detailsOmitted?: boolean;
   } | null = null;
   /** `_meta.acpUI` tag of the last replayed frame seen this load — the
    * bridge-side frame id + rolling hash, persisted into the tail cache. */
   let lastReplayTag: { seq: number; hh: string } | null = null;
+  let replayCursorValid = false;
   /** Set when a forwarded frame carries the bridge's divergence flag — the
    * buffer is a full transcript, never a suffix. */
   let replayResync = false;
@@ -337,6 +342,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
    * `loadFullHistory` fills it on demand. */
   const historyIncomplete = ref(false);
   let transcriptUserTurnBase = 0;
+  let transcriptDetailsOmitted = false;
 
   const HISTORY_FLUSH_MS = 2000;
   let historyFlushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -730,7 +736,11 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       cacheScope.agent,
       cacheScope.sessionId,
       messages.value,
-      lastReplayTag ? { seq: lastReplayTag.seq, hh: lastReplayTag.hh } : undefined,
+      replayCursorValid && lastReplayTag ? {
+        ...lastReplayTag,
+        userTurns: transcriptUserTurnBase + messages.value.filter(m => m.role === 'user').length,
+        detailsOmitted: transcriptDetailsOmitted,
+      } : null,
       transcriptUserTurnBase
     );
     if (entry) void writeSharedHistoryCache(cacheScope.agent, cacheScope.sessionId, entry);
@@ -773,6 +783,36 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     const at = (m: ChatMessage) =>
       (m.attachments ?? []).map((x) => `${x.kind}:${x.name}`).join(' ');
     return at(a) === at(b);
+  }
+
+  function cloneReplayRow(message: ChatMessage): ChatMessage {
+    return { ...message,
+      toolCalls: message.toolCalls?.map(tool => ({ ...tool, locations: tool.locations?.map(location => ({ ...location })) })),
+      attachments: message.attachments?.map(attachment => ({ ...attachment })),
+      segments: message.segments?.map(segment => ({ ...segment })),
+      plan: message.plan?.map(entry => ({ ...entry })),
+    };
+  }
+
+  function indexReplayRows(rows: ChatMessage[]): void {
+    toolCalls.value.clear();
+    toolCallMessageIndex.clear();
+    for (const message of rows) for (const tool of message.toolCalls ?? []) {
+      toolCalls.value.set(tool.toolCallId, { ...tool });
+      toolCallMessageIndex.set(tool.toolCallId, tool);
+    }
+  }
+
+  function resetReplayAttempt(): void {
+    lastReplayTag = null;
+    replayCursorValid = false;
+    replayResync = false;
+    if (!replayMerge) return;
+    replayMerge.snapshot ??= replayMerge.cached.map(cloneReplayRow);
+    replayMerge.cached = replayMerge.snapshot.map(cloneReplayRow);
+    replayMerge.buffer = [];
+    replayMerge.seeded = false;
+    indexReplayRows([]);
   }
 
   /**
@@ -826,8 +866,11 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       sessionId, cached, anchorIdx, buffer: replayMerge?.buffer ?? [],
       coversStart: entry.userTurnBase === 0 && cached[0]?.role === 'user',
       userTurnBase: entry.userTurnBase,
+      cursorUserTurns: entry.replayUserTurns,
+      detailsOmitted: entry.detailsOmitted,
     };
-    if (typeof entry.replaySeq === 'number' && typeof entry.replayHash === 'string' && entry.replayHash) {
+    if (Number.isSafeInteger(entry.replayUserTurns) && entry.replayUserTurns! >= 0 &&
+        typeof entry.replaySeq === 'number' && typeof entry.replayHash === 'string' && entry.replayHash) {
       pendingResume = { seq: entry.replaySeq, hh: entry.replayHash };
     }
     historyCacheNote.value = 'loading';
@@ -850,19 +893,13 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     const replayed = merge.buffer;
     const cached = merge.cached;
     if (merge.resumed) {
-      // The bridge withheld the verified prefix — `replayed` is only the new
-      // suffix. The cached tail may already contain some of it (written
-      // after a live turn), so drop the seam overlap then append the rest.
-      let overlap = 0;
-      if (replayed.length) {
-        for (let i = cached.length - 1; i >= 0; i--) {
-          if (!sameMessage(cached[i], replayed[0])) continue;
-          let k = 0;
-          while (i + k < cached.length && k < replayed.length && sameMessage(cached[i + k], replayed[k])) k++;
-          if (i + k === cached.length) { overlap = k; break; }
-        }
-      }
-      messages.value = [...cached, ...replayed.slice(overlap)];
+      // The bridge withheld the prefix represented by the frozen cache.
+      // Live mutations invalidate its cursor instead of requiring a guessed
+      // overlap between an older cursor and newer, possibly trimmed rows.
+      // A cursor belongs to this exact snapshot. The suffix reducer starts
+      // with its final row, so text/thought/tool chunks continue that row.
+      messages.value = merge.seeded
+        ? [...cached.slice(0, -1), ...replayed] : cached;
       toolCalls.value.clear();
       toolCallMessageIndex.clear();
       for (const m of messages.value) {
@@ -873,14 +910,16 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       }
       // A suppressed prefix above the tail stays un-fetched — the feed
       // offers "load earlier" which re-runs the load without the token.
-      historyIncomplete.value = !merge.coversStart;
+      historyIncomplete.value = !merge.coversStart || !!merge.detailsOmitted;
       transcriptUserTurnBase = merge.userTurnBase ?? 0;
+      transcriptDetailsOmitted = !!merge.detailsOmitted;
       historyCacheNote.value = null;
       flushHistoryNow();
       return;
     }
     historyIncomplete.value = false;
     transcriptUserTurnBase = 0;
+    transcriptDetailsOmitted = false;
     const anchor = cached[merge.anchorIdx];
     let base = -1;
     for (let ai = replayed.length - 1; anchor && ai >= 0; ai--) {
@@ -1021,8 +1060,25 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         ._meta?.acpUI;
       if (typeof acpUI?.seq === 'number') {
         lastReplayTag = { seq: acpUI.seq, hh: typeof acpUI.hh === 'string' ? acpUI.hh : '' };
-        if (acpUI.resync === true) replayResync = true;
+        if (acpUI.resync === true) {
+          if (replayMerge.seeded) replayMerge.buffer = [];
+          replayMerge.seeded = false;
+          replayResync = true;
+        } else if (requestedResume && acpUI.seq > requestedResume.seq &&
+            !replayResync && !replayMerge.seeded) {
+          const boundary = replayMerge.cached[replayMerge.cached.length - 1];
+          replayMerge.buffer = boundary ? [cloneReplayRow(boundary)] : [];
+          replayMerge.seeded = true;
+          indexReplayRows([...replayMerge.cached.slice(0, -1), ...replayMerge.buffer]);
+        }
       }
+    }
+
+    if (!loadingHistory && ['user_message_chunk', 'agent_message_chunk',
+        'agent_thought_chunk', 'tool_call', 'tool_call_update', 'plan'].includes(update.sessionUpdate)) {
+      // A live-updated or trimmed tail no longer represents the old cursor.
+      replayCursorValid = false;
+      lastReplayTag = null;
     }
 
     let completedLiveTool = false;
@@ -1085,7 +1141,11 @@ export function createSessionRuntime(deps: RuntimeDeps) {
           mergeRecordedAttachments(
             notification.sessionId,
             target,
-            sink.reduce((n, m) => n + (m.role === 'user' ? 1 : 0), 0)
+            (replayMerge?.seeded && requestedResume && !replayResync
+              ? (replayMerge.cursorUserTurns ?? 0) -
+                (replayMerge.seeded && replayMerge.cached[replayMerge.cached.length - 1]?.role === 'user' ? 1 : 0)
+              : replayMerge ? 0 : transcriptUserTurnBase) +
+              sink.reduce((n, m) => n + (m.role === 'user' ? 1 : 0), 0)
           );
         }
         if (update.content.type === 'text') {
@@ -1320,6 +1380,10 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     cacheScope = null;
     historyCacheNote.value = null;
     replayMerge = null;
+    replayCursorValid = false;
+    lastReplayTag = null;
+    transcriptUserTurnBase = 0;
+    transcriptDetailsOmitted = false;
 
     // Look up the agent's transport kind so we know whether to do the
     // stdio-only startup choreography (spawn → stderr progress) or the
@@ -1640,9 +1704,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     pendingResume = null;
     requestedResume = null;
     if (retainTranscript) {
-      const stored = readHistoryCache(savedSession.agentName, savedSession.sessionId);
-      if (typeof stored?.replaySeq === 'number' && stored.replayHash) {
-        pendingResume = { seq: stored.replaySeq, hh: stored.replayHash };
+      if (replayCursorValid && lastReplayTag) {
+        pendingResume = { ...lastReplayTag };
       }
       // An open runtime is fresher than either cache. Keep its visible rows
       // until the full replay settles, including through failed reconnects.
@@ -1655,13 +1718,20 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         sessionId: savedSession.sessionId, cached, anchorIdx, buffer: [],
         coversStart: transcriptUserTurnBase === 0 && cached.length === messages.value.length && cached[0]?.role === 'user',
         userTurnBase: transcriptUserTurnBase + messages.value.slice(0, -cached.length).filter(m => m.role === 'user').length,
+        cursorUserTurns: transcriptUserTurnBase + messages.value.filter(m => m.role === 'user').length,
+        detailsOmitted: transcriptDetailsOmitted,
       };
     } else {
+      replayCursorValid = false;
+      lastReplayTag = null;
       const local = readHistoryCache(savedSession.agentName, savedSession.sessionId);
       hydrateHistoryCache(savedSession.agentName, savedSession.sessionId, local);
       const pendingMerge = replayMerge;
       void readSharedHistoryCache(savedSession.agentName, savedSession.sessionId).then((entry) => {
         if (!entry || replayMerge !== pendingMerge || entry.savedAt <= (local?.savedAt ?? 0)) return;
+        // The in-flight token was selected for this snapshot, not a newer
+        // shared tail. Never swap its reducer input underneath the request.
+        if (requestedResume) return;
         storeHistoryCacheEntry(savedSession.agentName, savedSession.sessionId, entry);
         hydrateHistoryCache(savedSession.agentName, savedSession.sessionId, entry);
       });
@@ -1731,9 +1801,9 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       // same shape as session/new — captured for the parser below.
       const loadHistory = async () => {
         loadingHistory = true;
-        lastReplayTag = null;
-        replayResync = false;
-        const sentResume = forceFullLoad ? null : (pendingResume ?? requestedResume);
+        resetReplayAttempt();
+        const sentResume = forceFullLoad || getTransportKind(agentConfig) !== 'websocket'
+          ? null : (pendingResume ?? requestedResume);
         forceFullLoad = false;
         pendingResume = null;
         const params = {
@@ -1759,6 +1829,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
               throw first;
             }
             await new Promise((r) => setTimeout(r, 1500));
+            resetReplayAttempt();
             return await acpClient!.loadSession(params);
           }
         } finally {
@@ -1804,12 +1875,14 @@ export function createSessionRuntime(deps: RuntimeDeps) {
       // honored acpUIResume reports how many prefix frames it withheld;
       // skipped>0 + no resync flag means the buffer is a verified suffix to
       // append onto the cache, not a full transcript to align.
-      const loadMeta = (loadResponse as { _meta?: { acpUI?: { skipped?: number; resynced?: boolean } } | undefined })
+      const loadMeta = (loadResponse as { _meta?: { acpUI?: { skipped?: number; resynced?: boolean; cursor?: {seq:number; hh:string} } } | undefined })
         ?._meta?.acpUI;
       if (replayMerge) {
         replayMerge.resumed =
           !!requestedResume && !replayResync && !loadMeta?.resynced && (loadMeta?.skipped ?? 0) > 0;
       }
+      lastReplayTag = loadMeta?.cursor ?? lastReplayTag ?? (replayMerge?.resumed ? requestedResume : null);
+      replayCursorValid = !!lastReplayTag;
       requestedResume = null;
       settleReplayMerge();
 
@@ -1844,7 +1917,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
         setTurnStatus(null, false);
       }
       outbox.restore(attachmentScope(session.value!.sessionId));
-      const confirmedDelivery = outbox.reconcile(messages.value, previousHistory);
+      const confirmedDelivery = outbox.reconcile(messages.value, previousHistory, transcriptUserTurnBase);
       // Canonical status supersedes stale inventory flags after a successful replay.
       if (confirmedDelivery || turnStatus.value === 'working' || turnStatus.value === 'output') {
         remoteWorkAfter.value ??= statusStore.remoteReadVersion?.() ?? 0;
@@ -1922,6 +1995,8 @@ export function createSessionRuntime(deps: RuntimeDeps) {
 
   function recordUserPrompt(text: string, attachments: Attachment[]) {
     if (!session.value) throw new Error('No active session');
+    replayCursorValid = false;
+    lastReplayTag = null;
     // Add user message (attachments kept as metadata so the transcript shows
     // what went out, including a thumbnail for images). No `segments` here —
     // the replayed twin carries only a text part (agents echo files as
@@ -1942,7 +2017,7 @@ export function createSessionRuntime(deps: RuntimeDeps) {
     // bytes into the history they stream back. Best-effort: a failed write
     // must not stall the prompt.
     if (attachments.length) {
-      const userTurnIndex = messages.value.reduce(
+      const userTurnIndex = transcriptUserTurnBase + messages.value.reduce(
         (n, m) => n + (m.role === 'user' ? 1 : 0),
         0
       );
@@ -2347,9 +2422,15 @@ export function createSessionRuntime(deps: RuntimeDeps) {
   async function loadFullHistory(): Promise<void> {
     const target = session.value ?? descriptor.value;
     if (!target) return;
+    const wasIncomplete = historyIncomplete.value;
     forceFullLoad = true;
     historyIncomplete.value = false;
-    await resume(target);
+    try { await resume(target); }
+    catch {
+      // resume exposes the failure in error; keep the action available for retry.
+      forceFullLoad = false;
+      historyIncomplete.value = wasIncomplete;
+    }
   }
 
   const runtimeApi = {
