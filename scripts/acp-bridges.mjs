@@ -76,7 +76,7 @@ function assertCanonicalCheckout() {
 }
 
 function help() {
-  console.log(`ACP bridge mode controller (only Hermes/OpenCode/Devin/Pi/Codex)\n\nUsage:\n  scripts/acp-bridges.mjs status\n  scripts/acp-bridges.mjs preflight --mode docker|host\n  scripts/acp-bridges.mjs guard-start --mode docker|host --bridge <name>\n  scripts/acp-bridges.mjs switch --mode docker|host [--accept-interruption]\n  scripts/acp-bridges.mjs reconcile\n  scripts/acp-bridges.mjs restart --bridge <name> --accept-interruption\n\nDocker is the fresh-install default. A host switch prebuilds and normalizes legacy Docker launches one bridge at a time before handoff. A switch that would stop live bridges requires --accept-interruption; it never falls back to the other mode.`);
+  console.log(`ACP bridge mode controller (only Hermes/OpenCode/Devin/Pi/Codex)\n\nUsage:\n  scripts/acp-bridges.mjs status\n  scripts/acp-bridges.mjs preflight --mode docker|host\n  scripts/acp-bridges.mjs guard-start --mode docker|host --bridge <name>\n  scripts/acp-bridges.mjs switch --mode docker|host [--accept-interruption]\n  scripts/acp-bridges.mjs reconcile\n  scripts/acp-bridges.mjs restart --bridge <name> --accept-interruption\n  scripts/acp-bridges.mjs recover-starts --accept-interruption\n\nDocker is the fresh-install default. A host switch prebuilds and normalizes legacy Docker launches one bridge at a time before handoff. A switch that would stop live bridges requires --accept-interruption; it never falls back to the other mode.`);
 }
 
 // Inventory is evidence, never a cleanup instruction. Keep unknown records
@@ -214,12 +214,12 @@ function listeningPorts(errors) {
   return found;
 }
 const describeListeners = (rows) => rows?.map((r) => r.description).join('; ') || 'no listener';
-async function observe({ startingHostBridge = '' } = {}) {
+async function observe({ startingHostBridge = '', recoveringHostBridges = [] } = {}) {
   const errors = [];
   const mode = await readBridgeMode({ allowMissing: false });
   const projectContainers = await dockerOwners(errors);
   const docker = projectContainers.filter((owner) => owner.name);
-  const host = await unitOwners(hostBridgesToInspect(BRIDGES, startingHostBridge), errors, false, mode === 'host');
+  const host = await unitOwners(hostBridgesToInspect(BRIDGES, startingHostBridge).filter(b => !recoveringHostBridges.includes(b.name)), errors, false, mode === 'host');
   const legacy = await unitOwners(LEGACY_UNITS, errors, true);
   unknownUnits(errors);
   await verifyBridgeProcesses([...docker, ...host], errors);
@@ -484,6 +484,61 @@ async function waitForTarget(mode) {
   }
 }
 
+// Recover only pre-start loops, never an agent process or an unknown listener.
+// Stop all pending jobs first: starting just one while peers retry deadlocks
+// their ExecStartPre gates. Keep the normal direct-start gate fail-closed.
+export async function recoverHostStarts(actions) {
+  if (actions.mode !== 'host') throw new Error('recover-starts requires selected host mode');
+  const units = await actions.readUnits();
+  const pending = units.filter(u => ['activating', 'failed'].includes(u.state) && u.pid === 0);
+  if (!pending.length) throw new Error('no failed or pending host starts with MainPID=0 to recover');
+  await actions.inspect(pending.map(u => u.name));
+  await actions.preflight();
+  const fresh = await actions.readUnits();
+  for (const unit of pending) {
+    const current = fresh.find(u => u.name === unit.name);
+    if (!current || current.pid !== 0 || !['activating', 'failed'].includes(current.state)) {
+      throw new Error(`${unit.name} ownership changed before recovery; refusing to stop`);
+    }
+  }
+  await actions.stop(pending.map(u => u.unit));
+  await actions.inspect([]);
+  for (const unit of pending) {
+    await actions.start(unit.unit);
+    await actions.ready(unit);
+  }
+}
+
+async function recoverStarts(acceptInterruption) {
+  if (!acceptInterruption) throw new Error('recover-starts cancels pending startup jobs; repeat with --accept-interruption');
+  await recoverHostStarts({
+    mode: await readBridgeMode({ allowMissing: false }),
+    readUnits: async () => BRIDGES.map(b => ({ ...b,
+      state: run('systemctl', ['--user', 'show', '--property=ActiveState', '--value', b.unit], { quiet: true }),
+      pid: Number(run('systemctl', ['--user', 'show', '--property=MainPID', '--value', b.unit], { quiet: true }) || NaN),
+    })),
+    inspect: async recoveringHostBridges => {
+      const state = await observe({ recoveringHostBridges });
+      if (state.mode !== 'host') throw new Error('selected mode changed during recovery');
+      assertNoMixedOwners(state);
+    },
+    preflight: () => preflight('host'),
+    stop: units => run('systemctl', ['--user', 'stop', ...units]),
+    start: unit => run('systemctl', ['--user', 'start', unit]),
+    ready: async bridge => {
+      for (let attempt = 0; attempt < 80; attempt++) {
+        if (listeningPorts().has(bridge.port)) {
+          assertNoMixedOwners(await observe());
+          return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      throw new Error(`${bridge.name} did not bind :${bridge.port}; no fallback attempted`);
+    },
+  });
+  await verifyTarget('host');
+}
+
 async function reconcile() {
   assertCanonicalCheckout();
   const desired = await readBridgeMode();
@@ -623,9 +678,10 @@ async function main() {
     console.log(`PASS ${parsed.mode} start gate for ${parsed.bridge}; selected mode and live ownership agree.`);
     return;
   }
-  if (!['switch', 'reconcile', 'restart'].includes(parsed.action)) throw new Error(`unknown action: ${parsed.action}`);
+  if (!['switch', 'reconcile', 'restart', 'recover-starts'].includes(parsed.action)) throw new Error(`unknown action: ${parsed.action}`);
   assertCanonicalCheckout();
   await mkdir(MODE_DIR, { recursive: true, mode: 0o700 });
+  if (parsed.action === 'recover-starts') return withLock(() => recoverStarts(parsed.flags.has('--accept-interruption')));
   if (parsed.action === 'restart') return withLock(() => restartBridge(parsed.bridge, parsed.flags.has('--accept-interruption')));
   if (parsed.action === 'switch') {
     return withLock(() => switchMode(parsed.mode, parsed.flags.has('--accept-interruption')));
