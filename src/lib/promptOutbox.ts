@@ -158,11 +158,27 @@ export function createPromptOutbox(deps: {
         const matches = previous.map((m, i) => m.content === item.text ? i : -1).filter(i => i >= 0);
         if (matches.length === 1) anchor = { userTurn: cached.userTurnBase + matches[0] + 1, text: item.text };
       }
-      if (!anchor || !Number.isInteger(anchor.userTurn) || anchor.userTurn < 1
-        || anchor.text !== item.text || claimed.has(anchor.userTurn)
-        || users[anchor.userTurn - historyUserTurnBase - 1]?.content !== anchor.text) return true;
-      claimed.add(anchor.userTurn);
-      return false;
+      if (anchor && Number.isInteger(anchor.userTurn) && anchor.userTurn >= 1
+        && anchor.text === item.text && !claimed.has(anchor.userTurn)
+        && users[anchor.userTurn - historyUserTurnBase - 1]?.content === anchor.text) {
+        claimed.add(anchor.userTurn);
+        return false;
+      }
+      // A live send can anchor on a stale ordinal — the prompt may leave while
+      // the visible transcript is still a suffix (restore/replay in flight),
+      // so `userTurn` counts from the wrong base and the exact-position check
+      // above can never pass again. Fall back to the transcript itself: the
+      // item's exact text appearing EXACTLY ONCE is delivery proof from that
+      // absolute ordinal on. A later attempt behind the same text keeps its
+      // anchor beyond the match and stays pending (never silently dropped).
+      const floor = anchor && Number.isInteger(anchor.userTurn) && anchor.userTurn >= 1 ? anchor.userTurn : 0;
+      const hits: number[] = [];
+      users.forEach((m, i) => { if (item.text && m.content === item.text) hits.push(historyUserTurnBase + i + 1); });
+      if (hits.length === 1 && hits[0] >= floor) {
+        claimed.add(hits[0]);
+        return false;
+      }
+      return true;
     });
     const confirmed = messages.value.length - next.length;
     if (confirmed) {

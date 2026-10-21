@@ -166,3 +166,27 @@ test('accepted delivery reconciles against an absolute ordinal in a resumed tail
  assert.equal(box.reconcile([{role:'user',content:'previous'},{role:'assistant',content:'answer'},{role:'user',content:'delivered'}],null,6),1);
  assert.equal(box.messages.value.length,0,'the acknowledged turn must never be offered for re-send');
 });
+
+test('a send anchored on a drifted suffix ordinal is confirmed by a unique transcript match', async () => {
+  // The prompt left while the visible transcript was still a suffix with a
+  // stale userTurnBase: the anchor counted users from the tail, not the top,
+  // so the exact-position check can never pass — the real Codex session kept
+  // such an errored item forever although the agent processed the turn.
+  const box = createPromptOutbox({ busy: () => false, connected: () => true, storage: null,
+    deliveryAnchor: () => ({ userTurn: 2, text: 'покажи статус' }),
+    send: async () => { throw new Error('transport closed'); }, steer: async () => 'injected' });
+  box.submit('покажи статус'); await tick();
+  const history = Array.from({ length: 30 }, (_, i) => ({ role: 'user', content: 'ранний вопрос ' + i }))
+    .concat([{ role: 'user', content: 'покажи статус' }, { role: 'assistant', content: 'готово' }]);
+  assert.equal(box.reconcile(history, null, 0), 1, 'exact text appears once in the authoritative transcript');
+  assert.equal(box.messages.value.length, 0);
+});
+
+test('a later failed attempt behind an identical delivered turn is not confirmed', async () => {
+  const box = createPromptOutbox({ busy: () => false, connected: () => true, storage: null,
+    deliveryAnchor: () => ({ userTurn: 4, text: 'покажи статус' }),
+    send: async () => { throw new Error('transport closed'); }, steer: async () => 'injected' });
+  box.submit('покажи статус'); await tick();
+  box.reconcile([{ role: 'user', content: 'старое' }, { role: 'user', content: 'покажи статус' }, { role: 'assistant', content: 'ok' }], null, 0);
+  assert.equal(box.messages.value.length, 1, 'a match below the anchor is not proof for this attempt');
+});
